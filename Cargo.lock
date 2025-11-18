@@ -12281,6 +12281,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
+ "reth-db",
  "reth-revm",
  "revm-context-interface",
  "serde",
