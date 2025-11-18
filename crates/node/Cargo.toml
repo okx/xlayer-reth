@@ -61,3 +61,4 @@ once_cell.workspace = true
 [features]
 default = []
 jemalloc = ["reth-cli-util/jemalloc", "reth-optimism-cli/jemalloc"]
+asm-keccak = ["alloy-primitives/asm-keccak"]
