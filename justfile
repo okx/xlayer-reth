@@ -9,11 +9,11 @@ test:
     cargo test --workspace --all-features
 
 check-format:
-    cargo +nightly fmt --all -- --check
+    cargo fmt --all -- --check
 
 fix-format:
     cargo fix --allow-dirty --allow-staged
-    cargo +nightly fmt --all
+    cargo fmt --all
 
 check-clippy:
     cargo clippy --all-targets -- -D warnings
