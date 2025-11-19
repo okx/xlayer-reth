@@ -38,7 +38,11 @@ pub fn create_test_client(endpoint_url: &str) -> HttpClient {
 }
 
 /// Transfer native balance from the rich address to a target address
-pub async fn transfer_token(endpoint_url: &str, amount: U256, to_address: &str) -> Result<String> {
+pub async fn native_balance_transfer(
+    endpoint_url: &str,
+    amount: U256,
+    to_address: &str,
+) -> Result<String> {
     let signer = PrivateKeySigner::from_str(DEFAULT_RICH_PRIVATE_KEY.trim_start_matches("0x"))?;
     let wallet = EthereumWallet::from(signer.clone());
     let provider = ProviderBuilder::new().wallet(wallet).connect_http(endpoint_url.parse()?);
@@ -210,8 +214,8 @@ pub async fn setup_test_environment(client: &HttpClient) -> Result<(String, u64)
         return Err(eyre!("No hash field found in block data"));
     };
 
-    if block_hash.is_empty() ||
-        block_hash == "0x0000000000000000000000000000000000000000000000000000000000000000"
+    if block_hash.is_empty()
+        || block_hash == "0x0000000000000000000000000000000000000000000000000000000000000000"
     {
         return Err(eyre!("Block hash should not be empty or zero"));
     }
@@ -220,13 +224,13 @@ pub async fn setup_test_environment(client: &HttpClient) -> Result<(String, u64)
 }
 
 /// Transfer ERC20 tokens from the rich address to a target address
-pub async fn erc20_transfer_tx(
+pub async fn erc20_balance_transfer(
     endpoint_url: &str,
     amount: U256,
     gas_price: Option<u128>,
-    to_address: Address,
+    to_address: &str,
     erc20_address: Address,
-    nonce: u64,
+    nonce: Option<u64>,
 ) -> Result<String> {
     // Define the ERC20 transfer function
     sol! {
@@ -238,8 +242,14 @@ pub async fn erc20_transfer_tx(
     let provider = ProviderBuilder::new().wallet(wallet).connect_http(endpoint_url.parse()?);
 
     let from = signer.address();
+    let to = Address::from_str(to_address)?;
     let gas_price = if let Some(gp) = gas_price { gp } else { provider.get_gas_price().await? };
-    let call = transferCall { to: to_address, amount };
+    let nonce = if let Some(n) = nonce {
+        n
+    } else {
+        provider.get_transaction_count(from).pending().await?
+    };
+    let call = transferCall { to, amount };
     let calldata = call.abi_encode();
     let tx = TransactionRequest::default()
         .with_from(from)
@@ -266,8 +276,6 @@ pub async fn transfer_erc20_token_batch(
 ) -> Result<(Vec<String>, u64, String)> {
     let mut tx_hashes: Vec<String> = Vec::new();
 
-    let to = Address::from_str(to_address)?;
-
     let client = create_test_client(endpoint_url);
     let gas_price = eth_gas_price(&client).await?.to::<u128>();
     let start_nonce =
@@ -277,17 +285,29 @@ pub async fn transfer_erc20_token_batch(
     println!("Starting batch transfer of {} transactions", batch_size);
     for i in 1..batch_size {
         let nonce = start_nonce + i as u64;
-        let tx_hash =
-            erc20_transfer_tx(endpoint_url, amount, Some(gas_price), to, erc20_address, nonce)
-                .await?;
+        let tx_hash = erc20_balance_transfer(
+            endpoint_url,
+            amount,
+            Some(gas_price),
+            to_address,
+            erc20_address,
+            Some(nonce),
+        )
+        .await?;
         tx_hashes.push(tx_hash);
         println!("Sent transaction {}/{}: {}", i, batch_size - 1, tx_hashes.last().unwrap());
     }
 
     // Send the last transaction with the starting nonce
-    let tx_hash =
-        erc20_transfer_tx(endpoint_url, amount, Some(gas_price), to, erc20_address, start_nonce)
-            .await?;
+    let tx_hash = erc20_balance_transfer(
+        endpoint_url,
+        amount,
+        Some(gas_price),
+        to_address,
+        erc20_address,
+        Some(start_nonce),
+    )
+    .await?;
     tx_hashes.push(tx_hash.clone());
     println!("Sent final transaction: {}", tx_hash);
 
@@ -317,7 +337,7 @@ pub async fn transfer_erc20_token_batch(
 }
 
 /// Waits for a transaction receipt with timeout
-async fn wait_for_tx_mined(endpoint_url: &str, tx_hash: &str) -> Result<serde_json::Value> {
+pub async fn wait_for_tx_mined(endpoint_url: &str, tx_hash: &str) -> Result<serde_json::Value> {
     let client = create_test_client(endpoint_url);
     tokio::time::timeout(DEFAULT_TIMEOUT_TX_TO_BE_MINED, async {
         loop {

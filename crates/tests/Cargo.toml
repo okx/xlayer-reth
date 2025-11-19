@@ -49,3 +49,7 @@ path = "lib.rs"
 [[test]]
 name = "e2e_tests"
 path = "e2e-tests/main.rs"
+
+[[test]]
+name = "flashblocks_tests"
+path = "flashblocks-tests/main.rs"
