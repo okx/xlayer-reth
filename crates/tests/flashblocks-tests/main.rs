@@ -17,10 +17,179 @@ use xlayer_e2e_test::operations;
 const ITERATIONS: usize = 11;
 const TX_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Flashblock smoke test to verify pending tags on all flashblock supported RPCs.
+#[tokio::test]
+async fn fb_smoke_test() {
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+    let sender_address = operations::DEFAULT_RICH_ADDRESS;
+    let test_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
+
+    // Deploy contracts and get ERC20 address
+    let contracts = operations::try_deploy_contracts().await.expect("Failed to deploy contracts");
+    println!("ERC20 contract at: {:#x}", contracts.erc20);
+
+    // eth_getBlockTransactionCountByNumber
+    let fb_block_transaction_count = operations::eth_get_block_transaction_count_by_number_or_hash(
+        &fb_client,
+        operations::BlockId::Pending,
+    )
+    .await
+    .expect("Pending eth_getBlockTransactionCountByNumber failed");
+    assert_ne!(
+        fb_block_transaction_count, 0,
+        "eth_getBlockTransactionCountByNumber with pending tag should return non-zero"
+    );
+
+    let tx_hash = operations::native_balance_transfer(
+        operations::DEFAULT_L2_NETWORK_URL_FB,
+        U256::from(operations::GWEI),
+        test_address,
+    )
+    .await
+    .expect("Failed to send tx");
+
+    // eth_getTransactionByHash
+    let tx = operations::eth_get_transaction_by_hash(&fb_client, &tx_hash)
+        .await
+        .expect("Pending eth_getTransactionByHash failed");
+    assert!(!tx.is_null(), "Transaction should not be empty");
+
+    // eth_getTransactionReceipt
+    let receipt = operations::eth_get_transaction_receipt(&fb_client, &tx_hash)
+        .await
+        .expect("Pending eth_getTransactionReceipt failed");
+    assert!(!receipt.is_null(), "Receipt should not be empty");
+    assert_eq!(
+        receipt["transactionIndex"], tx["transactionIndex"],
+        "Transaction index not identical"
+    );
+
+    // eth_getRawTransactionByHash
+    let raw_tx = operations::eth_get_raw_transaction_by_hash(&fb_client, &tx_hash)
+        .await
+        .expect("Pending eth_getRawTransactionByHash failed");
+    assert!(!raw_tx.is_null(), "Raw transaction should not be empty");
+
+    // eth_getInternalTransactions
+    let internal_transactions = operations::eth_get_internal_transactions(&fb_client, &tx_hash)
+        .await
+        .expect("Pending eth_getInternalTransactions failed");
+    assert!(!internal_transactions.is_null(), "Internal transactions should not be empty");
+
+    // eth_getBalance
+    let balance =
+        operations::get_balance(&fb_client, sender_address, Some(operations::BlockId::Pending))
+            .await
+            .expect("Pending eth_getBalance failed");
+    assert_ne!(balance, U256::ZERO, "Balance should not be zero");
+
+    // eth_getTransactionCount
+    let transaction_count = operations::eth_get_transaction_count(
+        &fb_client,
+        sender_address,
+        Some(operations::BlockId::Pending),
+    )
+    .await
+    .expect("Pending eth_getTransactionCount failed");
+    assert_ne!(transaction_count, 0, "Transaction count should not be zero");
+
+    // eth_getCode
+    let code = operations::eth_get_code(
+        &fb_client,
+        contracts.erc20.to_string().as_str(),
+        Some(operations::BlockId::Pending),
+    )
+    .await
+    .expect("Pending eth_getCode failed");
+    assert_ne!(code, "", "Code should not be empty");
+    assert_ne!(code, "0x", "Code should not be empty");
+
+    // eth_getStorageAt
+    let storage = operations::eth_get_storage_at(
+        &fb_client,
+        contracts.erc20.to_string().as_str(),
+        "0x2",
+        Some(operations::BlockId::Pending),
+    )
+    .await
+    .expect("Pending eth_getStorageAt failed");
+    assert_ne!(storage, "", "Storage should not be empty");
+    assert_ne!(storage, "0x", "Storage should not be empty");
+
+    // eth_call
+    sol! {
+        function balanceOf(address account) external view returns (uint256);
+    }
+    let call = balanceOfCall { account: Address::from_str(test_address).expect("Invalid address") };
+    let calldata = call.abi_encode();
+
+    let call_args = serde_json::json!({
+        "from": test_address,
+        "to": contracts.erc20,
+        "gas": "0x100000",
+        "data": format!("0x{}", hex::encode(&calldata)),
+    });
+
+    let call = operations::eth_call(
+        &fb_client,
+        Some(call_args.clone()),
+        Some(operations::BlockId::Pending),
+    )
+    .await
+    .expect("Pending eth_call failed");
+    assert_ne!(call, "", "Call should not be empty");
+    assert_ne!(call, "0x", "Call should not be empty");
+
+    // eth_estimateGas
+    let transfer_args = serde_json::json!({
+        "from":  sender_address,
+        "to":    test_address,
+        "value": format!("0x{:x}", operations::GWEI).as_str(),
+    });
+    let estimate_gas = operations::estimate_gas(
+        &fb_client,
+        Some(transfer_args.clone()),
+        Some(operations::BlockId::Pending),
+    )
+    .await
+    .expect("Pending eth_estimateGas failed");
+    assert_eq!(estimate_gas, 21_000, "Estimate gas for native balance transfer should be 21_000");
+
+    // eth_getBlockByNumber
+    let fb_block = operations::eth_get_block_by_number_or_hash(
+        &fb_client,
+        operations::BlockId::Pending,
+        false,
+    )
+    .await
+    .expect("Pending eth_getBlockByNumber failed");
+    assert!(!fb_block.is_null(), "Block should not be empty");
+
+    // eth_getBlockTransactionCountByNumber
+    let fb_block_transaction_count = operations::eth_get_block_transaction_count_by_number_or_hash(
+        &fb_client,
+        operations::BlockId::Pending,
+    )
+    .await
+    .expect("Pending eth_getBlockTransactionCountByNumber failed");
+    assert_eq!(fb_block_transaction_count, 1, "Block transaction count should be 1");
+
+    // eth_getBlockInternalTransactions
+    let _ =
+        operations::eth_get_block_internal_transactions(&fb_client, operations::BlockId::Pending)
+            .await
+            .expect("Pending eth_getBlockInternalTransactions failed");
+
+    // eth_getBlockReceipts
+    let _ = operations::eth_get_block_receipts(&fb_client, operations::BlockId::Pending)
+        .await
+        .expect("Pending eth_getBlockReceipts failed");
+}
+
 /// Flashblock native balance transfer tx confirmation benchmark between a flashblock
 /// node and a non-flashblock node.
 #[tokio::test]
-async fn test_fb_benchmark_native_tx_confirmation() {
+async fn fb_benchmark_native_tx_confirmation() {
     let test_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
 
     // Benchmark transfer tx to test address
@@ -87,7 +256,7 @@ async fn test_fb_benchmark_native_tx_confirmation() {
 /// Flashblock erc20 transfer tx confirmation benchmark between a flashblock node
 /// and a non-flashblock node.
 #[tokio::test]
-async fn test_fb_benchmark_erc20_tx_confirmation() {
+async fn fb_benchmark_erc20_tx_confirmation_test() {
     let test_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
 
     // Deploy contracts and get ERC20 address
@@ -164,9 +333,11 @@ async fn test_fb_benchmark_erc20_tx_confirmation() {
 #[case::stateless_api("StatelessApi")]
 #[case::state_api("StateApi")]
 #[tokio::test]
-async fn test_fb_rpc_comparison(#[case] test_name: &str) {
+async fn fb_rpc_comparison_test(#[case] test_name: &str) {
     let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
     let non_fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_NO_FB);
+    let sender_address = operations::DEFAULT_RICH_ADDRESS;
+    let test_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
 
     let latest_block_number = operations::eth_block_number(&non_fb_client)
         .await
@@ -176,8 +347,6 @@ async fn test_fb_rpc_comparison(#[case] test_name: &str) {
         test_blocks.push(operations::BlockId::Number(latest_block_number - i));
     }
 
-    let sender_address = operations::DEFAULT_RICH_ADDRESS;
-    let test_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
     // Deploy contracts and get ERC20 address
     let contracts = operations::try_deploy_contracts().await.expect("Failed to deploy contracts");
     println!("ERC20 contract at: {:#x}", contracts.erc20);
