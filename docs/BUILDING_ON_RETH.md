@@ -12,6 +12,301 @@ Reth's extensibility model is built around **traits** that define clear interfac
 - Extend RPC APIs with chain-specific methods
 - Modify transaction validation logic
 - Customize payload building strategies
+- Add custom database tables for chain-specific data
+
+## Adding Custom Database Tables
+
+One of the most common needs when building on Reth is storing chain-specific data. Reth's database abstraction allows you to define custom tables in your own repository without modifying Reth's core code.
+
+### Defining Custom Tables
+
+Custom tables are defined using the `Table` trait from `reth-db-api`. Here's how to create your own tables:
+
+**Location**: `crates/storage/db-api/src/table.rs:87-101`
+
+```rust
+use reth_db_api::table::{Table, Encode, Decode, Compress, Decompress};
+use serde::{Serialize, Deserialize};
+
+// Define your custom data type
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MyCustomData {
+    pub field1: u64,
+    pub field2: Vec<u8>,
+}
+
+// Implement required traits for your value type
+impl Compress for MyCustomData {
+    type Compressed = Vec<u8>;
+
+    fn compress_to_buf<B: bytes::BufMut + AsMut<[u8]>>(&self, buf: &mut B) {
+        // Your compression logic (e.g., using bincode, postcard, etc.)
+        let encoded = bincode::serialize(self).unwrap();
+        buf.put_slice(&encoded);
+    }
+}
+
+impl Decompress for MyCustomData {
+    fn decompress(value: &[u8]) -> Result<Self, reth_db_api::DatabaseError> {
+        bincode::deserialize(value)
+            .map_err(|e| reth_db_api::DatabaseError::Decode)
+    }
+}
+
+// Define your custom table
+#[derive(Debug)]
+pub struct MyCustomTable;
+
+impl Table for MyCustomTable {
+    const NAME: &'static str = "MyCustomTable";
+    const DUPSORT: bool = false; // Set to true if you need duplicate keys
+
+    type Key = BlockNumber; // Use any type that implements Key trait
+    type Value = MyCustomData;
+}
+```
+
+### Using the `tables!` Macro (Recommended)
+
+The `tables!` macro is exported from `reth-db-api` and can be used in your own codebase. However, note that it generates a `Tables` enum, so you should use it in a separate module or with appropriate naming to avoid conflicts:
+
+```rust
+// In your crate, e.g., my-chain/src/db/tables.rs
+use reth_db_api::table::{Table, DupSort};
+use alloy_primitives::{BlockNumber, Address, B256};
+use serde::{Serialize, Deserialize};
+
+// Define your custom data models
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MyChainMetadata {
+    pub custom_field: u64,
+    pub extra_data: Vec<u8>,
+}
+
+// Implement Compress/Decompress for your types
+// (implementations omitted for brevity)
+
+// Use the macro - it will generate a `Tables` enum in this module
+reth_db_api::tables! {
+    /// Stores custom metadata for each block
+    table MyChainMetadata {
+        type Key = BlockNumber;
+        type Value = MyChainMetadata;
+    }
+
+    /// Maps addresses to custom chain-specific data
+    table AddressMetadata {
+        type Key = Address;
+        type Value = MyCustomData;
+    }
+
+    /// Example DUPSORT table (allows duplicate keys)
+    table EventIndex {
+        type Key = Address;
+        type Value = B256;
+        type SubKey = BlockNumber; // SubKey enables DUPSORT
+    }
+}
+
+// The macro generates:
+// - Individual table marker structs (MyChainMetadata, AddressMetadata, EventIndex)
+// - A Tables enum with variants for each table
+// - TableInfo and TableSet implementations
+```
+
+**Important Note**: The `tables!` macro generates a `Tables` enum which provides runtime table enumeration. If you don't need this functionality, you can manually implement the `Table` trait for each table type (as shown in the previous section) to avoid the enum generation.
+
+### Integrating Custom Tables with Your Node
+
+To use custom tables in your node, you need to create a custom storage implementation:
+
+**Step 1: Define your storage type with custom tables**
+
+```rust
+use reth_db_api::{table::TableSet, table::TableInfo};
+use std::marker::PhantomData;
+
+// Your storage type that includes custom tables
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MyChainStorage<T = TransactionSigned, H = Header> {
+    _phantom: PhantomData<(T, H)>,
+}
+
+// Implement TableSet to expose your custom tables
+impl TableSet for MyChainTables {
+    fn tables() -> Box<dyn Iterator<Item = Box<dyn TableInfo>>> {
+        // Combine Reth's standard tables with your custom ones
+        Box::new(
+            reth_db_api::Tables::ALL
+                .iter()
+                .map(|t| Box::new(*t) as Box<dyn TableInfo>)
+                .chain([
+                    Box::new(MyChainMetadata) as Box<dyn TableInfo>,
+                    Box::new(AddressMetadata) as Box<dyn TableInfo>,
+                    Box::new(EventIndex) as Box<dyn TableInfo>,
+                ])
+        )
+    }
+}
+```
+
+**Step 2: Use your storage type in NodeTypes**
+
+```rust
+use reth_node_api::NodeTypes;
+
+#[derive(Clone, Debug, Default)]
+pub struct MyChainNodeTypes;
+
+impl NodeTypes for MyChainNodeTypes {
+    type Primitives = EthPrimitives;
+    type ChainSpec = MyChainSpec;
+    type Storage = MyChainStorage; // Your custom storage type
+    type Payload = EthPayloadTypes;
+}
+```
+
+### Reading and Writing Custom Tables
+
+Once your tables are defined, use them like any other Reth table:
+
+```rust
+use reth_db_api::{
+    transaction::{DbTx, DbTxMut},
+    cursor::DbCursorRO,
+};
+
+// Writing to your custom table
+fn write_custom_data<DB: Database>(
+    tx: &impl DbTxMut,
+    block_number: BlockNumber,
+    data: MyCustomData,
+) -> Result<(), DatabaseError> {
+    tx.put::<MyCustomTable>(block_number, data)?;
+    Ok(())
+}
+
+// Reading from your custom table
+fn read_custom_data<DB: Database>(
+    tx: &impl DbTx,
+    block_number: BlockNumber,
+) -> Result<Option<MyCustomData>, DatabaseError> {
+    tx.get::<MyCustomTable>(block_number)
+}
+
+// Iterating over your custom table
+fn iterate_custom_table<DB: Database>(
+    tx: &impl DbTx,
+) -> Result<(), DatabaseError> {
+    let mut cursor = tx.cursor_read::<MyCustomTable>()?;
+
+    for entry in cursor.walk(None)? {
+        let (key, value) = entry?;
+        // Process each entry
+        println!("Block {}: {:?}", key, value);
+    }
+
+    Ok(())
+}
+```
+
+### Best Practices for Custom Tables
+
+1. **Namespace Your Table Names**: Use a prefix to avoid conflicts (e.g., `"MyChain_Metadata"`)
+
+2. **Implement Efficient Compression**: For large values, implement custom compression in the `Compress` trait
+
+3. **Use DUPSORT Carefully**: DUPSORT tables (with duplicate keys) are useful for one-to-many relationships but have performance implications
+
+4. **Consider Key Ordering**: Your key's `Encode` implementation should maintain sort order if you need range queries
+
+5. **Document Your Schema**: Add comprehensive documentation to your table definitions
+
+6. **Version Your Data Structures**: Include version fields in your data types to handle migrations
+
+### Example: Complete Custom Table Implementation
+
+Here's a complete example for a custom L2 that tracks batch submissions:
+
+```rust
+use alloy_primitives::{BlockNumber, B256, U256};
+use reth_db_api::{table::*, DatabaseError};
+use serde::{Serialize, Deserialize};
+
+/// Represents a batch of L2 transactions submitted to L1
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BatchInfo {
+    pub l1_block: BlockNumber,
+    pub l1_tx_hash: B256,
+    pub batch_size: u64,
+    pub state_root: B256,
+}
+
+// Implement compression using postcard for efficiency
+impl Compress for BatchInfo {
+    type Compressed = Vec<u8>;
+
+    fn compress_to_buf<B: bytes::BufMut + AsMut<[u8]>>(&self, buf: &mut B) {
+        let encoded = postcard::to_allocvec(self).unwrap();
+        buf.put_slice(&encoded);
+    }
+}
+
+impl Decompress for BatchInfo {
+    fn decompress(value: &[u8]) -> Result<Self, DatabaseError> {
+        postcard::from_bytes(value)
+            .map_err(|_| DatabaseError::Decode)
+    }
+}
+
+// Define the table
+tables! {
+    /// Maps L2 block number to batch submission info
+    table L2BatchSubmissions {
+        type Key = BlockNumber;
+        type Value = BatchInfo;
+    }
+}
+
+// Usage in your node
+impl MyL2Node {
+    pub fn record_batch_submission(
+        &self,
+        provider: &impl DbTxMut,
+        l2_block: BlockNumber,
+        batch_info: BatchInfo,
+    ) -> Result<(), DatabaseError> {
+        provider.put::<L2BatchSubmissions>(l2_block, batch_info)?;
+        Ok(())
+    }
+
+    pub fn get_batch_for_block(
+        &self,
+        provider: &impl DbTx,
+        l2_block: BlockNumber,
+    ) -> Result<Option<BatchInfo>, DatabaseError> {
+        provider.get::<L2BatchSubmissions>(l2_block)
+    }
+}
+```
+
+### Database Initialization
+
+When launching your node with custom tables, ensure they're created during database initialization:
+
+```rust
+use reth_db::mdbx::{Env, EnvKind};
+use reth_provider::providers::StaticFileProvider;
+
+// Initialize database with your custom tables
+let db = Env::<EnvKind>::open(
+    db_path,
+    EnvKind::RW,
+    MyChainTables::tables(), // Your custom table set
+)?;
+```
+
+For more details on database operations, see the [Database Design Documentation](https://github.com/okx/reth/tree/dev/docs/design/database.md).
 
 ## Core Extensibility Traits
 
