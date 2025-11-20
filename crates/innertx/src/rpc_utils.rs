@@ -42,7 +42,7 @@ fn string_to_b256(hex_str: String) -> Result<B256, FromHexError> {
     <Net as RpcTypes>::TransactionRequest:
         serde::de::DeserializeOwned + serde::Serialize
 ))]
-pub trait XlayerExtApi<Net: RpcTypes> {
+pub trait XlayerInnerTxExtApi<Net: RpcTypes> {
     #[method(name = "getInternalTransactions")]
     async fn get_internal_transactions(
         &self,
@@ -57,12 +57,12 @@ pub trait XlayerExtApi<Net: RpcTypes> {
 }
 
 #[derive(Debug)]
-pub struct XlayerExt<T> {
+pub struct XlayerInnerTxExt<T> {
     pub backend: Arc<T>,
 }
 
 #[async_trait]
-impl<T, Net> XlayerExtApiServer<Net> for XlayerExt<T>
+impl<T, Net> XlayerInnerTxExtApiServer<Net> for XlayerInnerTxExt<T>
 where
     T: EthCall + EthApiTypes<NetworkTypes = Net> + Send + Sync + 'static,
     Net: RpcTypes + Send + Sync + 'static,

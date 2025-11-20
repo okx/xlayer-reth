@@ -108,7 +108,9 @@ where
     Ok(())
 }
 
-pub async fn post_exec_exex<Node: FullNodeComponents>(mut ctx: ExExContext<Node>) -> Result<()> {
+pub async fn post_exec_exex_inner_tx<Node: FullNodeComponents>(
+    mut ctx: ExExContext<Node>,
+) -> Result<()> {
     while let Some(notif) = ctx.notifications.try_next().await? {
         match &notif {
             ExExNotification::ChainCommitted { new } => {

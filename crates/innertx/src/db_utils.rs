@@ -18,7 +18,7 @@ use reth_db::{
 
 static XLAYERDB: OnceCell<DatabaseEnv> = OnceCell::new();
 
-pub fn initialize(db_path: &str) -> Result<(), Report> {
+pub fn initialize_inner_tx_db(db_path: &str) -> Result<(), Report> {
     let db_dir = format!("{}/{}", db_path, "xlayerdb");
     let db_create_result = create_db(&db_dir, DatabaseArguments::default());
     if let Err(e) = db_create_result {
@@ -34,7 +34,7 @@ pub fn initialize(db_path: &str) -> Result<(), Report> {
 
     let db_set_result = XLAYERDB.set(db);
     if db_set_result.is_err() {
-        return Err(Report::msg("xlayerdb was initialized more than once"));
+        return Err(Report::msg("xlayerdb was initialize_inner_tx_db more than once"));
     }
 
     Ok(())
