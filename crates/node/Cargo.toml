@@ -20,6 +20,7 @@ reth.workspace = true
 reth-optimism-node.workspace = true
 reth-optimism-cli.workspace = true
 reth-primitives.workspace = true
+reth-primitives-traits.workspace = true
 reth-rpc-eth-api.workspace = true
 reth-optimism-primitives.workspace = true
 reth-rpc-convert.workspace = true
@@ -28,6 +29,43 @@ reth-optimism-evm.workspace = true
 reth-optimism-chainspec.workspace = true
 reth-cli-util.workspace = true
 reth-exex.workspace = true
+reth-provider.workspace = true
+reth-db-common.workspace = true
+reth-node-builder.workspace = true
+reth-node-core.workspace = true
+reth-node-types.workspace = true
+reth-node-api.workspace = true
+reth-chainspec.workspace = true
+reth-codecs.workspace = true
+reth-stages-types.workspace = true
+reth-static-file-types.workspace = true
+reth-tasks.workspace = true
+reth-tracing.workspace = true
+reth-engine-service.workspace = true
+reth-engine-tree.workspace = true
+reth-engine-util.workspace = true
+reth-network.workspace = true
+reth-network-api.workspace = true
+reth-node-events.workspace = true
+reth-tokio-util.workspace = true
+reth-trie.workspace = true
+reth-trie-db.workspace = true
+reth-db-api.workspace = true
+reth-network-peers.workspace = true
+reth-basic-payload-builder.workspace = true
+reth-payload-builder.workspace = true
+reth-payload-primitives.workspace = true
+reth-payload-util.workspace = true
+reth-optimism-payload-builder.workspace = true
+reth-optimism-forks.workspace = true
+reth-optimism-txpool.workspace = true
+reth-transaction-pool.workspace = true
+reth-evm.workspace = true
+reth-storage-api.workspace = true
+reth-revm.workspace = true
+reth-execution-types.workspace = true
+reth-chain-state.workspace = true
+alloy-eips.workspace = true
 
 # tokio
 tokio.workspace = true
@@ -44,6 +82,7 @@ jsonrpsee.workspace = true
 
 # alloy
 alloy-primitives.workspace = true
+alloy-consensus.workspace = true
 
 # misc
 clap.workspace = true

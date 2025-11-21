@@ -76,6 +76,36 @@ reth-revm = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
 reth-storage-api = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
 reth-rpc = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
 reth-node-api = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-node-builder = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-node-core = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-node-types = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-chainspec = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-codecs = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-stages-types = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-static-file-types = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-tasks = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-engine-service = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-engine-tree = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-engine-util = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-network = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-network-api = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-node-events = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-tokio-util = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-trie = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-trie-db = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-db-api = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-db-common = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-network-peers = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-basic-payload-builder = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-payload-builder = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-payload-primitives = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-payload-util = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-optimism-payload-builder = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-optimism-forks = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-optimism-txpool = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-transaction-pool = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-execution-types = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth-chain-state = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
 
 # ------------------------------------------------------------------------------
 # Revm Dependencies (follows upstream reth)

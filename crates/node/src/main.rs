@@ -1,21 +1,23 @@
 #![allow(missing_docs, rustdoc::missing_crate_level_docs)]
 
 mod args_xlayer;
+mod node;
+mod payload_builder;
 
 use std::path::Path;
 use std::sync::Arc;
 
 use args_xlayer::XLayerArgs;
 use clap::Parser;
-use tracing::{error, info};
-
+use node::XLayerNode;
 use reth::{
     builder::{EngineNodeLauncher, Node, NodeHandle, TreeConfig},
     providers::providers::BlockchainProvider,
     version::{default_reth_version_metadata, try_init_version_metadata, RethCliVersionConsts},
 };
 use reth_optimism_cli::{chainspec::OpChainSpecParser, Cli};
-use reth_optimism_node::{args::RollupArgs, OpNode};
+use reth_optimism_node::args::RollupArgs;
+use tracing::{error, info};
 
 use xlayer_innertx::{
     db_utils::initialize_inner_tx_db,
@@ -91,7 +93,7 @@ fn main() {
                 "XLayer features configuration"
             );
 
-            let op_node = OpNode::new(args.rollup_args.clone());
+            let xlayer_node = XLayerNode::new(args.rollup_args.clone());
 
             let data_dir = builder.config().datadir();
             if args.xlayer_args.enable_inner_tx {
@@ -106,9 +108,9 @@ fn main() {
             }
 
             let NodeHandle { node: _node, node_exit_future } = builder
-                .with_types_and_provider::<OpNode, BlockchainProvider<_>>()
-                .with_components(op_node.components())
-                .with_add_ons(op_node.add_ons())
+                .with_types_and_provider::<XLayerNode, BlockchainProvider<_>>()
+                .with_components(xlayer_node.components_builder())
+                .with_add_ons(xlayer_node.add_ons())
                 .on_component_initialized(move |_ctx| {
                     // TODO: Initialize XLayer components here
                     // - Bridge intercept configuration
