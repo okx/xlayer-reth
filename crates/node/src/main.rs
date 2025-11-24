@@ -2,8 +2,13 @@
 
 mod args_xlayer;
 
+use std::path::Path;
+use std::sync::Arc;
+
 use args_xlayer::XLayerArgs;
 use clap::Parser;
+use tracing::{error, info};
+
 use reth::{
     builder::{EngineNodeLauncher, Node, NodeHandle, TreeConfig},
     providers::providers::BlockchainProvider,
@@ -11,7 +16,12 @@ use reth::{
 };
 use reth_optimism_cli::{chainspec::OpChainSpecParser, Cli};
 use reth_optimism_node::{args::RollupArgs, OpNode};
-use tracing::info;
+
+use xlayer_innertx::{
+    db_utils::initialize_inner_tx_db,
+    exex_utils::post_exec_exex_inner_tx,
+    rpc_utils::{XlayerInnerTxExt, XlayerInnerTxExtApiServer},
+};
 
 pub const XLAYER_RETH_CLIENT_VERSION: &str = concat!("xlayer/v", env!("CARGO_PKG_VERSION"));
 
@@ -69,7 +79,7 @@ fn main() {
 
             // Validate XLayer configuration
             if let Err(e) = args.xlayer_args.validate() {
-                eprintln!("XLayer configuration error: {}", e);
+                eprintln!("XLayer configuration error: {e}");
                 std::process::exit(1);
             }
 
@@ -83,6 +93,18 @@ fn main() {
 
             let op_node = OpNode::new(args.rollup_args.clone());
 
+            let data_dir = builder.config().datadir();
+            if args.xlayer_args.enable_inner_tx {
+                let db = data_dir.db();
+                let db_path = db.parent().unwrap_or_else(|| Path::new("/")).to_str().unwrap();
+                match initialize_inner_tx_db(db_path) {
+                    Ok(_) => info!(target: "reth::cli", "xlayer db initialize_inner_tx_db"),
+                    Err(e) => {
+                        error!(target: "reth::cli", "xlayer db failed to initialize_inner_tx_db {:#?}", e)
+                    }
+                }
+            }
+
             let NodeHandle { node: _node, node_exit_future } = builder
                 .with_types_and_provider::<OpNode, BlockchainProvider<_>>()
                 .with_components(op_node.components())
@@ -94,19 +116,23 @@ fn main() {
                     // - Inner transaction tracking
                     Ok(())
                 })
-                // TODO: Add XLayer ExExes here
-                // .install_exex_if(
-                //     args.xlayer_args.enable_inner_tx,
-                //     "xlayer-innertx",
-                //     move |ctx| async move {
-                //         Ok(xlayer_innertx_exex(ctx))
-                //     },
-                // )
-                .extend_rpc_modules(move |_ctx| {
+                .install_exex_if(
+                    args.xlayer_args.enable_inner_tx,
+                    "xlayer-innertx",
+                    move |ctx| async move { Ok(post_exec_exex_inner_tx(ctx)) },
+                )
+                .extend_rpc_modules(move |ctx| {
                     // TODO: Add XLayer RPC extensions here
                     // - Bridge intercept RPC methods
                     // - Apollo RPC methods
                     // - Inner transaction RPC methods
+
+                    // TODO: implement legacy rpc routing for innertx rpc
+                    let new_op_eth_api = ctx.registry.eth_api().clone();
+                    let custom_rpc = XlayerInnerTxExt { backend: Arc::new(new_op_eth_api) };
+                    ctx.modules.merge_configured(custom_rpc.into_rpc())?;
+                    info!(target:"reth::cli", "xlayer innertx rpc enabled");
+
                     info!(message = "XLayer RPC modules initialized");
                     Ok(())
                 })

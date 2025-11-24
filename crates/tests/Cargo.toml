@@ -41,6 +41,7 @@ derive_more.workspace = true
 
 [dev-dependencies]
 rstest = "0.23"
+alloy-rpc-types-engine = { version = "1.0.41", default-features = false }
 
 [lib]
 name = "xlayer_e2e_test"

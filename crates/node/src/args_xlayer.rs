@@ -73,7 +73,7 @@ impl XLayerInterceptArgs {
         if let Some(addr) = &self.bridge_contract
             && addr.parse::<alloy_primitives::Address>().is_err()
         {
-            return Err(format!("Invalid bridge contract address format: {}", addr));
+            return Err(format!("Invalid bridge contract address format: {addr}"));
         }
 
         if let Some(token) = &self.target_token
@@ -81,7 +81,7 @@ impl XLayerInterceptArgs {
             && token != "*"
             && token.parse::<alloy_primitives::Address>().is_err()
         {
-            return Err(format!("Invalid target token address format: {}", token));
+            return Err(format!("Invalid target token address format: {token}"));
         }
 
         Ok(())

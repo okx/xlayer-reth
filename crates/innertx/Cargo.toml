@@ -1,0 +1,43 @@
+[package]
+name = "xlayer-innertx"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+
+[dependencies]
+reth-revm.workspace = true
+reth-db = { workspace = true, features = ["mdbx"] }
+reth-exex.workspace = true
+reth-node-api.workspace = true
+reth-provider.workspace = true
+reth-primitives-traits.workspace = true
+reth-tracing.workspace = true
+reth-evm.workspace = true
+reth-storage-api.workspace = true
+reth-rpc-eth-api.workspace = true
+reth-rpc.workspace = true
+
+revm-context-interface.workspace = true
+revm-database.workspace = true
+
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+alloy-consensus.workspace = true
+alloy-evm.workspace = true
+alloy-eips.workspace = true
+
+tokio.workspace = true
+futures.workspace = true
+serde.workspace = true
+once_cell.workspace = true
+eyre.workspace = true
+jsonrpsee.workspace = true
+
+[lints]
+workspace = true

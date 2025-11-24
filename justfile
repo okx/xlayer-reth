@@ -5,8 +5,14 @@ check: check-format check-clippy test
 
 fix: fix-format fix-clippy
 
-test:
-    cargo test --workspace --all-features
+# Run `just test true` to run e2e tests.
+test include_e2e="false":
+    @echo "Running tests (include_e2e={{include_e2e}})"
+    @if [ "{{include_e2e}}" = "true" ]; then \
+        cargo test --workspace --all-features; \
+    else \
+        cargo test --workspace --exclude xlayer-e2e-test --all-features; \
+    fi
 
 check-format:
     cargo fmt --all -- --check

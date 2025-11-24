@@ -12,6 +12,8 @@ description = "XLayer Reth Binary"
 workspace = true
 
 [dependencies]
+# internal
+xlayer-innertx.workspace = true
 
 # reth
 reth.workspace = true
