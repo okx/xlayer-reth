@@ -33,11 +33,35 @@ build:
 build-maxperf:
     RUSTFLAGS="-C target-cpu=native" cargo build --profile maxperf --features jemalloc,asm-keccak
 
+build-import:
+    cargo build --release --package xlayer-reth-import
+
+build-import-maxperf:
+    RUSTFLAGS="-C target-cpu=native" cargo build --package xlayer-reth-import --profile maxperf --features jemalloc,asm-keccak
+
+build-export:
+    cargo build --release --package xlayer-reth-export
+
+build-export-maxperf:
+    RUSTFLAGS="-C target-cpu=native" cargo build --package xlayer-reth-export --profile maxperf --features jemalloc,asm-keccak
+
 install:
     cargo install --path crates/node --bin xlayer-reth-node --force --locked --profile release
 
 install-maxperf:
     RUSTFLAGS="-C target-cpu=native" cargo install --path crates/node --bin xlayer-reth-node --force --locked --profile maxperf --features jemalloc,asm-keccak
+
+install-import:
+    cargo install --path crates/import --bin xlayer-reth-import --force --locked --profile release
+
+install-import-maxperf:
+    RUSTFLAGS="-C target-cpu=native" cargo install --path crates/import --bin xlayer-reth-import --force --locked --profile maxperf --features jemalloc,asm-keccak
+
+install-export:
+    cargo install --path crates/export --bin xlayer-reth-export --force --locked --profile release
+
+install-export-maxperf:
+    RUSTFLAGS="-C target-cpu=native" cargo install --path crates/export --bin xlayer-reth-export --force --locked --profile maxperf --features jemalloc,asm-keccak
 
 clean:
     cargo clean
