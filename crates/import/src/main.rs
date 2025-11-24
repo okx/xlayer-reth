@@ -22,6 +22,13 @@ async fn main() -> Result<()> {
     // Initialize tracing/logging
     reth_cli_util::sigsegv_handler::install();
 
+    // Enable backtraces unless a RUST_BACKTRACE value has already been explicitly provided.
+    if std::env::var_os("RUST_BACKTRACE").is_none() {
+        unsafe {
+            std::env::set_var("RUST_BACKTRACE", "1");
+        }
+    }
+
     info!(target: "xlayer::import", "XLayer Reth Import starting");
 
     let cmd = ImportCommand::<OpChainSpecParser>::parse();
