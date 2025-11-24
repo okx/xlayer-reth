@@ -48,3 +48,6 @@ watch-test:
 watch-check:
     cargo watch -x "fmt --all -- --check" -x "clippy --all-targets -- -D warnings" -x test
 
+xlayer:
+	cp .github/scripts/pre-commit-xlayer .git/hooks/pre-commit && \
+	chmod +x .git/hooks/pre-commit
