@@ -30,7 +30,7 @@ RUN cargo build --profile $BUILD_PROFILE --bin xlayer-reth-node --manifest-path 
 
 # Copy binary to a fixed location
 RUN OUTPUT_DIR=$(if [ "$BUILD_PROFILE" = "dev" ] || [ "$BUILD_PROFILE" = "test" ]; then echo debug; else echo "$BUILD_PROFILE"; fi) && \
-    cp /app/target/$OUTPUT_DIR/xlayer-reth-node /app/xlayer-reth-node
+    cp /app/target/$OUTPUT_DIR/xlayer-reth-node /app/op-reth
 
 FROM ubuntu:24.04 AS runtime
 
@@ -39,9 +39,9 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY --from=builder /app/xlayer-reth-node /usr/local/bin/
-RUN chmod +x /usr/local/bin/xlayer-reth-node
+COPY --from=builder /app/op-reth /usr/local/bin/
+RUN chmod +x /usr/local/bin/op-reth
 COPY LICENSE-* ./
 
 EXPOSE 30303 30303/udp 9001 8545 8546 7545 8551
-ENTRYPOINT ["/usr/local/bin/xlayer-reth-node"]
+ENTRYPOINT ["/usr/local/bin/op-reth"]
