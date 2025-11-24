@@ -12419,10 +12419,12 @@ dependencies = [
  "alloy-primitives",
  "jsonrpsee",
  "reth-chainspec",
+ "reth-optimism-rpc",
  "reth-rpc",
  "reth-rpc-eth-api",
  "reth-storage-api",
  "serde",
+ "tokio",
  "tracing",
 ]
 

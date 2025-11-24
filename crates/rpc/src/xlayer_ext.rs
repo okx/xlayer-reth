@@ -6,15 +6,22 @@ use jsonrpsee::{
     core::{async_trait, RpcResult},
     proc_macros::rpc,
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 use reth_chainspec::{ChainSpecProvider, EthChainSpec};
+use reth_optimism_rpc::SequencerClient;
 use reth_rpc::RpcTypes;
 use reth_rpc_eth_api::{
     helpers::{EthFees, LoadBlock, LoadFee},
     EthApiTypes,
 };
 use reth_storage_api::{BlockReaderIdExt, HeaderProvider, ProviderHeader};
+
+/// Trait for accessing sequencer client from backend
+pub trait SequencerClientProvider {
+    /// Returns the sequencer client if available
+    fn sequencer_client(&self) -> Option<&SequencerClient>;
+}
 
 /// XLayer-specific RPC API trait
 #[rpc(server, namespace = "eth", server_bounds(
@@ -39,13 +46,42 @@ pub struct XlayerRpcExt<T> {
 #[async_trait]
 impl<T, Net> XlayerRpcExtApiServer<Net> for XlayerRpcExt<T>
 where
-    T: EthFees + LoadFee + LoadBlock + EthApiTypes<NetworkTypes = Net> + Send + Sync + 'static,
+    T: EthFees
+        + LoadFee
+        + LoadBlock
+        + EthApiTypes<NetworkTypes = Net>
+        + SequencerClientProvider
+        + Send
+        + Sync
+        + 'static,
     T::Provider: ChainSpecProvider<ChainSpec: EthChainSpec<Header = ProviderHeader<T::Provider>>>
         + BlockReaderIdExt
         + HeaderProvider,
     Net: RpcTypes + Send + Sync + 'static,
 {
     async fn min_gas_price(&self) -> RpcResult<U256> {
+        // Check if sequencer client is available (RPC node mode)
+        if let Some(sequencer) = self.backend.sequencer_client() {
+            match sequencer.request::<_, U256>("eth_minGasPrice", ()).await {
+                Ok(result) => {
+                    debug!(
+                        target: "rpc::xlayer",
+                        "Received eth_minGasPrice from sequencer: {result}"
+                    );
+                    return Ok(result);
+                }
+                Err(err) => {
+                    warn!(
+                        target: "rpc::xlayer",
+                        %err,
+                        "Failed to forward eth_minGasPrice to sequencer, falling back to local calculation"
+                    );
+                    // Fall through to local calculation
+                }
+            }
+        }
+
+        // Local calculation (sequencer mode or fallback)
         let header = self.backend.provider().latest_header().map_err(|err| {
             jsonrpsee::types::ErrorObjectOwned::owned(
                 -32603,
@@ -62,8 +98,10 @@ where
 
         let min_gas_price = U256::from(base_fee) + default_suggested_fee;
 
-        // debug log
-        debug!(target: "reth::cli", "min_gas_price: {min_gas_price}, base_fee: {base_fee}, default_suggested_fee: {default_suggested_fee}");
+        debug!(
+            target: "rpc::xlayer",
+            "Calculated min_gas_price locally: {min_gas_price}, base_fee: {base_fee}, default_suggested_fee: {default_suggested_fee}"
+        );
 
         Ok(min_gas_price)
     }
