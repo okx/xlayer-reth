@@ -12408,6 +12408,22 @@ dependencies = [
  "url",
  "uuid",
  "xlayer-innertx",
+ "xlayer-rpc",
+]
+
+[[package]]
+name = "xlayer-rpc"
+version = "0.1.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-primitives",
+ "jsonrpsee",
+ "reth-chainspec",
+ "reth-rpc",
+ "reth-rpc-eth-api",
+ "reth-storage-api",
+ "serde",
+ "tracing",
 ]
 
 [[package]]

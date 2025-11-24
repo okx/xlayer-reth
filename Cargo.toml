@@ -12,11 +12,7 @@ repository = "https://github.com/okx/xlayer-reth.git"
 
 [workspace]
 resolver = "2"
-members = [
-    "crates/node",
-    "crates/tests",
-    "crates/innertx", 
-]
+members = ["crates/node", "crates/tests", "crates/innertx", "crates/rpc"]
 default-members = ["crates/node"]
 
 [workspace.lints]
@@ -51,6 +47,7 @@ codegen-units = 1
 
 xlayer-reth-node = { path = "crates/node" }
 xlayer-innertx = { path = "crates/innertx" }
+xlayer-rpc = { path = "crates/rpc" }
 
 # ------------------------------------------------------------------------------
 # Reth Dependencies (points to our fork)
@@ -76,6 +73,7 @@ reth-revm = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
 reth-storage-api = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
 reth-rpc = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
 reth-node-api = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-chainspec = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
 
 # ------------------------------------------------------------------------------
 # Revm Dependencies (follows upstream reth)
@@ -97,7 +95,9 @@ alloy-consensus = { version = "1.0.41" }
 alloy-provider = { version = "1.0.41" }
 alloy-sol-types = { version = "1.4.1", default-features = false }
 alloy-network = { version = "1.1.0", default-features = false }
-alloy-rlp = { version = "0.3.10", default-features = false, features = ["core-net"] }
+alloy-rlp = { version = "0.3.10", default-features = false, features = [
+    "core-net",
+] }
 alloy-signer = { version = "1.1.0", default-features = false }
 alloy-signer-local = { version = "1.1.0", default-features = false }
 alloy-evm = { version = "0.23.0", default-features = false }
