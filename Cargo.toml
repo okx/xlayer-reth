@@ -55,27 +55,27 @@ xlayer-innertx = { path = "crates/innertx" }
 # ------------------------------------------------------------------------------
 # Reth Dependencies (points to our fork)
 # ------------------------------------------------------------------------------
-reth = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
-reth-optimism-node = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
-reth-optimism-cli = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
-reth-primitives = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
-reth-rpc-eth-api = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
-reth-optimism-primitives = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
-reth-rpc-convert = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
-reth-optimism-rpc = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
-reth-optimism-evm = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
-reth-optimism-chainspec = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
-reth-provider = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
-reth-tracing = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
-reth-primitives-traits = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
-reth-evm = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
-reth-cli-util = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
-reth-exex = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
-reth-db = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
-reth-revm = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
-reth-storage-api = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
-reth-rpc = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
-reth-node-api = { git = "https://github.com/okx/reth", branch = "upstream/v1.9.2" }
+reth = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-optimism-node = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-optimism-cli = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-primitives = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-rpc-eth-api = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-optimism-primitives = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-rpc-convert = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-optimism-rpc = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-optimism-evm = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-optimism-chainspec = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-provider = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-tracing = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-primitives-traits = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-evm = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-cli-util = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-exex = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-db = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-revm = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-storage-api = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-rpc = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-node-api = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
 
 # ------------------------------------------------------------------------------
 # Revm Dependencies (follows upstream reth)

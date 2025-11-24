@@ -208,9 +208,9 @@ dependencies = [
 
 [[package]]
 name = "alloy-eips"
-version = "1.1.1"
+version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e867b5fd52ed0372a95016f3a37cbff95a9d5409230fbaef2d8ea00e8618098"
+checksum = "4bd2c7ae05abcab4483ce821f12f285e01c0b33804e6883dd9ca1569a87ee2be"
 dependencies = [
  "alloy-eip2124",
  "alloy-eip2930",
@@ -256,9 +256,9 @@ dependencies = [
 
 [[package]]
 name = "alloy-genesis"
-version = "1.1.1"
+version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b90be17e9760a6ba6d13cebdb049cea405ebc8bf57d90664ed708cc5bc348342"
+checksum = "fc47eaae86488b07ea8e20236184944072a78784a1f4993f8ec17b3aa5d08c21"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
@@ -683,9 +683,9 @@ dependencies = [
 
 [[package]]
 name = "alloy-serde"
-version = "1.1.1"
+version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01e856112bfa0d9adc85bd7c13db03fad0e71d1d6fb4c2010e475b6718108236"
+checksum = "a6f180c399ca7c1e2fe17ea58343910cad0090878a696ff5a50241aee12fc529"
 dependencies = [
  "alloy-primitives",
  "serde",
@@ -6306,8 +6306,8 @@ checksum = "6b3789b30bd25ba102de4beabd95d21ac45b69b1be7d14522bab988c526d6799"
 
 [[package]]
 name = "reth"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-rpc-types",
  "aquamarine",
@@ -6352,8 +6352,8 @@ dependencies = [
 
 [[package]]
 name = "reth-basic-payload-builder"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -6376,8 +6376,8 @@ dependencies = [
 
 [[package]]
 name = "reth-chain-state"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -6405,8 +6405,8 @@ dependencies = [
 
 [[package]]
 name = "reth-chainspec"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-chains",
  "alloy-consensus",
@@ -6425,8 +6425,8 @@ dependencies = [
 
 [[package]]
 name = "reth-cli"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-genesis",
  "clap",
@@ -6439,8 +6439,8 @@ dependencies = [
 
 [[package]]
 name = "reth-cli-commands"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-chains",
  "alloy-consensus",
@@ -6514,8 +6514,8 @@ dependencies = [
 
 [[package]]
 name = "reth-cli-runner"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "reth-tasks",
  "tokio",
@@ -6524,8 +6524,8 @@ dependencies = [
 
 [[package]]
 name = "reth-cli-util"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
@@ -6542,8 +6542,8 @@ dependencies = [
 
 [[package]]
 name = "reth-codecs"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -6560,8 +6560,8 @@ dependencies = [
 
 [[package]]
 name = "reth-codecs-derive"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6570,8 +6570,8 @@ dependencies = [
 
 [[package]]
 name = "reth-config"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "eyre",
  "humantime-serde",
@@ -6585,8 +6585,8 @@ dependencies = [
 
 [[package]]
 name = "reth-consensus"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
@@ -6598,8 +6598,8 @@ dependencies = [
 
 [[package]]
 name = "reth-consensus-common"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -6610,8 +6610,8 @@ dependencies = [
 
 [[package]]
 name = "reth-consensus-debug-client"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -6636,8 +6636,8 @@ dependencies = [
 
 [[package]]
 name = "reth-db"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-primitives",
  "derive_more",
@@ -6660,8 +6660,8 @@ dependencies = [
 
 [[package]]
 name = "reth-db-api"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-genesis",
@@ -6686,8 +6686,8 @@ dependencies = [
 
 [[package]]
 name = "reth-db-common"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-genesis",
@@ -6716,8 +6716,8 @@ dependencies = [
 
 [[package]]
 name = "reth-db-models"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
@@ -6730,8 +6730,8 @@ dependencies = [
 
 [[package]]
 name = "reth-discv4"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
@@ -6755,8 +6755,8 @@ dependencies = [
 
 [[package]]
 name = "reth-discv5"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
@@ -6779,8 +6779,8 @@ dependencies = [
 
 [[package]]
 name = "reth-dns-discovery"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-primitives",
  "data-encoding",
@@ -6803,8 +6803,8 @@ dependencies = [
 
 [[package]]
 name = "reth-downloaders"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -6834,8 +6834,8 @@ dependencies = [
 
 [[package]]
 name = "reth-ecies"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "aes",
  "alloy-primitives",
@@ -6865,8 +6865,8 @@ dependencies = [
 
 [[package]]
 name = "reth-engine-local"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
@@ -6889,8 +6889,8 @@ dependencies = [
 
 [[package]]
 name = "reth-engine-primitives"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -6914,8 +6914,8 @@ dependencies = [
 
 [[package]]
 name = "reth-engine-service"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "futures",
  "pin-project",
@@ -6936,8 +6936,8 @@ dependencies = [
 
 [[package]]
 name = "reth-engine-tree"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -6986,8 +6986,8 @@ dependencies = [
 
 [[package]]
 name = "reth-engine-util"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-rpc-types-engine",
@@ -7014,8 +7014,8 @@ dependencies = [
 
 [[package]]
 name = "reth-era"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -7030,8 +7030,8 @@ dependencies = [
 
 [[package]]
 name = "reth-era-downloader"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-primitives",
  "bytes",
@@ -7045,8 +7045,8 @@ dependencies = [
 
 [[package]]
 name = "reth-era-utils"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
@@ -7067,8 +7067,8 @@ dependencies = [
 
 [[package]]
 name = "reth-errors"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "reth-consensus",
  "reth-execution-errors",
@@ -7078,8 +7078,8 @@ dependencies = [
 
 [[package]]
 name = "reth-eth-wire"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-chains",
  "alloy-primitives",
@@ -7106,8 +7106,8 @@ dependencies = [
 
 [[package]]
 name = "reth-eth-wire-types"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-chains",
  "alloy-consensus",
@@ -7127,8 +7127,8 @@ dependencies = [
 
 [[package]]
 name = "reth-ethereum-cli"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "clap",
  "eyre",
@@ -7151,8 +7151,8 @@ dependencies = [
 
 [[package]]
 name = "reth-ethereum-consensus"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -7167,8 +7167,8 @@ dependencies = [
 
 [[package]]
 name = "reth-ethereum-engine-primitives"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
@@ -7185,8 +7185,8 @@ dependencies = [
 
 [[package]]
 name = "reth-ethereum-forks"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-eip2124",
  "alloy-hardforks",
@@ -7198,8 +7198,8 @@ dependencies = [
 
 [[package]]
 name = "reth-ethereum-payload-builder"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -7227,8 +7227,8 @@ dependencies = [
 
 [[package]]
 name = "reth-ethereum-primitives"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -7246,8 +7246,8 @@ dependencies = [
 
 [[package]]
 name = "reth-etl"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "rayon",
  "reth-db-api",
@@ -7256,8 +7256,8 @@ dependencies = [
 
 [[package]]
 name = "reth-evm"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -7279,8 +7279,8 @@ dependencies = [
 
 [[package]]
 name = "reth-evm-ethereum"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -7299,8 +7299,8 @@ dependencies = [
 
 [[package]]
 name = "reth-execution-errors"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-evm",
  "alloy-primitives",
@@ -7312,8 +7312,8 @@ dependencies = [
 
 [[package]]
 name = "reth-execution-types"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -7330,8 +7330,8 @@ dependencies = [
 
 [[package]]
 name = "reth-exex"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -7368,8 +7368,8 @@ dependencies = [
 
 [[package]]
 name = "reth-exex-types"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
@@ -7382,8 +7382,8 @@ dependencies = [
 
 [[package]]
 name = "reth-fs-util"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "serde",
  "serde_json",
@@ -7392,8 +7392,8 @@ dependencies = [
 
 [[package]]
 name = "reth-invalid-block-hooks"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
@@ -7420,8 +7420,8 @@ dependencies = [
 
 [[package]]
 name = "reth-ipc"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "bytes",
  "futures",
@@ -7440,8 +7440,8 @@ dependencies = [
 
 [[package]]
 name = "reth-libmdbx"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "bitflags 2.10.0",
  "byteorder",
@@ -7456,8 +7456,8 @@ dependencies = [
 
 [[package]]
 name = "reth-mdbx-sys"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "bindgen 0.71.1",
  "cc",
@@ -7465,8 +7465,8 @@ dependencies = [
 
 [[package]]
 name = "reth-metrics"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "futures",
  "metrics",
@@ -7477,16 +7477,16 @@ dependencies = [
 
 [[package]]
 name = "reth-net-banlist"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-primitives",
 ]
 
 [[package]]
 name = "reth-net-nat"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "futures-util",
  "if-addrs",
@@ -7499,8 +7499,8 @@ dependencies = [
 
 [[package]]
 name = "reth-network"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -7554,8 +7554,8 @@ dependencies = [
 
 [[package]]
 name = "reth-network-api"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
@@ -7579,8 +7579,8 @@ dependencies = [
 
 [[package]]
 name = "reth-network-p2p"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -7601,8 +7601,8 @@ dependencies = [
 
 [[package]]
 name = "reth-network-peers"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
@@ -7616,8 +7616,8 @@ dependencies = [
 
 [[package]]
 name = "reth-network-types"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-eip2124",
  "humantime-serde",
@@ -7630,8 +7630,8 @@ dependencies = [
 
 [[package]]
 name = "reth-nippy-jar"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "anyhow",
  "bincode",
@@ -7647,8 +7647,8 @@ dependencies = [
 
 [[package]]
 name = "reth-node-api"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-rpc-types-engine",
  "eyre",
@@ -7671,8 +7671,8 @@ dependencies = [
 
 [[package]]
 name = "reth-node-builder"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -7739,8 +7739,8 @@ dependencies = [
 
 [[package]]
 name = "reth-node-core"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -7792,8 +7792,8 @@ dependencies = [
 
 [[package]]
 name = "reth-node-ethereum"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-eips",
  "alloy-network",
@@ -7830,8 +7830,8 @@ dependencies = [
 
 [[package]]
 name = "reth-node-ethstats"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
@@ -7854,8 +7854,8 @@ dependencies = [
 
 [[package]]
 name = "reth-node-events"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -7878,8 +7878,8 @@ dependencies = [
 
 [[package]]
 name = "reth-node-metrics"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "eyre",
  "http",
@@ -7900,8 +7900,8 @@ dependencies = [
 
 [[package]]
 name = "reth-node-types"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "reth-chainspec",
  "reth-db-api",
@@ -7912,8 +7912,8 @@ dependencies = [
 
 [[package]]
 name = "reth-optimism-chainspec"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-chains",
  "alloy-consensus",
@@ -7940,8 +7940,8 @@ dependencies = [
 
 [[package]]
 name = "reth-optimism-cli"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -7990,8 +7990,8 @@ dependencies = [
 
 [[package]]
 name = "reth-optimism-consensus"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -8015,8 +8015,8 @@ dependencies = [
 
 [[package]]
 name = "reth-optimism-evm"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -8043,8 +8043,8 @@ dependencies = [
 
 [[package]]
 name = "reth-optimism-flashblocks"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -8082,8 +8082,8 @@ dependencies = [
 
 [[package]]
 name = "reth-optimism-forks"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-op-hardforks",
  "alloy-primitives",
@@ -8093,8 +8093,8 @@ dependencies = [
 
 [[package]]
 name = "reth-optimism-node"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
@@ -8139,8 +8139,8 @@ dependencies = [
 
 [[package]]
 name = "reth-optimism-payload-builder"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -8179,8 +8179,8 @@ dependencies = [
 
 [[package]]
 name = "reth-optimism-primitives"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -8198,8 +8198,8 @@ dependencies = [
 
 [[package]]
 name = "reth-optimism-rpc"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -8259,8 +8259,8 @@ dependencies = [
 
 [[package]]
 name = "reth-optimism-storage"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "reth-optimism-primitives",
@@ -8269,8 +8269,8 @@ dependencies = [
 
 [[package]]
 name = "reth-optimism-txpool"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -8305,8 +8305,8 @@ dependencies = [
 
 [[package]]
 name = "reth-payload-builder"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
@@ -8326,8 +8326,8 @@ dependencies = [
 
 [[package]]
 name = "reth-payload-builder-primitives"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "pin-project",
  "reth-payload-primitives",
@@ -8338,8 +8338,8 @@ dependencies = [
 
 [[package]]
 name = "reth-payload-primitives"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
@@ -8358,8 +8358,8 @@ dependencies = [
 
 [[package]]
 name = "reth-payload-util"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
@@ -8368,8 +8368,8 @@ dependencies = [
 
 [[package]]
 name = "reth-payload-validator"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-rpc-types-engine",
@@ -8378,8 +8378,8 @@ dependencies = [
 
 [[package]]
 name = "reth-primitives"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "c-kzg",
@@ -8392,8 +8392,8 @@ dependencies = [
 
 [[package]]
 name = "reth-primitives-traits"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -8422,8 +8422,8 @@ dependencies = [
 
 [[package]]
 name = "reth-provider"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -8463,8 +8463,8 @@ dependencies = [
 
 [[package]]
 name = "reth-prune"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -8490,8 +8490,8 @@ dependencies = [
 
 [[package]]
 name = "reth-prune-types"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-primitives",
  "derive_more",
@@ -8504,8 +8504,8 @@ dependencies = [
 
 [[package]]
 name = "reth-ress-protocol"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
@@ -8523,8 +8523,8 @@ dependencies = [
 
 [[package]]
 name = "reth-ress-provider"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
@@ -8550,8 +8550,8 @@ dependencies = [
 
 [[package]]
 name = "reth-revm"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-primitives",
  "reth-primitives-traits",
@@ -8563,8 +8563,8 @@ dependencies = [
 
 [[package]]
 name = "reth-rpc"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-dyn-abi",
@@ -8642,8 +8642,8 @@ dependencies = [
 
 [[package]]
 name = "reth-rpc-api"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-eips",
  "alloy-genesis",
@@ -8670,8 +8670,8 @@ dependencies = [
 
 [[package]]
 name = "reth-rpc-builder"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-network",
  "alloy-provider",
@@ -8709,8 +8709,8 @@ dependencies = [
 
 [[package]]
 name = "reth-rpc-convert"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-json-rpc",
@@ -8736,8 +8736,8 @@ dependencies = [
 
 [[package]]
 name = "reth-rpc-engine-api"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
@@ -8766,8 +8766,8 @@ dependencies = [
 
 [[package]]
 name = "reth-rpc-eth-api"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-dyn-abi",
@@ -8810,8 +8810,8 @@ dependencies = [
 
 [[package]]
 name = "reth-rpc-eth-types"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -8857,8 +8857,8 @@ dependencies = [
 
 [[package]]
 name = "reth-rpc-layer"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-rpc-types-engine",
  "http",
@@ -8871,8 +8871,8 @@ dependencies = [
 
 [[package]]
 name = "reth-rpc-server-types"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
@@ -8887,8 +8887,8 @@ dependencies = [
 
 [[package]]
 name = "reth-stages"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -8931,8 +8931,8 @@ dependencies = [
 
 [[package]]
 name = "reth-stages-api"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
@@ -8958,8 +8958,8 @@ dependencies = [
 
 [[package]]
 name = "reth-stages-types"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-primitives",
  "bytes",
@@ -8971,8 +8971,8 @@ dependencies = [
 
 [[package]]
 name = "reth-static-file"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-primitives",
  "parking_lot",
@@ -8991,8 +8991,8 @@ dependencies = [
 
 [[package]]
 name = "reth-static-file-types"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-primitives",
  "clap",
@@ -9003,8 +9003,8 @@ dependencies = [
 
 [[package]]
 name = "reth-storage-api"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -9026,8 +9026,8 @@ dependencies = [
 
 [[package]]
 name = "reth-storage-errors"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
@@ -9042,8 +9042,8 @@ dependencies = [
 
 [[package]]
 name = "reth-tasks"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "auto_impl",
  "dyn-clone",
@@ -9060,8 +9060,8 @@ dependencies = [
 
 [[package]]
 name = "reth-tokio-util"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "tokio",
  "tokio-stream",
@@ -9070,8 +9070,8 @@ dependencies = [
 
 [[package]]
 name = "reth-tracing"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "clap",
  "eyre",
@@ -9087,8 +9087,8 @@ dependencies = [
 
 [[package]]
 name = "reth-tracing-otlp"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "clap",
  "eyre",
@@ -9104,8 +9104,8 @@ dependencies = [
 
 [[package]]
 name = "reth-transaction-pool"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -9144,8 +9144,8 @@ dependencies = [
 
 [[package]]
 name = "reth-trie"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -9168,8 +9168,8 @@ dependencies = [
 
 [[package]]
 name = "reth-trie-common"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
@@ -9192,8 +9192,8 @@ dependencies = [
 
 [[package]]
 name = "reth-trie-db"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-primitives",
  "reth-db-api",
@@ -9205,8 +9205,8 @@ dependencies = [
 
 [[package]]
 name = "reth-trie-parallel"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
@@ -9230,8 +9230,8 @@ dependencies = [
 
 [[package]]
 name = "reth-trie-sparse"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
@@ -9249,8 +9249,8 @@ dependencies = [
 
 [[package]]
 name = "reth-trie-sparse-parallel"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
@@ -9267,8 +9267,8 @@ dependencies = [
 
 [[package]]
 name = "reth-zstd-compressors"
-version = "1.9.2"
-source = "git+https://github.com/okx/reth?branch=upstream%2Fv1.9.2#74351d98e906b8af5f118694529fb2b71d316946"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=upstream%2Fdev#8e68a5c86711e4c7a95d179ff7dec2c873aa3e05"
 dependencies = [
  "zstd",
 ]
