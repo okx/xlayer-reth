@@ -44,6 +44,5 @@ async fn main() -> Result<()> {
 
     let cmd = ImportCommand::<OpChainSpecParser>::parse();
 
-    cmd.execute::<OpNode, _>(components)
-    .await
+    cmd.execute::<OpNode, _>(components).await
 }

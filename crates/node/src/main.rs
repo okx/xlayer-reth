@@ -12,7 +12,7 @@ use tracing::{error, info};
 use reth::{
     builder::{EngineNodeLauncher, Node, NodeHandle, TreeConfig},
     providers::providers::BlockchainProvider,
-    version::{default_reth_version_metadata},
+    version::default_reth_version_metadata,
 };
 use reth_optimism_cli::{chainspec::OpChainSpecParser, Cli};
 use reth_optimism_node::{args::RollupArgs, OpNode};
