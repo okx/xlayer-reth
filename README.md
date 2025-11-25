@@ -109,6 +109,10 @@ just fix
 just watch-test
 ```
 
+## Other Tests
+
+For other tests, please read [tests/README.md](tests/README.md).
+
 ## Repository
 
 - **Homepage**: [https://github.com/okx/xlayer-reth](https://github.com/okx/xlayer-reth)
