@@ -35,6 +35,11 @@ where
                 let service = LegacyRpcRouterService { inner, config, client };
                 service.forward_to_legacy(req).await
             } else {
+                tracing::debug!(
+                    target: "rpc::legacy",
+                    method = req.method_name(),
+                    "Normal (no re-route)"
+                );
                 inner.call(req).await
             }
         }
