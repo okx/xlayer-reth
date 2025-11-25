@@ -59,32 +59,32 @@ xlayer-reth-utils = { path = "crates/utils" }
 # ------------------------------------------------------------------------------
 # Reth Dependencies (points to our fork)
 # ------------------------------------------------------------------------------
-reth = { git = "https://github.com/okx/reth", branch = "dev" }
-reth-chainspec = { git = "https://github.com/okx/reth", branch = "dev" }
-reth-cli = { git = "https://github.com/okx/reth", branch = "dev" }
-reth-cli-commands = { git = "https://github.com/okx/reth", branch = "dev" }
-reth-cli-util = { git = "https://github.com/okx/reth", branch = "dev" }
-reth-db = { git = "https://github.com/okx/reth", branch = "dev" }
-reth-evm = { git = "https://github.com/okx/reth", branch = "dev" }
-reth-exex = { git = "https://github.com/okx/reth", branch = "dev" }
-reth-node-api = { git = "https://github.com/okx/reth", branch = "dev" }
-reth-node-core = { git = "https://github.com/okx/reth", branch = "dev" }
-reth-optimism-chainspec = { git = "https://github.com/okx/reth", branch = "dev" }
-reth-optimism-cli = { git = "https://github.com/okx/reth", branch = "dev" }
-reth-optimism-consensus = { git = "https://github.com/okx/reth", branch = "dev" }
-reth-optimism-evm = { git = "https://github.com/okx/reth", branch = "dev" }
-reth-optimism-node = { git = "https://github.com/okx/reth", branch = "dev" }
-reth-optimism-primitives = { git = "https://github.com/okx/reth", branch = "dev" }
-reth-optimism-rpc = { git = "https://github.com/okx/reth", branch = "dev" }
-reth-primitives = { git = "https://github.com/okx/reth", branch = "dev" }
-reth-primitives-traits = { git = "https://github.com/okx/reth", branch = "dev" }
-reth-provider = { git = "https://github.com/okx/reth", branch = "dev" }
-reth-revm = { git = "https://github.com/okx/reth", branch = "dev" }
-reth-rpc = { git = "https://github.com/okx/reth", branch = "dev" }
-reth-rpc-convert = { git = "https://github.com/okx/reth", branch = "dev" }
-reth-rpc-eth-api = { git = "https://github.com/okx/reth", branch = "dev" }
-reth-storage-api = { git = "https://github.com/okx/reth", branch = "dev" }
-reth-tracing = { git = "https://github.com/okx/reth", branch = "dev" }
+reth = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
+reth-chainspec = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
+reth-cli = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
+reth-cli-commands = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
+reth-cli-util = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
+reth-db = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
+reth-evm = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
+reth-exex = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
+reth-node-api = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
+reth-node-core = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
+reth-optimism-chainspec = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
+reth-optimism-cli = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
+reth-optimism-consensus = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
+reth-optimism-evm = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
+reth-optimism-node = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
+reth-optimism-primitives = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
+reth-optimism-rpc = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
+reth-primitives = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
+reth-primitives-traits = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
+reth-provider = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
+reth-revm = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
+reth-rpc = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
+reth-rpc-convert = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
+reth-rpc-eth-api = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
+reth-storage-api = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
+reth-tracing = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
 
 # ------------------------------------------------------------------------------
 # Revm Dependencies (follows upstream reth)
