@@ -16,6 +16,7 @@ members = [
     "crates/node",
     "crates/tests",
     "crates/innertx", 
+		"crates/legacy-rpc"
 ]
 default-members = ["crates/node"]
 
@@ -120,9 +121,11 @@ tokio-tungstenite = { version = "0.26.2", features = ["native-tls"] }
 futures = "0.3"
 futures-util = "0.3"
 reqwest = { version = "0.12", features = ["json", "stream"] }
+tower = "0.5"
 
 # rpc
 jsonrpsee = "0.26.0"
+jsonrpsee-types = "0.26.0"
 
 # misc
 clap = { version = "4.4.3" }

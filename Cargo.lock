@@ -12371,6 +12371,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "xlayer-legacy-rpc"
+version = "0.1.0"
+dependencies = [
+ "jsonrpsee",
+ "jsonrpsee-types",
+ "reqwest",
+ "serde_json",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "xlayer-reth-node"
 version = "0.1.0"
 dependencies = [
