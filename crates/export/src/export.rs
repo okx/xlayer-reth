@@ -6,6 +6,7 @@
 //! - Writes to a file (supports gzip compression)
 //! - Handles interrupts gracefully (Ctrl+C)
 
+use alloy_consensus::BlockHeader;
 use alloy_rlp::Encodable;
 use clap::Parser;
 use eyre::{eyre, Result, WrapErr};
@@ -67,17 +68,14 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> ExportCommand<C> {
         let latest_block =
             provider.last_block_number().wrap_err("Failed to get latest block number")?;
 
-        // Determine the end block
+        let genesis_block_number = provider.chain_spec().genesis_header().number();
+        let start_block = if self.start_block < genesis_block_number {
+            warn!(target: "reth::cli", "Start block ({}) is less than genesis block ({}), using genesis block as start block", self.start_block, genesis_block_number);
+            genesis_block_number
+        } else {
+            self.start_block
+        };
         let end_block = self.end_block.unwrap_or(latest_block);
-
-        // Validate block range
-        if self.start_block > end_block {
-            return Err(eyre!(
-                "Start block ({}) is greater than end block ({})",
-                self.start_block,
-                end_block
-            ));
-        }
 
         if end_block > latest_block {
             return Err(eyre!(
@@ -87,11 +85,11 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> ExportCommand<C> {
             ));
         }
 
-        let total_blocks = end_block - self.start_block + 1;
+        let total_blocks = end_block - start_block + 1;
         info!(
             target: "reth::cli",
             "Exporting blocks {} to {} ({} blocks total)",
-            self.start_block,
+            start_block,
             end_block,
             total_blocks
         );
@@ -121,7 +119,7 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> ExportCommand<C> {
         };
 
         // Export blocks in batches
-        let mut current_block = self.start_block;
+        let mut current_block = start_block;
         let mut exported_blocks = 0u64;
 
         while current_block <= end_block && !shutdown.load(Ordering::SeqCst) {
