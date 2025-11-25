@@ -22,6 +22,7 @@ use xlayer_innertx::{
     exex_utils::post_exec_exex_inner_tx,
     rpc_utils::{XlayerInnerTxExt, XlayerInnerTxExtApiServer},
 };
+use xlayer_rpc::xlayer_ext::{XlayerRpcExt, XlayerRpcExtApiServer};
 
 pub const XLAYER_RETH_CLIENT_VERSION: &str = concat!("xlayer/v", env!("CARGO_PKG_VERSION"));
 
@@ -129,9 +130,14 @@ fn main() {
 
                     // TODO: implement legacy rpc routing for innertx rpc
                     let new_op_eth_api = ctx.registry.eth_api().clone();
-                    let custom_rpc = XlayerInnerTxExt { backend: Arc::new(new_op_eth_api) };
+                    let custom_rpc = XlayerInnerTxExt { backend: Arc::new(new_op_eth_api.clone()) };
                     ctx.modules.merge_configured(custom_rpc.into_rpc())?;
                     info!(target:"reth::cli", "xlayer innertx rpc enabled");
+
+                    // Register XLayer RPC extension for eth_minGasPrice
+                    let xlayer_rpc = XlayerRpcExt { backend: Arc::new(new_op_eth_api) };
+                    ctx.modules.merge_configured(xlayer_rpc.into_rpc())?;
+                    info!(target:"reth::cli", "xlayer rpc extension enabled (eth_minGasPrice)");
 
                     info!(message = "XLayer RPC modules initialized");
                     Ok(())

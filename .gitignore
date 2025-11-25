@@ -1,9 +1,13 @@
 /target
 .claude
 .vscode
+
 tests/data
 tests/op-reth-seq
 tests/genesis-reth.json
 tests/op-reth-seq.tar.xz
 tests/*.bin
 tests/*.log
+
+# Local development: cargo config for debugging with local reth
+.cargo
