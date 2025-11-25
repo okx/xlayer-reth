@@ -15,6 +15,7 @@ workspace = true
 # internal
 xlayer-innertx.workspace = true
 xlayer-rpc.workspace = true
+xlayer-reth-utils.workspace = true
 
 # reth
 reth.workspace = true
