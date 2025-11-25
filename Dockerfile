@@ -9,10 +9,21 @@ RUN apt-get update && apt-get -y upgrade && apt-get install -y libclang-dev pkg-
 # Builds a cargo-chef plan
 FROM chef AS planner
 COPY . .
+# For dev builds: move .cargo/reth to /reth (same level as /app, not nested)
+# This avoids nested workspace issues. Create empty /reth if not dev mode.
+RUN if [ -d .cargo/reth ]; then \
+        mv .cargo/reth /reth; \
+    else \
+        mkdir -p /reth; \
+    fi
+RUN mkdir -p .cargo
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
+COPY --from=planner /app/.cargo /app/.cargo
+# Copy /reth from planner (will be empty dir in prod mode, reth source in dev mode)
+COPY --from=planner /reth /reth
 
 ARG BUILD_PROFILE=release
 ENV BUILD_PROFILE=$BUILD_PROFILE
