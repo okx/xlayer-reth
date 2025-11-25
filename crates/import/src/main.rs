@@ -3,9 +3,10 @@
 use clap::Parser;
 use eyre::Result;
 use reth::version::default_reth_version_metadata;
+use reth_optimism_chainspec::OpChainSpec;
 use reth_optimism_cli::chainspec::OpChainSpecParser;
 use reth_optimism_consensus::OpBeaconConsensus;
-use reth_optimism_evm::{OpEvmConfig, OpRethReceiptBuilder};
+use reth_optimism_evm::OpExecutorProvider;
 use reth_optimism_node::OpNode;
 use reth_tracing::{RethTracer, Tracer};
 use std::sync::Arc;
@@ -37,12 +38,12 @@ async fn main() -> Result<()> {
     let default_version_metadata = default_reth_version_metadata();
     init_version_metadata(default_version_metadata).expect("Unable to init version metadata");
 
+    let components = |spec: Arc<OpChainSpec>| {
+        (OpExecutorProvider::optimism(spec.clone()), Arc::new(OpBeaconConsensus::new(spec)))
+    };
+
     let cmd = ImportCommand::<OpChainSpecParser>::parse();
 
-    cmd.execute::<OpNode, _>(|chain_spec| {
-        let evm_config = OpEvmConfig::new(chain_spec.clone(), OpRethReceiptBuilder::default());
-        let consensus = Arc::new(OpBeaconConsensus::new(chain_spec));
-        (evm_config, consensus)
-    })
+    cmd.execute::<OpNode, _>(components)
     .await
 }
