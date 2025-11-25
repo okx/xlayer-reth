@@ -12544,6 +12544,7 @@ dependencies = [
  "url",
  "uuid",
  "xlayer-innertx",
+ "xlayer-reth-utils",
  "xlayer-rpc",
 ]
 
