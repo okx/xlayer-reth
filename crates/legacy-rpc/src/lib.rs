@@ -85,7 +85,7 @@ impl<S> LegacyRpcRouterService<S> {
         let arr = parsed.as_array()?;
 
         // Some params are optional.
-        if index >= len(arr) {
+        if index >= arr.len() {
             return None;
         }
 
