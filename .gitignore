@@ -1,3 +1,6 @@
 /target
 .claude
 .vscode
+
+# Local development: cargo config for debugging with local reth
+.cargo
