@@ -27,6 +27,7 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Initialize version metadata
     let default_version_metadata = default_reth_version_metadata();
     init_version_metadata(default_version_metadata).expect("Unable to init version metadata");
 
@@ -35,7 +36,7 @@ async fn main() -> Result<()> {
 
     info!(target: "xlayer::export", "XLayer Reth Export starting");
 
+    // Parse and execute command
     let cmd = ExportCommand::<OpChainSpecParser>::parse();
-
     cmd.execute::<OpNode>().await
 }

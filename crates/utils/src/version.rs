@@ -1,3 +1,5 @@
+//! Version metadata initialization for XLayer Reth.
+
 use reth::version::{try_init_version_metadata, RethCliVersionConsts};
 
 pub const XLAYER_RETH_CLIENT_VERSION: &str = concat!("xlayer/v", env!("CARGO_PKG_VERSION"));

@@ -33,8 +33,10 @@ async fn main() -> Result<()> {
     // Initialize tracing
     let _guard = RethTracer::new().init()?;
 
+    // Log starting message
     info!(target: "xlayer::import", "XLayer Reth Import starting");
 
+    // Initialize version metadata
     let default_version_metadata = default_reth_version_metadata();
     init_version_metadata(default_version_metadata).expect("Unable to init version metadata");
 
@@ -42,7 +44,7 @@ async fn main() -> Result<()> {
         (OpExecutorProvider::optimism(spec.clone()), Arc::new(OpBeaconConsensus::new(spec)))
     };
 
+    // Parse and execute command
     let cmd = ImportCommand::<OpChainSpecParser>::parse();
-
     cmd.execute::<OpNode, _>(components).await
 }

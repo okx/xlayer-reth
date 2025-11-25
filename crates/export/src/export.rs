@@ -67,16 +67,7 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> ExportCommand<C> {
         let provider = provider_factory.provider()?;
         let latest_block =
             provider.last_block_number().wrap_err("Failed to get latest block number")?;
-
-        let genesis_block_number = provider.chain_spec().genesis_header().number();
-        let start_block = if self.start_block < genesis_block_number {
-            warn!(target: "reth::cli", "Start block ({}) is less than genesis block ({}), using genesis block as start block", self.start_block, genesis_block_number);
-            genesis_block_number
-        } else {
-            self.start_block
-        };
         let end_block = self.end_block.unwrap_or(latest_block);
-
         if end_block > latest_block {
             return Err(eyre!(
                 "End block ({}) is greater than latest block ({})",
@@ -84,6 +75,17 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> ExportCommand<C> {
                 latest_block
             ));
         }
+
+        // Get the genesis block number from the chain spec
+        let genesis_block_number = provider.chain_spec().genesis_header().number();
+
+        // If the start block is less than the genesis block, use the genesis block as the start block
+        let start_block = if self.start_block < genesis_block_number {
+            warn!(target: "reth::cli", "Start block ({}) is less than genesis block ({}), using genesis block as start block", self.start_block, genesis_block_number);
+            genesis_block_number
+        } else {
+            self.start_block
+        };
 
         let total_blocks = end_block - start_block + 1;
         info!(
