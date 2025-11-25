@@ -2,16 +2,16 @@
 
 use clap::Parser;
 use eyre::Result;
-use reth::version::{default_reth_version_metadata, try_init_version_metadata, RethCliVersionConsts};
+use reth::version::default_reth_version_metadata;
 use reth_cli_util::sigsegv_handler;
 use reth_optimism_cli::chainspec::OpChainSpecParser;
 use reth_optimism_node::OpNode;
+use reth_tracing::{RethTracer, Tracer};
 use tracing::info;
+use xlayer_reth_utils::version::init_version_metadata;
 
 mod export;
 use export::ExportCommand;
-
-pub const XLAYER_RETH_CLIENT_VERSION: &str = concat!("xlayer/v", env!("CARGO_PKG_VERSION"));
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
@@ -28,32 +28,10 @@ async fn main() -> Result<()> {
     }
 
     let default_version_metadata = default_reth_version_metadata();
-    try_init_version_metadata(RethCliVersionConsts {
-        name_client: "XLayer Reth Export".to_string().into(),
-        cargo_pkg_version: format!(
-            "{}/{}",
-            default_version_metadata.cargo_pkg_version,
-            env!("CARGO_PKG_VERSION")
-        )
-        .into(),
-        p2p_client_version: format!(
-            "{}/{}",
-            default_version_metadata.p2p_client_version,
-            XLAYER_RETH_CLIENT_VERSION
-        )
-        .into(),
-        extra_data: format!(
-            "{}/{}",
-            default_version_metadata.extra_data,
-            XLAYER_RETH_CLIENT_VERSION
-        )
-        .into(),
-        ..default_version_metadata
-    })
-    .unwrap();
+    init_version_metadata(default_version_metadata).expect("Unable to init version metadata");
 
-    // Initialize tracing/logging
-    reth_cli_util::sigsegv_handler::install();
+    // Initialize tracing
+    let _guard = RethTracer::new().init()?;
 
     info!(target: "xlayer::export", "XLayer Reth Export starting");
 
@@ -61,4 +39,3 @@ async fn main() -> Result<()> {
 
     cmd.execute::<OpNode>().await
 }
-

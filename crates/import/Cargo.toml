@@ -11,8 +11,13 @@ description = "XLayer Reth Import Command"
 [lints]
 workspace = true
 
+[[bin]]
+name = "xlayer-reth-import"
+path = "src/main.rs"
+
 [dependencies]
 # internal
+xlayer-reth-utils.workspace = true
 
 # reth
 reth.workspace = true
@@ -32,6 +37,7 @@ reth-cli.workspace = true
 reth-cli-commands.workspace = true
 reth-node-core.workspace = true
 reth-optimism-consensus.workspace = true
+reth-tracing.workspace = true
 
 # tokio
 tokio.workspace = true
@@ -68,3 +74,4 @@ once_cell.workspace = true
 default = []
 jemalloc = ["reth-cli-util/jemalloc", "reth-optimism-cli/jemalloc"]
 asm-keccak = ["alloy-primitives/asm-keccak"]
+

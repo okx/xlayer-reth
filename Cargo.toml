@@ -17,7 +17,8 @@ members = [
     "crates/tests",
     "crates/innertx",
     "crates/import",
-    "crates/export"
+    "crates/export",
+    "crates/utils"
 ]
 default-members = ["crates/node"]
 
@@ -53,6 +54,7 @@ codegen-units = 1
 
 xlayer-reth-node = { path = "crates/node" }
 xlayer-innertx = { path = "crates/innertx" }
+xlayer-reth-utils = { path = "crates/utils" }
 
 # ------------------------------------------------------------------------------
 # Reth Dependencies (points to our fork)

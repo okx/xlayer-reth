@@ -12455,8 +12455,10 @@ dependencies = [
  "reth-primitives-traits",
  "reth-provider",
  "reth-storage-api",
+ "reth-tracing",
  "tokio",
  "tracing",
+ "xlayer-reth-utils",
 ]
 
 [[package]]
@@ -12492,6 +12494,7 @@ dependencies = [
  "reth-primitives",
  "reth-rpc-convert",
  "reth-rpc-eth-api",
+ "reth-tracing",
  "serde",
  "serde_json",
  "time",
@@ -12501,6 +12504,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "xlayer-reth-utils",
 ]
 
 [[package]]
@@ -12541,6 +12545,13 @@ dependencies = [
  "url",
  "uuid",
  "xlayer-innertx",
+]
+
+[[package]]
+name = "xlayer-reth-utils"
+version = "0.1.0"
+dependencies = [
+ "reth",
 ]
 
 [[package]]

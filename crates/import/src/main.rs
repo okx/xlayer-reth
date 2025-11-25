@@ -2,24 +2,24 @@
 
 use clap::Parser;
 use eyre::Result;
+use reth::version::default_reth_version_metadata;
 use reth_optimism_cli::chainspec::OpChainSpecParser;
 use reth_optimism_consensus::OpBeaconConsensus;
 use reth_optimism_evm::{OpEvmConfig, OpRethReceiptBuilder};
 use reth_optimism_node::OpNode;
+use reth_tracing::{RethTracer, Tracer};
 use std::sync::Arc;
 use tracing::info;
+use xlayer_reth_utils::version::init_version_metadata;
 
 mod import;
 use import::ImportCommand;
-
-pub const XLAYER_RETH_CLIENT_VERSION: &str = concat!("xlayer/v", env!("CARGO_PKG_VERSION"));
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing/logging
     reth_cli_util::sigsegv_handler::install();
 
     // Enable backtraces unless a RUST_BACKTRACE value has already been explicitly provided.
@@ -29,7 +29,13 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Initialize tracing
+    let _guard = RethTracer::new().init()?;
+
     info!(target: "xlayer::import", "XLayer Reth Import starting");
+
+    let default_version_metadata = default_reth_version_metadata();
+    init_version_metadata(default_version_metadata).expect("Unable to init version metadata");
 
     let cmd = ImportCommand::<OpChainSpecParser>::parse();
 

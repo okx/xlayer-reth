@@ -64,9 +64,8 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> ExportCommand<C> {
 
         // Get the latest block number from the database
         let provider = provider_factory.provider()?;
-        let latest_block = provider
-            .last_block_number()
-            .wrap_err("Failed to get latest block number")?;
+        let latest_block =
+            provider.last_block_number().wrap_err("Failed to get latest block number")?;
 
         // Determine the end block
         let end_block = self.end_block.unwrap_or(latest_block);
@@ -107,18 +106,16 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> ExportCommand<C> {
         .wrap_err("Failed to set interrupt handler")?;
 
         // Open output file
-        let output_file = File::create(&self.output_path)
-            .wrap_err_with(|| format!("Failed to create output file: {}", self.output_path.display()))?;
+        let output_file = File::create(&self.output_path).wrap_err_with(|| {
+            format!("Failed to create output file: {}", self.output_path.display())
+        })?;
 
         // Determine if we should use gzip compression
         let use_compression = self.output_path.extension().and_then(|s| s.to_str()) == Some("gz");
 
         let mut writer: Box<dyn Write> = if use_compression {
             info!(target: "reth::cli", "Using gzip compression");
-            Box::new(flate2::write::GzEncoder::new(
-                output_file,
-                flate2::Compression::default(),
-            ))
+            Box::new(flate2::write::GzEncoder::new(output_file, flate2::Compression::default()))
         } else {
             Box::new(output_file)
         };
@@ -172,9 +169,7 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> ExportCommand<C> {
         }
 
         // Flush and close the writer
-        writer
-            .flush()
-            .wrap_err("Failed to flush output file")?;
+        writer.flush().wrap_err("Failed to flush output file")?;
 
         if shutdown.load(Ordering::SeqCst) {
             warn!(
@@ -200,4 +195,3 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> ExportCommand<C> {
         Ok(())
     }
 }
-

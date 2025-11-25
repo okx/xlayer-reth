@@ -1,0 +1,20 @@
+[package]
+name = "xlayer-reth-utils"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "XLayer Reth Utility Functions"
+
+[lints]
+workspace = true
+
+[dependencies]
+# reth
+reth.workspace = true
+
+[features]
+default = []
+
