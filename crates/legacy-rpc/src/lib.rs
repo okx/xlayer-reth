@@ -83,6 +83,12 @@ impl<S> LegacyRpcRouterService<S> {
     fn parse_block_param(&self, params: &str, index: usize) -> Option<u64> {
         let parsed: serde_json::Value = serde_json::from_str(params).ok()?;
         let arr = parsed.as_array()?;
+
+        // Some params are optional.
+        if index >= len(arr) {
+            return None;
+        }
+
         let block_param = arr.get(index)?;
 
         match block_param {
