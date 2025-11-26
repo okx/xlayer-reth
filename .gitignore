@@ -6,6 +6,9 @@ tests/data
 tests/op-reth-seq
 tests/genesis-reth.json
 tests/op-reth-seq.tar.xz
+tests/testnet-data
+tests/exported-testnet.rlp
+tests/re-exported-testnet.rlp
 tests/*.rlp
 tests/*.log
 
