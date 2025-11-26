@@ -153,7 +153,7 @@ fn main() {
                         info!(target:"reth::cli", "xlayer innertx rpc enabled");
                     }
                     // Register XLayer RPC
-                    let xlayer_rpc = XlayerRpcExt { backend: Arc::new(new_op_eth_api) };
+                    let xlayer_rpc = XlayerRpcExt { backend: new_op_eth_api };
                     ctx.modules.merge_configured(xlayer_rpc.into_rpc())?;
                     info!(target:"reth::cli", "xlayer rpc extension enabled");
 
