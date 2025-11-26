@@ -14,8 +14,9 @@ use reth::{
     providers::providers::BlockchainProvider,
     version::{default_reth_version_metadata, try_init_version_metadata, RethCliVersionConsts},
 };
-use reth_optimism_cli::{chainspec::OpChainSpecParser, Cli};
+use reth_optimism_cli::Cli;
 use reth_optimism_node::{args::RollupArgs, OpNode};
+use xlayer_chainspec::XLayerChainSpecParser;
 
 use xlayer_innertx::{
     db_utils::initialize_inner_tx_db,
@@ -75,7 +76,7 @@ fn main() {
     })
     .expect("Unable to init version metadata");
 
-    Cli::<OpChainSpecParser, Args>::parse()
+    Cli::<XLayerChainSpecParser, Args>::parse()
         .run(|builder, args| async move {
             info!(message = "starting custom XLayer node");
 
@@ -151,11 +152,10 @@ fn main() {
                         ctx.modules.merge_configured(custom_rpc.into_rpc())?;
                         info!(target:"reth::cli", "xlayer innertx rpc enabled");
                     }
-
-                    // Register XLayer RPC extension for eth_minGasPrice
-                    let xlayer_rpc = XlayerRpcExt { backend: new_op_eth_api };
+                    // Register XLayer RPC
+                    let xlayer_rpc = XlayerRpcExt { backend: Arc::new(new_op_eth_api) };
                     ctx.modules.merge_configured(xlayer_rpc.into_rpc())?;
-                    info!(target:"reth::cli", "xlayer rpc extension enabled (eth_minGasPrice)");
+                    info!(target:"reth::cli", "xlayer rpc extension enabled");
 
                     info!(message = "XLayer RPC modules initialized");
                     Ok(())

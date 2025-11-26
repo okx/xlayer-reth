@@ -1,9 +1,13 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+pub mod pre_exec_ext_xlayer;
+pub mod pre_exec_types;
 pub mod xlayer_ext;
 
 // Re-export for convenience
+pub use pre_exec_ext_xlayer::PreExec;
+pub use pre_exec_types::{PreExecError, PreExecInnerTx, PreExecResult};
 pub use xlayer_ext::{SequencerClientProvider, XlayerRpcExt, XlayerRpcExtApiServer};
 
 // Implement SequencerClientProvider for OpEthApi

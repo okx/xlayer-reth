@@ -16,8 +16,12 @@ RUN if [ -d .cargo/reth ]; then \
     else \
         mkdir -p /reth; \
     fi
+# Temporarily disable .cargo/config.toml during cargo chef prepare
+# to avoid path conflicts (it will be restored and copied to builder stage)
+RUN if [ -f .cargo/config.toml ]; then mv .cargo/config.toml .cargo/config.toml.bak; fi
 RUN mkdir -p .cargo
 RUN cargo chef prepare --recipe-path recipe.json
+RUN if [ -f .cargo/config.toml.bak ]; then mv .cargo/config.toml.bak .cargo/config.toml; fi
 
 FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json

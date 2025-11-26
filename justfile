@@ -79,33 +79,29 @@ build-docker:
 build-docker-dev reth_path="":
     #!/usr/bin/env bash
     set -e
-    
-    # If no path provided, check if .cargo/reth exists
-    if [ -z "{{reth_path}}" ]; then
-        if [ -d .cargo/reth ]; then
-            echo "📦 Using existing .cargo/reth (no sync)"
-            echo "   To update: just build-docker-dev /path/to/reth"
-        else
-            echo "⚠️  First time setup needed: just build-docker-dev /absolute/path/to/reth"
-            exit 1
-        fi
+    PATH_FILE=".cargo/.reth_source_path"
+    # Determine source path: provided > saved > error
+    if [ -n "{{reth_path}}" ]; then
+        RETH_SRC=$(cd {{reth_path}} && pwd)
+    elif [ -f "$PATH_FILE" ]; then
+        RETH_SRC=$(cat "$PATH_FILE")
+        echo "📦 Using saved path: $RETH_SRC"
+    elif [ -d .cargo/reth ]; then
+        echo "⚠️  .cargo/reth exists but no source path. Using as-is (may be outdated)"
+        echo "   To enable auto-sync: just build-docker-dev /path/to/reth" && RETH_SRC=""
     else
-        # Path provided, sync changes
-        just check-dev-template
-        RETH_ABS=$(cd {{reth_path}} && pwd)
-        mkdir -p .cargo
-        
-        if [ -d .cargo/reth ]; then
-            echo "📦 Syncing changes to .cargo/reth (incremental)..."
-            rsync -au --delete --exclude='.git' --exclude='target' "$RETH_ABS/" .cargo/reth/
-            echo "   ✅ Sync complete"
-        else
-            echo "📦 Copying local reth for Docker build (first time)..."
-            echo "   From: $RETH_ABS"
-            rsync -a --exclude='.git' --exclude='target' "$RETH_ABS/" .cargo/reth/
-            echo "   ✅ Copy complete"
-        fi
+        echo "❌ First time: just build-docker-dev /path/to/reth" && exit 1
     fi
+    # Sync if source path exists
+    [ -z "$RETH_SRC" ] && just build-docker && exit 0
+
+    just check-dev-template
+    mkdir -p .cargo
+    
+    echo "$RETH_SRC" > "$PATH_FILE"
+    echo "📦 Syncing $RETH_SRC → .cargo/reth..."
+    rsync -au --delete --exclude='.git' --exclude='target' "$RETH_SRC/" .cargo/reth/
+    echo "✅ Sync complete"
     
     # Generate config with /reth path (Docker will move .cargo/reth to /reth to avoid nesting)
     sed "s|RETH_PATH_PLACEHOLDER|/reth|g" .reth-dev.toml > .cargo/config.toml

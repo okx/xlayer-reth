@@ -12312,6 +12312,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "xlayer-chainspec"
+version = "0.1.0"
+dependencies = [
+ "alloy-chains",
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-genesis",
+ "alloy-primitives",
+ "eyre",
+ "once_cell",
+ "op-alloy-rpc-types",
+ "reth-chainspec",
+ "reth-cli",
+ "reth-ethereum-forks",
+ "reth-optimism-chainspec",
+ "reth-optimism-cli",
+ "reth-optimism-forks",
+ "reth-optimism-primitives",
+ "reth-primitives-traits",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "xlayer-e2e-test"
 version = "0.1.0"
 dependencies = [
@@ -12420,6 +12445,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "xlayer-chainspec",
  "xlayer-innertx",
  "xlayer-legacy-rpc",
  "xlayer-rpc",
@@ -12430,14 +12456,25 @@ name = "xlayer-rpc"
 version = "0.1.0"
 dependencies = [
  "alloy-consensus",
+ "alloy-eips",
+ "alloy-evm",
  "alloy-primitives",
+ "alloy-rpc-types-eth",
+ "alloy-rpc-types-trace",
  "jsonrpsee",
+ "op-alloy-rpc-types",
  "reth-chainspec",
+ "reth-errors",
+ "reth-evm",
  "reth-optimism-rpc",
+ "reth-revm",
  "reth-rpc",
  "reth-rpc-eth-api",
  "reth-storage-api",
+ "revm",
+ "revm-inspectors",
  "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]
