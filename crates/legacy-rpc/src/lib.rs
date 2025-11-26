@@ -2,12 +2,13 @@ mod conditions;
 pub mod layer;
 pub mod service;
 
+use std::sync::Arc;
+
 use jsonrpsee::{
     types::{ErrorObject, Request},
     MethodResponse,
 };
 use reqwest::Client;
-use std::sync::Arc;
 
 #[inline]
 pub fn is_legacy_routable(method: &str) -> bool {
@@ -59,25 +60,6 @@ pub struct LegacyRpcRouterService<S> {
 }
 
 impl<S> LegacyRpcRouterService<S> {
-    fn should_route_to_legacy(&self, req: &Request<'_>) -> bool {
-        // If legacy not enabled, do not route.
-        if !self.config.enabled {
-            return false;
-        }
-
-        let method = req.method_name();
-        if !is_legacy_routable(method) {
-            return false;
-        }
-
-        // Check block number against cutoff
-        if let Some(block_num) = self.extract_block_number(req) {
-            return block_num < self.config.cutoff_block;
-        }
-
-        false
-    }
-
     async fn forward_to_legacy(&self, req: Request<'_>) -> MethodResponse {
         let request_id = req.id().clone();
 
@@ -128,5 +110,63 @@ impl<S> LegacyRpcRouterService<S> {
                 )
             }
         }
+    }
+}
+
+#[inline]
+pub fn is_block_hash(hex: &str) -> bool {
+    if hex.starts_with("0x") {
+        // Check if it's a block hash (66 chars) or block number
+        if hex.len() == 66 {
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}
+
+/// Handles latest, pending, hash, hex number etc
+#[inline]
+pub(crate) fn parse_block_param(params: &str, index: usize, genesis_num: u64) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(params).ok()?;
+    let arr = parsed.as_array()?;
+
+    // Some params are optional.
+    if index >= arr.len() {
+        return None;
+    }
+
+    let block_param = arr.get(index)?;
+
+    match block_param {
+        serde_json::Value::String(s) => {
+            match s.as_str() {
+                // Don't route these to legacy (use current chain state)
+                "latest" | "pending" | "safe" | "finalized" => None,
+
+                // Route to legacy (set to genesis)
+                "earliest" => Some(genesis_num.to_string()),
+
+                // Parse hex block number/hash
+                hex if hex.starts_with("0x") => {
+                    // Check if it's a block hash (66 chars) or block number
+                    if hex.len() == 66 {
+                        // This is a block hash, not a number
+                        // Return None to indicate can't extract number
+                        Some(hex.into())
+                    } else {
+                        // Parse as block number
+                        u64::from_str_radix(&hex[2..], 16).ok().map(|n| n.to_string())
+                    }
+                }
+
+                _ => None,
+            }
+        }
+        // decimal number not handled...
+        // serde_json::Value::Number(n) => n.as_u64(),
+        _ => None,
     }
 }

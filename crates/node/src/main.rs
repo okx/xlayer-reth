@@ -144,7 +144,6 @@ fn main() {
                     // - Bridge intercept RPC methods
                     // - Apollo RPC methods
                     // - Inner transaction RPC methods
-
                     let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
 
                     if args.xlayer_args.enable_inner_tx {

@@ -1,7 +1,8 @@
-use crate::{LegacyRpcRouterConfig, LegacyRpcRouterService};
 use reqwest::Client;
 use std::sync::Arc;
 use tower::Layer;
+
+use crate::{LegacyRpcRouterConfig, LegacyRpcRouterService};
 
 /// Layer that creates the routing middleware
 #[derive(Clone)]
