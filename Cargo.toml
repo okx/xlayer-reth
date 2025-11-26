@@ -14,13 +14,14 @@ repository = "https://github.com/okx/xlayer-reth.git"
 resolver = "2"
 members = [
     "crates/node",
-    "crates/tests",
-    "crates/innertx",
-    "crates/rpc",
-    "crates/import",
+    "crates/apollo",
+    "crates/chainspec",
     "crates/export",
+    "crates/innertx",
+    "crates/import",
+    "crates/rpc",
+    "crates/tests",
     "crates/utils",
-    "crates/chainspec"
 ]
 default-members = ["crates/node"]
 
@@ -59,6 +60,7 @@ xlayer-innertx = { path = "crates/innertx" }
 xlayer-reth-node = { path = "crates/node" }
 xlayer-reth-utils = { path = "crates/utils" }
 xlayer-rpc = { path = "crates/rpc" }
+xlayer-apollo = { path = "crates/apollo" }
 
 # ------------------------------------------------------------------------------
 # Reth Dependencies (points to our fork)
@@ -97,6 +99,7 @@ reth-rpc-eth-api = { git = "https://github.com/okx/reth", branch = "upstream/dev
 reth-storage-api = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
 reth-tracing = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
 reth-transaction-pool = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-errors = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
 
 # ------------------------------------------------------------------------------
 # Revm Dependencies (follows upstream reth)
@@ -104,6 +107,9 @@ reth-transaction-pool = { git = "https://github.com/okx/reth", branch = "upstrea
 revm = { version = "31.0.2", default-features = false }
 revm-context-interface = { version = "12.0.1", default-features = false }
 revm-database = { version = "9.0.5", default-features = false }
+revm-inspectors = { version = "0.32.0", default-features = false, features = [
+    "serde",
+] }
 
 # ------------------------------------------------------------------------------
 # Alloy Dependencies
@@ -125,6 +131,7 @@ alloy-rlp = { version = "0.3.10", default-features = false, features = [
 alloy-rpc-client = { version = "1.1.0" }
 alloy-rpc-types-engine = { version = "1.0.41", default-features = false }
 alloy-rpc-types-eth = { version = "1.0.41" }
+alloy-rpc-types-trace = { version = "1.0.41" }
 alloy-signer = { version = "1.1.0", default-features = false }
 alloy-signer-local = { version = "1.1.0", default-features = false }
 alloy-sol-types = { version = "1.4.1", default-features = false }

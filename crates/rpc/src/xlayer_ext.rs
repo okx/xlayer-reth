@@ -1,21 +1,29 @@
 use std::sync::Arc;
 
 use alloy_consensus::BlockHeader;
+use alloy_eips::BlockId;
+use alloy_evm::overrides::apply_state_overrides;
 use alloy_primitives::U256;
+use alloy_rpc_types_eth::state::StateOverride;
 use jsonrpsee::{
     core::{async_trait, RpcResult},
     proc_macros::rpc,
 };
+use op_alloy_rpc_types::OpTransactionRequest;
 use tracing::{debug, warn};
 
 use reth_chainspec::{ChainSpecProvider, EthChainSpec};
 use reth_optimism_rpc::SequencerClient;
 use reth_rpc::RpcTypes;
 use reth_rpc_eth_api::{
-    helpers::{EthFees, LoadBlock, LoadFee},
+    helpers::{Call, EthFees, LoadBlock, LoadFee, LoadState, SpawnBlocking, Trace},
     EthApiTypes,
 };
 use reth_storage_api::{BlockReaderIdExt, HeaderProvider, ProviderHeader};
+use revm::context_interface::block::Block;
+
+use crate::pre_exec_ext_xlayer::PreExec;
+use crate::pre_exec_types::{PreExecError, PreExecResult};
 
 /// Trait for accessing sequencer client from backend
 pub trait SequencerClientProvider {
@@ -35,6 +43,28 @@ pub trait XlayerRpcExtApi<Net: RpcTypes> {
     /// This is an XLayer-specific extension to the standard Ethereum RPC API.
     #[method(name = "minGasPrice")]
     async fn min_gas_price(&self) -> RpcResult<U256>;
+
+    /// Pre-executes a batch of transactions and returns detailed execution results.
+    ///
+    /// This method simulates transaction execution without committing state changes,
+    /// providing detailed information about inner transactions, logs, and state diffs.
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - Vector of transaction requests to pre-execute
+    /// * `block_number` - Optional block ID to execute against (defaults to latest)
+    /// * `state_overrides` - Optional state overrides to apply before execution
+    ///
+    /// # Returns
+    ///
+    /// Vector of `PreExecResult` containing execution details for each transaction
+    #[method(name = "transactionPreExec")]
+    async fn transaction_pre_exec(
+        &self,
+        args: Vec<<Net as RpcTypes>::TransactionRequest>,
+        block_number: Option<BlockId>,
+        state_overrides: Option<StateOverride>,
+    ) -> RpcResult<Vec<PreExecResult>>;
 }
 
 /// XLayer RPC extension implementation
@@ -49,15 +79,21 @@ where
     T: EthFees
         + LoadFee
         + LoadBlock
+        + Call
+        + LoadState
+        + SpawnBlocking
+        + Trace
+        + PreExec
         + EthApiTypes<NetworkTypes = Net>
         + SequencerClientProvider
+        + Clone
         + Send
         + Sync
         + 'static,
     T::Provider: ChainSpecProvider<ChainSpec: EthChainSpec<Header = ProviderHeader<T::Provider>>>
         + BlockReaderIdExt
         + HeaderProvider,
-    Net: RpcTypes + Send + Sync + 'static,
+    Net: RpcTypes<TransactionRequest = OpTransactionRequest> + Send + Sync + 'static,
 {
     async fn min_gas_price(&self) -> RpcResult<U256> {
         // Check if sequencer client is available (RPC node mode)
@@ -104,6 +140,45 @@ where
         );
 
         Ok(min_gas_price)
+    }
+
+    async fn transaction_pre_exec(
+        &self,
+        args: Vec<OpTransactionRequest>,
+        block_number: Option<BlockId>,
+        state_overrides: Option<StateOverride>,
+    ) -> RpcResult<Vec<PreExecResult>> {
+        let block_id = block_number.unwrap_or_default();
+        let (evm_env, at) = match self.backend.evm_env_at(block_id).await {
+            Ok(env) => env,
+            Err(e) => return Err(e.into()),
+        };
+
+        let api = self.backend.clone();
+        self.backend
+            .spawn_with_state_at_block(at, move |state| {
+                let mut db = reth_revm::db::CacheDB::new(
+                    reth_revm::database::StateProviderDatabase::new(state),
+                );
+
+                if let Some(overrides) = state_overrides {
+                    if let Err(e) = apply_state_overrides(overrides, &mut db) {
+                        let res = PreExecError::unknown(format!("state override error: {e:?}"))
+                            .into_result(0, evm_env.block_env.number());
+                        return Ok(vec![res]);
+                    }
+                }
+
+                Ok(api.run_pre_exec_in_db(&mut db, args, evm_env, at))
+            })
+            .await
+            .map_err(|e| {
+                jsonrpsee::types::ErrorObjectOwned::owned(
+                    jsonrpsee::types::error::INTERNAL_ERROR_CODE,
+                    e.to_string(),
+                    None::<()>,
+                )
+            })
     }
 }
 
