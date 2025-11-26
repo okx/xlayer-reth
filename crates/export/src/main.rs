@@ -5,10 +5,10 @@ use std::process::ExitCode;
 use clap::Parser;
 use reth::version::default_reth_version_metadata;
 use reth_cli_util::sigsegv_handler;
-use reth_optimism_cli::chainspec::OpChainSpecParser;
 use reth_optimism_node::OpNode;
 use reth_tracing::{RethTracer, Tracer};
 use tracing::{error, info};
+use xlayer_chainspec::XLayerChainSpecParser;
 use xlayer_reth_utils::version::init_version_metadata;
 
 mod export;
@@ -38,7 +38,7 @@ async fn main() -> ExitCode {
     info!(target: "xlayer::export", "XLayer Reth Export starting");
 
     // Parse and execute command
-    let cmd = ExportCommand::<OpChainSpecParser>::parse();
+    let cmd = ExportCommand::<XLayerChainSpecParser>::parse();
     let mut has_error = false;
     cmd.execute::<OpNode>().await.map_err(|e| {
         error!(target: "xlayer::export", "Error: {:#?}", e);

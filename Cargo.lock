@@ -12482,6 +12482,7 @@ dependencies = [
  "reth-tracing",
  "tokio",
  "tracing",
+ "xlayer-chainspec",
  "xlayer-reth-utils",
 ]
 
@@ -12528,6 +12529,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "xlayer-chainspec",
  "xlayer-reth-utils",
 ]
 

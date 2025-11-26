@@ -3,13 +3,13 @@
 use clap::Parser;
 use reth::version::default_reth_version_metadata;
 use reth_optimism_chainspec::OpChainSpec;
-use reth_optimism_cli::chainspec::OpChainSpecParser;
 use reth_optimism_consensus::OpBeaconConsensus;
 use reth_optimism_evm::OpExecutorProvider;
 use reth_optimism_node::OpNode;
 use reth_tracing::{RethTracer, Tracer};
 use std::{process::ExitCode, sync::Arc};
 use tracing::{error, info};
+use xlayer_chainspec::XLayerChainSpecParser;
 use xlayer_reth_utils::version::init_version_metadata;
 
 mod import;
@@ -44,7 +44,7 @@ async fn main() -> ExitCode {
     };
 
     // Parse and execute command
-    let cmd = ImportCommand::<OpChainSpecParser>::parse();
+    let cmd = ImportCommand::<XLayerChainSpecParser>::parse();
     let mut has_error = false;
     cmd.execute::<OpNode, _>(components).await.map_err(|e| {
         error!(target: "xlayer::import", "Error: {:#?}", e);

@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 # internal
+xlayer-chainspec.workspace = true
 xlayer-reth-utils.workspace = true
 
 # reth
