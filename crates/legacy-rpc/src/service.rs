@@ -106,7 +106,6 @@ where
             }
 
             if need_parse_block(&method) {
-                // TODO: set param index based on method
                 let block_param =
                     crate::parse_block_param(params, block_param_pos(&method), config.cutoff_block);
                 if let Some(block_param) = block_param {
