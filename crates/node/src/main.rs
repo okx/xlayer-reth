@@ -2,7 +2,7 @@
 
 mod args_xlayer;
 
-use std::path::Path;
+use std::{path::Path, process::ExitCode};
 use std::sync::Arc;
 
 use args_xlayer::XLayerArgs;
@@ -41,7 +41,7 @@ struct Args {
     pub xlayer_args: XLayerArgs,
 }
 
-fn main() {
+fn main() -> ExitCode {
     reth_cli_util::sigsegv_handler::install();
 
     // Enable backtraces unless a RUST_BACKTRACE value has already been explicitly provided.
@@ -54,6 +54,7 @@ fn main() {
     let default_version_metadata = default_reth_version_metadata();
     init_version_metadata(default_version_metadata).expect("Unable to init version metadata");
 
+    let mut has_error = false;
     Cli::<XLayerChainSpecParser, Args>::parse()
         .run(|builder, args| async move {
             info!(message = "starting custom XLayer node");
@@ -141,5 +142,15 @@ fn main() {
 
             node_exit_future.await
         })
-        .unwrap();
+        .map_err(|e| {
+            error!(target: "xlayer::node", "Error: {:#?}", e);
+            has_error = true;
+        })
+        .unwrap_or(());
+
+    if has_error {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
