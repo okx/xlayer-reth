@@ -1,12 +1,10 @@
 #!/bin/bash
 
 # Build the export and import tools
-cd ..
 just install-export
 just install-import
 
 # Clean up
-cd tests
 rm -rf data
 rm -rf op-reth-seq
 rm -f *.log
