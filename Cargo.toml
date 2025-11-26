@@ -19,7 +19,8 @@ members = [
     "crates/rpc",
     "crates/import",
     "crates/export",
-    "crates/utils"
+    "crates/utils",
+    "crates/chainspec"
 ]
 default-members = ["crates/node"]
 
@@ -57,36 +58,45 @@ xlayer-innertx = { path = "crates/innertx" }
 xlayer-reth-node = { path = "crates/node" }
 xlayer-reth-utils = { path = "crates/utils" }
 xlayer-rpc = { path = "crates/rpc" }
+xlayer-chainspec = { path = "crates/chainspec" }
 
 # ------------------------------------------------------------------------------
 # Reth Dependencies (points to our fork)
 # ------------------------------------------------------------------------------
-reth = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
-reth-chainspec = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
-reth-cli = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
-reth-cli-commands = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
-reth-cli-util = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
-reth-db = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
-reth-evm = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
-reth-exex = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
-reth-node-api = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
-reth-node-core = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
-reth-optimism-chainspec = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
-reth-optimism-cli = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
-reth-optimism-consensus = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
-reth-optimism-evm = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
-reth-optimism-node = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
-reth-optimism-primitives = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
-reth-optimism-rpc = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
-reth-primitives = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
-reth-primitives-traits = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
-reth-provider = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
-reth-revm = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
-reth-rpc = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
-reth-rpc-convert = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
-reth-rpc-eth-api = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
-reth-storage-api = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
-reth-tracing = { git = "https://github.com/okx/reth", branch = "dumi/support-importer" }
+reth = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-optimism-node = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-optimism-cli = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-primitives = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-rpc-eth-api = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-optimism-primitives = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-rpc-convert = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-optimism-rpc = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-optimism-evm = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-optimism-chainspec = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-optimism-consensus = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-provider = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-tracing = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-primitives-traits = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-evm = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-cli = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-cli-commands = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-cli-util = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-exex = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-db = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-revm = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-storage-api = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-rpc = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-node-api = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-node-builder = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-node-core = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-node-types = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-chainspec = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-optimism-forks = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-ethereum-forks = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-optimism-txpool = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-transaction-pool = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-execution-types = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-chain-state = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
 
 # ------------------------------------------------------------------------------
 # Revm Dependencies (follows upstream reth)
@@ -98,7 +108,6 @@ revm-database = { version = "9.0.5", default-features = false }
 # ------------------------------------------------------------------------------
 # Alloy Dependencies
 # ------------------------------------------------------------------------------
-alloy-consensus = { version = "1.0.41" }
 alloy-eips = { version = "1.0.41", default-features = false }
 alloy-evm = { version = "0.23.0", default-features = false }
 alloy-json-rpc = { version = "1.1.0" }
@@ -106,6 +115,9 @@ alloy-network = { version = "1.1.0", default-features = false }
 alloy-primitives = { version = "1.4.1", default-features = false, features = [
     "map-foldhash",
 ] }
+alloy-genesis = { version = "1.0.41", default-features = false }
+alloy-chains = { version = "0.2.20", default-features = false }
+alloy-consensus = { version = "1.0.41" }
 alloy-provider = { version = "1.0.41" }
 alloy-rlp = { version = "0.3.10", default-features = false, features = [
     "core-net",
