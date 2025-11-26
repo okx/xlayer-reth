@@ -76,16 +76,16 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> ExportCommand<C> {
             ));
         }
 
-        // Get the genesis block number from the chain spec
+        // Get the genesis block number from the chain spec and validate the start block
         let genesis_block_number = provider.chain_spec().genesis_header().number();
-
-        // If the start block is less than the genesis block, use the genesis block as the start block
-        let start_block = if self.start_block < genesis_block_number {
-            warn!(target: "reth::cli", "Start block ({}) is less than genesis block ({}), using genesis block as start block", self.start_block, genesis_block_number);
-            genesis_block_number
-        } else {
-            self.start_block
-        };
+        if self.start_block < genesis_block_number {
+            return Err(eyre!(
+                "Start block ({}) is less than genesis block ({})",
+                self.start_block,
+                genesis_block_number
+            ));
+        }
+        let start_block = self.start_block;
 
         let total_blocks = end_block - start_block + 1;
         info!(
