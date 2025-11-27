@@ -11,9 +11,11 @@ rm -f *.log
 rm -f *.rlp
 
 # Extract the database
+echo "⚙️ Extracting blockchain data ..."
 tar xf op-reth-seq.tar.xz
 
 # Export the blocks
+echo "⚙️ Exporting blocks ..."
 xlayer-reth-export --datadir op-reth-seq --chain genesis-reth.json --exported-data exp-test-78.rlp --start-block 8593921 --end-block 8593999 | tee export-78.log
 xlayer-reth-export --datadir op-reth-seq --chain genesis-reth.json --exported-data exp-test-all.rlp --start-block 8593921 | tee export-all.log
 xlayer-reth-export --datadir op-reth-seq --chain genesis-reth.json --exported-data exp-test-all.rlp | tee export-err.log
@@ -24,6 +26,7 @@ fi
 echo "✅ Done exporting."
 
 # Import the blocks
+echo "⚙️ Importing blocks ..."
 xlayer-reth-import --datadir data --chain genesis-reth.json --exported-data exp-test-78.rlp | tee import-78.log
 xlayer-reth-import --datadir data --chain genesis-reth.json --exported-data exp-test-all.rlp | tee import-all.log
 echo "✅ Done importing."
