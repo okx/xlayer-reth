@@ -59,6 +59,47 @@ check-dev-template:
     M=$(comm -23 <(grep 'git = "https://github.com/okx/reth"' Cargo.toml | grep -oE '^[a-z][a-z0-9-]+' | sort) <(grep 'RETH_PATH_PLACEHOLDER' .reth-dev.toml | grep -oE '^[a-z][a-z0-9-]+' | sort))
     [ -z "$M" ] && echo "✅ Template OK" || (echo "❌ Missing: $M" && exit 1)
 
+# Sync .reth-dev.toml with Cargo.toml dependencies
+sync-dev-template:
+    #!/usr/bin/env bash
+    set -e
+
+    echo "🔄 Syncing .reth-dev.toml with Cargo.toml..."
+
+    # Create a temporary file with the header
+    echo '[patch."https://github.com/okx/reth"]' > .reth-dev.toml.tmp
+
+    # Extract reth dependencies from Cargo.toml and generate paths
+    grep 'git = "https://github.com/okx/reth"' Cargo.toml | \
+        grep -oE '^[a-z][a-z0-9-]+' | \
+        sort | \
+        while read -r crate; do
+            # Check if this crate already exists in .reth-dev.toml to preserve its path
+            EXISTING_PATH=$(grep "^$crate = " .reth-dev.toml 2>/dev/null | sed 's/.*"\(.*\)".*/\1/')
+
+            if [ -n "$EXISTING_PATH" ]; then
+                # Use existing path mapping
+                echo "$crate = { path = \"$EXISTING_PATH\" }" >> .reth-dev.toml.tmp
+            else
+                # New crate detected - needs manual path mapping
+                echo "⚠️  New crate detected: $crate (please update .reth-dev.toml manually)"
+                echo "$crate = { path = \"RETH_PATH_PLACEHOLDER/crates/$crate\" }" >> .reth-dev.toml.tmp
+            fi
+        done
+
+    # Show diff if there are changes
+    if ! diff -q .reth-dev.toml .reth-dev.toml.tmp > /dev/null 2>&1; then
+        echo ""
+        echo "📋 Changes detected:"
+        diff -u .reth-dev.toml .reth-dev.toml.tmp || true
+        echo ""
+        mv .reth-dev.toml.tmp .reth-dev.toml
+        echo "✅ .reth-dev.toml synced successfully"
+    else
+        rm .reth-dev.toml.tmp
+        echo "✅ .reth-dev.toml already in sync"
+    fi
+
 build-maxperf:
     RUSTFLAGS="-C target-cpu=native" cargo build --profile maxperf --features jemalloc,asm-keccak
 
