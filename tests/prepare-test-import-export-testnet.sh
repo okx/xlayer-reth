@@ -30,7 +30,7 @@ if [ ! -f "$TESTNET_GENESIS_FILE" ]; then
     wget $TESTNET_GENESIS_URL
     tar -xzf merged.genesis.json.tar.gz
     mv merged.genesis.json $TESTNET_GENESIS_FILE
-    sed_inplace 's/"number": "0x0"/"number": $TESTNET_NEXT_BLOCK_NUMBER_HEX/' $TESTNET_GENESIS_FILE
+    sed_inplace 's/"number": "0x0"/"number": '$TESTNET_NEXT_BLOCK_NUMBER'/' $TESTNET_GENESIS_FILE
 else
     echo "ℹ️ Testnet genesis file already exists: $TESTNET_GENESIS_FILE"
 fi
