@@ -12,7 +12,7 @@ use tracing::{error, info};
 use reth::{
     builder::{EngineNodeLauncher, Node, NodeHandle, TreeConfig},
     providers::providers::BlockchainProvider,
-    version::default_reth_version_metadata,
+    version::{default_reth_version_metadata, try_init_version_metadata, RethCliVersionConsts},
 };
 use reth_optimism_cli::Cli;
 use reth_optimism_node::{args::RollupArgs, OpNode};
@@ -24,7 +24,6 @@ use xlayer_innertx::{
     exex_utils::post_exec_exex_inner_tx,
     rpc_utils::{XlayerInnerTxExt, XlayerInnerTxExtApiServer},
 };
-use xlayer_reth_utils::version::init_version_metadata;
 use xlayer_rpc::xlayer_ext::{XlayerRpcExt, XlayerRpcExtApiServer};
 
 #[global_allocator]
@@ -42,6 +41,33 @@ struct Args {
     pub xlayer_args: XLayerArgs,
 }
 
+pub const XLAYER_RETH_CLIENT_VERSION: &str = concat!("xlayer/v", env!("CARGO_PKG_VERSION"));
+
+fn init_version_metadata() {
+    let default_version_metadata = default_reth_version_metadata();
+    try_init_version_metadata(RethCliVersionConsts {
+        name_client: "XLayer Reth Export".to_string().into(),
+        cargo_pkg_version: format!(
+            "{}/{}",
+            default_version_metadata.cargo_pkg_version,
+            env!("CARGO_PKG_VERSION")
+        )
+        .into(),
+        p2p_client_version: format!(
+            "{}/{}",
+            default_version_metadata.p2p_client_version, XLAYER_RETH_CLIENT_VERSION
+        )
+        .into(),
+        extra_data: format!(
+            "{}/{}",
+            default_version_metadata.extra_data, XLAYER_RETH_CLIENT_VERSION
+        )
+        .into(),
+        ..default_version_metadata
+    })
+    .expect("Unable to init version metadata");
+}
+
 fn main() {
     reth_cli_util::sigsegv_handler::install();
 
@@ -52,8 +78,8 @@ fn main() {
         }
     }
 
-    let default_version_metadata = default_reth_version_metadata();
-    init_version_metadata(default_version_metadata);
+    // Initialize version metadata
+    init_version_metadata();
 
     Cli::<XLayerChainSpecParser, Args>::parse()
         .run(|builder, args| async move {

@@ -16,7 +16,6 @@ workspace = true
 xlayer-innertx.workspace = true
 xlayer-chainspec.workspace = true
 xlayer-rpc.workspace = true
-xlayer-reth-utils.workspace = true
 
 # reth
 reth.workspace = true

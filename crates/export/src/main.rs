@@ -3,13 +3,11 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use reth::version::default_reth_version_metadata;
 use reth_cli_util::sigsegv_handler;
 use reth_optimism_node::OpNode;
 use reth_tracing::{RethTracer, Tracer};
 use tracing::{error, info};
 use xlayer_chainspec::XLayerChainSpecParser;
-use xlayer_reth_utils::version::init_version_metadata;
 
 mod export;
 use export::ExportCommand;
@@ -27,10 +25,6 @@ async fn main() -> ExitCode {
             std::env::set_var("RUST_BACKTRACE", "1");
         }
     }
-
-    // Initialize version metadata
-    let default_version_metadata = default_reth_version_metadata();
-    init_version_metadata(default_version_metadata);
 
     // Initialize tracing
     let _guard = RethTracer::new().init().expect("Failed to initialize tracing");

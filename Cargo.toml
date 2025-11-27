@@ -21,7 +21,6 @@ members = [
     "crates/import",
     "crates/rpc",
     "crates/tests",
-    "crates/utils",
 ]
 default-members = ["crates/node"]
 
@@ -58,7 +57,6 @@ codegen-units = 1
 xlayer-chainspec = { path = "crates/chainspec" }
 xlayer-innertx = { path = "crates/innertx" }
 xlayer-reth-node = { path = "crates/node" }
-xlayer-reth-utils = { path = "crates/utils" }
 xlayer-rpc = { path = "crates/rpc" }
 xlayer-apollo = { path = "crates/apollo" }
 

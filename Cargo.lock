@@ -12796,7 +12796,6 @@ dependencies = [
  "tokio",
  "tracing",
  "xlayer-chainspec",
- "xlayer-reth-utils",
 ]
 
 [[package]]
@@ -12843,7 +12842,6 @@ dependencies = [
  "url",
  "uuid",
  "xlayer-chainspec",
- "xlayer-reth-utils",
 ]
 
 [[package]]
@@ -12886,15 +12884,7 @@ dependencies = [
  "xlayer-apollo",
  "xlayer-chainspec",
  "xlayer-innertx",
- "xlayer-reth-utils",
  "xlayer-rpc",
-]
-
-[[package]]
-name = "xlayer-reth-utils"
-version = "0.1.0"
-dependencies = [
- "reth",
 ]
 
 [[package]]

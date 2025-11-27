@@ -1,7 +1,6 @@
 #![allow(missing_docs, rustdoc::missing_crate_level_docs)]
 
 use clap::Parser;
-use reth::version::default_reth_version_metadata;
 use reth_optimism_chainspec::OpChainSpec;
 use reth_optimism_consensus::OpBeaconConsensus;
 use reth_optimism_evm::OpExecutorProvider;
@@ -10,7 +9,6 @@ use reth_tracing::{RethTracer, Tracer};
 use std::{process::ExitCode, sync::Arc};
 use tracing::{error, info};
 use xlayer_chainspec::XLayerChainSpecParser;
-use xlayer_reth_utils::version::init_version_metadata;
 
 mod import;
 use import::ImportCommand;
@@ -34,10 +32,6 @@ async fn main() -> ExitCode {
 
     // Log starting message
     info!(target: "xlayer::import", "XLayer Reth Import starting");
-
-    // Initialize version metadata
-    let default_version_metadata = default_reth_version_metadata();
-    init_version_metadata(default_version_metadata);
 
     let components = |spec: Arc<OpChainSpec>| {
         (OpExecutorProvider::optimism(spec.clone()), Arc::new(OpBeaconConsensus::new(spec)))
