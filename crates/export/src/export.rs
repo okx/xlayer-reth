@@ -157,7 +157,7 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> ExportCommand<C> {
             exported_blocks += batch_end - current_block + 1;
 
             // Log progress periodically
-            if exported_blocks % self.batch_size == 0 {
+            if exported_blocks.is_multiple_of(self.batch_size) {
                 let progress = (exported_blocks as f64 / total_blocks as f64) * 100.0;
                 info!(
                     target: "reth::cli",

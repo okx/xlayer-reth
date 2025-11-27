@@ -2,8 +2,8 @@
 
 mod args_xlayer;
 
+use std::path::Path;
 use std::sync::Arc;
-use std::{path::Path, process::ExitCode};
 
 use args_xlayer::{ApolloArgs, XLayerArgs};
 use clap::Parser;
@@ -42,7 +42,7 @@ struct Args {
     pub xlayer_args: XLayerArgs,
 }
 
-fn main() -> ExitCode {
+fn main() {
     reth_cli_util::sigsegv_handler::install();
 
     // Enable backtraces unless a RUST_BACKTRACE value has already been explicitly provided.
@@ -55,7 +55,6 @@ fn main() -> ExitCode {
     let default_version_metadata = default_reth_version_metadata();
     init_version_metadata(default_version_metadata);
 
-    let mut has_error = false;
     Cli::<XLayerChainSpecParser, Args>::parse()
         .run(|builder, args| async move {
             info!(message = "starting custom XLayer node");
@@ -145,17 +144,7 @@ fn main() -> ExitCode {
 
             node_exit_future.await
         })
-        .map_err(|e| {
-            error!(target: "xlayer::node", "Error: {:#?}", e);
-            has_error = true;
-        })
-        .unwrap_or(());
-
-    if has_error {
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
-    }
+        .unwrap();
 }
 
 async fn run_apollo(apollo_args: &ApolloArgs) {
