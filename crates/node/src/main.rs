@@ -14,9 +14,9 @@ use reth::{
     providers::providers::BlockchainProvider,
     version::{default_reth_version_metadata, try_init_version_metadata, RethCliVersionConsts},
 };
-use xlayer_apollo::{ApolloConfig, ApolloService};
 use reth_optimism_cli::Cli;
 use reth_optimism_node::{args::RollupArgs, OpNode};
+use xlayer_apollo::{ApolloConfig, ApolloService};
 use xlayer_chainspec::XLayerChainSpecParser;
 
 use xlayer_innertx::{
@@ -162,7 +162,7 @@ fn main() {
                     builder.launch_with(launcher)
                 })
                 .await?;
- 
+
             node_exit_future.await
         })
         .unwrap();

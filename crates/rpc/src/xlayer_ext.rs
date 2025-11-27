@@ -161,12 +161,12 @@ where
                     reth_revm::database::StateProviderDatabase::new(state),
                 );
 
-                if let Some(overrides) = state_overrides {
-                    if let Err(e) = apply_state_overrides(overrides, &mut db) {
-                        let res = PreExecError::unknown(format!("state override error: {e:?}"))
-                            .into_result(0, evm_env.block_env.number());
-                        return Ok(vec![res]);
-                    }
+                if let Some(overrides) = state_overrides
+                    && let Err(e) = apply_state_overrides(overrides, &mut db)
+                {
+                    let res = PreExecError::unknown(format!("state override error: {e:?}"))
+                        .into_result(0, evm_env.block_env.number());
+                    return Ok(vec![res]);
                 }
 
                 Ok(api.run_pre_exec_in_db(&mut db, args, evm_env, at))

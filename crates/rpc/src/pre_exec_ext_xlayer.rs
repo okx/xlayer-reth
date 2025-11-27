@@ -49,19 +49,19 @@ pub mod helpers {
         let msg_nonce =
             req.nonce.ok_or_else(|| PreExecError::check_args(format!("{}, nonce is nil", from)))?;
 
-        if let Some(prev_req) = prev {
-            if let (Some(pf), Some(pn)) = (prev_req.as_ref().from, prev_req.as_ref().nonce) {
-                if pf == from && msg_nonce <= pn {
-                    return Err(PreExecError::check_args(format!(
-                        "{} nonce decreases, tx index {} has nonce {}, tx index {} has nonce {}",
-                        from,
-                        index.saturating_sub(1),
-                        pn,
-                        index,
-                        msg_nonce
-                    )));
-                }
-            }
+        if let Some(prev_req) = prev
+            && let (Some(pf), Some(pn)) = (prev_req.as_ref().from, prev_req.as_ref().nonce)
+            && pf == from
+            && msg_nonce <= pn
+        {
+            return Err(PreExecError::check_args(format!(
+                "{} nonce decreases, tx index {} has nonce {}, tx index {} has nonce {}",
+                from,
+                index.saturating_sub(1),
+                pn,
+                index,
+                msg_nonce
+            )));
         }
 
         let st_nonce = db
@@ -307,8 +307,8 @@ pub trait PreExec: EthCall {
             };
 
             let gas_used = exec.result.gas_used();
-            let block_hash_opt = match at.clone() {
-                BlockId::Hash(h) => Some(h.block_hash.into()),
+            let block_hash_opt = match at {
+                BlockId::Hash(h) => Some(h.block_hash),
                 _ => None,
             };
             let tx_idx = results.len() as u64;
