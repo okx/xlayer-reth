@@ -32,10 +32,10 @@ build:
     cargo build --release
 
 [no-exit-message]
-build-dev reth_path="":
+build-dev reth_path="" build="true":
     #!/usr/bin/env bash
     set -e
-    
+
     # If no path provided, check if .cargo/config.toml exists
     if [ -z "{{reth_path}}" ]; then
         if [ -f .cargo/config.toml ]; then
@@ -50,8 +50,10 @@ build-dev reth_path="":
         sed "s|RETH_PATH_PLACEHOLDER|{{reth_path}}|g" .reth-dev.toml > .cargo/config.toml
         echo "Using local reth: {{reth_path}}"
     fi
-    
-    cargo build --release
+
+    if [ "{{build}}" = "true" ]; then
+        cargo build --release
+    fi
 
 # Check dev template has all reth crates
 check-dev-template:

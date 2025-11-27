@@ -134,17 +134,37 @@ cargo build --release
 For active development on both XLayer Reth and Reth simultaneously, you can use local path dependencies:
 
 ```bash
-# Build with local reth (creates .cargo/config.toml with patches)
+# Setup local reth and build (creates .cargo/config.toml with patches)
 just build-dev /path/to/your/local/reth
+
+# Setup local reth WITHOUT building (useful for config-only changes)
+just build-dev /path/to/your/local/reth false
 
 # Subsequent builds will use the existing .cargo/config.toml
 just build-dev
+
+# Or just setup config without building
+just build-dev "" false
 ```
 
 The `build-dev` command:
 1. Creates a `.cargo/config.toml` file with `[patch]` directives
 2. Redirects all Reth git dependencies to your local Reth directory
 3. Allows you to test local Reth changes without pushing to GitHub
+4. Optionally skips the build step with the second parameter set to `false`
+
+### Verifying Dependency Sources
+
+To check whether your build is using local or remote dependencies:
+
+```bash
+# Check where reth dependencies are sourced from
+cargo tree -i reth
+```
+
+This will show:
+- **Local dependencies**: Paths like `file:///Users/you/path/to/reth/...`
+- **Remote dependencies**: Git URLs like `https://github.com/okx/reth?branch=...#<commit-hash>`
 
 ### Managing the Dev Template
 
