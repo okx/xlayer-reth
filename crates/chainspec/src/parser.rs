@@ -49,11 +49,11 @@ fn parse_genesis(s: &str) -> eyre::Result<Genesis> {
     // XLayer extension: If legacyXLayerBlock is specified in config, override genesis.number
     // This allows XLayer to migrate from a legacy chain by setting the genesis
     // block number to match the legacy chain's starting block.
-    if let Some(legacy_block_value) = genesis.config.extra_fields.get("legacyXLayerBlock") {
-        if let Some(legacy_block) = legacy_block_value.as_u64() {
-            debug!("Overriding genesis.number from {:?} to {legacy_block}", genesis.number);
-            genesis.number = Some(legacy_block);
-        }
+    if let Some(legacy_block_value) = genesis.config.extra_fields.get("legacyXLayerBlock")
+        && let Some(legacy_block) = legacy_block_value.as_u64()
+    {
+        debug!("Overriding genesis.number from {:?} to {legacy_block}", genesis.number);
+        genesis.number = Some(legacy_block);
     }
 
     Ok(genesis)
