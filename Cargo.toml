@@ -18,6 +18,7 @@ members = [
     "crates/innertx", 
 		"crates/rpc",
     "crates/chainspec",
+    "crates/apollo",
 		"crates/legacy-rpc"
 ]
 default-members = ["crates/node"]
@@ -56,6 +57,7 @@ xlayer-reth-node = { path = "crates/node" }
 xlayer-innertx = { path = "crates/innertx" }
 xlayer-chainspec = { path = "crates/chainspec" }
 xlayer-rpc = { path = "crates/rpc" }
+xlayer-apollo = { path = "crates/apollo" }
 xlayer-legacy-rpc = { path = "crates/legacy-rpc" }
 
 # ------------------------------------------------------------------------------
