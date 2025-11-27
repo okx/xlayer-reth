@@ -2,8 +2,8 @@
 
 mod args_xlayer;
 
-use std::{path::Path, process::ExitCode};
 use std::sync::Arc;
+use std::{path::Path, process::ExitCode};
 
 use args_xlayer::{ApolloArgs, XLayerArgs};
 use clap::Parser;
@@ -53,7 +53,7 @@ fn main() -> ExitCode {
     }
 
     let default_version_metadata = default_reth_version_metadata();
-    init_version_metadata(default_version_metadata).expect("Unable to init version metadata");
+    init_version_metadata(default_version_metadata);
 
     let mut has_error = false;
     Cli::<XLayerChainSpecParser, Args>::parse()

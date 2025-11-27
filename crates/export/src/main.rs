@@ -30,7 +30,7 @@ async fn main() -> ExitCode {
 
     // Initialize version metadata
     let default_version_metadata = default_reth_version_metadata();
-    init_version_metadata(default_version_metadata).expect("Unable to init version metadata");
+    init_version_metadata(default_version_metadata);
 
     // Initialize tracing
     let _guard = RethTracer::new().init().expect("Failed to initialize tracing");
@@ -40,10 +40,13 @@ async fn main() -> ExitCode {
     // Parse and execute command
     let cmd = ExportCommand::<XLayerChainSpecParser>::parse();
     let mut has_error = false;
-    cmd.execute::<OpNode>().await.map_err(|e| {
-        error!(target: "xlayer::export", "Error: {:#?}", e);
-        has_error = true;
-    }).unwrap_or(());
+    cmd.execute::<OpNode>()
+        .await
+        .map_err(|e| {
+            error!(target: "xlayer::export", "Error: {:#?}", e);
+            has_error = true;
+        })
+        .unwrap_or(());
 
     if has_error {
         ExitCode::FAILURE
