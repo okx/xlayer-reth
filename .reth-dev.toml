@@ -9,15 +9,14 @@ reth-db = { path = "RETH_PATH_PLACEHOLDER/crates/storage/db" }
 reth-errors = { path = "RETH_PATH_PLACEHOLDER/crates/errors" }
 reth-ethereum-forks = { path = "RETH_PATH_PLACEHOLDER/crates/ethereum/hardforks" }
 reth-evm = { path = "RETH_PATH_PLACEHOLDER/crates/evm/evm" }
-reth-exex = { path = "RETH_PATH_PLACEHOLDER/crates/exex/exex" }
 reth-execution-types = { path = "RETH_PATH_PLACEHOLDER/crates/evm/execution-types" }
+reth-exex = { path = "RETH_PATH_PLACEHOLDER/crates/exex/exex" }
 reth-node-api = { path = "RETH_PATH_PLACEHOLDER/crates/node/api" }
 reth-node-builder = { path = "RETH_PATH_PLACEHOLDER/crates/node/builder" }
 reth-node-core = { path = "RETH_PATH_PLACEHOLDER/crates/node/core" }
 reth-node-types = { path = "RETH_PATH_PLACEHOLDER/crates/node/types" }
 reth-optimism-chainspec = { path = "RETH_PATH_PLACEHOLDER/crates/optimism/chainspec" }
 reth-optimism-cli = { path = "RETH_PATH_PLACEHOLDER/crates/optimism/cli" }
-reth-optimism-consensus = { path = "RETH_PATH_PLACEHOLDER/crates/optimism/consensus" }
 reth-optimism-evm = { path = "RETH_PATH_PLACEHOLDER/crates/optimism/evm" }
 reth-optimism-forks = { path = "RETH_PATH_PLACEHOLDER/crates/optimism/hardforks" }
 reth-optimism-node = { path = "RETH_PATH_PLACEHOLDER/crates/optimism/node" }

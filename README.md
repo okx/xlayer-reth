@@ -113,6 +113,104 @@ just watch-test
 
 For other tests, please read [tests/README.md](tests/README.md).
 
+## Working with Local Reth Dependencies
+
+XLayer Reth depends on the [OKX Reth fork](https://github.com/okx/reth). For development, you can work with either git dependencies or a local Reth clone.
+
+### Using Git Dependencies (Default)
+
+By default, dependencies are fetched from the git repository as specified in `Cargo.toml`:
+
+```bash
+# Standard build using git dependencies
+just build
+```
+
+If you have a local `.cargo/config.toml` file from previous development work, remove it to use git dependencies:
+
+```bash
+rm -rf .cargo
+cargo build --release
+```
+
+### Using Local Reth Dependencies
+
+For active development on both XLayer Reth and Reth simultaneously, you can use local path dependencies:
+
+```bash
+# Setup local reth and build (creates .cargo/config.toml with patches)
+just build-dev /path/to/your/local/reth
+
+# Setup local reth WITHOUT building (useful for config-only changes)
+just build-dev /path/to/your/local/reth false
+
+# Subsequent builds will use the existing .cargo/config.toml
+just build-dev
+
+# Or just setup config without building
+just build-dev "" false
+```
+
+The `build-dev` command:
+1. Creates a `.cargo/config.toml` file with `[patch]` directives
+2. Redirects all Reth git dependencies to your local Reth directory
+3. Allows you to test local Reth changes without pushing to GitHub
+4. Optionally skips the build step with the second parameter set to `false`
+
+### Verifying Dependency Sources
+
+To check whether your build is using local or remote dependencies:
+
+```bash
+# Check where reth dependencies are sourced from
+cargo tree -i reth
+```
+
+This will show:
+- **Local dependencies**: Paths like `file:///Users/you/path/to/reth/...`
+- **Remote dependencies**: Git URLs like `https://github.com/okx/reth?branch=...#<commit-hash>`
+
+### Managing the Dev Template
+
+The `.reth-dev.toml` template defines the path mappings for local Reth dependencies. Keep it in sync with `Cargo.toml`:
+
+```bash
+# Check if .reth-dev.toml is in sync with Cargo.toml
+just check-dev-template
+
+# Auto-sync .reth-dev.toml with Cargo.toml dependencies
+just sync-dev-template /path/to/your/local/reth
+```
+
+**What these commands do:**
+
+- `check-dev-template`: Verifies that all Reth dependencies in `Cargo.toml` have corresponding entries in `.reth-dev.toml`, and flags any extra entries that should be removed
+- `sync-dev-template`: Automatically updates `.reth-dev.toml` by:
+  - Scanning your local Reth repository to find actual crate locations
+  - Adding new dependencies from `Cargo.toml`
+  - Removing dependencies no longer in `Cargo.toml`
+  - Preserving correct path mappings (handles cases where crate names differ from folder names, e.g., `reth-errors` lives in `crates/errors`)
+
+**When to use these commands:**
+
+- After adding or removing Reth dependencies in `Cargo.toml`
+- When upgrading to a new Reth version with different crate structure
+- If `build-dev` fails due to missing or incorrect path mappings
+
+### Switching Between Git and Local Dependencies
+
+```bash
+# Switch to local dependencies
+just build-dev /path/to/local/reth
+
+# Switch back to git dependencies
+rm -rf .cargo
+cargo build --release
+
+# Or use the standard build command (which auto-removes .cargo)
+just build
+```
+
 ## Repository
 
 - **Homepage**: [https://github.com/okx/xlayer-reth](https://github.com/okx/xlayer-reth)
