@@ -10,6 +10,8 @@ use alloy_consensus::BlockHeader;
 use alloy_rlp::Encodable;
 use clap::Parser;
 use eyre::{eyre, Result, WrapErr};
+use rayon::iter::IntoParallelIterator;
+use rayon::iter::ParallelIterator;
 use reth_cli::chainspec::ChainSpecParser;
 use reth_cli_commands::common::{AccessRights, Environment, EnvironmentArgs};
 use reth_node_core::version::version_metadata;
@@ -48,7 +50,7 @@ pub struct ExportCommand<C: ChainSpecParser> {
     end_block: Option<u64>,
 
     /// Batch size for reading blocks from database.
-    #[arg(long, value_name = "BATCH_SIZE", default_value = "1000")]
+    #[arg(long, value_name = "BATCH_SIZE", default_value = "100000")]
     batch_size: u64,
 }
 
@@ -127,42 +129,42 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> ExportCommand<C> {
         while current_block <= end_block && !shutdown.load(Ordering::SeqCst) {
             let batch_end = std::cmp::min(current_block + self.batch_size - 1, end_block);
 
-            for block_num in current_block..=batch_end {
-                if shutdown.load(Ordering::SeqCst) {
-                    break;
+            match provider.block_range(current_block..=batch_end) {
+                Ok(blocks) => {
+                    let blocks_rlp: Vec<Vec<u8>> = blocks
+                        .into_par_iter()
+                        .map(|block| {
+                            let mut rlp_buf = Vec::new();
+                            block.encode(&mut rlp_buf);
+                            rlp_buf
+                        })
+                        .collect();
+                    let blocks_rlp_concat = blocks_rlp.concat();
+
+                    writer.write_all(&blocks_rlp_concat).wrap_err_with(|| {
+                        format!(
+                            "Failed to write block range {} to {} to file",
+                            current_block, batch_end
+                        )
+                    })?;
                 }
-
-                // Read block from database
-                let block = match provider.block_by_number(block_num)? {
-                    Some(block) => block,
-                    None => {
-                        error!(target: "reth::cli", "Block {} not found in database", block_num);
-                        return Err(eyre!("Block {} not found in database", block_num));
-                    }
-                };
-
-                // Encode block to RLP
-                let mut rlp_buf = Vec::new();
-                block.encode(&mut rlp_buf);
-
-                // Write RLP data to file
-                writer
-                    .write_all(&rlp_buf)
-                    .wrap_err_with(|| format!("Failed to write block {} to file", block_num))?;
-
-                exported_blocks += 1;
-
-                // Log progress periodically
-                if exported_blocks % 1000 == 0 {
-                    let progress = (exported_blocks as f64 / total_blocks as f64) * 100.0;
-                    info!(
-                        target: "reth::cli",
-                        "Exported {} blocks ({:.2}%) - Latest: #{}",
-                        exported_blocks,
-                        progress,
-                        block_num
-                    );
+                Err(e) => {
+                    error!(target: "reth::cli", "Error: {:#?}", e);
+                    return Err(eyre!(e));
                 }
+            }
+
+            exported_blocks += batch_end - current_block + 1;
+
+            // Log progress periodically
+            if exported_blocks % self.batch_size == 0 {
+                let progress = (exported_blocks as f64 / total_blocks as f64) * 100.0;
+                info!(
+                    target: "reth::cli",
+                    "Exported {} blocks ({:.2}%)",
+                    exported_blocks,
+                    progress
+                );
             }
 
             current_block = batch_end + 1;
