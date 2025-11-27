@@ -90,13 +90,54 @@ sync-dev-template reth_path:
         exit 1
     fi
 
+    # Check if fd is installed, install if not
+    if ! command -v fd &> /dev/null; then
+        echo "📦 fd not found, installing..."
+        if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+            if command -v apt-get &> /dev/null; then
+                sudo apt-get update && sudo apt-get install -y fd-find
+                # Debian/Ubuntu installs it as fdfind
+                if command -v fdfind &> /dev/null; then
+                    alias fd=fdfind
+                fi
+            elif command -v dnf &> /dev/null; then
+                sudo dnf install -y fd-find
+            elif command -v yum &> /dev/null; then
+                sudo yum install -y fd-find
+            elif command -v pacman &> /dev/null; then
+                sudo pacman -S --noconfirm fd
+            else
+                echo "❌ Unable to install fd automatically. Please install it manually."
+                exit 1
+            fi
+        elif [[ "$OSTYPE" == "darwin"* ]]; then
+            if command -v brew &> /dev/null; then
+                brew install fd
+            else
+                echo "❌ Homebrew not found. Please install fd manually: https://github.com/sharkdp/fd"
+                exit 1
+            fi
+        else
+            echo "❌ Unsupported OS. Please install fd manually: https://github.com/sharkdp/fd"
+            exit 1
+        fi
+        echo "✅ fd installed successfully"
+    fi
+
     echo "🔄 Syncing .reth-dev.toml with Cargo.toml..."
     echo "📂 Using reth path: $RETH_PATH"
 
     # Build a lookup table of all crate names to their paths (using fd for speed)
     echo "📋 Building crate index..."
     CRATE_MAP=$(mktemp)
-    fd -t f "^Cargo.toml$" "$RETH_PATH" -x grep -H "^name = " | \
+
+    # Use fdfind if fd is not available (Debian/Ubuntu)
+    FD_CMD="fd"
+    if ! command -v fd &> /dev/null && command -v fdfind &> /dev/null; then
+        FD_CMD="fdfind"
+    fi
+
+    $FD_CMD -t f "^Cargo.toml$" "$RETH_PATH" -x grep -H "^name = " | \
         sed 's|/Cargo.toml:name = "\(.*\)"|\t\1|' | \
         awk -F'\t' '{print $2 "\t" $1}' > "$CRATE_MAP"
 
