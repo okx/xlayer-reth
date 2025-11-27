@@ -72,6 +72,7 @@ reth-cli = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
 reth-cli-commands = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
 reth-cli-util = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
 reth-db = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-errors = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
 reth-ethereum-forks = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
 reth-evm = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
 reth-exex = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
@@ -99,7 +100,6 @@ reth-rpc-eth-api = { git = "https://github.com/okx/reth", branch = "upstream/dev
 reth-storage-api = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
 reth-tracing = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
 reth-transaction-pool = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
-reth-errors = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
 
 # ------------------------------------------------------------------------------
 # Revm Dependencies (follows upstream reth)
