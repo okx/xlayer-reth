@@ -94,7 +94,7 @@ impl ApolloService {
         .await
         .map_err(|e| {
             error!(target: "xlayer-apollo", "[Apollo] Failed to create client: {:?}", e);
-            ApolloError::ClientInit(format!("Failed to connect to Apollo: Check if Apollo service is accessible or whether Apollo configuration for desired namespace is released."))
+            ApolloError::ClientInit("Failed to connect to Apollo: Check if Apollo service is accessible or whether Apollo configuration for desired namespace is released.".to_string())
         })?;
 
         // Create namespace map
@@ -204,7 +204,7 @@ impl ApolloService {
                 .map(|c| c.config_value.clone());
 
             if let Some(config) = config {
-                Self::update_cache_from_config(&cache, namespace, &config);
+                Self::update_cache_from_config(cache, namespace, &config);
             } else {
                 warn!(target: "xlayer-apollo", "[Apollo] get_config returned None for namespace {}. This may happen if the namespace format doesn't match.", namespace);
             }
