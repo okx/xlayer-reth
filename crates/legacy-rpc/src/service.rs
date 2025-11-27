@@ -82,6 +82,40 @@ fn need_get_block(method: &str) -> bool {
     )
 }
 
+#[inline]
+fn should_try_local_then_legacy(method: &str) -> bool {
+    matches!(
+        method,
+        "eth_getTransactionByHash"
+            | "eth_getTransactionReceipt"
+            | "eth_getRawTransactionByHash"
+            | "eth_getBlockByHash"
+            | "eth_getHeaderByHash"
+            | "eth_getBlockTransactionCountByHash"
+            | "eth_getTransactionByBlockHashAndIndex"
+            | "eth_getRawTransactionByBlockHashAndIndex"
+    )
+}
+
+/// Check if the response has a non-empty result.
+/// Returns true if the result is null, an empty object {}, or an empty array [].
+fn is_result_empty(response: &MethodResponse) -> bool {
+    // Parse the JSON response
+    let json_str = response.as_ref();
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str)
+        && let Some(result) = json.get("result")
+    {
+        match result {
+            serde_json::Value::Null => return true,
+            serde_json::Value::Object(obj) => return obj.is_empty(),
+            serde_json::Value::Array(arr) => return arr.is_empty(),
+            _ => return false,
+        }
+    }
+    // If we can't parse or no result field, consider it non-empty
+    false
+}
+
 /// Returns the block param index.
 ///
 /// In eth requests, there is params list: [...].
@@ -137,6 +171,37 @@ where
             // Not under legacy routing
             if !is_legacy_routable(&method) {
                 return inner.call(req).await;
+            }
+
+            if should_try_local_then_legacy(&method) {
+                // Try local first
+                let res = inner.call(req.clone()).await;
+
+                // If error, forward to legacy
+                if res.is_error() {
+                    debug!("Route to legacy for method (local error) = {}", method);
+                    let service = LegacyRpcRouterService {
+                        inner: inner.clone(),
+                        config: config.clone(),
+                        client: client.clone(),
+                    };
+                    return service.forward_to_legacy(req).await;
+                }
+
+                // If success but result is empty (null, {}, or []), forward to legacy
+                if res.is_success() && is_result_empty(&res) {
+                    debug!("Route to legacy for method (empty result) = {}", method);
+                    let service = LegacyRpcRouterService {
+                        inner: inner.clone(),
+                        config: config.clone(),
+                        client: client.clone(),
+                    };
+                    return service.forward_to_legacy(req).await;
+                }
+
+                // Success with non-empty result, return local response
+                debug!("No legacy routing for method (local success with data) = {}", method);
+                return res;
             }
 
             if need_parse_block(&method) {
