@@ -62,6 +62,7 @@ fn need_parse_block(method: &str) -> bool {
             | "eth_estimateGas"
             | "eth_createAccessList"
             | "eth_transactionPreExec"
+            | "eth_getBlockInternalTransactions"
     )
 }
 
