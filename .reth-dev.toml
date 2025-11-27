@@ -5,7 +5,7 @@ reth-chainspec = { path = "RETH_PATH_PLACEHOLDER/crates/chainspec" }
 reth-cli = { path = "RETH_PATH_PLACEHOLDER/crates/cli/cli" }
 reth-cli-util = { path = "RETH_PATH_PLACEHOLDER/crates/cli/util" }
 reth-db = { path = "RETH_PATH_PLACEHOLDER/crates/storage/db" }
-reth-errors = { path = "RETH_PATH_PLACEHOLDER/crates/reth-errors" }
+reth-errors = { path = "RETH_PATH_PLACEHOLDER/crates/errors" }
 reth-ethereum-forks = { path = "RETH_PATH_PLACEHOLDER/crates/ethereum/hardforks" }
 reth-evm = { path = "RETH_PATH_PLACEHOLDER/crates/evm/evm" }
 reth-execution-types = { path = "RETH_PATH_PLACEHOLDER/crates/evm/execution-types" }

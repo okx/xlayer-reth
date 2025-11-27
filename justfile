@@ -56,36 +56,75 @@ build-dev reth_path="":
 # Check dev template has all reth crates
 check-dev-template:
     #!/usr/bin/env bash
-    M=$(comm -23 <(grep 'git = "https://github.com/okx/reth"' Cargo.toml | grep -oE '^[a-z][a-z0-9-]+' | sort) <(grep 'RETH_PATH_PLACEHOLDER' .reth-dev.toml | grep -oE '^[a-z][a-z0-9-]+' | sort))
-    [ -z "$M" ] && echo "✅ Template OK" || (echo "❌ Missing: $M" && exit 1)
+    set -e
+
+    # Check for missing crates (in Cargo.toml but not in .reth-dev.toml)
+    MISSING=$(comm -23 <(grep 'git = "https://github.com/okx/reth"' Cargo.toml | grep -oE '^[a-z][a-z0-9-]+' | sort) <(grep 'RETH_PATH_PLACEHOLDER' .reth-dev.toml | grep -oE '^[a-z][a-z0-9-]+' | sort))
+
+    # Check for extra crates (in .reth-dev.toml but not in Cargo.toml)
+    EXTRA=$(comm -13 <(grep 'git = "https://github.com/okx/reth"' Cargo.toml | grep -oE '^[a-z][a-z0-9-]+' | sort) <(grep 'RETH_PATH_PLACEHOLDER' .reth-dev.toml | grep -oE '^[a-z][a-z0-9-]+' | sort))
+
+    if [ -z "$MISSING" ] && [ -z "$EXTRA" ]; then
+        echo "✅ Template OK"
+    else
+        if [ -n "$MISSING" ]; then
+            echo "❌ Missing in .reth-dev.toml:"
+            echo "$MISSING" | tr ' ' '\n' | sed 's/^/  - /'
+        fi
+        if [ -n "$EXTRA" ]; then
+            echo "❌ Extra in .reth-dev.toml (removed from Cargo.toml):"
+            echo "$EXTRA" | tr ' ' '\n' | sed 's/^/  - /'
+        fi
+        exit 1
+    fi
 
 # Sync .reth-dev.toml with Cargo.toml dependencies
-sync-dev-template:
+sync-dev-template reth_path:
     #!/usr/bin/env bash
     set -e
 
+    RETH_PATH="{{reth_path}}"
+
+    if [ ! -d "$RETH_PATH" ]; then
+        echo "❌ Error: reth path does not exist: $RETH_PATH"
+        exit 1
+    fi
+
     echo "🔄 Syncing .reth-dev.toml with Cargo.toml..."
+    echo "📂 Using reth path: $RETH_PATH"
+
+    # Build a lookup table of all crate names to their paths (using fd for speed)
+    echo "📋 Building crate index..."
+    CRATE_MAP=$(mktemp)
+    fd -t f "^Cargo.toml$" "$RETH_PATH" -x grep -H "^name = " | \
+        sed 's|/Cargo.toml:name = "\(.*\)"|\t\1|' | \
+        awk -F'\t' '{print $2 "\t" $1}' > "$CRATE_MAP"
 
     # Create a temporary file with the header
     echo '[patch."https://github.com/okx/reth"]' > .reth-dev.toml.tmp
 
-    # Extract reth dependencies from Cargo.toml and generate paths
+    # Extract reth dependencies from Cargo.toml and find their actual paths
     grep 'git = "https://github.com/okx/reth"' Cargo.toml | \
         grep -oE '^[a-z][a-z0-9-]+' | \
         sort | \
         while read -r crate; do
-            # Check if this crate already exists in .reth-dev.toml to preserve its path
-            EXISTING_PATH=$(grep "^$crate = " .reth-dev.toml 2>/dev/null | sed 's/.*"\(.*\)".*/\1/')
+            # Look up the crate in our pre-built map
+            CRATE_DIR=$(grep "^$crate"$'\t' "$CRATE_MAP" | cut -f2 | head -1)
 
-            if [ -n "$EXISTING_PATH" ]; then
-                # Use existing path mapping
-                echo "$crate = { path = \"$EXISTING_PATH\" }" >> .reth-dev.toml.tmp
-            else
-                # New crate detected - needs manual path mapping
-                echo "⚠️  New crate detected: $crate (please update .reth-dev.toml manually)"
+            if [ -z "$CRATE_DIR" ]; then
+                echo "⚠️  Could not find crate '$crate' in $RETH_PATH"
                 echo "$crate = { path = \"RETH_PATH_PLACEHOLDER/crates/$crate\" }" >> .reth-dev.toml.tmp
+                continue
             fi
+
+            # Make path relative to RETH_PATH
+            REL_PATH=$(echo "$CRATE_DIR" | sed "s|^$RETH_PATH/||")
+
+            echo "$crate = { path = \"RETH_PATH_PLACEHOLDER/$REL_PATH\" }" >> .reth-dev.toml.tmp
         done
+
+    # Clean up temp file
+    rm -f "$CRATE_MAP"
 
     # Show diff if there are changes
     if ! diff -q .reth-dev.toml .reth-dev.toml.tmp > /dev/null 2>&1; then
