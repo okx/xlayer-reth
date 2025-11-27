@@ -11,6 +11,9 @@ tests/exported-testnet.rlp
 tests/re-exported-testnet.rlp
 tests/*.rlp
 tests/*.log
+tests/merged.genesis.json
+tests/merged.genesis.json.tar.gz
+tests/genesis-testnet-reth.json
 
 # Local development: cargo config for debugging with local reth
 .cargo

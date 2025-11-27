@@ -14,7 +14,7 @@ Copy ``genesis-reth.json`` and ``op-reth-seq.tar.xz`` in this repo's ``tests`` f
 
 ### Import and Export Test Using Testnet
 
-To run this test, you first need to sync an X Layer Testnet RPC following [this guide](https://github.com/okx/xlayer-toolkit/blob/main/rpc-setup/README.md). This will create a ``testnet-geth`` under your working directory. Set a variable ``TESTNET_PATH=<path-to-testnet-geth>/op-geth/data``. Then, run:
+To run this test, you first need to sync an X Layer Testnet RPC following [this guide](https://github.com/okx/xlayer-toolkit/blob/main/rpc-setup/README.md). This will create a ``testnet-geth`` folder under your working directory. Set a variable ``TESTNET_PATH=<path-to-testnet-geth-inclusive>/op-geth/data``. Then, run:
 ```
 ./prepare-test-import-export-testnet.sh $TESTNET_PATH
 ```
