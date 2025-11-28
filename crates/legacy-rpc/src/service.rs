@@ -174,6 +174,22 @@ where
                 return inner.call(req).await;
             }
 
+            if method == "eth_getInternalTransactions" {
+                let tx_hash = crate::parse_tx_hash_param(params, 0);
+                if let Some(tx_hash) = tx_hash {
+                    let service = LegacyRpcRouterService {
+                        inner: inner.clone(),
+                        config: config.clone(),
+                        client: client.clone(),
+                    };
+                    let res = service.get_transaction_by_hash(&tx_hash).await;
+                    // Route to legacy only if tx hash cannot be found.
+                    if res.is_ok_and(|hash| hash.is_none()) {
+                        return service.forward_to_legacy(req).await;
+                    }
+                }
+            }
+
             if should_try_local_then_legacy(&method) {
                 // Try local first
                 let res = inner.call(req.clone()).await;
