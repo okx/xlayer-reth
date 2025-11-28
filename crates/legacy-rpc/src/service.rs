@@ -175,6 +175,10 @@ where
                     crate::get_logs::parse_eth_get_logs_params(params)
             {
                 if to_block < config.cutoff_block {
+                    debug!(
+                        "eth_getLogs pure legacy routing (from_block = {}, to_block = {})",
+                        from_block, to_block
+                    );
                     // Pure legacy
                     let service = LegacyRpcRouterService {
                         inner: inner.clone(),
@@ -183,6 +187,10 @@ where
                     };
                     return service.forward_to_legacy(req).await;
                 } else if from_block >= config.cutoff_block {
+                    debug!(
+                        "eth_getLogs pure local routing (from_block = {}, to_block = {})",
+                        from_block, to_block
+                    );
                     // Pure local
                     return inner.call(req).await;
                 } else {
@@ -209,6 +217,8 @@ where
                     );
 
                     if let (Some(legacy_req), Some(local_req)) = (legacy_req, local_req) {
+                        debug!("eth_getLogs hybrid routing (from_block = {}, {}) and  ({}, to_block = {})", from_block, config.cutoff_block-1, config.cutoff_block, to_block);
+
                         // Call both and merge results
                         let legacy_response = service.forward_to_legacy(legacy_req).await;
                         let local_response = inner.call(local_req).await;
@@ -220,6 +230,8 @@ where
                             req.id().clone(),
                         );
                     }
+
+                    debug!("No legacy routing for method = {}", method);
 
                     // Fallback to normal if modification failed
                     return inner.call(req).await;
