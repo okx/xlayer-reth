@@ -7,7 +7,7 @@ target/
 
 # IDE & System
 .cursor/
-.claude/ 
+.claude/
 .DS_Store
 
 # Docker
@@ -17,3 +17,6 @@ Dockerfile*
 # Documentation
 *.md
 docs/
+
+# Tests
+tests/
