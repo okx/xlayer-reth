@@ -218,12 +218,16 @@ install-export-maxperf:
 clean:
     cargo clean
 
-build-docker:
+build-docker suffix="":
     #!/usr/bin/env bash
     set -e
     rm -rf .cargo  # Clean dev mode files
     GITHASH=$(git rev-parse --short HEAD)
-    TAG="op-reth:$GITHASH"
+    SUFFIX=""
+    if [ -n "{{suffix}}" ]; then
+        SUFFIX="-{{suffix}}"
+    fi
+    TAG="op-reth:$GITHASH$SUFFIX"
     echo "🐳 Building XLayer Reth Docker image: $TAG ..."
     docker build -t $TAG -f Dockerfile .
     docker tag $TAG op-reth:latest
@@ -261,12 +265,7 @@ build-docker-dev reth_path="":
     sed "s|RETH_PATH_PLACEHOLDER|/reth|g" .reth-dev.toml > .cargo/config.toml
 
     # Build Docker image
-    GITHASH=$(git rev-parse --short HEAD)
-    TAG="op-reth:$GITHASH-dev"
-    echo "🐳 Building XLayer Reth Docker image: $TAG ..."
-    docker build -t $TAG -f Dockerfile .
-    docker tag $TAG op-reth:latest
-    echo "🔖 Tagged $TAG as op-reth:latest"
+    just build-docker dev
 
 watch-test:
     cargo watch -x test
