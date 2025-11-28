@@ -179,19 +179,14 @@ where
                 let res = inner.call(req.clone()).await;
 
                 // If error, forward to legacy
-                if res.is_error() {
-                    debug!("Route to legacy for method (local error) = {}", method);
-                    let service = LegacyRpcRouterService {
-                        inner: inner.clone(),
-                        config: config.clone(),
-                        client: client.clone(),
-                    };
-                    return service.forward_to_legacy(req).await;
-                }
-
                 // If success but result is empty (null, {}, or []), forward to legacy
-                if res.is_success() && is_result_empty(&res) {
-                    debug!("Route to legacy for method (empty result) = {}", method);
+                if res.is_error() || (res.is_success() && is_result_empty(&res)) {
+                    debug!(
+                        "Route to legacy for method = {}. is_error = {}, is_empty_result = {}",
+                        method,
+                        res.is_error(),
+                        res.is_success()
+                    );
                     let service = LegacyRpcRouterService {
                         inner: inner.clone(),
                         config: config.clone(),
