@@ -176,14 +176,7 @@ where
                     config: config.clone(),
                     client: client.clone(),
                 };
-                return crate::get_logs::handle_eth_get_logs(
-                    req.clone(),
-                    params,
-                    config.cutoff_block,
-                    inner.clone(),
-                    service,
-                )
-                .await;
+                return crate::get_logs::handle_eth_get_logs(req.clone(), params, service).await;
             }
 
             if method == "eth_getInternalTransactions" {
