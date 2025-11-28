@@ -160,8 +160,6 @@ where
         let inner = self.inner.clone();
 
         Box::pin(async move {
-            let _p = req.params(); // keeps compiler quiet
-            let params = _p.as_str().unwrap();
             let method = req.method_name().to_string();
 
             // If legacy not enabled, do not route.
@@ -171,105 +169,13 @@ where
             }
 
             if method == "eth_getLogs" {
-                let service = LegacyRpcRouterService {
-                    inner: inner.clone(),
-                    config: config.clone(),
-                    client: client.clone(),
-                };
-                return crate::get_logs::handle_eth_get_logs(req.clone(), params, service).await;
-            }
-
-            if method == "eth_getInternalTransactions" {
-                let tx_hash = crate::parse_tx_hash_param(params, 0);
-                if let Some(tx_hash) = tx_hash {
-                    let service = LegacyRpcRouterService {
-                        inner: inner.clone(),
-                        config: config.clone(),
-                        client: client.clone(),
-                    };
-                    let res = service.get_transaction_by_hash(&tx_hash).await;
-                    // Route to legacy only if tx hash cannot be found.
-                    if res.is_ok_and(|hash| hash.is_none()) {
-                        return service.forward_to_legacy(req).await;
-                    }
-                }
-            }
-
-            if should_try_local_then_legacy(&method) {
-                // Try local first
-                let res = inner.call(req.clone()).await;
-
-                // If error, forward to legacy
-                // If success but result is empty (null, {}, or []), forward to legacy
-                if res.is_error() || (res.is_success() && is_result_empty(&res)) {
-                    debug!(
-                        "Route to legacy for method = {}. is_error = {}, is_empty_result = {}",
-                        method,
-                        res.is_error(),
-                        res.is_success()
-                    );
-                    let service = LegacyRpcRouterService {
-                        inner: inner.clone(),
-                        config: config.clone(),
-                        client: client.clone(),
-                    };
-                    return service.forward_to_legacy(req).await;
-                }
-
-                // Success with non-empty result, return local response
-                debug!("No legacy routing for method (local success with data) = {}", method);
-                return res;
-            }
-
-            if need_parse_block(&method) {
-                let block_param =
-                    crate::parse_block_param(params, block_param_pos(&method), config.cutoff_block);
-                if let Some(block_param) = block_param {
-                    // Clone to prevent lifetime error
-                    let service = LegacyRpcRouterService {
-                        inner: inner.clone(),
-                        config: config.clone(),
-                        client: client.clone(),
-                    };
-
-                    // Only some methods that need to get block from DB do this.
-                    if need_get_block(&method) && crate::is_block_hash(&block_param) {
-                        let res = service.call_eth_get_block_by_hash(&block_param, false).await;
-
-                        match res {
-                            Ok(n) => {
-                                if n.is_none() {
-                                    debug!(
-                                        "Route to legacy for method (block by hash not found) = {}",
-                                        method
-                                    );
-                                    return service.forward_to_legacy(req).await;
-                                } else {
-                                    // TODO: if block_num parsed from blk hash is smaller than
-                                    // cutoff, route to legacy as well?
-                                    debug!("No route to legacy since got block num from block hash. block = {}", n.unwrap());
-                                }
-                            }
-                            Err(err) => debug!("Error getting block by hash = {err:?}"),
-                        }
-                    } else {
-                        match block_param.parse::<u64>() {
-                            Ok(block_num) => {
-                                debug!("block_num = {}", block_num);
-                                if block_num < service.config.cutoff_block {
-                                    debug!(
-                                        "Route to legacy for method (below cuttoff) = {}",
-                                        method
-                                    );
-                                    return service.forward_to_legacy(req).await;
-                                }
-                            }
-                            Err(err) => debug!("Failed to parse block num, err = {err:?}"),
-                        }
-                    }
-                } else {
-                    debug!("Failed to parse block param, got None");
-                }
+                return crate::get_logs::handle_eth_get_logs(req, client, config, inner).await;
+            } else if method == "eth_getInternalTransactions" {
+                return handle_eth_get_internal_transactions(req, client, config, inner).await;
+            } else if should_try_local_then_legacy(&method) {
+                return handle_try_local_then_legacy(req, client, config, inner).await;
+            } else if need_parse_block(&method) {
+                return handle_block_param_methods(req, client, config, inner).await;
             }
 
             debug!("No legacy routing for method = {}", method);
@@ -289,4 +195,108 @@ where
     ) -> impl Future<Output = Self::NotificationResponse> + Send + 'a {
         self.inner.notification(n)
     }
+}
+
+async fn handle_eth_get_internal_transactions<S>(
+    req: Request<'_>,
+    client: reqwest::Client,
+    config: std::sync::Arc<crate::LegacyRpcRouterConfig>,
+    inner: S,
+) -> MethodResponse
+where
+    S: RpcServiceT<MethodResponse = MethodResponse> + Send + Sync + Clone + 'static,
+{
+    let service = LegacyRpcRouterService { inner: inner.clone(), config, client };
+    let _p = req.params(); // keeps compiler quiet
+    let params = _p.as_str().unwrap();
+    let tx_hash = crate::parse_tx_hash_param(params, 0).unwrap();
+    let res = service.get_transaction_by_hash(&tx_hash).await;
+
+    // Route to legacy only if tx hash cannot be found
+    if res.is_ok_and(|hash| hash.is_none()) {
+        service.forward_to_legacy(req).await
+    } else {
+        inner.call(req).await
+    }
+}
+
+async fn handle_try_local_then_legacy<S>(
+    req: Request<'_>,
+    client: reqwest::Client,
+    config: std::sync::Arc<crate::LegacyRpcRouterConfig>,
+    inner: S,
+) -> MethodResponse
+where
+    S: RpcServiceT<MethodResponse = MethodResponse> + Send + Sync + Clone + 'static,
+{
+    let method = req.method.to_string();
+    let res = inner.call(req.clone()).await;
+    if res.is_error() || (res.is_success() && is_result_empty(&res)) {
+        let service = LegacyRpcRouterService { inner: inner.clone(), config, client };
+        debug!(
+            "Route to legacy for method = {}. is_error = {}, is_empty_result = {}",
+            method,
+            res.is_error(),
+            res.is_success()
+        );
+        service.forward_to_legacy(req).await
+    } else {
+        debug!("No legacy routing for method (local success with data) = {}", method);
+        res
+    }
+}
+
+async fn handle_block_param_methods<S>(
+    req: Request<'_>,
+    client: reqwest::Client,
+    config: std::sync::Arc<crate::LegacyRpcRouterConfig>,
+    inner: S,
+) -> MethodResponse
+where
+    S: RpcServiceT<MethodResponse = MethodResponse> + Send + Sync + Clone + 'static,
+{
+    let _p = req.params(); // keeps compiler quiet
+    let params = _p.as_str().unwrap();
+    let method = req.method.to_string();
+    let block_param =
+        crate::parse_block_param(params, block_param_pos(&method), config.cutoff_block);
+
+    let cutoff_block = config.cutoff_block;
+    if let Some(block_param) = block_param {
+        let service = LegacyRpcRouterService { inner: inner.clone(), config, client };
+        if need_get_block(&method) && crate::is_block_hash(&block_param) {
+            let res = service.call_eth_get_block_by_hash(&block_param, false).await;
+            match res {
+                Ok(n) => {
+                    if n.is_none() {
+                        debug!("Route to legacy for method (block by hash not found) = {}", method);
+                        return service.forward_to_legacy(req).await;
+                    } else {
+                        // TODO: if block_num parsed from blk hash is smaller than
+                        // cutoff, route to legacy as well?
+                        debug!(
+                            "No route to legacy since got block num from block hash. block = {:?}",
+                            n
+                        );
+                    }
+                }
+                Err(err) => debug!("Error getting block by hash = {err:?}"),
+            }
+        } else {
+            match block_param.parse::<u64>() {
+                Ok(block_num) => {
+                    debug!("block_num = {}", block_num);
+                    if block_num < cutoff_block {
+                        debug!("Route to legacy for method (below cuttoff) = {}", method);
+                        return service.forward_to_legacy(req).await;
+                    }
+                }
+                Err(err) => debug!("Failed to parse block num, err = {err:?}"),
+            }
+        }
+    } else {
+        debug!("Failed to parse block param, got None");
+    }
+
+    inner.call(req.clone()).await
 }

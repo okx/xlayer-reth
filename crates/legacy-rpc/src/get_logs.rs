@@ -24,6 +24,7 @@
 //!     These get converted to 0
 //! to_block: latest/pending/finalized/safe
 //!     These get converted to u64::MAX
+use crate::LegacyRpcRouterService;
 use jsonrpsee::MethodResponse;
 use jsonrpsee_types::{Id, Request};
 use serde_json::value::RawValue;
@@ -229,8 +230,9 @@ pub(crate) fn merge_eth_get_logs_responses(
 /// based on the block range in the request.
 pub(crate) async fn handle_eth_get_logs<S>(
     req: Request<'_>,
-    params: &str,
-    service: crate::LegacyRpcRouterService<S>,
+    client: reqwest::Client,
+    config: std::sync::Arc<crate::LegacyRpcRouterConfig>,
+    inner: S,
 ) -> MethodResponse
 where
     S: jsonrpsee::server::middleware::rpc::RpcServiceT<MethodResponse = MethodResponse>
@@ -239,6 +241,10 @@ where
         + Clone
         + 'static,
 {
+    let service = LegacyRpcRouterService { inner: inner.clone(), config, client };
+    let _p = req.params(); // keeps compiler quiet
+    let params = _p.as_str().unwrap();
+
     let cutoff_block = service.config.cutoff_block;
     if let Some((from_block, to_block)) = parse_eth_get_logs_params(params) {
         if to_block < cutoff_block {
@@ -254,7 +260,7 @@ where
                 from_block, to_block
             );
             // Pure local
-            return service.inner.call(req).await;
+            return inner.call(req).await;
         } else {
             // Hybrid: split into two requests
 
@@ -276,7 +282,7 @@ where
 
                 // Call both and merge results
                 let legacy_response = service.forward_to_legacy(legacy_req).await;
-                let local_response = service.inner.call(local_req).await;
+                let local_response = inner.call(local_req).await;
 
                 // Merge the results
                 return merge_eth_get_logs_responses(
@@ -289,12 +295,12 @@ where
             debug!("No legacy routing for method = eth_getLogs");
 
             // Fallback to normal if modification failed
-            return service.inner.call(req).await;
+            return inner.call(req).await;
         }
     }
 
     // If parsing fails, use normal routing
-    service.inner.call(req).await
+    inner.call(req).await
 }
 
 #[cfg(test)]
