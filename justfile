@@ -218,9 +218,20 @@ install-export-maxperf:
 clean:
     cargo clean
 
-build-docker:
-    @rm -rf .cargo  # Clean dev mode files
-    docker build -t op-reth:latest -f Dockerfile .
+build-docker suffix="":
+    #!/usr/bin/env bash
+    set -e
+    rm -rf .cargo  # Clean dev mode files
+    GITHASH=$(git rev-parse --short HEAD)
+    SUFFIX=""
+    if [ -n "{{suffix}}" ]; then
+        SUFFIX="-{{suffix}}"
+    fi
+    TAG="op-reth:$GITHASH$SUFFIX"
+    echo "🐳 Building XLayer Reth Docker image: $TAG ..."
+    docker build -t $TAG -f Dockerfile .
+    docker tag $TAG op-reth:latest
+    echo "🔖 Tagged $TAG as op-reth:latest"
 
 [no-exit-message]
 build-docker-dev reth_path="":
@@ -244,16 +255,17 @@ build-docker-dev reth_path="":
 
     just check-dev-template
     mkdir -p .cargo
-    
+
     echo "$RETH_SRC" > "$PATH_FILE"
     echo "📦 Syncing $RETH_SRC → .cargo/reth..."
     rsync -au --delete --exclude='.git' --exclude='target' "$RETH_SRC/" .cargo/reth/
     echo "✅ Sync complete"
-    
+
     # Generate config with /reth path (Docker will move .cargo/reth to /reth to avoid nesting)
     sed "s|RETH_PATH_PLACEHOLDER|/reth|g" .reth-dev.toml > .cargo/config.toml
-    echo "🐳 Building Docker image..."
-    docker build -t op-reth:latest -f Dockerfile .
+
+    # Build Docker image
+    just build-docker dev
 
 watch-test:
     cargo watch -x test

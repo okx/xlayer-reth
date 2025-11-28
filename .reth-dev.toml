@@ -1,7 +1,7 @@
 [patch."https://github.com/okx/reth"]
 reth = { path = "RETH_PATH_PLACEHOLDER/bin/reth" }
-reth-chain-state = { path = "RETH_PATH_PLACEHOLDER/crates/chain-state" }
 reth-chainspec = { path = "RETH_PATH_PLACEHOLDER/crates/chainspec" }
+reth-chain-state = { path = "RETH_PATH_PLACEHOLDER/crates/chain-state" }
 reth-cli = { path = "RETH_PATH_PLACEHOLDER/crates/cli/cli" }
 reth-cli-commands = { path = "RETH_PATH_PLACEHOLDER/crates/cli/commands" }
 reth-cli-util = { path = "RETH_PATH_PLACEHOLDER/crates/cli/util" }
@@ -17,6 +17,7 @@ reth-node-core = { path = "RETH_PATH_PLACEHOLDER/crates/node/core" }
 reth-node-types = { path = "RETH_PATH_PLACEHOLDER/crates/node/types" }
 reth-optimism-chainspec = { path = "RETH_PATH_PLACEHOLDER/crates/optimism/chainspec" }
 reth-optimism-cli = { path = "RETH_PATH_PLACEHOLDER/crates/optimism/cli" }
+reth-optimism-consensus = { path = "RETH_PATH_PLACEHOLDER/crates/optimism/consensus" }
 reth-optimism-evm = { path = "RETH_PATH_PLACEHOLDER/crates/optimism/evm" }
 reth-optimism-forks = { path = "RETH_PATH_PLACEHOLDER/crates/optimism/hardforks" }
 reth-optimism-node = { path = "RETH_PATH_PLACEHOLDER/crates/optimism/node" }
