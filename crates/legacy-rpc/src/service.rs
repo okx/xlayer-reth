@@ -165,12 +165,8 @@ where
             let method = req.method_name().to_string();
 
             // If legacy not enabled, do not route.
-            if !config.enabled {
-                return inner.call(req).await;
-            }
-
-            // Not under legacy routing
-            if !is_legacy_routable(&method) {
+            // Not under legacy routing, do not route.
+            if !config.enabled || !is_legacy_routable(&method) {
                 return inner.call(req).await;
             }
 
