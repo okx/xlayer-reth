@@ -47,7 +47,7 @@ pub mod helpers {
         }
 
         let msg_nonce =
-            req.nonce.ok_or_else(|| PreExecError::check_args(format!("{}, nonce is nil", from)))?;
+            req.nonce.ok_or_else(|| PreExecError::check_args(format!("{from}, nonce is nil")))?;
 
         if let Some(prev_req) = prev
             && let (Some(pf), Some(pn)) = (prev_req.as_ref().from, prev_req.as_ref().nonce)
@@ -66,19 +66,17 @@ pub mod helpers {
 
         let st_nonce = db
             .basic(from)
-            .map_err(|e| PreExecError::unknown(format!("db error: {:?}", e)))?
+            .map_err(|e| PreExecError::unknown(format!("db error: {e:?}")))?
             .map(|acc| acc.nonce)
             .unwrap_or(0);
 
         if st_nonce > msg_nonce {
             return Err(PreExecError::check_args(format!(
-                "nonce too low: address {}, tx: {} state: {}",
-                from, msg_nonce, st_nonce
+                "nonce too low: address {from}, tx: {msg_nonce} state: {st_nonce}"
             )));
         } else if st_nonce.checked_add(1).is_none() {
             return Err(PreExecError::check_args(format!(
-                "nonce has max value: address {}, nonce: {}",
-                from, st_nonce
+                "nonce has max value: address {from}, nonce: {st_nonce}"
             )));
         }
 
@@ -141,8 +139,7 @@ pub mod helpers {
         let gas = frame.gas.saturating_to::<u64>();
         let return_gas = gas.saturating_sub(gas_used);
 
-        let output =
-            frame.output.as_ref().map(|b| format!("{:?}", b)).unwrap_or_else(|| "0x".into());
+        let output = frame.output.as_ref().map(|b| format!("{b:?}")).unwrap_or_else(|| "0x".into());
         let value_wei = frame.value.map(|v| v.to_string()).unwrap_or_else(|| "0".into());
 
         let mut inner = PreExecInnerTx {
@@ -174,12 +171,12 @@ pub mod helpers {
                 inner.to = format!("0x000000000000000000000000{}", stripped.to_lowercase());
             }
             if inner.call_type == "callcode" {
-                inner.code_address = frame.to.map(|a| format!("{:?}", a)).unwrap_or_default();
+                inner.code_address = frame.to.map(|a| format!("{a:?}")).unwrap_or_default();
             }
             let current_root = if depth_index_root.is_empty() {
-                format!("_{}", index)
+                format!("_{index}")
             } else {
-                format!("{}_{}", depth_index_root, index)
+                format!("{depth_index_root}_{index}")
             };
             inner.name = format!("{}{}", inner.call_type, current_root);
         }
@@ -188,7 +185,7 @@ pub mod helpers {
 
         if !frame.calls.is_empty() {
             let next_root =
-                if depth == 0 { String::new() } else { format!("{}_{}", depth_index_root, index) };
+                if depth == 0 { String::new() } else { format!("{depth_index_root}_{index}") };
             for (i, nested) in frame.calls.iter().enumerate() {
                 let parent_err = out.last().map(|x| x.is_error).unwrap_or(false);
                 convert_call_frame_recursive(
@@ -333,9 +330,7 @@ pub trait PreExec: EthCall {
                 ExecutionResult::Revert { output, .. } => {
                     PreExecError::reverted(format!("execution reverted: 0x{}", hex::encode(output)))
                 }
-                ExecutionResult::Halt { reason, .. } => {
-                    Self::classify_error(format!("{:?}", reason))
-                }
+                ExecutionResult::Halt { reason, .. } => Self::classify_error(format!("{reason:?}")),
             };
 
             db.commit(exec.state.clone());
