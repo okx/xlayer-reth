@@ -9,6 +9,7 @@ use jsonrpsee::{
 use tracing::debug;
 
 use crate::LegacyRpcRouterService;
+use jsonrpsee_types::ErrorObject;
 
 /// Only these methods should be considered for legacy routing.
 #[inline]
@@ -209,8 +210,15 @@ where
     let service = LegacyRpcRouterService { inner: inner.clone(), config, client };
     let _p = req.params(); // keeps compiler quiet
     let params = _p.as_str().unwrap();
-    let tx_hash = crate::parse_tx_hash_param(params, 0).unwrap();
-    let res = service.get_transaction_by_hash(&tx_hash).await;
+    let tx_hash = crate::parse_tx_hash_param(params, 0);
+    if tx_hash.is_none() {
+        return MethodResponse::error(
+            req.id(),
+            ErrorObject::owned(-32603, "Need proper txn hash", None::<()>),
+        );
+    }
+
+    let res = service.get_transaction_by_hash(&tx_hash.unwrap()).await;
 
     // Route to legacy only if tx hash cannot be found
     if res.is_ok_and(|hash| hash.is_none()) {
