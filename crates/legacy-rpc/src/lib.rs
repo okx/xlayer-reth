@@ -92,7 +92,7 @@ impl<S> LegacyRpcRouterService<S> {
         S: RpcServiceT<MethodResponse = MethodResponse> + Send + Sync + Clone + 'static,
     {
         // Construct the parameters JSON string
-        let params_str = format!(r#"["{}", {}]"#, block_hash, full_transactions);
+        let params_str = format!(r#"["{block_hash}", {full_transactions}]"#);
 
         let method = "eth_getBlockByHash";
         let params_raw = RawValue::from_string(params_str).expect("Valid JSON params");
@@ -122,7 +122,7 @@ impl<S> LegacyRpcRouterService<S> {
         S: RpcServiceT<MethodResponse = MethodResponse> + Send + Sync + Clone + 'static,
     {
         // Construct the parameters JSON string
-        let params_str = format!(r#"["{}"]"#, hash);
+        let params_str = format!(r#"["{hash}"]"#);
         let method = "eth_getTransactionByHash";
         let id = Id::Number(1);
 

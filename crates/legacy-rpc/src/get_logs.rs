@@ -110,12 +110,12 @@ pub fn modify_eth_get_logs_params<'a>(
     // Modify fromBlock if provided
     if let Some(from) = from_block {
         filter_obj
-            .insert("fromBlock".to_string(), serde_json::Value::String(format!("0x{:x}", from)));
+            .insert("fromBlock".to_string(), serde_json::Value::String(format!("0x{from:x}")));
     }
 
     // Modify toBlock if provided
     if let Some(to) = to_block {
-        filter_obj.insert("toBlock".to_string(), serde_json::Value::String(format!("0x{:x}", to)));
+        filter_obj.insert("toBlock".to_string(), serde_json::Value::String(format!("0x{to:x}")));
     }
 
     // Serialize back to string
