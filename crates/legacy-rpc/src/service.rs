@@ -207,7 +207,6 @@ async fn handle_eth_get_internal_transactions<S>(
 where
     S: RpcServiceT<MethodResponse = MethodResponse> + Send + Sync + Clone + 'static,
 {
-    let service = LegacyRpcRouterService { inner: inner.clone(), config, client };
     let _p = req.params(); // keeps compiler quiet
     let params = _p.as_str().unwrap();
     let tx_hash = crate::parse_tx_hash_param(params, 0);
@@ -218,6 +217,7 @@ where
         );
     }
 
+    let service = LegacyRpcRouterService { inner: inner.clone(), config, client };
     let res = service.get_transaction_by_hash(&tx_hash.unwrap()).await;
 
     // Route to legacy only if tx hash cannot be found
