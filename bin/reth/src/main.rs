@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use reth_cli_commands::init_cmd::InitCommand;
+use reth_tracing::{RethTracer, Tracer};
 use tracing::{error, info};
 use xlayer_reth_node::args_xlayer::{ApolloArgs, XLayerArgs};
 
@@ -116,6 +117,9 @@ async fn main() -> ExitCode {
             std::env::set_var("RUST_BACKTRACE", "1");
         }
     }
+
+    // Initialize tracing
+    let _guard = RethTracer::new().init().expect("Failed to initialize tracing");
 
     // Initialize version metadata
     init_version_metadata();
@@ -231,11 +235,6 @@ async fn main() -> ExitCode {
             }
         }
         Commands::Import(import_cmd) => {
-            use reth_tracing::{RethTracer, Tracer};
-
-            // Initialize tracing
-            let _guard = RethTracer::new().init().expect("Failed to initialize tracing");
-
             info!(target: "xlayer::import", "XLayer Reth Import starting");
 
             let components = |spec: Arc<OpChainSpec>| {
@@ -251,11 +250,6 @@ async fn main() -> ExitCode {
             }
         }
         Commands::Export(export_cmd) => {
-            use reth_tracing::{RethTracer, Tracer};
-
-            // Initialize tracing
-            let _guard = RethTracer::new().init().expect("Failed to initialize tracing");
-
             info!(target: "xlayer::export", "XLayer Reth Export starting");
 
             match export_cmd.execute::<OpNode>().await {
