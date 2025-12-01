@@ -13,6 +13,7 @@ repository = "https://github.com/okx/xlayer-reth.git"
 [workspace]
 resolver = "2"
 members = [
+    "bin/reth",
     "crates/node",
     "crates/apollo",
     "crates/chainspec",
@@ -22,7 +23,7 @@ members = [
     "crates/rpc",
     "crates/tests",
 ]
-default-members = ["crates/node"]
+default-members = ["bin/reth"]
 
 [workspace.lints]
 
@@ -59,6 +60,9 @@ xlayer-innertx = { path = "crates/innertx" }
 xlayer-reth-node = { path = "crates/node" }
 xlayer-rpc = { path = "crates/rpc" }
 xlayer-apollo = { path = "crates/apollo" }
+xlayer-reth-import = { path = "crates/import" }
+xlayer-reth-export = { path = "crates/export" }
+
 
 # ------------------------------------------------------------------------------
 # Reth Dependencies (points to our fork)

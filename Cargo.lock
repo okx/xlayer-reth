@@ -12767,6 +12767,67 @@ dependencies = [
 ]
 
 [[package]]
+name = "xlayer-reth"
+version = "0.1.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-primitives",
+ "alloy-rlp",
+ "chrono",
+ "clap",
+ "ctrlc",
+ "eyre",
+ "flate2",
+ "futures",
+ "futures-util",
+ "itertools 0.14.0",
+ "jsonrpsee",
+ "metrics",
+ "metrics-derive",
+ "once_cell",
+ "rayon",
+ "reqwest 0.12.24",
+ "reth",
+ "reth-chainspec",
+ "reth-cli",
+ "reth-cli-commands",
+ "reth-cli-util",
+ "reth-db",
+ "reth-exex",
+ "reth-node-core",
+ "reth-optimism-chainspec",
+ "reth-optimism-cli",
+ "reth-optimism-consensus",
+ "reth-optimism-evm",
+ "reth-optimism-node",
+ "reth-optimism-primitives",
+ "reth-optimism-rpc",
+ "reth-primitives",
+ "reth-primitives-traits",
+ "reth-provider",
+ "reth-rpc-convert",
+ "reth-rpc-eth-api",
+ "reth-storage-api",
+ "reth-tracing",
+ "serde",
+ "serde_json",
+ "time 0.3.44",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite",
+ "tracing",
+ "url",
+ "uuid",
+ "xlayer-apollo",
+ "xlayer-chainspec",
+ "xlayer-innertx",
+ "xlayer-reth-export",
+ "xlayer-reth-import",
+ "xlayer-reth-node",
+ "xlayer-rpc",
+]
+
+[[package]]
 name = "xlayer-reth-export"
 version = "0.1.0"
 dependencies = [

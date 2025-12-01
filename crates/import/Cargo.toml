@@ -11,10 +11,6 @@ description = "XLayer Reth Import Command"
 [lints]
 workspace = true
 
-[[bin]]
-name = "xlayer-reth-import"
-path = "src/main.rs"
-
 [dependencies]
 # internal
 xlayer-chainspec.workspace = true

@@ -11,10 +11,6 @@ description = "XLayer Reth Export Command"
 [lints]
 workspace = true
 
-[[bin]]
-name = "xlayer-reth-export"
-path = "src/main.rs"
-
 [dependencies]
 # internal
 xlayer-chainspec.workspace = true
