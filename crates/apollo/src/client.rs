@@ -104,8 +104,7 @@ impl ApolloService {
                 let namespace = get_namespace(full_namespace)?;
                 if namespace_map.contains_key(&namespace) {
                     return Err(ApolloError::ClientInit(format!(
-                        "duplicate apollo namespace: {}",
-                        namespace
+                        "duplicate apollo namespace: {namespace}",
                     )));
                 }
                 namespace_map.insert(namespace, full_namespace.clone());
@@ -250,5 +249,5 @@ fn get_namespace(namespace: &str) -> Result<String, ApolloError> {
 }
 
 fn make_cache_key(namespace: &str, key: &str) -> String {
-    format!("{}:{}", namespace, key)
+    format!("{namespace}:{key}")
 }
