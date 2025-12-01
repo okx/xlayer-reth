@@ -175,6 +175,14 @@ mod tests {
         assert!(spec.fork(OpHardfork::Granite).active_at_timestamp(ts));
         assert!(spec.fork(OpHardfork::Holocene).active_at_timestamp(ts));
         assert!(spec.fork(OpHardfork::Isthmus).active_at_timestamp(ts));
+        // Jovian is configured but not active at genesis timestamp, it activates at a future timestamp
+        // Verify Jovian is configured (not ForkCondition::Never)
+        assert!(!matches!(
+            spec.fork(OpHardfork::Jovian),
+            reth_ethereum_forks::ForkCondition::Never
+        ));
+        // Verify it's not active at genesis timestamp
+        assert!(!spec.fork(OpHardfork::Jovian).active_at_timestamp(ts));
     }
 
     #[test]
@@ -257,5 +265,56 @@ mod tests {
         assert_eq!(header.base_fee_per_gas, genesis.base_fee_per_gas.map(|fee| fee as u64));
         // NOTE: state_root is hardcoded, not read from JSON
         assert_eq!(header.state_root, XLAYER_TESTNET_STATE_ROOT);
+    }
+
+    #[test]
+    fn test_xlayer_testnet_jovian_activation() {
+        use crate::XLAYER_TESTNET_JOVIAN_TIMESTAMP;
+
+        let spec = &*XLAYER_TESTNET;
+
+        // Jovian should not be active before activation timestamp
+        assert!(!spec
+            .fork(OpHardfork::Jovian)
+            .active_at_timestamp(XLAYER_TESTNET_JOVIAN_TIMESTAMP - 1));
+
+        // Jovian should be active at activation timestamp
+        assert!(spec.fork(OpHardfork::Jovian).active_at_timestamp(XLAYER_TESTNET_JOVIAN_TIMESTAMP));
+
+        // Jovian should be active after activation timestamp
+        assert!(spec
+            .fork(OpHardfork::Jovian)
+            .active_at_timestamp(XLAYER_TESTNET_JOVIAN_TIMESTAMP + 1));
+    }
+
+    #[test]
+    fn test_xlayer_testnet_jovian_included() {
+        use crate::XLAYER_TESTNET_HARDFORKS;
+        let hardforks = &*XLAYER_TESTNET_HARDFORKS;
+        assert!(
+            hardforks.get(OpHardfork::Jovian).is_some(),
+            "XLayer testnet hardforks should include Jovian"
+        );
+    }
+
+    #[test]
+    fn test_xlayer_testnet_jovian_timestamp_condition() {
+        use crate::{XLAYER_TESTNET_HARDFORKS, XLAYER_TESTNET_JOVIAN_TIMESTAMP};
+        use reth_ethereum_forks::ForkCondition;
+
+        let xlayer_testnet = &*XLAYER_TESTNET_HARDFORKS;
+
+        let jovian_fork =
+            xlayer_testnet.get(OpHardfork::Jovian).expect("XLayer testnet should have Jovian fork");
+
+        match jovian_fork {
+            ForkCondition::Timestamp(ts) => {
+                assert_eq!(
+                    ts, XLAYER_TESTNET_JOVIAN_TIMESTAMP,
+                    "Jovian fork should use XLAYER_TESTNET_JOVIAN_TIMESTAMP"
+                );
+            }
+            _ => panic!("Jovian fork should use timestamp condition"),
+        }
     }
 }

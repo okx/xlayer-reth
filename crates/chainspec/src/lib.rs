@@ -19,6 +19,14 @@ use reth_chainspec::Hardfork;
 use reth_ethereum_forks::{ChainHardforks, EthereumHardfork, ForkCondition};
 use reth_optimism_forks::OpHardfork;
 
+/// XLayer mainnet Jovian hardfork activation timestamp
+/// 2025-12-02 16:00:01 UTC
+pub const XLAYER_MAINNET_JOVIAN_TIMESTAMP: u64 = 1764691201;
+
+/// XLayer testnet Jovian hardfork activation timestamp
+/// 2025-11-28 11:00:00 UTC
+pub const XLAYER_TESTNET_JOVIAN_TIMESTAMP: u64 = 1764327600;
+
 /// X Layer mainnet list of hardforks.
 ///
 /// All time-based hardforks are activated at genesis (timestamp 0).
@@ -56,6 +64,7 @@ pub static XLAYER_MAINNET_HARDFORKS: Lazy<ChainHardforks> = Lazy::new(|| {
         (OpHardfork::Holocene.boxed(), ForkCondition::Timestamp(0)),
         (EthereumHardfork::Prague.boxed(), ForkCondition::Timestamp(0)),
         (OpHardfork::Isthmus.boxed(), ForkCondition::Timestamp(0)),
+        (OpHardfork::Jovian.boxed(), ForkCondition::Timestamp(XLAYER_MAINNET_JOVIAN_TIMESTAMP)),
     ])
 });
 
@@ -96,5 +105,6 @@ pub static XLAYER_TESTNET_HARDFORKS: Lazy<ChainHardforks> = Lazy::new(|| {
         (OpHardfork::Holocene.boxed(), ForkCondition::Timestamp(0)),
         (EthereumHardfork::Prague.boxed(), ForkCondition::Timestamp(0)),
         (OpHardfork::Isthmus.boxed(), ForkCondition::Timestamp(0)),
+        (OpHardfork::Jovian.boxed(), ForkCondition::Timestamp(XLAYER_TESTNET_JOVIAN_TIMESTAMP)),
     ])
 });

@@ -33,6 +33,7 @@ alloy-chains = { workspace = true }
 
 # op
 op-alloy-rpc-types = { workspace = true }
+alloy-op-hardforks = { workspace = true }
 
 # misc
 serde = { workspace = true }

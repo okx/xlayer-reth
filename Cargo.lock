@@ -12690,6 +12690,7 @@ dependencies = [
  "alloy-consensus",
  "alloy-eips",
  "alloy-genesis",
+ "alloy-op-hardforks",
  "alloy-primitives",
  "eyre",
  "once_cell",
