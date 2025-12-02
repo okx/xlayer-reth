@@ -11,9 +11,9 @@ description = "XLayer Reth Import Command"
 [lints]
 workspace = true
 
-[[bin]]
-name = "xlayer-reth-import"
-path = "src/main.rs"
+[lib]
+name = "xlayer_reth_import"
+path = "src/lib.rs"
 
 [dependencies]
 # internal

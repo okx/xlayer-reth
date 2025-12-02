@@ -12888,6 +12888,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "xlayer-reth-tools"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "reth-cli-util",
+ "reth-optimism-chainspec",
+ "reth-optimism-consensus",
+ "reth-optimism-evm",
+ "reth-optimism-node",
+ "reth-tracing",
+ "tokio",
+ "tracing",
+ "xlayer-chainspec",
+ "xlayer-reth-export",
+ "xlayer-reth-import",
+]
+
+[[package]]
 name = "xlayer-rpc"
 version = "0.1.0"
 dependencies = [

@@ -21,6 +21,7 @@ members = [
     "crates/import",
     "crates/rpc",
     "crates/tests",
+    "bin/tools",
 ]
 default-members = ["crates/node"]
 
@@ -59,6 +60,8 @@ xlayer-innertx = { path = "crates/innertx" }
 xlayer-reth-node = { path = "crates/node" }
 xlayer-rpc = { path = "crates/rpc" }
 xlayer-apollo = { path = "crates/apollo" }
+xlayer-reth-import = { path = "crates/import" }
+xlayer-reth-export = { path = "crates/export" }
 
 # ------------------------------------------------------------------------------
 # Reth Dependencies (points to our fork)
