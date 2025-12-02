@@ -18,16 +18,24 @@ path = "main.rs"
 [dependencies]
 # internal
 xlayer-chainspec.workspace = true
-xlayer-reth-import.workspace = true
-xlayer-reth-export.workspace = true
 
 # reth
 reth-optimism-node.workspace = true
 reth-optimism-evm.workspace = true
 reth-optimism-chainspec.workspace = true
+reth-cli.workspace = true
+reth-cli-commands.workspace = true
 reth-cli-util.workspace = true
 reth-optimism-consensus.workspace = true
 reth-tracing.workspace = true
+reth-node-core.workspace = true
+reth-chainspec.workspace = true
+reth-provider.workspace = true
+reth-storage-api.workspace = true
+
+# alloy
+alloy-consensus.workspace = true
+alloy-rlp.workspace = true
 
 # tokio
 tokio.workspace = true
@@ -35,9 +43,11 @@ tokio.workspace = true
 # misc
 clap.workspace = true
 tracing.workspace = true
+eyre.workspace = true
+rayon = "1.10"
+flate2 = "1.0"
+ctrlc = "3.4"
 
 [features]
 default = []
-jemalloc = ["xlayer-reth-import/jemalloc", "xlayer-reth-export/jemalloc", "reth-cli-util/jemalloc"]
-asm-keccak = ["xlayer-reth-import/asm-keccak", "xlayer-reth-export/asm-keccak"]
-
+jemalloc = ["reth-cli-util/jemalloc"]

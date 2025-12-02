@@ -16,9 +16,7 @@ members = [
     "crates/node",
     "crates/apollo",
     "crates/chainspec",
-    "crates/export",
     "crates/innertx",
-    "crates/import",
     "crates/rpc",
     "crates/tests",
     "bin/tools",
@@ -60,8 +58,6 @@ xlayer-innertx = { path = "crates/innertx" }
 xlayer-reth-node = { path = "crates/node" }
 xlayer-rpc = { path = "crates/rpc" }
 xlayer-apollo = { path = "crates/apollo" }
-xlayer-reth-import = { path = "crates/import" }
-xlayer-reth-export = { path = "crates/export" }
 
 # ------------------------------------------------------------------------------
 # Reth Dependencies (points to our fork)

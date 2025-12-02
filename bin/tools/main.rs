@@ -10,16 +10,10 @@ use std::{process::ExitCode, sync::Arc};
 use tracing::{error, info};
 use xlayer_chainspec::XLayerChainSpecParser;
 
-mod import {
-    pub use xlayer_reth_import::ImportCommand;
-}
-
-mod export {
-    pub use xlayer_reth_export::ExportCommand;
-}
-
-use import::ImportCommand;
+mod export;
+mod import;
 use export::ExportCommand;
+use import::ImportCommand;
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
@@ -87,4 +81,3 @@ async fn main() -> ExitCode {
         }
     }
 }
-
