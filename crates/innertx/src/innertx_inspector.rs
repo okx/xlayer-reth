@@ -1,4 +1,4 @@
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_primitives::{hex, Address, Bytes, U256};
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 use reth_revm::{
     interpreter::{
@@ -8,7 +8,33 @@ use reth_revm::{
     Inspector,
 };
 use revm_context_interface::{ContextTr, LocalContextTr};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+/// Serialize Bytes as empty string if empty, otherwise as hex string
+fn serialize_bytes_legacy<S>(bytes: &Bytes, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    if bytes.is_empty() {
+        serializer.serialize_str("")
+    } else {
+        serializer.serialize_str(&format!("0x{}", hex::encode(bytes)))
+    }
+}
+
+/// Deserialize Bytes from empty string or hex string
+fn deserialize_bytes_legacy<'de, D>(deserializer: D) -> Result<Bytes, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    if s.is_empty() {
+        Ok(Bytes::default())
+    } else {
+        let hex_str = s.strip_prefix("0x").unwrap_or(&s);
+        hex::decode(hex_str).map(Bytes::from).map_err(serde::de::Error::custom)
+    }
+}
 
 #[derive(Debug, Clone, Default, RlpEncodable, RlpDecodable, Serialize, Deserialize)]
 pub struct InternalTransaction {
@@ -20,7 +46,15 @@ pub struct InternalTransaction {
     code_address: String,
     from: String,
     to: String,
+    #[serde(
+        serialize_with = "serialize_bytes_legacy",
+        deserialize_with = "deserialize_bytes_legacy"
+    )]
     input: Bytes,
+    #[serde(
+        serialize_with = "serialize_bytes_legacy",
+        deserialize_with = "deserialize_bytes_legacy"
+    )]
     output: Bytes,
     is_error: bool,
     gas: u64,
