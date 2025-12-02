@@ -16,11 +16,10 @@ members = [
     "crates/node",
     "crates/apollo",
     "crates/chainspec",
-    "crates/export",
     "crates/innertx",
-    "crates/import",
     "crates/rpc",
     "crates/tests",
+    "bin/tools",
 ]
 default-members = ["crates/node"]
 

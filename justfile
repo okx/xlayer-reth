@@ -185,17 +185,11 @@ sync-dev-template reth_path:
 build-maxperf:
     RUSTFLAGS="-C target-cpu=native" cargo build --profile maxperf --features jemalloc,asm-keccak
 
-build-import:
-    cargo build --release --package xlayer-reth-import
+build-tools:
+    cargo build --release --package xlayer-reth-tools
 
-build-import-maxperf:
-    RUSTFLAGS="-C target-cpu=native" cargo build --package xlayer-reth-import --profile maxperf --features jemalloc,asm-keccak
-
-build-export:
-    cargo build --release --package xlayer-reth-export
-
-build-export-maxperf:
-    RUSTFLAGS="-C target-cpu=native" cargo build --package xlayer-reth-export --profile maxperf --features jemalloc,asm-keccak
+build-tools-maxperf:
+    RUSTFLAGS="-C target-cpu=native" cargo build --package xlayer-reth-tools --profile maxperf --features jemalloc,asm-keccak
 
 install:
     cargo install --path crates/node --bin xlayer-reth-node --force --locked --profile release
@@ -203,17 +197,11 @@ install:
 install-maxperf:
     RUSTFLAGS="-C target-cpu=native" cargo install --path crates/node --bin xlayer-reth-node --force --locked --profile maxperf --features jemalloc,asm-keccak
 
-install-import:
-    cargo install --path crates/import --bin xlayer-reth-import --force --locked --profile release
+install-tools:
+    cargo install --path bin/tools --bin xlayer-reth-tools --force --locked --profile release
 
-install-import-maxperf:
-    RUSTFLAGS="-C target-cpu=native" cargo install --path crates/import --bin xlayer-reth-import --force --locked --profile maxperf --features jemalloc,asm-keccak
-
-install-export:
-    cargo install --path crates/export --bin xlayer-reth-export --force --locked --profile release
-
-install-export-maxperf:
-    RUSTFLAGS="-C target-cpu=native" cargo install --path crates/export --bin xlayer-reth-export --force --locked --profile maxperf --features jemalloc,asm-keccak
+install-tools-maxperf:
+    RUSTFLAGS="-C target-cpu=native" cargo install --path bin/tools --bin xlayer-reth-tools --force --locked --profile maxperf --features jemalloc,asm-keccak
 
 clean:
     cargo clean

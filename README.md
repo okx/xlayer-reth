@@ -113,6 +113,10 @@ just watch-test
 
 For other tests, please read [tests/README.md](tests/README.md).
 
+## Import and Export Tool
+
+Please read [bin/tools/README.md](bin/tools/README.md).
+
 ## Working with Local Reth Dependencies
 
 XLayer Reth depends on the [OKX Reth fork](https://github.com/okx/reth). For development, you can work with either git dependencies or a local Reth clone.

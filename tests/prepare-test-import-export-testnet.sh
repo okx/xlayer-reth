@@ -20,7 +20,7 @@ if [ ! -d "$TESTNET_PATH" ]; then
     exit 1
 fi
 
-TESTNET_EXPORT_FILE="exported-testnet.rlp"
+TESTNET_EXPORT_FILE="testnet-exported.rlp"
 TESTNET_GENESIS_FILE="genesis-testnet-reth.json"
 TESTNET_GENESIS_URL="https://okg-pub-hk.oss-cn-hongkong.aliyuncs.com/cdn/chain/xlayer/snapshot/merged.genesis.json.tar.gz"
 TESTNET_NEXT_BLOCK_NUMBER=12241700

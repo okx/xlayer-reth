@@ -1,59 +1,53 @@
 [package]
-name = "xlayer-reth-export"
+name = "xlayer-reth-tools"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "XLayer Reth Export Command"
+description = "XLayer Reth Tools - Import and Export utilities"
 
 [lints]
 workspace = true
 
 [[bin]]
-name = "xlayer-reth-export"
-path = "src/main.rs"
+name = "xlayer-reth-tools"
+path = "main.rs"
 
 [dependencies]
 # internal
 xlayer-chainspec.workspace = true
 
 # reth
-reth.workspace = true
 reth-optimism-node.workspace = true
-reth-optimism-cli.workspace = true
-reth-primitives.workspace = true
+reth-optimism-evm.workspace = true
 reth-optimism-chainspec.workspace = true
-reth-cli-util.workspace = true
-reth-chainspec.workspace = true
 reth-cli.workspace = true
 reth-cli-commands.workspace = true
-reth-node-core.workspace = true
-reth-provider.workspace = true
-reth-db.workspace = true
-reth-storage-api.workspace = true
-reth-primitives-traits.workspace = true
+reth-cli-util.workspace = true
+reth-optimism-consensus.workspace = true
 reth-tracing.workspace = true
+reth-node-core.workspace = true
+reth-chainspec.workspace = true
+reth-provider.workspace = true
+reth-storage-api.workspace = true
+
+# alloy
+alloy-consensus.workspace = true
+alloy-rlp.workspace = true
 
 # tokio
 tokio.workspace = true
-
-# alloy
-alloy-primitives.workspace = true
-alloy-consensus.workspace = true
-alloy-rlp.workspace = true
 
 # misc
 clap.workspace = true
 tracing.workspace = true
 eyre.workspace = true
-ctrlc = "3.4"
+rayon = "1.10"
 flate2 = "1.0"
-rayon = "1.11.0"
+ctrlc = "3.4"
 
 [features]
 default = []
-jemalloc = ["reth-cli-util/jemalloc", "reth-optimism-cli/jemalloc"]
-asm-keccak = ["alloy-primitives/asm-keccak"]
-
+jemalloc = ["reth-cli-util/jemalloc"]

@@ -12767,84 +12767,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "xlayer-reth-export"
-version = "0.1.0"
-dependencies = [
- "alloy-consensus",
- "alloy-primitives",
- "alloy-rlp",
- "clap",
- "ctrlc",
- "eyre",
- "flate2",
- "rayon",
- "reth",
- "reth-chainspec",
- "reth-cli",
- "reth-cli-commands",
- "reth-cli-util",
- "reth-db",
- "reth-node-core",
- "reth-optimism-chainspec",
- "reth-optimism-cli",
- "reth-optimism-node",
- "reth-primitives",
- "reth-primitives-traits",
- "reth-provider",
- "reth-storage-api",
- "reth-tracing",
- "tokio",
- "tracing",
- "xlayer-chainspec",
-]
-
-[[package]]
-name = "xlayer-reth-import"
-version = "0.1.0"
-dependencies = [
- "alloy-primitives",
- "chrono",
- "clap",
- "eyre",
- "futures",
- "futures-util",
- "itertools 0.14.0",
- "jsonrpsee",
- "metrics",
- "metrics-derive",
- "once_cell",
- "reqwest 0.12.24",
- "reth",
- "reth-chainspec",
- "reth-cli",
- "reth-cli-commands",
- "reth-cli-util",
- "reth-exex",
- "reth-node-core",
- "reth-optimism-chainspec",
- "reth-optimism-cli",
- "reth-optimism-consensus",
- "reth-optimism-evm",
- "reth-optimism-node",
- "reth-optimism-primitives",
- "reth-optimism-rpc",
- "reth-primitives",
- "reth-rpc-convert",
- "reth-rpc-eth-api",
- "reth-tracing",
- "serde",
- "serde_json",
- "time 0.3.44",
- "tokio",
- "tokio-stream",
- "tokio-tungstenite",
- "tracing",
- "url",
- "uuid",
- "xlayer-chainspec",
-]
-
-[[package]]
 name = "xlayer-reth-node"
 version = "0.1.0"
 dependencies = [
@@ -12885,6 +12807,34 @@ dependencies = [
  "xlayer-chainspec",
  "xlayer-innertx",
  "xlayer-rpc",
+]
+
+[[package]]
+name = "xlayer-reth-tools"
+version = "0.1.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-rlp",
+ "clap",
+ "ctrlc",
+ "eyre",
+ "flate2",
+ "rayon",
+ "reth-chainspec",
+ "reth-cli",
+ "reth-cli-commands",
+ "reth-cli-util",
+ "reth-node-core",
+ "reth-optimism-chainspec",
+ "reth-optimism-consensus",
+ "reth-optimism-evm",
+ "reth-optimism-node",
+ "reth-provider",
+ "reth-storage-api",
+ "reth-tracing",
+ "tokio",
+ "tracing",
+ "xlayer-chainspec",
 ]
 
 [[package]]
