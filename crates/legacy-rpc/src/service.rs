@@ -70,7 +70,7 @@ fn need_parse_block(method: &str) -> bool {
 
 /// Need to fetch block num from DB/API
 #[inline]
-fn need_get_block(method: &str) -> bool {
+fn can_use_block_hash_as_param(method: &str) -> bool {
     matches!(
         method,
         "eth_getBlockReceipts"
@@ -86,7 +86,7 @@ fn need_get_block(method: &str) -> bool {
 }
 
 #[inline]
-fn should_try_local_then_legacy(method: &str) -> bool {
+fn need_try_local_then_legacy(method: &str) -> bool {
     matches!(
         method,
         "eth_getTransactionByHash"
@@ -175,7 +175,7 @@ where
                 return crate::get_logs::handle_eth_get_logs(req, client, config, inner).await;
             } else if method == "eth_getInternalTransactions" {
                 return handle_eth_get_internal_transactions(req, client, config, inner).await;
-            } else if should_try_local_then_legacy(method) {
+            } else if need_try_local_then_legacy(method) {
                 return handle_try_local_then_legacy(req, client, config, inner).await;
             } else if need_parse_block(method) {
                 return handle_block_param_methods(req, client, config, inner).await;
@@ -274,7 +274,7 @@ where
     let cutoff_block = config.cutoff_block;
     if let Some(block_param) = block_param {
         let service = LegacyRpcRouterService { inner: inner.clone(), config, client };
-        if need_get_block(method) && crate::is_block_hash(&block_param) {
+        if can_use_block_hash_as_param(method) && crate::is_block_hash(&block_param) {
             let res = service.call_eth_get_block_by_hash(&block_param, false).await;
             match res {
                 Ok(n) => {
