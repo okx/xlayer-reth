@@ -96,10 +96,6 @@ impl XLayerInterceptArgs {
 /// X Layer legacy RPC arguments
 #[derive(Debug, Clone, Args, PartialEq, Eq, Default)]
 pub struct LegacyRpcArgs {
-    /// Enable legacy RPC
-    #[arg(long = "rpc.legacy-enabled", default_value_t = false)]
-    pub legacy_rpc_enabled: bool,
-
     /// Legacy RPC endpoint URL for routing historical data
     #[arg(long = "rpc.legacy-url", value_name = "URL")]
     pub legacy_rpc_url: Option<String>,
