@@ -1,4 +1,5 @@
 use clap::Args;
+use std::time::Duration;
 
 /// X Layer specific configuration flags
 #[derive(Debug, Clone, Args, PartialEq, Eq, Default)]
@@ -11,6 +12,10 @@ pub struct XLayerArgs {
     /// Enable Apollo
     #[command(flatten)]
     pub apollo: ApolloArgs,
+
+    /// Enable legacy rpc routing
+    #[command(flatten)]
+    pub legacy: LegacyRpcArgs,
 
     /// Enable inner transaction capture and storage
     #[arg(
@@ -86,6 +91,24 @@ impl XLayerInterceptArgs {
 
         Ok(())
     }
+}
+
+/// X Layer legacy RPC arguments
+#[derive(Debug, Clone, Args, PartialEq, Eq, Default)]
+pub struct LegacyRpcArgs {
+    /// Legacy RPC endpoint URL for routing historical data
+    #[arg(long = "rpc.legacy-url", value_name = "URL")]
+    pub legacy_rpc_url: Option<String>,
+
+    /// Timeout for legacy RPC requests
+    #[arg(
+        long = "rpc.legacy-timeout",
+        value_name = "DURATION",
+        default_value = "30s",
+        value_parser = humantime::parse_duration,
+        requires = "legacy_rpc_url"
+    )]
+    pub legacy_rpc_timeout: Duration,
 }
 
 /// Apollo configuration arguments

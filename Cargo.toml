@@ -19,7 +19,9 @@ members = [
     "crates/innertx",
     "crates/rpc",
     "crates/tests",
-    "bin/tools",
+    "crates/legacy-rpc",
+
+    "bin/tools"
 ]
 default-members = ["crates/node"]
 
@@ -58,6 +60,7 @@ xlayer-innertx = { path = "crates/innertx" }
 xlayer-reth-node = { path = "crates/node" }
 xlayer-rpc = { path = "crates/rpc" }
 xlayer-apollo = { path = "crates/apollo" }
+xlayer-legacy-rpc = { path = "crates/legacy-rpc" }
 
 # ------------------------------------------------------------------------------
 # Reth Dependencies (points to our fork)
@@ -152,9 +155,11 @@ tokio-tungstenite = { version = "0.26.2", features = ["native-tls"] }
 futures = "0.3"
 futures-util = "0.3"
 reqwest = { version = "0.12", features = ["json", "stream"] }
+tower = "0.5"
 
 # rpc
 jsonrpsee = "0.26.0"
+jsonrpsee-types = "0.26.0"
 
 # misc
 chrono = "0.4.41"
@@ -168,6 +173,7 @@ once_cell = "1.19"
 serde = "1"
 serde_json = "1.0"
 tempfile = "3.20"
+humantime = "2.1"
 time = { version = "0.3.36", features = ["macros", "formatting", "parsing"] }
 tracing = { version = "0.1.41" }
 url = "2.5"

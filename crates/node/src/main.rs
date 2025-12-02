@@ -24,6 +24,7 @@ use xlayer_innertx::{
     exex_utils::post_exec_exex_inner_tx,
     rpc_utils::{XlayerInnerTxExt, XlayerInnerTxExtApiServer},
 };
+use xlayer_legacy_rpc::{layer::LegacyRpcRouterLayer, LegacyRpcRouterConfig};
 use xlayer_rpc::xlayer_ext::{XlayerRpcExt, XlayerRpcExtApiServer};
 
 #[global_allocator]
@@ -113,6 +114,21 @@ fn main() {
                 }
             }
 
+            let genesis_block = builder.config().chain.genesis().number.unwrap_or_default();
+            info!("XLayer genesis block = {}", genesis_block);
+
+            let legacy_config = LegacyRpcRouterConfig {
+                enabled: args.xlayer_args.legacy.legacy_rpc_url.is_some(),
+                legacy_endpoint: args.xlayer_args.legacy.legacy_rpc_url.unwrap_or_default(),
+                cutoff_block: genesis_block,
+                timeout: args.xlayer_args.legacy.legacy_rpc_timeout,
+            };
+
+            // Build add-ons with RPC middleware
+            // If not enabled, the layer will not do any re-routing.
+            let add_ons = op_node.add_ons()
+                .with_rpc_middleware(LegacyRpcRouterLayer::new(legacy_config));
+
             if args.xlayer_args.apollo.enabled {
                 run_apollo(&args.xlayer_args.apollo).await;
             }
@@ -120,10 +136,9 @@ fn main() {
             let NodeHandle { node: _node, node_exit_future } = builder
                 .with_types_and_provider::<OpNode, BlockchainProvider<_>>()
                 .with_components(op_node.components())
-                .with_add_ons(op_node.add_ons())
+                .with_add_ons(add_ons)
                 .on_component_initialized(move |_ctx| {
                     // TODO: Initialize XLayer components here
-                    // - Bridge intercept configuration
                     // - Inner transaction tracking
                     Ok(())
                 })
@@ -134,17 +149,16 @@ fn main() {
                 )
                 .extend_rpc_modules(move |ctx| {
                     // TODO: Add XLayer RPC extensions here
-                    // - Bridge intercept RPC methods
                     // - Inner transaction RPC methods
+                    let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
 
-                    // TODO: implement legacy rpc routing for innertx rpc
-                    let new_op_eth_api = ctx.registry.eth_api().clone();
-                    let custom_rpc = XlayerInnerTxExt { backend: Arc::new(new_op_eth_api.clone()) };
-                    ctx.modules.merge_configured(custom_rpc.into_rpc())?;
-                    info!(target:"reth::cli", "xlayer innertx rpc enabled");
-
+                    if args.xlayer_args.enable_inner_tx {
+                        let custom_rpc = XlayerInnerTxExt { backend: new_op_eth_api.clone() };
+                        ctx.modules.merge_configured(custom_rpc.into_rpc())?;
+                        info!(target:"reth::cli", "xlayer innertx rpc enabled");
+                    }
                     // Register XLayer RPC
-                    let xlayer_rpc = XlayerRpcExt { backend: Arc::new(new_op_eth_api) };
+                    let xlayer_rpc = XlayerRpcExt { backend: new_op_eth_api };
                     ctx.modules.merge_configured(xlayer_rpc.into_rpc())?;
                     info!(target:"reth::cli", "xlayer rpc extension enabled");
 
