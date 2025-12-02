@@ -64,6 +64,7 @@ time.workspace = true
 chrono.workspace = true
 once_cell.workspace = true
 humantime.workspace = true
+tower.workspace = true
 
 [features]
 default = []

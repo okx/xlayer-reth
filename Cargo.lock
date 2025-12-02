@@ -12770,11 +12770,13 @@ dependencies = [
 name = "xlayer-legacy-rpc"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "futures",
  "jsonrpsee",
  "jsonrpsee-types",
  "reqwest 0.12.24",
  "serde_json",
+ "thiserror 2.0.17",
  "tokio",
  "tower",
  "tracing",
@@ -12815,6 +12817,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-tungstenite",
+ "tower",
  "tracing",
  "url",
  "uuid",

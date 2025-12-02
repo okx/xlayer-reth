@@ -1,6 +1,7 @@
 pub mod get_logs;
 pub mod layer;
 pub mod service;
+pub mod multi_address_middleware;
 
 use std::sync::Arc;
 

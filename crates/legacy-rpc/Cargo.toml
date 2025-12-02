@@ -16,6 +16,8 @@ jsonrpsee-types.workspace = true
 jsonrpsee = { workspace = true, features = ["server", "client"] }
 tokio.workspace = true
 futures.workspace = true
+alloy-primitives.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

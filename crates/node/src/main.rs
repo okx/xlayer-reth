@@ -25,6 +25,7 @@ use xlayer_innertx::{
     rpc_utils::{XlayerInnerTxExt, XlayerInnerTxExtApiServer},
 };
 use xlayer_legacy_rpc::{layer::LegacyRpcRouterLayer, LegacyRpcRouterConfig};
+use xlayer_legacy_rpc::multi_address_middleware::AddressMiddlewareLayer;
 use xlayer_rpc::xlayer_ext::{XlayerRpcExt, XlayerRpcExtApiServer};
 
 #[global_allocator]
@@ -125,9 +126,13 @@ fn main() {
             };
 
             // Build add-ons with RPC middleware
+            let address_layer = AddressMiddlewareLayer::new();
             // If not enabled, the layer will not do any re-routing.
+            let legacy_layer = LegacyRpcRouterLayer::new(legacy_config);
+            let combined_layer = tower::layer::util::Stack::new(address_layer, legacy_layer);
+
             let add_ons = op_node.add_ons()
-                .with_rpc_middleware(LegacyRpcRouterLayer::new(legacy_config));
+                .with_rpc_middleware(combined_layer);
 
             if args.xlayer_args.apollo.enabled {
                 run_apollo(&args.xlayer_args.apollo).await;
