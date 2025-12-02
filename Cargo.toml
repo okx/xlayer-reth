@@ -21,7 +21,7 @@ members = [
     "crates/import",
     "crates/rpc",
     "crates/tests",
-		"crates/legacy-rpc"
+    "crates/legacy-rpc"
 ]
 default-members = ["crates/node"]
 
