@@ -115,7 +115,7 @@ fn main() {
             }
 
             let chain_spec = builder.config().chain.clone();
-            let genesis_block = chain_spec.genesis().number.unwrap();
+            let genesis_block = chain_spec.genesis().number.unwrap_or_default();
             info!("XLayer genesis block = {}", genesis_block);
 
             let legacy_config = LegacyRpcRouterConfig {
