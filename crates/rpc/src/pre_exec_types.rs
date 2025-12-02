@@ -117,16 +117,7 @@ pub struct PreExecResult {
     /// Gas used
     pub gas_used: u64,
     /// Block number
-    #[serde(serialize_with = "serialize_u256_as_hex")]
     pub block_number: U256,
-}
-
-/// Serialize U256 as hex string
-fn serialize_u256_as_hex<S>(value: &U256, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    serializer.serialize_str(&format!("{:#x}", value))
 }
 
 impl PreExecResult {
