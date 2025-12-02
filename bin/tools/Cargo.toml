@@ -38,6 +38,6 @@ tracing.workspace = true
 
 [features]
 default = []
-jemalloc = ["reth-cli-util/jemalloc"]
-asm-keccak = []
+jemalloc = ["xlayer-reth-import/jemalloc", "xlayer-reth-export/jemalloc", "reth-cli-util/jemalloc"]
+asm-keccak = ["xlayer-reth-import/asm-keccak", "xlayer-reth-export/asm-keccak"]
 
