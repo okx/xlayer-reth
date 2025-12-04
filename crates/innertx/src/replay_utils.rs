@@ -23,7 +23,7 @@ use crate::{
     structs::{BlockTable, TxTable},
 };
 
-fn replay_and_index_block<P, E, N>(
+pub fn replay_and_index_block<P, E, N>(
     provider: P,
     evm_config: E,
     block: RecoveredBlock<<N as NodePrimitives>::Block>,
@@ -90,7 +90,7 @@ where
     Ok(())
 }
 
-fn remove_block<E, N>(_: E, block: RecoveredBlock<<N as NodePrimitives>::Block>) -> Result<()>
+pub fn remove_block<E, N>(_: E, block: RecoveredBlock<<N as NodePrimitives>::Block>) -> Result<()>
 where
     E: ConfigureEvm<Primitives = N> + Send + Sync + 'static,
     N: NodePrimitives + 'static,
@@ -127,7 +127,7 @@ pub async fn post_exec_exex_inner_tx<Node: FullNodeComponents>(
                     }
                 }
 
-                // Tell Reth “I’m done up to this height” (unblocks pruning & WAL growth):
+                // Tell Reth "I'm done up to this height" (unblocks pruning & WAL growth):
                 ctx.events.send(ExExEvent::FinishedHeight(new.tip().num_hash()))?;
             }
             ExExNotification::ChainReorged { old, new } => {

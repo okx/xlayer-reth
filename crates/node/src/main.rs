@@ -21,8 +21,8 @@ use xlayer_chainspec::XLayerChainSpecParser;
 
 use xlayer_innertx::{
     db_utils::initialize_inner_tx_db,
-    exex_utils::post_exec_exex_inner_tx,
     rpc_utils::{XlayerInnerTxExt, XlayerInnerTxExtApiServer},
+    subscriber_utils::initialize_innertx_replay,
 };
 use xlayer_legacy_rpc::{layer::LegacyRpcRouterLayer, LegacyRpcRouterConfig};
 use xlayer_rpc::xlayer_ext::{XlayerRpcExt, XlayerRpcExtApiServer};
@@ -144,25 +144,24 @@ fn main() {
                     // - Inner transaction tracking
                     Ok(())
                 })
-                .install_exex_if(
-                    args.xlayer_args.enable_inner_tx,
-                    "xlayer-innertx",
-                    move |ctx| async move { Ok(post_exec_exex_inner_tx(ctx)) },
-                )
                 .extend_rpc_modules(move |ctx| {
-                    // TODO: Add XLayer RPC extensions here
-                    // - Inner transaction RPC methods
                     let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
-
                     if args.xlayer_args.enable_inner_tx {
+                        // Initialize inner tx replay handler (uses canonical_state_stream)
+                        // Note: This only processes real-time blocks, NOT synced blocks from Pipeline
+                        initialize_innertx_replay(ctx.node());
+                        info!(target: "reth::cli", "xlayer inner tx replay initialized (canonical_state_stream mode)");
                         let custom_rpc = XlayerInnerTxExt { backend: new_op_eth_api.clone() };
+                        
+                        // Register inner tx RPC
                         ctx.modules.merge_configured(custom_rpc.into_rpc())?;
-                        info!(target:"reth::cli", "xlayer innertx rpc enabled");
+                        info!(target: "reth::cli", "xlayer innertx rpc enabled");
                     }
+
                     // Register XLayer RPC
                     let xlayer_rpc = XlayerRpcExt { backend: new_op_eth_api };
                     ctx.modules.merge_configured(xlayer_rpc.into_rpc())?;
-                    info!(target:"reth::cli", "xlayer rpc extension enabled");
+                    info!(target: "reth::cli", "xlayer rpc extension enabled");
 
                     info!(message = "XLayer RPC modules initialized");
                     Ok(())

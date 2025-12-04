@@ -12749,6 +12749,7 @@ dependencies = [
  "futures",
  "jsonrpsee",
  "once_cell",
+ "reth-chain-state",
  "reth-db",
  "reth-evm",
  "reth-exex",
