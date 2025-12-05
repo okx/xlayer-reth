@@ -375,3 +375,13 @@ pub async fn txpool_status(client_rpc: &HttpClient) -> Result<Value> {
     .await??;
     Ok(result)
 }
+
+/// For eth_flashblocksEnabled
+pub async fn eth_flashblocks_enabled(client_rpc: &HttpClient) -> Result<bool> {
+    let result: bool = tokio::time::timeout(
+        RPC_TIMEOUT,
+        client_rpc.request("eth_flashblocksEnabled", jsonrpsee::rpc_params![]),
+    )
+    .await??;
+    Ok(result)
+}
