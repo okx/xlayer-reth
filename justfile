@@ -192,10 +192,10 @@ build-tools-maxperf:
     RUSTFLAGS="-C target-cpu=native" cargo build --package xlayer-reth-tools --profile maxperf --features jemalloc,asm-keccak
 
 install:
-    cargo install --path crates/node --bin xlayer-reth-node --force --locked --profile release
+    cargo install --path bin/node --bin xlayer-reth-node --force --locked --profile release
 
 install-maxperf:
-    RUSTFLAGS="-C target-cpu=native" cargo install --path crates/node --bin xlayer-reth-node --force --locked --profile maxperf --features jemalloc,asm-keccak
+    RUSTFLAGS="-C target-cpu=native" cargo install --path bin/node --bin xlayer-reth-node --force --locked --profile maxperf --features jemalloc,asm-keccak
 
 install-tools:
     cargo install --path bin/tools --bin xlayer-reth-tools --force --locked --profile release

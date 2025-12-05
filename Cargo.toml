@@ -13,7 +13,6 @@ repository = "https://github.com/okx/xlayer-reth.git"
 [workspace]
 resolver = "2"
 members = [
-    "crates/node",
     "crates/apollo",
     "crates/chainspec",
     "crates/innertx",
@@ -21,9 +20,10 @@ members = [
     "crates/tests",
     "crates/legacy-rpc",
 
-    "bin/tools"
+    "bin/tools",
+    "bin/node"
 ]
-default-members = ["crates/node"]
+default-members = ["bin/node"]
 
 [workspace.lints]
 
@@ -57,7 +57,7 @@ codegen-units = 1
 
 xlayer-chainspec = { path = "crates/chainspec" }
 xlayer-innertx = { path = "crates/innertx" }
-xlayer-reth-node = { path = "crates/node" }
+xlayer-reth-node = { path = "bin/node" }
 xlayer-rpc = { path = "crates/rpc" }
 xlayer-apollo = { path = "crates/apollo" }
 xlayer-legacy-rpc = { path = "crates/legacy-rpc" }

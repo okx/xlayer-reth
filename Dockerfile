@@ -38,10 +38,10 @@ ENV RUSTFLAGS="$RUSTFLAGS"
 ARG FEATURES=""
 ENV FEATURES=$FEATURES
 
-RUN cargo chef cook --profile $BUILD_PROFILE --features "$FEATURES" --recipe-path recipe.json --manifest-path /app/crates/node/Cargo.toml
+RUN cargo chef cook --profile $BUILD_PROFILE --features "$FEATURES" --recipe-path recipe.json --manifest-path /app/bin/node/Cargo.toml
 
 COPY . .
-RUN cargo build --profile $BUILD_PROFILE --bin xlayer-reth-node --manifest-path /app/crates/node/Cargo.toml
+RUN cargo build --profile $BUILD_PROFILE --bin xlayer-reth-node --manifest-path /app/bin/node/Cargo.toml
 
 # Copy binary to a fixed location
 RUN OUTPUT_DIR=$(if [ "$BUILD_PROFILE" = "dev" ] || [ "$BUILD_PROFILE" = "test" ]; then echo debug; else echo "$BUILD_PROFILE"; fi) && \
