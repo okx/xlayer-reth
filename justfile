@@ -217,7 +217,7 @@ build-docker suffix="":
     fi
     TAG="op-reth:$GITHASH$SUFFIX"
     echo "🐳 Building XLayer Reth Docker image: $TAG ..."
-    docker build -t $TAG -f Dockerfile .
+    docker build -t $TAG -f DockerfileOp .
     docker tag $TAG op-reth:latest
     echo "🔖 Tagged $TAG as op-reth:latest"
 
