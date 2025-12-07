@@ -993,7 +993,9 @@ async fn fb_subscription_test() -> Result<()> {
                         continue;
                     };
 
-                    let block_num = notification["metadata"]["block_number"].as_u64().unwrap_or(0);
+                    let block_num = notification["metadata"]["block_number"]
+                        .as_u64()
+                        .expect("Failed to get block number");
 
                     assert!(
                         block_num >= current_block_number,
