@@ -12332,10 +12332,12 @@ dependencies = [
  "jsonrpsee",
  "revm",
  "rstest",
+ "scopeguard",
  "serde_json",
  "tempfile",
  "tokio",
  "tokio-stream",
+ "tokio-tungstenite",
  "tracing",
  "url",
 ]
