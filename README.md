@@ -1,97 +1,123 @@
 # XLayer Reth
 
-XLayer Reth is a customized implementation of [Reth](https://github.com/paradigmxyz/reth) optimized for the XLayer network, an Optimism-based Layer 2 solution.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Rust](https://img.shields.io/badge/Rust-1.88+-orange.svg)](https://www.rust-lang.org/)
+[![GitHub release](https://img.shields.io/github/v/release/okx/xlayer-reth)](https://github.com/okx/xlayer-reth/releases)
+
 
 ## Overview
 
+XLayer Reth is a customized implementation of [Reth](https://github.com/paradigmxyz/reth) optimized for the XLayer network, an Optimism-based Layer 2 solution.
+
 This project provides a high-performance, production-ready Ethereum execution client tailored for XLayer's specific requirements. It builds upon the upstream Reth codebase with custom optimizations and features for the XLayer network.
 
-### Why We Maintain a Fork
+### Why built on top of Reth
 
-XLayer Reth uses a [fork of Reth](https://github.com/okx/reth) instead of depending directly on upstream for the following reasons:
+XLayer Reth is built on top of [Reth](https://github.com/paradigmxyz/reth), extending it with XLayer-specific functionality:
 
-- **Custom Features**: Ability to implement XLayer-specific features and optimizations that may not be suitable for upstream
-- **Rapid Development**: Control over the codebase allows us to merge critical changes quickly without waiting for upstream review cycles
-- **Flexibility**: Direct access to modify internal code when needed for urgent fixes or network-specific requirements
-- **Stability**: Independence from upstream breaking changes while still being able to selectively integrate improvements
+- **High Performance & Full OP Support**: Leverage Reth's blazing-fast execution engine and complete Optimism feature set out of the box
+- **XLayer Customization**: Implement XLayer-specific features and optimizations independently without impacting upstream development
+- **Seamless Upstream Sync**: Easily integrate the latest Reth updates, improvements, and security patches
+- **Ecosystem Contribution**: Rapidly experiment with new features and bug fixes, contributing valuable improvements back to upstream Reth
 
-## Architecture
+## Getting Started
 
-XLayer Reth is structured as a Rust workspace with the following components:
+### Prerequisites
 
-- **xlayer-reth-node**: The main binary crate that runs the XLayer Reth node
+- **Rust**: Version 1.88 or higher
+- **[just](https://github.com/casey/just)**: Command runner (install with `cargo install just`)
+- **Docker** (optional): For containerized builds
 
-## Dependencies
+### Building from Source
 
-### Core Components
-
-- **Reth**: Based on [OKX's Reth fork](https://github.com/okx/reth) at version 1.9.2
-- **Revm**: EVM implementation (v31.0.2)
-- **Alloy**: Ethereum library primitives (v1.0.41)
-- **OP Alloy**: Optimism-specific extensions (v0.22.0)
-
-### Key Features
-
-- Optimism rollup support via `reth-optimism-*` crates
-- Full async runtime powered by Tokio
-- JSON-RPC support via `jsonrpsee`
-- Comprehensive metrics and tracing capabilities
-
-## Build Profiles
-
-### Release Profile
-Mimics the upstream Reth release profile:
-- Thin LTO for faster builds
-- Optimized for production use
-- Stripped symbols for smaller binaries
-
-### Maxperf Profile
-Maximum performance build:
-- Fat LTO for maximum optimization
-- Single codegen unit
-- Ideal for production deployments where build time is not a concern
-
-## Building
-
-We use [just](https://github.com/casey/just) as our command runner. Install it with:
+#### Standard Release Build
 
 ```bash
+# Install just command runner
 cargo install just
-```
 
-### Build Commands
-
-```bash
 # List all available commands
 just
 
 # Standard release build
 just build
 
-# Maximum performance build (with jemalloc)
+# Maximum performance build (recommended for production)
 just build-maxperf
-
-# Clean build artifacts
-just clean
 ```
 
-### Install Commands
+#### Build Profiles
 
-Install the binary to `~/.cargo/bin` (or `$CARGO_HOME/bin`):
+| Profile | Command | Description |
+|---------|---------|-------------|
+| `release` | `just build` | Thin LTO, optimized for fast builds |
+| `maxperf` | `just build-maxperf` | Fat LTO, single codegen unit, jemalloc - ideal for production |
+
+#### Install to System
 
 ```bash
-# Install standard release build
+# Install standard release build to ~/.cargo/bin
 just install
 
 # Install maximum performance build
 just install-maxperf
 ```
 
-After installation, you can run the node from anywhere:
+After installation, run the node from anywhere:
 
 ```bash
 xlayer-reth-node --help
 ```
+
+### Docker Build
+
+Build a Docker image with the following command:
+
+```bash
+# Build Docker image (tagged with git commit hash)
+just build-docker
+
+# Build with custom suffix
+just build-docker mysuffix
+
+# The image will be tagged as:
+# - op-reth:<git-hash>
+# - op-reth:latest
+```
+
+## Initialization
+
+Before running the node for the first time, you need to initialize the database with the genesis block.
+
+```bash
+xlayer-reth-node init --chain /path/to/genesis.json --datadir /data/xlayer
+```
+
+> **Note**: The `init` command only needs to be run once before the first start. It creates the database and writes the genesis block.
+
+## Configuration
+
+XLayer Reth inherits all configuration options from [Reth](https://reth.rs/) and [OP Reth](https://github.com/paradigmxyz/reth). Run `xlayer-reth-node --help` for a complete list.
+
+Below are the XLayer-specific configuration options:
+
+```bash
+# XLayer Options
+--xlayer.enable-innertx              # Enable inner transaction capture and storage (default: false)
+
+# Legacy RPC Routing
+--rpc.legacy-url <URL>               # Legacy RPC endpoint for historical data
+--rpc.legacy-timeout <DUR>           # Timeout for legacy RPC requests (default: 30s)
+
+# Apollo Configuration Management
+--apollo.enabled                     # Enable Apollo configuration (default: false)
+--apollo.app-id <ID>                 # Apollo application ID
+--apollo.ip <IP>                     # Apollo server IP
+--apollo.cluster <CLUSTER>           # Apollo cluster name
+--apollo.namespace <NS>              # Apollo namespace
+```
+
+## Development
 
 ### Development Commands
 
@@ -102,6 +128,9 @@ just check
 # Run tests
 just test
 
+# Run tests including e2e tests
+just test true
+
 # Auto-fix formatting and clippy issues
 just fix
 
@@ -109,118 +138,23 @@ just fix
 just watch-test
 ```
 
-## Other Tests
+## Contributing
 
-For other tests, please read [tests/README.md](tests/README.md).
+We welcome contributions! Please follow these steps:
 
-## Import and Export Tool
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Run checks before committing (`just check`)
+4. Commit your changes (`git commit -m 'Add amazing feature'`)
+5. Push to the branch (`git push origin feature/amazing-feature`)
+6. Open a Pull Request
 
-Please read [bin/tools/README.md](bin/tools/README.md).
-
-## Working with Local Reth Dependencies
-
-XLayer Reth depends on the [OKX Reth fork](https://github.com/okx/reth). For development, you can work with either git dependencies or a local Reth clone.
-
-### Using Git Dependencies (Default)
-
-By default, dependencies are fetched from the git repository as specified in `Cargo.toml`:
+### Setup Pre-commit Hook
 
 ```bash
-# Standard build using git dependencies
-just build
+just xlayer
 ```
 
-If you have a local `.cargo/config.toml` file from previous development work, remove it to use git dependencies:
+## License
 
-```bash
-rm -rf .cargo
-cargo build --release
-```
-
-### Using Local Reth Dependencies
-
-For active development on both XLayer Reth and Reth simultaneously, you can use local path dependencies:
-
-```bash
-# Setup local reth and build (creates .cargo/config.toml with patches)
-just build-dev /path/to/your/local/reth
-
-# Setup local reth WITHOUT building (useful for config-only changes)
-just build-dev /path/to/your/local/reth false
-
-# Subsequent builds will use the existing .cargo/config.toml
-just build-dev
-
-# Or just setup config without building
-just build-dev "" false
-```
-
-The `build-dev` command:
-1. Creates a `.cargo/config.toml` file with `[patch]` directives
-2. Redirects all Reth git dependencies to your local Reth directory
-3. Allows you to test local Reth changes without pushing to GitHub
-4. Optionally skips the build step with the second parameter set to `false`
-
-### Verifying Dependency Sources
-
-To check whether your build is using local or remote dependencies:
-
-```bash
-# Check where reth dependencies are sourced from
-cargo tree -i reth
-```
-
-This will show:
-- **Local dependencies**: Paths like `file:///Users/you/path/to/reth/...`
-- **Remote dependencies**: Git URLs like `https://github.com/okx/reth?branch=...#<commit-hash>`
-
-### Managing the Dev Template
-
-The `.reth-dev.toml` template defines the path mappings for local Reth dependencies. Keep it in sync with `Cargo.toml`:
-
-```bash
-# Check if .reth-dev.toml is in sync with Cargo.toml
-just check-dev-template
-
-# Auto-sync .reth-dev.toml with Cargo.toml dependencies
-just sync-dev-template /path/to/your/local/reth
-```
-
-**What these commands do:**
-
-- `check-dev-template`: Verifies that all Reth dependencies in `Cargo.toml` have corresponding entries in `.reth-dev.toml`, and flags any extra entries that should be removed
-- `sync-dev-template`: Automatically updates `.reth-dev.toml` by:
-  - Scanning your local Reth repository to find actual crate locations
-  - Adding new dependencies from `Cargo.toml`
-  - Removing dependencies no longer in `Cargo.toml`
-  - Preserving correct path mappings (handles cases where crate names differ from folder names, e.g., `reth-errors` lives in `crates/errors`)
-
-**When to use these commands:**
-
-- After adding or removing Reth dependencies in `Cargo.toml`
-- When upgrading to a new Reth version with different crate structure
-- If `build-dev` fails due to missing or incorrect path mappings
-
-### Switching Between Git and Local Dependencies
-
-```bash
-# Switch to local dependencies
-just build-dev /path/to/local/reth
-
-# Switch back to git dependencies
-rm -rf .cargo
-cargo build --release
-
-# Or use the standard build command (which auto-removes .cargo)
-just build
-```
-
-## Repository
-
-- **Homepage**: [https://github.com/okx/xlayer-reth](https://github.com/okx/xlayer-reth)
-- **License**: MIT
-
-## Requirements
-
-- Rust 1.88 or higher
-- Edition 2024 features
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
