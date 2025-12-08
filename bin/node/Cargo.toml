@@ -68,4 +68,5 @@ humantime.workspace = true
 [features]
 default = []
 jemalloc = ["reth-cli-util/jemalloc", "reth-optimism-cli/jemalloc"]
+jemalloc-prof = ["reth-cli-util/jemalloc-prof"]
 asm-keccak = ["alloy-primitives/asm-keccak"]
