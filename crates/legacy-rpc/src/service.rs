@@ -42,6 +42,7 @@ pub fn is_legacy_routable(method: &str) -> bool {
             | "eth_getInternalTransactions"
             | "eth_getBlockInternalTransactions"
             | "eth_transactionPreExec"
+            | "debug_traceTransaction"
     )
 }
 
@@ -97,6 +98,7 @@ fn need_try_local_then_legacy(method: &str) -> bool {
             | "eth_getBlockTransactionCountByHash"
             | "eth_getTransactionByBlockHashAndIndex"
             | "eth_getRawTransactionByBlockHashAndIndex"
+            | "debug_traceTransaction"
     )
 }
 
