@@ -35,12 +35,14 @@ futures-util.workspace = true
 eyre.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
+tokio-tungstenite.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 derive_more.workspace = true
 
 [dev-dependencies]
 rstest = "0.23"
+scopeguard = "1.2"
 alloy-rpc-types-engine = { version = "1.0.41", default-features = false }
 
 [lib]

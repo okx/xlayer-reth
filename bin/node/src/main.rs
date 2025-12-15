@@ -9,16 +9,20 @@ use args_xlayer::{ApolloArgs, XLayerArgs};
 use clap::Parser;
 use tracing::{error, info};
 
+use op_rbuilder::{
+    args::OpRbuilderArgs,
+    builders::{BuilderConfig, FlashblocksServiceBuilder},
+};
 use reth::{
     builder::{EngineNodeLauncher, Node, NodeHandle, TreeConfig},
     providers::providers::BlockchainProvider,
     version::{default_reth_version_metadata, try_init_version_metadata, RethCliVersionConsts},
 };
 use reth_optimism_cli::Cli;
-use reth_optimism_node::{args::RollupArgs, OpNode};
+use reth_optimism_node::OpNode;
+
 use xlayer_apollo::{ApolloConfig, ApolloService};
 use xlayer_chainspec::XLayerChainSpecParser;
-
 use xlayer_innertx::{
     db_utils::initialize_inner_tx_db,
     rpc_utils::{XlayerInnerTxExt, XlayerInnerTxExtApiServer},
@@ -33,9 +37,9 @@ static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::ne
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
 #[command(next_help_heading = "Rollup")]
 struct Args {
-    /// Upstream rollup args
+    /// Upstream rollup args + flashblock specific args
     #[command(flatten)]
-    pub rollup_args: RollupArgs,
+    pub node_args: OpRbuilderArgs,
 
     /// X Layer specific configuration
     #[command(flatten)]
@@ -102,7 +106,7 @@ fn main() {
                 "XLayer features configuration"
             );
 
-            let op_node = OpNode::new(args.rollup_args.clone());
+            let op_node = OpNode::new(args.node_args.rollup_args.clone());
 
             let data_dir = builder.config().datadir();
             if args.xlayer_args.enable_inner_tx {
@@ -135,53 +139,106 @@ fn main() {
                 run_apollo(&args.xlayer_args.apollo).await;
             }
 
-            let NodeHandle { node: _node, node_exit_future } = builder
-                .with_types_and_provider::<OpNode, BlockchainProvider<_>>()
-                .with_components(op_node.components())
-                .with_add_ons(add_ons)
-                .on_component_initialized(move |_ctx| {
-                    // TODO: Initialize XLayer components here
-                    // - Inner transaction tracking
-                    Ok(())
-                })
-                .extend_rpc_modules(move |ctx| {
-                    let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
-                    if args.xlayer_args.enable_inner_tx {
-                        // Initialize inner tx replay handler (uses canonical_state_stream)
-                        // Note: This only processes real-time blocks, NOT synced blocks from Pipeline
-                        initialize_innertx_replay(ctx.node());
-                        info!(target: "reth::cli", "xlayer inner tx replay initialized (canonical_state_stream mode)");
+            let NodeHandle { node: _node, node_exit_future } = if args.node_args.flashblocks.enabled {
+                let builder_config = BuilderConfig::try_from(args.node_args.clone())
+                    .expect("Failed to convert builder args to builder config");
 
-                        // Register inner tx RPC
-                        let custom_rpc = XlayerInnerTxExt { backend: new_op_eth_api.clone() };
-                        ctx.modules.merge_configured(custom_rpc.into_rpc())?;
-                        info!(target: "reth::cli", "xlayer innertx rpc enabled");
-                    }
+                builder
+                    .with_types_and_provider::<OpNode, BlockchainProvider<_>>()
+                    .with_components(op_node.components().payload(FlashblocksServiceBuilder(builder_config)))
+                    .with_add_ons(add_ons)
+                    .on_component_initialized(move |_ctx| {
+                        // TODO: Initialize XLayer components here
+                        // - Inner transaction tracking
+                        Ok(())
+                    })
+                    .extend_rpc_modules(move |ctx| {
+                        let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
+                        if args.xlayer_args.enable_inner_tx {
+                            // Initialize inner tx replay handler (uses canonical_state_stream)
+                            // Note: This only processes real-time blocks, NOT synced blocks from Pipeline
+                            initialize_innertx_replay(ctx.node());
+                            info!(target: "reth::cli", "xlayer inner tx replay initialized (canonical_state_stream mode)");
 
-                    // Register XLayer RPC
-                    let xlayer_rpc = XlayerRpcExt { backend: new_op_eth_api };
-                    ctx.modules.merge_configured(xlayer_rpc.into_rpc())?;
-                    info!(target: "reth::cli", "xlayer rpc extension enabled");
+                            // Register inner tx RPC
+                            let custom_rpc = XlayerInnerTxExt { backend: new_op_eth_api.clone() };
+                            ctx.modules.merge_configured(custom_rpc.into_rpc())?;
+                            info!(target: "reth::cli", "xlayer innertx rpc enabled");
+                        }
 
-                    info!(message = "XLayer RPC modules initialized");
-                    Ok(())
-                })
-                .launch_with_fn(|builder| {
-                    let engine_tree_config = TreeConfig::default()
-                        .with_persistence_threshold(builder.config().engine.persistence_threshold)
-                        .with_memory_block_buffer_target(
-                            builder.config().engine.memory_block_buffer_target,
+                        // Register XLayer RPC
+                        let xlayer_rpc = XlayerRpcExt { backend: new_op_eth_api };
+                        ctx.modules.merge_configured(xlayer_rpc.into_rpc())?;
+                        info!(target: "reth::cli", "xlayer rpc extension enabled");
+
+                        info!(message = "XLayer RPC modules initialized");
+                        Ok(())
+                    })
+                    .launch_with_fn(|builder| {
+                        let engine_tree_config = TreeConfig::default()
+                            .with_persistence_threshold(builder.config().engine.persistence_threshold)
+                            .with_memory_block_buffer_target(
+                                builder.config().engine.memory_block_buffer_target,
+                            );
+
+                        let launcher = EngineNodeLauncher::new(
+                            builder.task_executor().clone(),
+                            builder.config().datadir(),
+                            engine_tree_config,
                         );
 
-                    let launcher = EngineNodeLauncher::new(
-                        builder.task_executor().clone(),
-                        builder.config().datadir(),
-                        engine_tree_config,
-                    );
+                        builder.launch_with(launcher)
+                    })
+                    .await?
+            } else {
+                builder
+                    .with_types_and_provider::<OpNode, BlockchainProvider<_>>()
+                    .with_components(op_node.components())
+                    .with_add_ons(add_ons)
+                    .on_component_initialized(move |_ctx| {
+                        // TODO: Initialize XLayer components here
+                        // - Inner transaction tracking
+                        Ok(())
+                    })
+                    .extend_rpc_modules(move |ctx| {
+                        let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
+                        if args.xlayer_args.enable_inner_tx {
+                            // Initialize inner tx replay handler (uses canonical_state_stream)
+                            // Note: This only processes real-time blocks, NOT synced blocks from Pipeline
+                            initialize_innertx_replay(ctx.node());
+                            info!(target: "reth::cli", "xlayer inner tx replay initialized (canonical_state_stream mode)");
 
-                    builder.launch_with(launcher)
-                })
-                .await?;
+                            // Register inner tx RPC
+                            let custom_rpc = XlayerInnerTxExt { backend: new_op_eth_api.clone() };
+                            ctx.modules.merge_configured(custom_rpc.into_rpc())?;
+                            info!(target: "reth::cli", "xlayer innertx rpc enabled");
+                        }
+
+                        // Register XLayer RPC
+                        let xlayer_rpc = XlayerRpcExt { backend: new_op_eth_api };
+                        ctx.modules.merge_configured(xlayer_rpc.into_rpc())?;
+                        info!(target: "reth::cli", "xlayer rpc extension enabled");
+
+                        info!(message = "XLayer RPC modules initialized");
+                        Ok(())
+                    })
+                    .launch_with_fn(|builder| {
+                        let engine_tree_config = TreeConfig::default()
+                            .with_persistence_threshold(builder.config().engine.persistence_threshold)
+                            .with_memory_block_buffer_target(
+                                builder.config().engine.memory_block_buffer_target,
+                            );
+
+                        let launcher = EngineNodeLauncher::new(
+                            builder.task_executor().clone(),
+                            builder.config().datadir(),
+                            engine_tree_config,
+                        );
+
+                        builder.launch_with(launcher)
+                    })
+                    .await?
+            };
 
             node_exit_future.await
         })

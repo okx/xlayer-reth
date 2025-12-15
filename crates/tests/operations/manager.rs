@@ -21,6 +21,8 @@ pub const DEFAULT_L2_BUILDER_URL: &str = "http://localhost:8125";
 pub const DEFAULT_L2_NETWORK_URL_FB: &str = "http://localhost:8124";
 // Default L2 RPC node with flashblocks disabled
 pub const DEFAULT_L2_NETWORK_URL_NO_FB: &str = "http://localhost:8128";
+/// Default Flashblocks WebSocket URL for testing
+pub const DEFAULT_FLASHBLOCKS_WS_URL: &str = "ws://localhost:11112";
 
 /// Default L2 metrics Prometheus URL for testing
 pub const DEFAULT_L2_METRICS_PROMETHEUS_URL: &str =

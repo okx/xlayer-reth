@@ -1,21 +1,25 @@
 //! Functional tests for flashblocks e2e tests
 //!
 //! Run all tests with: `cargo test -p xlayer-e2e-test --test flashblocks_tests -- --nocapture --test-threads=1`
-//! or run a specific test with: `cargo test -p xlayer-e2e-test --test flashblocks_tests -- <test_case_name> -- --nocapture`
-//! --test-threads=1`
+//! or run a specific test with: `cargo test -p xlayer-e2e-test --test flashblocks_tests -- <test_case_name> -- --nocapture --test-threads=1`
 //!
 
-use alloy_primitives::{hex, Address, U256};
+use alloy_primitives::{hex, keccak256, Address, U256};
 use alloy_sol_types::{sol, SolCall};
 use eyre::Result;
+use futures_util::StreamExt;
+use scopeguard::defer;
 use std::{
+    collections::HashSet,
     str::FromStr,
     time::{Duration, Instant},
 };
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 use xlayer_e2e_test::operations;
 
 const ITERATIONS: usize = 11;
 const TX_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(10);
+const WEB_SOCKET_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Flashblock smoke test to verify pending tags on all flashblock supported RPCs.
 #[tokio::test]
@@ -938,4 +942,126 @@ async fn fb_rpc_comparison_test(#[case] test_name: &str) {
         }
         _ => panic!("Unknown test case: {}", test_name),
     }
+}
+
+#[tokio::test]
+async fn fb_subscription_test() -> Result<()> {
+    let ws_url = operations::manager::DEFAULT_FLASHBLOCKS_WS_URL;
+    let test_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
+    let non_fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_NO_FB);
+
+    let current_block_number = operations::eth_block_number(&non_fb_client)
+        .await
+        .expect("Failed to get current block number");
+    println!("Current block number: {}", current_block_number);
+
+    let num_txs: usize = 5;
+
+    println!("Connecting to flashblocks WebSocket at {ws_url}...");
+    let (ws_stream, response) = connect_async(ws_url).await?;
+    println!("Connected: {:?}", response.status());
+    let (_, mut read) = ws_stream.split();
+
+    // Guarantee cleanup on scope exit
+    defer! {
+        println!("Closing WebSocket connection");
+    };
+
+    let mut remaining: HashSet<String> = HashSet::new();
+    for i in 0..num_txs {
+        let tx_hash = operations::native_balance_transfer(
+            operations::DEFAULT_L2_NETWORK_URL_FB,
+            U256::from(operations::GWEI),
+            test_address,
+        )
+        .await?;
+        println!("Sent tx {}: {}", i + 1, tx_hash);
+        remaining.insert(tx_hash);
+    }
+    let total = remaining.len();
+    println!(
+        "Waiting for {} txs to appear in flashblocks (timeout: {:?})...",
+        total, WEB_SOCKET_TIMEOUT
+    );
+
+    // Read flashblocks until all txs are found or timeout
+    let result = tokio::time::timeout(WEB_SOCKET_TIMEOUT, async {
+        while !remaining.is_empty() {
+            match read.next().await {
+                Some(Ok(Message::Text(msg))) => {
+                    let Ok(notification) = serde_json::from_str::<serde_json::Value>(&msg) else {
+                        continue;
+                    };
+
+                    let block_num = notification["metadata"]["block_number"]
+                        .as_u64()
+                        .expect("Failed to get block number");
+
+                    assert!(
+                        block_num >= current_block_number,
+                        "Flashblock block number {} should be >= current block {}",
+                        block_num,
+                        current_block_number
+                    );
+
+                    if let Some(txs) = notification["diff"]["transactions"].as_array() {
+                        for tx in txs {
+                            let Some(tx_rlp_hex) = tx.as_str() else { continue };
+                            let raw = tx_rlp_hex.trim_start_matches("0x");
+                            let Ok(bytes) = hex::decode(raw) else {
+                                eprintln!("Failed to hex-decode RLP: {}", tx_rlp_hex);
+                                continue;
+                            };
+
+                            let hash = keccak256(&bytes);
+                            let hash_str = format!("0x{}", hex::encode(hash));
+
+                            if remaining.remove(&hash_str) {
+                                let found = total - remaining.len();
+                                println!(
+                                    "Found tx {}/{} in block {}: {}",
+                                    found, total, block_num, hash_str
+                                );
+                                if remaining.is_empty() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                Some(Ok(_)) => {} // ignore non-text
+                Some(Err(e)) => {
+                    eprintln!("WebSocket error: {}", e);
+                    break;
+                }
+                None => {
+                    eprintln!("WebSocket closed");
+                    break;
+                }
+            }
+        }
+    })
+    .await;
+
+    if result.is_err() {
+        eprintln!("Timeout: Stopped waiting after {:?}", WEB_SOCKET_TIMEOUT);
+    }
+
+    if !remaining.is_empty() {
+        eprintln!("\nMissing txs in flashblocks:");
+        for tx in &remaining {
+            eprintln!("  - {}", tx);
+        }
+    }
+
+    assert!(
+        remaining.is_empty(),
+        "Expected all {} txs to appear in flashblocks, but {} were missing",
+        total,
+        remaining.len()
+    );
+
+    println!("All {} transactions found in flashblocks", total);
+
+    Ok(())
 }
