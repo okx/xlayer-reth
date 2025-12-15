@@ -2202,9 +2202,9 @@ dependencies = [
 
 [[package]]
 name = "camino"
-version = "1.2.1"
+version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "276a59bf2b2c967788139340c9f0c5b12d7fd6630315c15c217e559de85d2609"
+checksum = "e629a66d692cb9ff1a1c664e41771b3dcaf961985a9774c0eb0bd1b51cf60a48"
 dependencies = [
  "serde_core",
 ]
@@ -6737,7 +6737,7 @@ dependencies = [
 [[package]]
 name = "op-rbuilder"
 version = "0.2.13"
-source = "git+https://github.com/okx/op-rbuilder?branch=upstream%2Fdev#6c05983c216cbd3383e110adc50fa9499e210106"
+source = "git+https://github.com/okx/op-rbuilder?branch=upstream%2Fdev#44ae013743b90e8a979f84cda3493b14284a6b4c"
 dependencies = [
  "alloy-consensus",
  "alloy-contract",
@@ -7113,7 +7113,7 @@ dependencies = [
 [[package]]
 name = "p2p"
 version = "0.2.13"
-source = "git+https://github.com/okx/op-rbuilder?branch=upstream%2Fdev#6c05983c216cbd3383e110adc50fa9499e210106"
+source = "git+https://github.com/okx/op-rbuilder?branch=upstream%2Fdev#44ae013743b90e8a979f84cda3493b14284a6b4c"
 dependencies = [
  "derive_more",
  "eyre",
