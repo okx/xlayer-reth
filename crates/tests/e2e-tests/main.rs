@@ -322,7 +322,7 @@ async fn test_eth_block_rpc(#[case] test_name: &str) {
             );
             println!("Number of transactions: {}", tx_hashes.len());
 
-            tokio::time::sleep(Duration::from_millis(1000)).await;
+            operations::wait_for_blocks(&client, target_block_number).await;
 
             // Test getting block receipts by block number
             let receipts_by_number = operations::eth_get_block_receipts(
