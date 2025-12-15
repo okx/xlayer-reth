@@ -358,7 +358,7 @@ async fn test_eth_block_rpc(#[case] test_name: &str) {
             // Test getting block receipts by block hash
             let receipts_by_hash = operations::eth_get_block_receipts(
                 &client,
-                operations::BlockId::Hash(block_hash.clone()),
+                operations::BlockId::Hash(block_hash.into()),
             )
             .await
             .expect("Failed to get block receipts by hash");

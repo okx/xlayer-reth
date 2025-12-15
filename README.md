@@ -180,6 +180,8 @@ Also, start the 2nd RPC node under ``xlayer-toolkit/devnet``:
 Then, in this repo, run:
 ```
 cargo test -p xlayer-e2e-test --test flashblocks_tests -- --nocapture --test-threads=1
+# or
+just test false true
 ```
 
 
