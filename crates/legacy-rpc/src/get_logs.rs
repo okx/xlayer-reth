@@ -300,11 +300,13 @@ where
             }
         }
         Some(GetLogsParams::BlockHash(_block_hash)) => {
-            // TODO: if success and got empty response, also forward to legacy.
+            debug!(target:"xlayer_legacy_rpc", "method = eth_getLogs, testing locally first...");
             let res = inner.call(req.clone()).await;
             if res.is_success() {
+                debug!(target:"xlayer_legacy_rpc", "method = eth_getLogs, success response = {res:?}");
                 res
             } else {
+                debug!(target:"xlayer_legacy_rpc", "method = eth_getLogs, forward to legacy");
                 service.forward_to_legacy(req).await
             }
         }
