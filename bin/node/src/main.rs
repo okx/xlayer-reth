@@ -170,8 +170,7 @@ fn main() {
                             // Register inner tx RPC
                             let custom_rpc = XlayerInnerTxExt { backend: new_op_eth_api.clone() };
                             ctx.modules.merge_configured(custom_rpc.into_rpc())?;
-                            info!(target: "reth::cli", "xlayer innertx rpc enabled");
-                            
+                            info!(target: "reth::cli", "xlayer innertx rpc enabled");                            
                             // Initialize inner tx extraction for pending flashblocks
                             let pending_block_rx = new_op_eth_api.pending_block_rx();
                             xlayer_innertx::subscriber_utils::initialize_innertx_flashblocks(pending_block_rx, ctx.node());
