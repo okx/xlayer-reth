@@ -293,7 +293,7 @@ where
                 debug!(target:"xlayer_legacy_rpc", "No legacy routing for method = eth_getLogs");
 
                 // Fallback to normal if modification failed
-                return inner.call(req).await
+                return inner.call(req).await;
             }
         }
         Some(GetLogsParams::BlockHash(_block_hash)) => {
@@ -329,15 +329,12 @@ mod tests {
                 r#"[{"fromBlock":"0x1","toBlock":"latest"}]"#,
                 Some(GetLogsParams::Range(1, u64::MAX)),
             ),
-            (r#"[{"fromBlock":"0x1","toBlock":"earliest"}]"#, Some(GetLogsParams::Range(1, 0))),
-            (
-                r#"[{"fromBlock":"latest","toBlock":"0x64"}]"#,
-                Some(GetLogsParams::Range(u64::MAX, 100)),
-            ),
+            (r#"[{"fromBlock":"0x1","toBlock":"earliest"}]"#, None),
+            (r#"[{"fromBlock":"latest","toBlock":"0x64"}]"#, None),
             (r#"[{"fromBlock":"earliest","toBlock":"0x64"}]"#, Some(GetLogsParams::Range(0, 100))),
             (r#"[{"fromBlock":"0x1","toBlock":"0x64"}]"#, Some(GetLogsParams::Range(1, 100))),
             (r#"[{"fromBlock":"0x1"}]"#, Some(GetLogsParams::Range(1, u64::MAX))),
-            (r#"[{"toBlock":"0x64"}]"#, Some(GetLogsParams::Range(u64::MAX, 100))),
+            (r#"[{"toBlock":"0x64"}]"#, None),
             (r#"[{}]"#, Some(GetLogsParams::Range(u64::MAX, u64::MAX))),
             // Blockhash
             (
@@ -345,6 +342,11 @@ mod tests {
                 Some(GetLogsParams::BlockHash(
                     "0x8c83240f457f709b4574dd57afb656242418ea481325ea3c284c4ba144c1e032".into(),
                 )),
+            ),
+            (
+                // invalid block hash
+                r#"[{"blockHash":"0x8c83240f457f709b4574dd57afb656242418ea481325ea3c284c4ba144c1e03"}]"#,
+                None,
             ),
         ];
 
