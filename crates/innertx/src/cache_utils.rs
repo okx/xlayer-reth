@@ -1,14 +1,14 @@
 use crate::innertx_inspector::InternalTransaction;
-use alloy_primitives::{BlockHash, TxHash, B256};
+use alloy_primitives::{BlockHash, TxHash};
 use eyre::Report;
 use moka::sync::Cache;
 use once_cell::sync::OnceCell;
 
 // Cache for BlockTable: block_hash -> Vec<TxHash>
-static BLOCK_CACHE: OnceCell<Cache<B256, Vec<TxHash>>> = OnceCell::new();
+static BLOCK_CACHE: OnceCell<Cache<BlockHash, Vec<TxHash>>> = OnceCell::new();
 
 // Cache for TxTable: tx_hash -> Vec<InternalTransaction>
-static TX_CACHE: OnceCell<Cache<B256, Vec<InternalTransaction>>> = OnceCell::new();
+static TX_CACHE: OnceCell<Cache<TxHash, Vec<InternalTransaction>>> = OnceCell::new();
 
 const MAX_TX_CACHE_SIZE: u64 = 10_000;
 const MAX_BLOCK_CACHE_SIZE: u64 = 500;
@@ -29,14 +29,14 @@ pub fn initialize_inner_tx_cache() -> Result<(), Report> {
     Ok(())
 }
 
-pub fn write_block_cache(key: B256, tx_hashes: Vec<TxHash>) -> Result<(), Report> {
+pub fn write_block_cache(key: BlockHash, tx_hashes: Vec<TxHash>) -> Result<(), Report> {
     let block_cache =
         BLOCK_CACHE.get().ok_or_else(|| Report::msg("BLOCK_CACHE not initialized"))?;
 
     block_cache.insert(key, tx_hashes);
     Ok(())
 }
-pub fn write_tx_cache(key: B256, inner_txs: Vec<InternalTransaction>) -> Result<(), Report> {
+pub fn write_tx_cache(key: TxHash, inner_txs: Vec<InternalTransaction>) -> Result<(), Report> {
     let tx_cache = TX_CACHE.get().ok_or_else(|| Report::msg("TX_CACHE not initialized"))?;
 
     tx_cache.insert(key, inner_txs);
