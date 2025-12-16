@@ -144,11 +144,11 @@ where
             }
 
             tx_hashes.push(*tx.tx_hash());
-            write_tx_cache(tx.tx_hash().to_vec(), internal_transactions[index].clone())?;
+            write_tx_cache(*tx.tx_hash(), internal_transactions[index].clone())?;
         }
     }
 
-    write_block_cache(block.hash().to_vec(), tx_hashes)?;
+    write_block_cache(block.hash(), tx_hashes)?;
 
     Ok(())
 }

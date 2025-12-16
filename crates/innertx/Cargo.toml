@@ -40,7 +40,7 @@ serde.workspace = true
 once_cell.workspace = true
 eyre.workspace = true
 jsonrpsee.workspace = true
-lru-cache = "=0.1.2"
+moka = { version = "0.12.11", features = ["sync"] }
 
 [lints]
 workspace = true
