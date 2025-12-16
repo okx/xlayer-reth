@@ -109,6 +109,11 @@ fn parse_eth_get_logs_params(params: &str) -> Option<GetLogsParams> {
         .and_then(parse_block_number_string)
         .unwrap_or(u64::MAX);
 
+    // Fallback to normal routing
+    if from_block > to_block {
+        return None;
+    }
+
     Some(GetLogsParams::Range(from_block, to_block))
 }
 
