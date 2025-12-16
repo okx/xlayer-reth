@@ -92,11 +92,7 @@ where
         })?;
 
         if self.backend.local_pending_block().await.is_ok() {
-            let read = spawn_blocking(move || read_tx_cache(hash))
-                .await
-                .map_err(|_| ())
-                .and_then(|r| r.map_err(|_| ()));
-
+            let read = read_tx_cache(hash);
             match read {
                 Ok(result) if !result.is_empty() => {
                     return Ok(result);

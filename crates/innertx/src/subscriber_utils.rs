@@ -208,18 +208,12 @@ async fn handle_pending_flashblocks<P, E, N>(
         let provider_clone = provider.clone();
         let evm_config_clone = evm_config.clone();
 
-        if let Err(err) = tokio::task::spawn_blocking(move || {
-            extract_and_store_inner_tx_for_pending_block(
-                provider_clone,
-                evm_config_clone,
-                recovered_block,
-                receipts.as_slice(),
-            )
-        })
-        .await
-        .map_err(|e| eyre::eyre!("Task join error: {e}"))
-        .and_then(|r| r)
-        {
+        if let Err(err) = extract_and_store_inner_tx_for_pending_block(
+            provider_clone,
+            evm_config_clone,
+            recovered_block,
+            receipts.as_slice(),
+        ) {
             error!(
                 target: "xlayer::subscriber",
                 "Failed to extract internal transactions for pending flashblock {:?}: {:?}",
