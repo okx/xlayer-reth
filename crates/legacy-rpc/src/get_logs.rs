@@ -71,14 +71,9 @@ enum GetLogsParams {
     BlockHash(String),
 }
 
-/// Parse eth_getLogs params to extract fromBlock and toBlock
-/// Returns (from_block, to_block) as Option<(Option<u64>, Option<u64>)>
-///
-/// - Some((from, to)) - both blocks specified
-/// - Some((from, u64::MAX)) - only fromBlock specified
-/// - Some((u64::MAX, to)) - only toBlock specified
-/// - Some((u64::MAX, u64::MAX)) - neither specified (will use latest)
-/// - None - invalid params
+/// Parse eth_getLogs params to extract a range or a block hash.
+/// If blockHash, a `GetLogsParams::BlockHash` is returned.
+/// If range, a `GetLogsParams::Range(from_block, to_block)` is returned.
 #[inline]
 fn parse_eth_get_logs_params(params: &str) -> Option<GetLogsParams> {
     let parsed: serde_json::Value = serde_json::from_str(params).ok()?;
