@@ -119,7 +119,15 @@ where
     let mut executor = evm_config.create_executor(evm, block_ctx);
 
     executor.set_state_hook(None);
-    executor.execute_block(block.transactions_recovered())?;
+    let output = executor.execute_block(block.transactions_recovered())?;
+
+    if output.receipts.len() != receipts.len() {
+        return Err(eyre::eyre!(
+            "Re-execution produced {} receipts but block has {} transactions",
+            output.receipts.len(),
+            receipts.len(),
+        ));
+    }
 
     let mut internal_transactions = inspector.get();
     let mut tx_hashes = Vec::<TxHash>::default();
