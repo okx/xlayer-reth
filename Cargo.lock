@@ -14827,7 +14827,6 @@ dependencies = [
  "reth-exex",
  "reth-node-api",
  "reth-optimism-flashblocks",
- "reth-optimism-rpc",
  "reth-primitives-traits",
  "reth-provider",
  "reth-revm",
