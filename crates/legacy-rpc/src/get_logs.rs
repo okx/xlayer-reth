@@ -288,7 +288,7 @@ where
                 debug!(target:"xlayer_legacy_rpc", "No legacy routing for method = eth_getLogs");
 
                 // Fallback to normal if modification failed
-                return inner.call(req).await;
+                return inner.call(req).await
             }
         }
         Some(GetLogsParams::BlockHash(_block_hash)) => {
