@@ -10,7 +10,10 @@ use alloy_primitives::{
 use jsonrpsee::{
     core::{async_trait, RpcResult},
     proc_macros::rpc,
-    types::{error::INVALID_PARAMS_CODE, ErrorObjectOwned},
+    types::{
+        error::{INTERNAL_ERROR_CODE, INVALID_PARAMS_CODE},
+        ErrorObjectOwned,
+    },
 };
 use tokio::{
     select,
@@ -103,7 +106,7 @@ where
                 }
                 Err(_) => {
                     return Err(ErrorObjectOwned::owned(
-                        -32603,
+                        INTERNAL_ERROR_CODE,
                         "Internal error reading transaction data",
                         None::<()>,
                     ))
@@ -160,7 +163,11 @@ where
     ) -> RpcResult<HashMap<String, Vec<InternalTransaction>>> {
         if block_number == BlockNumberOrTag::Pending {
             let Some(pending_block) = self.backend.local_pending_block().await.map_err(|_| {
-                ErrorObjectOwned::owned(-32603, "Internal error getting pending block", None::<()>)
+                ErrorObjectOwned::owned(
+                    INTERNAL_ERROR_CODE,
+                    "Internal error getting pending block",
+                    None::<()>,
+                )
             })?
             else {
                 return Err(ErrorObjectOwned::owned(-32000, "Block not found", None::<()>));
@@ -190,7 +197,7 @@ where
                 }
                 Err(_) => {
                     return Err(ErrorObjectOwned::owned(
-                        -32603,
+                        INTERNAL_ERROR_CODE,
                         "Internal error reading block data from cache",
                         None::<()>,
                     ))
@@ -208,7 +215,7 @@ where
                     }
                     Err(_) => {
                         return Err(ErrorObjectOwned::owned(
-                            -32603,
+                            INTERNAL_ERROR_CODE,
                             "Internal error reading transaction data",
                             None::<()>,
                         ));
