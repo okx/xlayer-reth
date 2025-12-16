@@ -138,6 +138,53 @@ just fix
 just watch-test
 ```
 
+## Testing
+### End-to-end Testing
+
+To run end-to-end (e2e) tests, first build ``xlayer-reth`` Docker image in this repo:
+```
+just build-docker
+```
+
+Next, you need to start a devnet using [xlayer-toolkit](https://github.com/okx/xlayer-toolkit/blob/main/devnet/README.md). Make sure you set the following environment variables in ``xlayer-toolkit/devnet/example.env``:
+```
+SEQ_TYPE=reth
+RPC_TYPE=reth
+ENABLE_INNERTX_RPC=true
+```
+
+After devnet is started, run the e2e test:
+```
+cargo test -p xlayer-e2e-test --test e2e_tests -- --nocapture --test-threads=1
+# or
+just test true
+```
+
+### Flashblocks Tests
+Similar to e2e tests, first build ``xlayer-reth`` Docker image in this repo:
+```
+just build-docker
+```
+
+Next, you need to start a devnet using [xlayer-toolkit](https://github.com/okx/xlayer-toolkit/blob/main/devnet/README.md). Make sure you set the following environment variables in ``xlayer-toolkit/devnet/example.env``:
+```
+FLASHBLOCK_ENABLED=true
+FLASHBLOCK_P2P_ENABLED=true
+```
+
+Also, start the 2nd RPC node under ``xlayer-toolkit/devnet``:
+```
+./scripts/run-rpc2.sh
+```
+
+Then, in this repo, run:
+```
+cargo test -p xlayer-e2e-test --test flashblocks_tests -- --nocapture --test-threads=1
+# or
+just test false true
+```
+
+
 ## Contributing
 
 We welcome contributions! Please follow these steps:

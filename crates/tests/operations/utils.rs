@@ -461,3 +461,103 @@ pub fn get_refund_counter_from_trace(trace_result: &serde_json::Value, opcode: &
 
     refund_counter
 }
+
+pub async fn make_contract_call(
+    endpoint_url: &str,
+    private_key: &str,
+    contract_address: Address,
+    calldata: Bytes,
+    value: U256,
+    tx_request: TransactionRequest,
+) -> Result<serde_json::Value> {
+    let key_str = private_key.trim_start_matches("0x");
+    let signer = PrivateKeySigner::from_str(key_str)
+        .map_err(|e| eyre!("Failed to parse private key: {}", e))?;
+    let wallet = EthereumWallet::from(signer.clone());
+    let provider = ProviderBuilder::new().wallet(wallet).connect_http(endpoint_url.parse()?);
+
+    let from = signer.address();
+    let nonce = provider.get_transaction_count(from).pending().await?;
+    let gas_price = provider.get_gas_price().await?;
+
+    let tx = tx_request
+        .to(contract_address)
+        .input(calldata.into())
+        .value(value)
+        .with_from(from)
+        .with_nonce(nonce)
+        .with_chain_id(DEFAULT_L2_CHAIN_ID)
+        .with_gas_price(gas_price);
+
+    let pending_tx = provider
+        .send_transaction(tx)
+        .await
+        .map_err(|e| eyre!("Failed to send contract call transaction: {}", e))?;
+
+    let tx_hash = *pending_tx.tx_hash();
+    println!("Contract call tx sent: {:#x}", tx_hash);
+
+    let receipt = wait_for_tx_mined(endpoint_url, &format!("{:#x}", tx_hash)).await?;
+    let block_number = receipt["blockNumber"]
+        .as_str()
+        .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        .ok_or_else(|| eyre!("Failed to parse block number"))?;
+    let gas_used = receipt["gasUsed"]
+        .as_str()
+        .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        .ok_or_else(|| eyre!("Failed to parse gas used"))?;
+    println!("Contract call tx mined in block {}, gas used: {}", block_number, gas_used);
+
+    // Return transaction hash as JSON
+    Ok(serde_json::json!({
+        "transactionHash": format!("{:#x}", tx_hash),
+        "receipt": receipt
+    }))
+}
+
+pub fn validate_internal_transaction(
+    inner_tx: &serde_json::Value,
+    expected_from: String,
+    expected_to: String,
+    context: &str,
+) -> Result<()> {
+    let has_error = inner_tx["is_error"]
+        .as_bool()
+        .ok_or_else(|| eyre!("{}: 'is_error' field must be a boolean", context))?;
+
+    if has_error {
+        return Err(eyre!(
+            "{}: Inner transaction should not have an error (is_error: {:?})",
+            context,
+            inner_tx["is_error"]
+        ));
+    }
+
+    let from_addr = inner_tx["from"]
+        .as_str()
+        .ok_or_else(|| eyre!("{}: Inner transaction should have 'from' field", context))?;
+
+    if from_addr.to_lowercase() != expected_from.to_lowercase() {
+        return Err(eyre!(
+            "{}: Inner transaction from address mismatch. Expected: {}, Got: {}",
+            context,
+            expected_from,
+            from_addr
+        ));
+    }
+
+    let to_addr = inner_tx["to"]
+        .as_str()
+        .ok_or_else(|| eyre!("{}: Inner transaction should have 'to' field", context))?;
+
+    if to_addr.to_lowercase() != expected_to.to_lowercase() {
+        return Err(eyre!(
+            "{}: Inner transaction to address mismatch. Expected: {}, Got: {}",
+            context,
+            expected_to,
+            to_addr
+        ));
+    }
+
+    Ok(())
+}
