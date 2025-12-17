@@ -60,10 +60,9 @@ impl XLayerArgs {
             // Check if chain is xlayer-mainnet or xlayer-testnet
             if chain == "xlayer-mainnet" || chain == "xlayer-testnet" {
                 eprintln!(
-                    "Error: For --chain={}, you must use a genesis.json file instead of the chain name.\n\
+                    "Error: For --chain={chain}, you must use a genesis.json file instead of the chain name.\n\
                     Please specify the path to your genesis.json file, e.g.:\n\
-                    xlayer-reth-node init --chain=/path/to/genesis.json",
-                    chain
+                    xlayer-reth-node init --chain=/path/to/genesis.json"
                 );
                 std::process::exit(1);
             }
