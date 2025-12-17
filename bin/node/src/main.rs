@@ -146,6 +146,8 @@ fn main() {
                 run_apollo(&args.xlayer_args.apollo).await;
             }
 
+            // Should run as sequencer if flashblocks.enabled = true. Doing so means you are
+            // running a flashblocks producing sequencer.
             let NodeHandle { node: _node, node_exit_future } = if args.node_args.flashblocks.enabled {
                 let builder_config = BuilderConfig::try_from(args.node_args.clone())
                     .expect("Failed to convert builder args to builder config");
@@ -171,8 +173,6 @@ fn main() {
                             let custom_rpc = XlayerInnerTxExt { backend: new_op_eth_api.clone() };
                             ctx.modules.merge_configured(custom_rpc.into_rpc())?;
                             info!(target: "reth::cli", "xlayer innertx rpc enabled");
-
-                            // TODO: enable flashblocks innertx without websocket.
                         }
 
                         // Register XLayer RPC
