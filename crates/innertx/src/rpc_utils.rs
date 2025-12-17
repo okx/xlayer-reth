@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use alloy_consensus::transaction::TxHashRef;
 use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::{
     hex::{FromHex, FromHexError},
@@ -9,7 +10,10 @@ use alloy_primitives::{
 use jsonrpsee::{
     core::{async_trait, RpcResult},
     proc_macros::rpc,
-    types::{error::INVALID_PARAMS_CODE, ErrorObjectOwned},
+    types::{
+        error::{INTERNAL_ERROR_CODE, INVALID_PARAMS_CODE},
+        ErrorObjectOwned,
+    },
 };
 use tokio::{
     select,
@@ -19,10 +23,15 @@ use tokio::{
 
 use reth_provider::TransactionsProvider;
 use reth_rpc::RpcTypes;
-use reth_rpc_eth_api::{helpers::EthCall, EthApiTypes};
+use reth_rpc_eth_api::{
+    helpers::{block::LoadBlock, EthCall},
+    EthApiTypes,
+};
 use reth_storage_api::BlockIdReader;
+use reth_tracing::tracing::debug;
 
 use crate::{
+    cache_utils::{read_block_cache, read_tx_cache},
     db_utils::{read_table_block, read_table_tx},
     innertx_inspector::InternalTransaction,
 };
@@ -64,7 +73,7 @@ pub struct XlayerInnerTxExt<T> {
 #[async_trait]
 impl<T, Net> XlayerInnerTxExtApiServer<Net> for XlayerInnerTxExt<T>
 where
-    T: EthCall + EthApiTypes<NetworkTypes = Net> + Send + Sync + 'static,
+    T: EthCall + EthApiTypes<NetworkTypes = Net> + LoadBlock + Send + Sync + 'static,
     Net: RpcTypes + Send + Sync + 'static,
 {
     async fn get_internal_transactions(
@@ -82,6 +91,26 @@ where
         let hash = string_to_b256(tx_hash.clone()).map_err(|_| {
             ErrorObjectOwned::owned(INVALID_PARAMS_CODE, "Invalid transaction hash", None::<()>)
         })?;
+
+        if self.backend.local_pending_block().await.is_ok() {
+            let read = read_tx_cache(hash);
+            debug!(target: "xlayer::innertx::rpc_utils", "read {} from tx cache", hash.to_string());
+            match read {
+                Ok(result) if !result.is_empty() => {
+                    return Ok(result);
+                }
+                Ok(_) => {
+                    // Cache miss, fall through to DB reads for committed transactions
+                }
+                Err(_) => {
+                    return Err(ErrorObjectOwned::owned(
+                        INTERNAL_ERROR_CODE,
+                        "Internal error reading transaction data",
+                        None::<()>,
+                    ))
+                }
+            }
+        }
 
         match self.backend.provider().transaction_by_hash(hash) {
             Ok(Some(_)) => {}
@@ -130,6 +159,54 @@ where
         &self,
         block_number: BlockNumberOrTag,
     ) -> RpcResult<HashMap<String, Vec<InternalTransaction>>> {
+        if block_number == BlockNumberOrTag::Pending {
+            let Some(pending_block) = self.backend.local_pending_block().await.map_err(|_| {
+                ErrorObjectOwned::owned(
+                    INTERNAL_ERROR_CODE,
+                    "Internal error getting pending block",
+                    None::<()>,
+                )
+            })?
+            else {
+                return Err(ErrorObjectOwned::owned(-32000, "Block not found", None::<()>));
+            };
+
+            let block_hash = pending_block.block.hash();
+            if let Ok(txns) = read_block_cache(block_hash) {
+                debug!(target: "xlayer::innertx::rpc_utils", "read {} from block cache", block_hash.to_string());
+                let block_txs = if !txns.is_empty() {
+                    txns
+                } else {
+                    // fall back to getting tx_hashes from pending block
+                    pending_block
+                        .block
+                        .transactions_recovered()
+                        .map(|tx| *tx.tx_hash())
+                        .collect::<Vec<_>>()
+                };
+
+                // Read internal transactions from cache
+                let mut result = HashMap::<String, Vec<InternalTransaction>>::default();
+                for tx_hash in block_txs {
+                    let internal_txs_result = read_tx_cache(tx_hash);
+
+                    match internal_txs_result {
+                        Ok(internal_txs) => {
+                            result.insert(tx_hash.to_string(), internal_txs);
+                        }
+                        Err(_) => {
+                            return Err(ErrorObjectOwned::owned(
+                                INTERNAL_ERROR_CODE,
+                                "Internal error reading transaction data",
+                                None::<()>,
+                            ));
+                        }
+                    }
+                }
+                return Ok(result);
+            }
+        }
+
         let hash: FixedBytes<32> = match self
             .backend
             .provider()

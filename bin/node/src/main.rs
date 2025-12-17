@@ -24,6 +24,7 @@ use reth_optimism_node::OpNode;
 use xlayer_apollo::{ApolloConfig, ApolloService};
 use xlayer_chainspec::XLayerChainSpecParser;
 use xlayer_innertx::{
+    cache_utils::initialize_inner_tx_cache,
     db_utils::initialize_inner_tx_db,
     rpc_utils::{XlayerInnerTxExt, XlayerInnerTxExtApiServer},
     subscriber_utils::initialize_innertx_replay,
@@ -118,6 +119,12 @@ fn main() {
                         error!(target: "reth::cli", "xlayer db failed to initialize_inner_tx_db {:#?}", e)
                     }
                 }
+                match initialize_inner_tx_cache() {
+                    Ok(_) => info!(target: "reth::cli", "xlayer cache initialize_inner_tx_cache"),
+                    Err(e) => {
+                        error!(target: "reth::cli", "xlayer cache failed to initialize_inner_tx_cache {:#?}", e)
+                    }
+                }
             }
 
             let genesis_block = builder.config().chain.genesis().number.unwrap_or_default();
@@ -139,6 +146,8 @@ fn main() {
                 run_apollo(&args.xlayer_args.apollo).await;
             }
 
+            // Should run as sequencer if flashblocks.enabled = true. Doing so means you are
+            // running a flashblocks producing sequencer.
             let NodeHandle { node: _node, node_exit_future } = if args.node_args.flashblocks.enabled {
                 let builder_config = BuilderConfig::try_from(args.node_args.clone())
                     .expect("Failed to convert builder args to builder config");
@@ -212,6 +221,11 @@ fn main() {
                             let custom_rpc = XlayerInnerTxExt { backend: new_op_eth_api.clone() };
                             ctx.modules.merge_configured(custom_rpc.into_rpc())?;
                             info!(target: "reth::cli", "xlayer innertx rpc enabled");
+
+                            // Initialize inner tx extraction for pending flashblocks
+                            let pending_block_rx = new_op_eth_api.pending_block_rx();
+                            xlayer_innertx::subscriber_utils::initialize_innertx_flashblocks(pending_block_rx, ctx.node());
+                            info!(target: "reth::cli", "xlayer inner tx flashblocks handler initialized");
                         }
 
                         // Register XLayer RPC

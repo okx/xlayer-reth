@@ -105,6 +105,7 @@ reth-rpc-eth-api = { git = "https://github.com/okx/reth", branch = "upstream/dev
 reth-storage-api = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
 reth-tracing = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
 reth-transaction-pool = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
+reth-optimism-flashblocks = { git = "https://github.com/okx/reth", branch = "upstream/dev" }
 
 # ------------------------------------------------------------------------------
 # Revm Dependencies (follows upstream reth)

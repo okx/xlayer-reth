@@ -1,6 +1,7 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+pub mod cache_utils;
 pub mod db_utils;
 pub mod innertx_inspector;
 pub mod replay_utils;
