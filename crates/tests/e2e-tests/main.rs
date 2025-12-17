@@ -1,7 +1,7 @@
 //! Functional tests for e2e tests
 //!
 //! Run all tests with: `cargo test -p xlayer-e2e-test --test e2e_tests -- --nocapture --test-threads=1`
-//! or run a specific test with: `cargo test -p xlayer-e2e-test --test e2e_tests -- <test_case_name> --nocapture --test-threads=1`
+//! or run a specific test with: `cargo test -p xlayer-e2e-test --test e2e_tests -- <test_case_name> -- --nocapture --test-threads=1`
 
 use alloy_network::TransactionBuilder;
 use alloy_primitives::{hex, Address, Bytes, B256, U256};
@@ -11,6 +11,7 @@ use alloy_sol_types::{sol, SolCall};
 use jsonrpsee::core::client::ClientT;
 use serde_json::json;
 use std::str::FromStr;
+use tokio::time::Duration;
 use xlayer_e2e_test::operations;
 
 #[tokio::test]
@@ -321,6 +322,8 @@ async fn test_eth_block_rpc(#[case] test_name: &str) {
             );
             println!("Number of transactions: {}", tx_hashes.len());
 
+            operations::wait_for_blocks(&client, target_block_number).await;
+
             // Test getting block receipts by block number
             let receipts_by_number = operations::eth_get_block_receipts(
                 &client,
@@ -342,10 +345,20 @@ async fn test_eth_block_rpc(#[case] test_name: &str) {
                 panic!("Block receipts should be an array");
             }
 
+            let block = operations::eth_get_block_by_number_or_hash(
+                &client,
+                operations::BlockId::Number(target_block_number),
+                false,
+            )
+            .await
+            .expect("Failed to get block from client");
+            let block_hash =
+                block["hash"].as_str().expect("Block hash should not be empty").to_string();
+
             // Test getting block receipts by block hash
             let receipts_by_hash = operations::eth_get_block_receipts(
                 &client,
-                operations::BlockId::Hash(target_block_hash.clone()),
+                operations::BlockId::Hash(block_hash.into()),
             )
             .await
             .expect("Failed to get block receipts by hash");
@@ -642,6 +655,7 @@ async fn test_txpool_rpc(#[case] test_name: &str) {
 async fn test_new_transaction_types(#[case] test_name: &str) {
     let client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL);
     let private_key = "363ea277eec54278af051fb574931aec751258450a286edce9e1f64401f3b9c8";
+    tokio::time::sleep(Duration::from_millis(1000)).await;
 
     match test_name {
         "Eip1559SimpleTransfer" => {
@@ -942,6 +956,8 @@ async fn test_new_transaction_types(#[case] test_name: &str) {
                 contract_address, tx_hash
             );
 
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+
             // Trace the transaction to get refund counter
             let trace_result = operations::debug_trace_transaction(&client, &tx_hash)
                 .await
@@ -994,4 +1010,219 @@ async fn test_new_transaction_types(#[case] test_name: &str) {
         }
         _ => panic!("Unknown test case: {}", test_name),
     }
+}
+
+#[tokio::test]
+async fn test_eth_get_internal_transactions() {
+    let client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL);
+    let private_key = operations::manager::DEFAULT_RICH_PRIVATE_KEY;
+
+    let (_block_hash, _block_number) = operations::setup_test_environment(&client)
+        .await
+        .expect("Failed to setup test environment");
+
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    let contracts = operations::try_deploy_contracts().await.expect("Failed to deploy contracts");
+    println!("ContractC address: {:#x}", contracts.contract_c);
+
+    sol! {
+        function setValue(uint256 _val) external;
+    }
+    let set_value_call = setValueCall { _val: U256::from(0x123u64) };
+    let contract_c_set_value_data = Bytes::from(set_value_call.abi_encode());
+    let tx_request = TransactionRequest::default().with_gas_limit(200_000);
+
+    let result = operations::make_contract_call(
+        operations::manager::DEFAULT_L2_NETWORK_URL,
+        private_key,
+        contracts.contract_c,
+        contract_c_set_value_data,
+        U256::ZERO,
+        tx_request,
+    )
+    .await
+    .expect("Failed to call ContractC setValue");
+
+    let signed_contract_c_set_value_tx_hash =
+        result["transactionHash"].as_str().expect("Transaction hash should be present");
+
+    println!("signedContractCSetValueTxHash: {}", signed_contract_c_set_value_tx_hash);
+
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    let inner_txs =
+        operations::eth_get_internal_transactions(&client, signed_contract_c_set_value_tx_hash)
+            .await
+            .expect("Failed to get internal transactions");
+
+    assert!(!inner_txs.is_null(), "Inner transactions result should not be nil");
+
+    let inner_txs_array = inner_txs.as_array().expect("Inner transactions should be an array");
+
+    assert_eq!(
+        inner_txs_array.len(),
+        1,
+        "Should have exactly 1 inner transaction for setValue call"
+    );
+
+    let inner_tx = &inner_txs_array[0];
+    assert!(!inner_tx.is_null(), "innerTx should not be nil");
+
+    operations::validate_internal_transaction(
+        inner_tx,
+        operations::manager::DEFAULT_RICH_ADDRESS.to_string(),
+        contracts.contract_c.to_string(),
+        "ContractC setValue call",
+    )
+    .expect("Failed to validate internal transaction");
+
+    println!("Internal transaction: {}", serde_json::to_string_pretty(inner_tx).unwrap());
+}
+
+#[tokio::test]
+async fn test_eth_get_block_internal_transactions() {
+    let client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL);
+
+    let (_block_hash, _block_number) = operations::setup_test_environment(&client)
+        .await
+        .expect("Failed to setup test environment");
+
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    let contracts = operations::try_deploy_contracts().await.expect("Failed to deploy contracts");
+    let batch_size = 5;
+    let amount = 1u128; // 1 Gwei per transfer
+    let to_address = operations::manager::DEFAULT_L2_NEW_ACC1_ADDRESS;
+
+    println!("Performing batch transfer of {} transactions", batch_size);
+    println!("Amount per transfer: {} Gwei", amount);
+    println!("Recipient: {}", to_address);
+
+    let (tx_hashes, _target_block_number, _target_block_hash) =
+        operations::transfer_erc20_token_batch(
+            operations::manager::DEFAULT_L2_NETWORK_URL,
+            contracts.erc20,
+            U256::from(amount * operations::GWEI),
+            to_address,
+            batch_size,
+        )
+        .await
+        .expect("Failed to perform batch ERC20 transfers");
+
+    assert_eq!(tx_hashes.len(), batch_size, "Should have created {} transactions", batch_size);
+
+    use std::collections::HashMap;
+    let mut block_numbers: HashMap<u64, Vec<usize>> = HashMap::new();
+
+    for (i, tx_hash) in tx_hashes.iter().enumerate() {
+        let receipt = operations::eth_get_transaction_receipt(&client, tx_hash)
+            .await
+            .expect(&format!("Failed to get receipt for tx {}", i));
+
+        let block_num = receipt["blockNumber"]
+            .as_str()
+            .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+            .expect("Failed to parse block number");
+
+        block_numbers.entry(block_num).or_insert_with(Vec::new).push(i);
+    }
+
+    let mut total_validated_txs = 0;
+
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    for (block_num, tx_indices) in block_numbers.iter() {
+        println!("Testing block {} with {} transactions", block_num, tx_indices.len());
+
+        let block_inner_txs = operations::eth_get_block_internal_transactions(
+            &client,
+            operations::BlockId::Number(*block_num),
+        )
+        .await
+        .expect(&format!("Failed to get block internal transactions for block {}", block_num));
+
+        assert!(
+            !block_inner_txs.is_null(),
+            "Block inner transactions should not be nil for block {}",
+            block_num
+        );
+
+        let block_inner_txs_obj =
+            block_inner_txs.as_object().expect("Block internal transactions should be an object");
+
+        let mut batch_txs_in_block = 0;
+
+        for tx_idx in tx_indices {
+            let tx_hash = &tx_hashes[*tx_idx];
+
+            let block_inner_txs_for_tx = block_inner_txs_obj.get(tx_hash).expect(&format!(
+                "Transaction {} ({}) should be in block {} internal transactions",
+                tx_idx, tx_hash, block_num
+            ));
+
+            let block_inner_txs_array = block_inner_txs_for_tx
+                .as_array()
+                .expect(&format!("Inner transactions for tx {} should be an array", tx_idx));
+
+            assert_eq!(
+                block_inner_txs_array.len(),
+                1,
+                "Transaction {} should have exactly 1 inner transaction",
+                tx_idx
+            );
+
+            batch_txs_in_block += 1;
+
+            let inner_tx = &block_inner_txs_array[0];
+
+            operations::validate_internal_transaction(
+                inner_tx,
+                operations::manager::DEFAULT_RICH_ADDRESS.to_string(),
+                contracts.erc20.to_string(),
+                &format!("Block internal transaction {}", tx_idx),
+            )
+            .expect(&format!("Failed to validate block internal transaction {}", tx_idx));
+
+            let individual_inner_txs = operations::eth_get_internal_transactions(&client, tx_hash)
+                .await
+                .expect(&format!("Failed to get individual inner transactions for tx {}", tx_idx));
+
+            let individual_inner_txs_array = individual_inner_txs.as_array().expect(&format!(
+                "Individual inner transactions should be an array for tx {}",
+                tx_idx
+            ));
+
+            assert_eq!(
+                individual_inner_txs_array.len(),
+                1,
+                "Individual inner transactions should have 1 entry for tx {}",
+                tx_idx
+            );
+
+            let individual_inner_tx = &individual_inner_txs_array[0];
+
+            operations::validate_internal_transaction(
+                individual_inner_tx,
+                operations::manager::DEFAULT_RICH_ADDRESS.to_string(),
+                contracts.erc20.to_string(),
+                &format!("Block internal transaction {}", tx_idx),
+            )
+            .expect(&format!("Failed to validate block internal transaction {}", tx_idx));
+
+            assert_eq!(
+                inner_tx, &individual_inner_txs_array[0],
+                "Inner transaction from block and individual should match for tx {}",
+                tx_idx
+            );
+        }
+
+        total_validated_txs += batch_txs_in_block;
+    }
+
+    assert_eq!(
+        tx_hashes.len(),
+        total_validated_txs,
+        "Should have validated all batch transactions"
+    );
 }

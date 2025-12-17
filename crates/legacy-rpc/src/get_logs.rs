@@ -30,6 +30,20 @@ use jsonrpsee_types::{Id, Request};
 use serde_json::value::RawValue;
 use tracing::debug;
 
+// Basic validation - check if it's a valid 32-byte hex string
+fn is_valid_blockhash(hash: &str) -> bool {
+    // Remove 0x prefix if present
+    let hash = hash.strip_prefix("0x").unwrap_or(hash);
+
+    // Check length (64 hex chars = 32 bytes)
+    if hash.len() != 64 {
+        return false;
+    }
+
+    // Check if all characters are valid hex
+    hash.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 /// Parse a block number string to u64
 /// Returns None for "latest", "pending", "safe", "finalized"
 /// Returns Some(0) for "earliest"
@@ -50,16 +64,18 @@ fn parse_block_number_string(s: &str) -> Option<u64> {
     }
 }
 
-/// Parse eth_getLogs params to extract fromBlock and toBlock
-/// Returns (from_block, to_block) as Option<(Option<u64>, Option<u64>)>
-///
-/// - Some((from, to)) - both blocks specified
-/// - Some((from, u64::MAX)) - only fromBlock specified
-/// - Some((u64::MAX, to)) - only toBlock specified
-/// - Some((u64::MAX, u64::MAX)) - neither specified (will use latest)
-/// - None - invalid params
+/// Represents params we want to parse for `eth_getLogs`.
+#[derive(Debug, Eq, PartialEq)]
+enum GetLogsParams {
+    Range(u64, u64),
+    BlockHash(String),
+}
+
+/// Parse eth_getLogs params to extract a range or a block hash.
+/// If blockHash, a `GetLogsParams::BlockHash` is returned.
+/// If range, a `GetLogsParams::Range(from_block, to_block)` is returned.
 #[inline]
-fn parse_eth_get_logs_params(params: &str) -> Option<(u64, u64)> {
+fn parse_eth_get_logs_params(params: &str) -> Option<GetLogsParams> {
     let parsed: serde_json::Value = serde_json::from_str(params).ok()?;
     let arr = parsed.as_array()?;
 
@@ -70,6 +86,14 @@ fn parse_eth_get_logs_params(params: &str) -> Option<(u64, u64)> {
 
     let filter = arr.first()?;
     let filter_obj = filter.as_object()?;
+
+    if let Some(block_hash) = filter_obj.get("blockHash").and_then(|v| v.as_str()) {
+        if is_valid_blockhash(block_hash) {
+            return Some(GetLogsParams::BlockHash(block_hash.into()));
+        } else {
+            return None;
+        }
+    }
 
     // Parse fromBlock
     let from_block = filter_obj
@@ -85,7 +109,12 @@ fn parse_eth_get_logs_params(params: &str) -> Option<(u64, u64)> {
         .and_then(parse_block_number_string)
         .unwrap_or(u64::MAX);
 
-    Some((from_block, to_block))
+    // Fallback to normal routing
+    if from_block > to_block {
+        return None;
+    }
+
+    Some(GetLogsParams::Range(from_block, to_block))
 }
 
 /// Modify eth_getLogs request to use custom fromBlock and toBlock
@@ -211,66 +240,83 @@ where
     let params = _p.as_str().unwrap();
 
     let cutoff_block = service.config.cutoff_block;
-    if let Some((from_block, to_block)) = parse_eth_get_logs_params(params) {
-        if to_block < cutoff_block {
-            debug!(
-                target:"xlayer_legacy_rpc",
-                "eth_getLogs pure legacy routing (from_block = {}, to_block = {})",
-                from_block, to_block
-            );
-            // Pure legacy
-            return service.forward_to_legacy(req).await;
-        } else if from_block >= cutoff_block {
-            debug!(
-                target:"xlayer_legacy_rpc",
-                "eth_getLogs pure local routing (from_block = {}, to_block = {})",
-                from_block, to_block
-            );
-            // Pure local
-            return inner.call(req).await;
-        } else {
-            // Hybrid: split into two requests
 
-            // 1. Legacy request: fromBlock to cutoff-1
-            let legacy_req =
-                modify_eth_get_logs_params(&req, Some(from_block), Some(cutoff_block - 1));
-
-            // 2. Local request: cutoff to toBlock
-            let local_req = modify_eth_get_logs_params(&req, Some(cutoff_block), Some(to_block));
-
-            if let (Some(legacy_req), Some(local_req)) = (legacy_req, local_req) {
+    match parse_eth_get_logs_params(params) {
+        Some(GetLogsParams::Range(from_block, to_block)) => {
+            if to_block < cutoff_block {
                 debug!(
                     target:"xlayer_legacy_rpc",
-                    "eth_getLogs hybrid routing (from_block = {}, {}) and ({}, to_block = {})",
-                    from_block,
-                    cutoff_block - 1,
-                    cutoff_block,
-                    to_block
+                    "eth_getLogs pure legacy routing (from_block = {}, to_block = {})",
+                    from_block, to_block
                 );
+                // Pure legacy
+                return service.forward_to_legacy(req).await;
+            } else if from_block >= cutoff_block {
+                debug!(
+                    target:"xlayer_legacy_rpc",
+                    "eth_getLogs pure local routing (from_block = {}, to_block = {})",
+                    from_block, to_block
+                );
+                // Pure local
+                return inner.call(req).await;
+            } else {
+                // Hybrid: split into two requests
 
-                // Call both and merge results
-                let (legacy_response, local_response) =
-                    tokio::join!(async { service.forward_to_legacy(legacy_req).await }, async {
-                        inner.call(local_req).await
-                    });
+                // 1. Legacy request: fromBlock to cutoff-1
+                let legacy_req =
+                    modify_eth_get_logs_params(&req, Some(from_block), Some(cutoff_block - 1));
 
-                // Merge the results
-                return merge_eth_get_logs_responses(legacy_response, local_response, req.id());
+                // 2. Local request: cutoff to toBlock
+                let local_req =
+                    modify_eth_get_logs_params(&req, Some(cutoff_block), Some(to_block));
+
+                if let (Some(legacy_req), Some(local_req)) = (legacy_req, local_req) {
+                    debug!(
+                        target:"xlayer_legacy_rpc",
+                        "eth_getLogs hybrid routing (from_block = {}, {}) and ({}, to_block = {})",
+                        from_block,
+                        cutoff_block - 1,
+                        cutoff_block,
+                        to_block
+                    );
+
+                    // Call both and merge results
+                    let (legacy_response, local_response) = tokio::join!(
+                        async { service.forward_to_legacy(legacy_req).await },
+                        async { inner.call(local_req).await }
+                    );
+
+                    // Merge the results
+                    return merge_eth_get_logs_responses(legacy_response, local_response, req.id());
+                }
+
+                debug!(target:"xlayer_legacy_rpc", "No legacy routing for method = eth_getLogs");
+
+                // Fallback to normal if modification failed
+                return inner.call(req).await;
             }
-
-            debug!(target:"xlayer_legacy_rpc", "No legacy routing for method = eth_getLogs");
-
-            // Fallback to normal if modification failed
-            return inner.call(req).await;
+        }
+        Some(GetLogsParams::BlockHash(_block_hash)) => {
+            debug!(target:"xlayer_legacy_rpc", "method = eth_getLogs, testing locally first...");
+            let res = inner.call(req.clone()).await;
+            if res.is_success() {
+                debug!(target:"xlayer_legacy_rpc", "method = eth_getLogs, success response = {res:?}");
+                res
+            } else {
+                debug!(target:"xlayer_legacy_rpc", "method = eth_getLogs, forward to legacy");
+                service.forward_to_legacy(req).await
+            }
+        }
+        _ => {
+            // If parsing fails, use normal routing
+            inner.call(req).await
         }
     }
-
-    // If parsing fails, use normal routing
-    inner.call(req).await
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::get_logs::GetLogsParams;
     use jsonrpsee::MethodResponse;
     use jsonrpsee_types::{Id, Request};
     use serde_json::value::RawValue;
@@ -278,20 +324,35 @@ mod tests {
     #[test]
     fn test_parse_eth_get_logs_params_both_blocks() {
         let cases = [
-            (r#"[{"fromBlock":"0x1","toBlock":"latest"}]"#, Some((1, u64::MAX))),
-            (r#"[{"fromBlock":"0x1","toBlock":"earliest"}]"#, Some((1, 0))),
-            (r#"[{"fromBlock":"latest","toBlock":"0x64"}]"#, Some((u64::MAX, 100))),
-            (r#"[{"fromBlock":"earliest","toBlock":"0x64"}]"#, Some((0, 100))),
-            (r#"[{"fromBlock":"0x1","toBlock":"0x64"}]"#, Some((1, 100))),
-            (r#"[{"fromBlock":"0x1"}]"#, Some((1, u64::MAX))),
-            (r#"[{"toBlock":"0x64"}]"#, Some((u64::MAX, 100))),
-            (r#"[{}]"#, Some((u64::MAX, u64::MAX))),
+            // Range
+            (
+                r#"[{"fromBlock":"0x1","toBlock":"latest"}]"#,
+                Some(GetLogsParams::Range(1, u64::MAX)),
+            ),
+            (r#"[{"fromBlock":"0x1","toBlock":"earliest"}]"#, None),
+            (r#"[{"fromBlock":"latest","toBlock":"0x64"}]"#, None),
+            (r#"[{"fromBlock":"earliest","toBlock":"0x64"}]"#, Some(GetLogsParams::Range(0, 100))),
+            (r#"[{"fromBlock":"0x1","toBlock":"0x64"}]"#, Some(GetLogsParams::Range(1, 100))),
+            (r#"[{"fromBlock":"0x1"}]"#, Some(GetLogsParams::Range(1, u64::MAX))),
+            (r#"[{"toBlock":"0x64"}]"#, None),
+            (r#"[{}]"#, Some(GetLogsParams::Range(u64::MAX, u64::MAX))),
+            // Blockhash
+            (
+                r#"[{"blockHash":"0x8c83240f457f709b4574dd57afb656242418ea481325ea3c284c4ba144c1e032"}]"#,
+                Some(GetLogsParams::BlockHash(
+                    "0x8c83240f457f709b4574dd57afb656242418ea481325ea3c284c4ba144c1e032".into(),
+                )),
+            ),
+            (
+                // invalid block hash
+                r#"[{"blockHash":"0x8c83240f457f709b4574dd57afb656242418ea481325ea3c284c4ba144c1e03"}]"#,
+                None,
+            ),
         ];
 
-        for c in cases {
-            let params = c.0;
+        for (params, expected) in cases {
             let result = super::parse_eth_get_logs_params(params);
-            assert_eq!(result, c.1);
+            assert_eq!(result, expected);
         }
     }
 

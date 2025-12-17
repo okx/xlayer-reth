@@ -1,7 +1,7 @@
 //! Functional tests for flashblocks e2e tests
 //!
 //! Run all tests with: `cargo test -p xlayer-e2e-test --test flashblocks_tests -- --nocapture --test-threads=1`
-//! or run a specific test with: `cargo test -p xlayer-e2e-test --test flashblocks_tests -- <test_case_name> --nocapture --test-threads=1`
+//! or run a specific test with: `cargo test -p xlayer-e2e-test --test flashblocks_tests -- <test_case_name> -- --nocapture --test-threads=1`
 //!
 
 use alloy_primitives::{hex, keccak256, Address, U256};
