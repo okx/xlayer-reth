@@ -170,7 +170,9 @@ fn main() {
                             // Register inner tx RPC
                             let custom_rpc = XlayerInnerTxExt { backend: new_op_eth_api.clone() };
                             ctx.modules.merge_configured(custom_rpc.into_rpc())?;
-                            info!(target: "reth::cli", "xlayer innertx rpc enabled");                            
+                            info!(target: "reth::cli", "xlayer innertx rpc enabled");
+
+                            // TODO: enable flashblocks innertx without websocket.
                         }
 
                         // Register XLayer RPC
