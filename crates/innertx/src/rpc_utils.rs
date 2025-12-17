@@ -28,6 +28,7 @@ use reth_rpc_eth_api::{
     EthApiTypes,
 };
 use reth_storage_api::BlockIdReader;
+use reth_tracing::tracing::debug;
 
 use crate::{
     cache_utils::{read_block_cache, read_tx_cache},
@@ -93,6 +94,7 @@ where
 
         if self.backend.local_pending_block().await.is_ok() {
             let read = read_tx_cache(hash);
+            debug!(target: "xlayer::innertx::rpc_utils", "read {} from tx cache", hash.to_string());
             match read {
                 Ok(result) if !result.is_empty() => {
                     return Ok(result);
@@ -170,55 +172,39 @@ where
             };
 
             let block_hash = pending_block.block.hash();
-
-            // Try to read from cache first
-            let block_txs_result = spawn_blocking(move || read_block_cache(block_hash))
-                .await
-                .map_err(|_| ())
-                .and_then(|r| r.map_err(|_| ()));
-
-            let block_txs = match block_txs_result {
-                Ok(txs) if !txs.is_empty() => txs,
-                Ok(_) => {
+            if let Ok(txns) = read_block_cache(block_hash) {
+                debug!(target: "xlayer::innertx::rpc_utils", "read {} from block cache", block_hash.to_string());
+                let block_txs = if !txns.is_empty() {
+                    txns
+                } else {
                     // fall back to getting tx_hashes from pending block
-                    let tx_hashes = pending_block
+                    pending_block
                         .block
                         .transactions_recovered()
                         .map(|tx| *tx.tx_hash())
-                        .collect::<Vec<_>>();
-                    return Ok(tx_hashes
-                        .into_iter()
-                        .map(|tx_hash| (tx_hash.to_string(), vec![]))
-                        .collect());
-                }
-                Err(_) => {
-                    return Err(ErrorObjectOwned::owned(
-                        INTERNAL_ERROR_CODE,
-                        "Internal error reading block data from cache",
-                        None::<()>,
-                    ))
-                }
-            };
+                        .collect::<Vec<_>>()
+                };
 
-            // Read internal transactions from cache
-            let mut result = HashMap::<String, Vec<InternalTransaction>>::default();
-            for tx_hash in block_txs {
-                let internal_txs_result = read_tx_cache(tx_hash);
+                // Read internal transactions from cache
+                let mut result = HashMap::<String, Vec<InternalTransaction>>::default();
+                for tx_hash in block_txs {
+                    let internal_txs_result = read_tx_cache(tx_hash);
 
-                match internal_txs_result {
-                    Ok(internal_txs) => {
-                        result.insert(tx_hash.to_string(), internal_txs);
-                    }
-                    Err(_) => {
-                        return Err(ErrorObjectOwned::owned(
-                            INTERNAL_ERROR_CODE,
-                            "Internal error reading transaction data",
-                            None::<()>,
-                        ));
+                    match internal_txs_result {
+                        Ok(internal_txs) => {
+                            result.insert(tx_hash.to_string(), internal_txs);
+                        }
+                        Err(_) => {
+                            return Err(ErrorObjectOwned::owned(
+                                INTERNAL_ERROR_CODE,
+                                "Internal error reading transaction data",
+                                None::<()>,
+                            ));
+                        }
                     }
                 }
+                return Ok(result);
             }
-            return Ok(result);
         }
 
         let hash: FixedBytes<32> = match self
