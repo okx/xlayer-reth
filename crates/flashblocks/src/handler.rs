@@ -120,10 +120,4 @@ where
             }
         }
     }
-
-    /// Compute inner transactions for a flashblock (future enhancement)
-    #[allow(dead_code)]
-    async fn compute_innertx(&self, _flash_block: &Arc<reth_optimism_flashblocks::FlashBlock>) {
-        // TODO: Implement innertx computation logic
-    }
 }
