@@ -62,15 +62,37 @@ check-dev-template:
     #!/usr/bin/env bash
     set -e
 
+    # Check for duplicates within each patch section (not across sections)
+    OKX_DUPLICATES=$(sed -n '/^\[patch\."https:\/\/github\.com\/okx\/reth"\]/,/^\[patch\./p' .reth-dev.toml | grep 'RETH_PATH_PLACEHOLDER' | grep -oE '^[a-z][a-z0-9-]+' | sort | uniq -d)
+    PARADIGM_DUPLICATES=$(sed -n '/^\[patch\."https:\/\/github\.com\/paradigmxyz\/reth"\]/,/^$/p' .reth-dev.toml | grep 'RETH_PATH_PLACEHOLDER' | grep -oE '^[a-z][a-z0-9-]+' | sort | uniq -d)
+    DUPLICATES="$OKX_DUPLICATES$PARADIGM_DUPLICATES"
+
+    # Get all crates from Cargo.toml (both okx/reth and paradigmxyz/reth patches)
+    CARGO_CRATES=$(mktemp)
+    grep 'git = "https://github.com/okx/reth"' Cargo.toml | grep -oE '^[a-z][a-z0-9-]+' > "$CARGO_CRATES"
+    sed -n '/^\[patch\."https:\/\/github\.com\/paradigmxyz\/reth"\]/,/^$/p' Cargo.toml | grep -oE '^[a-z][a-z0-9-]+' >> "$CARGO_CRATES"
+    sort -u "$CARGO_CRATES" -o "$CARGO_CRATES"
+
+    # Get all crates from .reth-dev.toml
+    TEMPLATE_CRATES=$(mktemp)
+    grep 'RETH_PATH_PLACEHOLDER' .reth-dev.toml | grep -oE '^[a-z][a-z0-9-]+' | sort -u > "$TEMPLATE_CRATES"
+
     # Check for missing crates (in Cargo.toml but not in .reth-dev.toml)
-    MISSING=$(comm -23 <(grep 'git = "https://github.com/okx/reth"' Cargo.toml | grep -oE '^[a-z][a-z0-9-]+' | sort) <(grep 'RETH_PATH_PLACEHOLDER' .reth-dev.toml | grep -oE '^[a-z][a-z0-9-]+' | sort))
+    MISSING=$(comm -23 "$CARGO_CRATES" "$TEMPLATE_CRATES")
 
     # Check for extra crates (in .reth-dev.toml but not in Cargo.toml)
-    EXTRA=$(comm -13 <(grep 'git = "https://github.com/okx/reth"' Cargo.toml | grep -oE '^[a-z][a-z0-9-]+' | sort) <(grep 'RETH_PATH_PLACEHOLDER' .reth-dev.toml | grep -oE '^[a-z][a-z0-9-]+' | sort))
+    EXTRA=$(comm -13 "$CARGO_CRATES" "$TEMPLATE_CRATES")
 
-    if [ -z "$MISSING" ] && [ -z "$EXTRA" ]; then
+    # Clean up temp files
+    rm -f "$CARGO_CRATES" "$TEMPLATE_CRATES"
+
+    if [ -z "$MISSING" ] && [ -z "$EXTRA" ] && [ -z "$DUPLICATES" ]; then
         echo "✅ Template OK"
     else
+        if [ -n "$DUPLICATES" ]; then
+            echo "❌ Duplicates in .reth-dev.toml:"
+            echo "$DUPLICATES" | tr ' ' '\n' | sed 's/^/  - /'
+        fi
         if [ -n "$MISSING" ]; then
             echo "❌ Missing in .reth-dev.toml:"
             echo "$MISSING" | tr ' ' '\n' | sed 's/^/  - /'
@@ -145,13 +167,37 @@ sync-dev-template reth_path:
         sed 's|/Cargo.toml:name = "\(.*\)"|\t\1|' | \
         awk -F'\t' '{print $2 "\t" $1}' > "$CRATE_MAP"
 
-    # Create a temporary file with the header
+    # Create a temporary file with the header for okx/reth patches
     echo '[patch."https://github.com/okx/reth"]' > .reth-dev.toml.tmp
 
     # Extract reth dependencies from Cargo.toml and find their actual paths
     grep 'git = "https://github.com/okx/reth"' Cargo.toml | \
         grep -oE '^[a-z][a-z0-9-]+' | \
-        sort | \
+        sort -u | \
+        while read -r crate; do
+            # Look up the crate in our pre-built map
+            CRATE_DIR=$(grep "^$crate"$'\t' "$CRATE_MAP" | cut -f2 | head -1)
+
+            if [ -z "$CRATE_DIR" ]; then
+                echo "⚠️  Could not find crate '$crate' in $RETH_PATH"
+                echo "$crate = { path = \"RETH_PATH_PLACEHOLDER/crates/$crate\" }" >> .reth-dev.toml.tmp
+                continue
+            fi
+
+            # Make path relative to RETH_PATH
+            REL_PATH=$(echo "$CRATE_DIR" | sed "s|^$RETH_PATH/||")
+
+            echo "$crate = { path = \"RETH_PATH_PLACEHOLDER/$REL_PATH\" }" >> .reth-dev.toml.tmp
+        done
+
+    # Add paradigmxyz/reth patches section
+    echo "" >> .reth-dev.toml.tmp
+    echo '[patch."https://github.com/paradigmxyz/reth"]' >> .reth-dev.toml.tmp
+
+    # Extract reth dependencies from the paradigmxyz patch section
+    sed -n '/^\[patch\."https:\/\/github\.com\/paradigmxyz\/reth"\]/,/^$/p' Cargo.toml | \
+        grep -oE '^[a-z][a-z0-9-]+' | \
+        sort -u | \
         while read -r crate; do
             # Look up the crate in our pre-built map
             CRATE_DIR=$(grep "^$crate"$'\t' "$CRATE_MAP" | cut -f2 | head -1)
