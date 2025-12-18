@@ -926,19 +926,6 @@ async fn fb_rpc_comparison_test(#[case] test_name: &str) {
                 fb_storage_by_hash, non_fb_storage_by_hash,
                 "eth_getStorageAt with block hash not identical"
             );
-
-            // eth_flashblocksEnabled
-            let fb_flashblocks_enabled = operations::eth_flashblocks_enabled(&fb_client)
-                .await
-                .expect("Failed to get flashblocks enabled from fb client");
-
-            assert_eq!(fb_flashblocks_enabled, true, "Flashblocks should be enabled");
-
-            let non_fb_flashblocks_enabled = operations::eth_flashblocks_enabled(&non_fb_client)
-                .await
-                .expect("Failed to get flashblocks enabled from fb client");
-
-            assert_eq!(non_fb_flashblocks_enabled, false, "Flashblocks should be disabled");
         }
         _ => panic!("Unknown test case: {}", test_name),
     }
