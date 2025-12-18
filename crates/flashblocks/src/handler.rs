@@ -97,7 +97,7 @@ where
                             "Failed to publish flashblock: {:?}", e
                         );
                     } else {
-                        info!(
+                        debug!(
                             target: "xlayer::flashblocks",
                             "Published flashblock: index={}, block_hash={}",
                             flash_block.index,

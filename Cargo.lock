@@ -14729,6 +14729,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "xlayer-flashblocks"
+version = "0.1.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-evm",
+ "alloy-primitives",
+ "alloy-rlp",
+ "eyre",
+ "futures",
+ "jsonrpsee 0.26.0",
+ "once_cell",
+ "op-rbuilder",
+ "reth-node-api",
+ "reth-optimism-flashblocks",
+ "reth-primitives-traits",
+ "reth-tracing",
+ "revm-context-interface",
+ "revm-database",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "xlayer-innertx"
 version = "0.1.0"
 dependencies = [
@@ -14816,6 +14842,7 @@ dependencies = [
  "uuid",
  "xlayer-apollo",
  "xlayer-chainspec",
+ "xlayer-flashblocks",
  "xlayer-innertx",
  "xlayer-legacy-rpc",
  "xlayer-rpc",
