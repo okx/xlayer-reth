@@ -12,7 +12,7 @@ where
     Node: FullNodeComponents,
 {
     node: Node,
-    flash_block_rx: FlashBlockRx,
+    flashblock_rx: FlashBlockRx,
     ws_pub: Arc<WebSocketPublisher>,
     op_args: OpRbuilderArgs,
 }
@@ -23,7 +23,7 @@ where
 {
     pub fn new(
         node: Node,
-        flash_block_rx: FlashBlockRx,
+        flashblock_rx: FlashBlockRx,
         op_args: OpRbuilderArgs,
     ) -> Result<Self, eyre::Report> {
         let ws_addr = SocketAddr::new(
@@ -39,7 +39,7 @@ where
 
         info!(target: "xlayer::flashblocks", "WebSocket publisher initialized at {}", ws_addr);
 
-        Ok(Self { node, flash_block_rx, ws_pub, op_args })
+        Ok(Self { node, flashblock_rx, ws_pub, op_args })
     }
 
     pub fn spawn(mut self) {
@@ -63,23 +63,19 @@ where
         );
 
         loop {
-            tokio::select! {
-                result = self.flash_block_rx.recv() => {
-                    match result {
-                        Ok(flash_block) => {
-                            debug!(
-                                target: "xlayer::flashblocks",
-                                "Received flashblock: index={}, block_hash={}",
-                                flash_block.index,
-                                flash_block.diff.block_hash
-                            );
-                            self.publish_flashblock(&flash_block).await;
-                        }
-                        Err(e) => {
-                            warn!(target: "xlayer::flashblocks", "Flashblock receiver error: {:?}", e);
-                            break;
-                        }
-                    }
+            match self.flashblock_rx.recv().await {
+                Ok(flashblock) => {
+                    debug!(
+                        target: "xlayer::flashblocks",
+                        "Received flashblock: index={}, block_hash={}",
+                        flashblock.index,
+                        flashblock.diff.block_hash
+                    );
+                    self.publish_flashblock(&flashblock).await;
+                }
+                Err(e) => {
+                    warn!(target: "xlayer::flashblocks", "Flashblock receiver error: {:?}", e);
+                    break;
                 }
             }
         }
@@ -87,35 +83,20 @@ where
         info!(target: "xlayer::flashblocks", "Flashblocks service stopped");
     }
 
-    async fn publish_flashblock(&self, flash_block: &Arc<reth_optimism_flashblocks::FlashBlock>) {
-        match serde_json::to_string(flash_block) {
-            Ok(json) => match serde_json::from_str(&json) {
-                Ok(payload) => {
-                    if let Err(e) = self.ws_pub.publish(&payload) {
-                        warn!(
-                            target: "xlayer::flashblocks",
-                            "Failed to publish flashblock: {:?}", e
-                        );
-                    } else {
-                        debug!(
-                            target: "xlayer::flashblocks",
-                            "Published flashblock: index={}, block_hash={}",
-                            flash_block.index,
-                            flash_block.diff.block_hash
-                        );
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        target: "xlayer::flashblocks",
-                        "Failed to deserialize flashblock: {:?}", e
-                    );
-                }
-            },
+    async fn publish_flashblock(&self, flashblock: &Arc<reth_optimism_flashblocks::FlashBlock>) {
+        match self.ws_pub.publish_op_payload(&flashblock) {
+            Ok(_) => {
+                info!(
+                    target: "xlayer::flashblocks",
+                    "Published flashblock: index={}, block_hash={}",
+                    flashblock.index,
+                    flashblock.diff.block_hash
+                );
+            }
             Err(e) => {
                 warn!(
                     target: "xlayer::flashblocks",
-                    "Failed to serialize flashblock: {:?}", e
+                    "Failed to publish flashblock: {:?}", e
                 );
             }
         }

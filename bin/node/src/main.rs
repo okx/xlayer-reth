@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use args_xlayer::{ApolloArgs, XLayerArgs};
 use clap::Parser;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use op_rbuilder::{
     args::OpRbuilderArgs,
@@ -229,20 +229,22 @@ fn main() {
                             info!(target: "reth::cli", "xlayer inner tx flashblocks handler initialized");
                         }
 
-                        let flash_block_rx = new_op_eth_api.subscribe_received_flashblocks();
+                        let flashblock_rx = new_op_eth_api.subscribe_received_flashblocks();
 
                         // Register XLayer RPC
                         let xlayer_rpc = XlayerRpcExt { backend: new_op_eth_api };
                         ctx.modules.merge_configured(xlayer_rpc.into_rpc())?;
 
-                        if let Some(flash_block_rx) = flash_block_rx {
+                        if let Some(flashblock_rx) = flashblock_rx {
                             let service = FlashblocksService::new(
                                 ctx.node().clone(),
-                                flash_block_rx,
+                                flashblock_rx,
                                 args.node_args.clone(),
                             )?;
                             service.spawn();
                             info!(target: "reth::cli", "xlayer flashblocks service initialized");
+                        } else {
+                            warn!(target: "reth::cli", "unable to get flashblock receiver, xlayer flashblocks service not initialized");
                         }
 
                         info!(target: "reth::cli", "xlayer rpc extension enabled");
