@@ -234,7 +234,6 @@ fn main() {
                             info!(target: "reth::cli", "xlayer inner tx flashblocks handler initialized");
                         }
 
-                        // Subscribe to flashblocks before moving new_op_eth_api
                         let flash_block_rx = new_op_eth_api.subscribe_received_flashblocks();
 
                         // Register XLayer RPC
@@ -248,12 +247,9 @@ fn main() {
                                 args.node_args.flashblocks.flashblocks_addr.parse()?,
                                 args.node_args.flashblocks.flashblocks_port,
                             );
-                        
                             let metrics = Arc::new(OpRBuilderMetrics::default());
-                        
                             let ws_pub = Arc::new(WebSocketPublisher::new(ws_addr, metrics)
                                 .map_err(|e| eyre::eyre!("Failed to create WebSocket publisher: {e}"))?);
-                        
                             if let Some(flash_block_rx) = flash_block_rx {
                                 initialize_flashblocks_ws(ctx.node(), flash_block_rx, ws_pub);
                                 info!(target: "reth::cli", "xlayer flashblocks websocket rebroadcaster initialized");
