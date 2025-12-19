@@ -67,39 +67,57 @@ check-dev-template:
     PARADIGM_DUPLICATES=$(sed -n '/^\[patch\."https:\/\/github\.com\/paradigmxyz\/reth"\]/,/^$/p' .reth-dev.toml | grep 'RETH_PATH_PLACEHOLDER' | grep -oE '^[a-z][a-z0-9-]+' | sort | uniq -d)
     DUPLICATES="$OKX_DUPLICATES$PARADIGM_DUPLICATES"
 
-    # Get all crates from Cargo.toml (both okx/reth and paradigmxyz/reth patches)
-    CARGO_CRATES=$(mktemp)
-    grep 'git = "https://github.com/okx/reth"' Cargo.toml | grep -oE '^[a-z][a-z0-9-]+' > "$CARGO_CRATES"
-    sed -n '/^\[patch\."https:\/\/github\.com\/paradigmxyz\/reth"\]/,/^$/p' Cargo.toml | grep -oE '^[a-z][a-z0-9-]+' >> "$CARGO_CRATES"
-    sort -u "$CARGO_CRATES" -o "$CARGO_CRATES"
+    # Get crates from each section separately
+    OKX_CARGO=$(mktemp)
+    PARADIGM_CARGO=$(mktemp)
+    OKX_TEMPLATE=$(mktemp)
+    PARADIGM_TEMPLATE=$(mktemp)
 
-    # Get all crates from .reth-dev.toml
-    TEMPLATE_CRATES=$(mktemp)
-    grep 'RETH_PATH_PLACEHOLDER' .reth-dev.toml | grep -oE '^[a-z][a-z0-9-]+' | sort -u > "$TEMPLATE_CRATES"
+    # Extract okx/reth dependencies from Cargo.toml
+    grep 'git = "https://github.com/okx/reth"' Cargo.toml | grep -oE '^[a-z][a-z0-9-]+' | sort -u > "$OKX_CARGO"
 
-    # Check for missing crates (in Cargo.toml but not in .reth-dev.toml)
-    MISSING=$(comm -23 "$CARGO_CRATES" "$TEMPLATE_CRATES")
+    # Extract paradigmxyz/reth patches from Cargo.toml
+    sed -n '/^\[patch\."https:\/\/github\.com\/paradigmxyz\/reth"\]/,/^$/p' Cargo.toml | grep -oE '^[a-z][a-z0-9-]+' | sort -u > "$PARADIGM_CARGO"
 
-    # Check for extra crates (in .reth-dev.toml but not in Cargo.toml)
-    EXTRA=$(comm -13 "$CARGO_CRATES" "$TEMPLATE_CRATES")
+    # Extract okx/reth patches from .reth-dev.toml
+    sed -n '/^\[patch\."https:\/\/github\.com\/okx\/reth"\]/,/^\[patch\./p' .reth-dev.toml | grep 'RETH_PATH_PLACEHOLDER' | grep -oE '^[a-z][a-z0-9-]+' | sort -u > "$OKX_TEMPLATE"
+
+    # Extract paradigmxyz/reth patches from .reth-dev.toml
+    sed -n '/^\[patch\."https:\/\/github\.com\/paradigmxyz\/reth"\]/,/^$/p' .reth-dev.toml | grep 'RETH_PATH_PLACEHOLDER' | grep -oE '^[a-z][a-z0-9-]+' | sort -u > "$PARADIGM_TEMPLATE"
+
+    # Check for missing/extra in okx/reth section
+    OKX_MISSING=$(comm -23 "$OKX_CARGO" "$OKX_TEMPLATE")
+    OKX_EXTRA=$(comm -13 "$OKX_CARGO" "$OKX_TEMPLATE")
+
+    # Check for missing/extra in paradigmxyz/reth section
+    PARADIGM_MISSING=$(comm -23 "$PARADIGM_CARGO" "$PARADIGM_TEMPLATE")
+    PARADIGM_EXTRA=$(comm -13 "$PARADIGM_CARGO" "$PARADIGM_TEMPLATE")
 
     # Clean up temp files
-    rm -f "$CARGO_CRATES" "$TEMPLATE_CRATES"
+    rm -f "$OKX_CARGO" "$PARADIGM_CARGO" "$OKX_TEMPLATE" "$PARADIGM_TEMPLATE"
 
-    if [ -z "$MISSING" ] && [ -z "$EXTRA" ] && [ -z "$DUPLICATES" ]; then
+    if [ -z "$DUPLICATES" ] && [ -z "$OKX_MISSING" ] && [ -z "$OKX_EXTRA" ] && [ -z "$PARADIGM_MISSING" ] && [ -z "$PARADIGM_EXTRA" ]; then
         echo "✅ Template OK"
     else
         if [ -n "$DUPLICATES" ]; then
             echo "❌ Duplicates in .reth-dev.toml:"
             echo "$DUPLICATES" | tr ' ' '\n' | sed 's/^/  - /'
         fi
-        if [ -n "$MISSING" ]; then
-            echo "❌ Missing in .reth-dev.toml:"
-            echo "$MISSING" | tr ' ' '\n' | sed 's/^/  - /'
+        if [ -n "$OKX_MISSING" ]; then
+            echo "❌ Missing in [patch.\"https://github.com/okx/reth\"] section:"
+            echo "$OKX_MISSING" | tr ' ' '\n' | sed 's/^/  - /'
         fi
-        if [ -n "$EXTRA" ]; then
-            echo "❌ Extra in .reth-dev.toml (removed from Cargo.toml):"
-            echo "$EXTRA" | tr ' ' '\n' | sed 's/^/  - /'
+        if [ -n "$OKX_EXTRA" ]; then
+            echo "❌ Extra in [patch.\"https://github.com/okx/reth\"] section:"
+            echo "$OKX_EXTRA" | tr ' ' '\n' | sed 's/^/  - /'
+        fi
+        if [ -n "$PARADIGM_MISSING" ]; then
+            echo "❌ Missing in [patch.\"https://github.com/paradigmxyz/reth\"] section:"
+            echo "$PARADIGM_MISSING" | tr ' ' '\n' | sed 's/^/  - /'
+        fi
+        if [ -n "$PARADIGM_EXTRA" ]; then
+            echo "❌ Extra in [patch.\"https://github.com/paradigmxyz/reth\"] section:"
+            echo "$PARADIGM_EXTRA" | tr ' ' '\n' | sed 's/^/  - /'
         fi
         exit 1
     fi
