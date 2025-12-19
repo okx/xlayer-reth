@@ -229,13 +229,7 @@ fn main() {
                             info!(target: "reth::cli", "xlayer inner tx flashblocks handler initialized");
                         }
 
-                        let flashblock_rx = new_op_eth_api.subscribe_received_flashblocks();
-
-                        // Register XLayer RPC
-                        let xlayer_rpc = XlayerRpcExt { backend: new_op_eth_api };
-                        ctx.modules.merge_configured(xlayer_rpc.into_rpc())?;
-
-                        if let Some(flashblock_rx) = flashblock_rx {
+                        if let Some(flashblock_rx) = new_op_eth_api.subscribe_received_flashblocks() {
                             let service = FlashblocksService::new(
                                 ctx.node().clone(),
                                 flashblock_rx,
@@ -246,6 +240,10 @@ fn main() {
                         } else {
                             warn!(target: "reth::cli", "unable to get flashblock receiver, xlayer flashblocks service not initialized");
                         }
+
+                        // Register XLayer RPC
+                        let xlayer_rpc = XlayerRpcExt { backend: new_op_eth_api };
+                        ctx.modules.merge_configured(xlayer_rpc.into_rpc())?;
 
                         info!(target: "reth::cli", "xlayer rpc extension enabled");
 
