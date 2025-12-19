@@ -254,10 +254,13 @@ install-tools-maxperf:
 clean:
     cargo clean
 
-build-docker suffix="":
+build-docker suffix="" git_sha="" git_timestamp="":
     #!/usr/bin/env bash
     set -e
-    rm -rf .cargo  # Clean dev mode files
+    # Only clean .cargo in production mode, preserve it for dev builds
+    if [ "{{suffix}}" != "dev" ]; then
+        rm -rf .cargo
+    fi
     GITHASH=$(git rev-parse --short HEAD)
     SUFFIX=""
     if [ -n "{{suffix}}" ]; then
@@ -265,7 +268,18 @@ build-docker suffix="":
     fi
     TAG="op-reth:$GITHASH$SUFFIX"
     echo "🐳 Building XLayer Reth Docker image: $TAG ..."
-    docker build -t $TAG -f DockerfileOp .
+
+    # Build with optional git info for version metadata
+    BUILD_ARGS=""
+    if [ -n "{{git_sha}}" ]; then
+        BUILD_ARGS="--build-arg VERGEN_GIT_SHA={{git_sha}}"
+        echo "📋 Using git SHA: {{git_sha}}"
+    fi
+    if [ -n "{{git_timestamp}}" ]; then
+        BUILD_ARGS="$BUILD_ARGS --build-arg VERGEN_GIT_COMMIT_TIMESTAMP={{git_timestamp}}"
+    fi
+
+    docker build $BUILD_ARGS -t $TAG -f DockerfileOp .
     docker tag $TAG op-reth:latest
     echo "🔖 Tagged $TAG as op-reth:latest"
 
@@ -297,11 +311,16 @@ build-docker-dev reth_path="":
     rsync -au --delete --exclude='.git' --exclude='target' "$RETH_SRC/" .cargo/reth/
     echo "✅ Sync complete"
 
+    # Extract git info from local reth for version metadata
+    RETH_GIT_SHA=$(cd "$RETH_SRC" && git rev-parse HEAD 2>/dev/null || echo "unknown")
+    RETH_GIT_TIMESTAMP=$(cd "$RETH_SRC" && git log -1 --format=%cI 2>/dev/null || echo "")
+    echo "📋 Local reth commit: $RETH_GIT_SHA"
+
     # Generate config with /reth path (Docker will move .cargo/reth to /reth to avoid nesting)
     sed "s|RETH_PATH_PLACEHOLDER|/reth|g" .reth-dev.toml > .cargo/config.toml
 
-    # Build Docker image
-    just build-docker dev
+    # Build Docker image with reth git info
+    just build-docker dev "$RETH_GIT_SHA" "$RETH_GIT_TIMESTAMP"
 
 watch-test:
     cargo watch -x test
