@@ -37,13 +37,13 @@ where
                 .map_err(|e| eyre::eyre!("Failed to create WebSocket publisher: {e}"))?,
         );
 
-        info!(target: "xlayer::flashblocks", "WebSocket publisher initialized at {}", ws_addr);
+        info!(target: "flashblocks", "WebSocket publisher initialized at {}", ws_addr);
 
         Ok(Self { node, flashblock_rx, ws_pub, op_args })
     }
 
     pub fn spawn(mut self) {
-        info!(target: "xlayer::flashblocks", "Initializing flashblocks service");
+        debug!(target: "flashblocks", "Initializing flashblocks service");
 
         let task_executor = self.node.task_executor().clone();
         if self.op_args.rollup_args.flashblocks_url.is_some() {
@@ -58,7 +58,7 @@ where
 
     async fn run(&mut self) {
         info!(
-            target: "xlayer::flashblocks",
+            target: "flashblocks",
             "Flashblocks websocket publisher started"
         );
 
@@ -66,7 +66,7 @@ where
             match self.flashblock_rx.recv().await {
                 Ok(flashblock) => {
                     debug!(
-                        target: "xlayer::flashblocks",
+                        target: "flashblocks",
                         "Received flashblock: index={}, block_hash={}",
                         flashblock.index,
                         flashblock.diff.block_hash
@@ -74,20 +74,20 @@ where
                     self.publish_flashblock(&flashblock).await;
                 }
                 Err(e) => {
-                    warn!(target: "xlayer::flashblocks", "Flashblock receiver error: {:?}", e);
+                    warn!(target: "flashblocks", "Flashblock receiver error: {:?}", e);
                     break;
                 }
             }
         }
 
-        info!(target: "xlayer::flashblocks", "Flashblocks service stopped");
+        info!(target: "flashblocks", "Flashblocks service stopped");
     }
 
     async fn publish_flashblock(&self, flashblock: &Arc<reth_optimism_flashblocks::FlashBlock>) {
         match self.ws_pub.publish_op_payload(&flashblock) {
             Ok(_) => {
                 debug!(
-                    target: "xlayer::flashblocks",
+                    target: "flashblocks",
                     "Published flashblock: index={}, block_hash={}",
                     flashblock.index,
                     flashblock.diff.block_hash
@@ -95,7 +95,7 @@ where
             }
             Err(e) => {
                 warn!(
-                    target: "xlayer::flashblocks",
+                    target: "flashblocks",
                     "Failed to publish flashblock: {:?}", e
                 );
             }
