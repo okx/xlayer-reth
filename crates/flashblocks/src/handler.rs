@@ -84,7 +84,7 @@ where
     }
 
     async fn publish_flashblock(&self, flashblock: &Arc<reth_optimism_flashblocks::FlashBlock>) {
-        match self.ws_pub.publish_op_payload(&flashblock) {
+        match self.ws_pub.publish_op_payload(flashblock) {
             Ok(_) => {
                 debug!(
                     target: "flashblocks",
