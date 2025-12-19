@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 # internal
 xlayer-innertx.workspace = true
+xlayer-flashblocks.workspace = true
 xlayer-chainspec.workspace = true
 xlayer-rpc.workspace = true
 xlayer-legacy-rpc.workspace = true
@@ -31,7 +32,6 @@ reth-optimism-evm.workspace = true
 reth-optimism-chainspec.workspace = true
 reth-cli-util.workspace = true
 reth-exex.workspace = true
-xlayer-apollo.workspace = true
 
 # flashblocks
 op-rbuilder.workspace = true

@@ -667,15 +667,14 @@ async fn test_new_transaction_types(#[case] test_name: &str) {
                 Address::from_str("0x1111111111111111111111111111111111111111").unwrap();
 
             let funding_amount = U256::from(10 * operations::ETH_WEI); // 10 ETH
-            operations::native_balance_transfer(
+            operations::fund_address_and_wait_for_balance(
+                &client,
                 operations::manager::DEFAULT_L2_NETWORK_URL,
-                funding_amount,
                 &format!("{:#x}", from_address),
+                funding_amount,
             )
             .await
             .expect("Failed to fund test address");
-
-            println!("Funded test address {:#x} with 10 ETH", from_address);
 
             // Create EIP-1559 transaction
             let value = U256::from(1_000_000_000_000_000_000u128); // 1 ETH
@@ -721,10 +720,11 @@ async fn test_new_transaction_types(#[case] test_name: &str) {
             let from_address = signer.address();
 
             let funding_amount = U256::from(10 * operations::ETH_WEI); // 10 ETH
-            operations::native_balance_transfer(
+            operations::fund_address_and_wait_for_balance(
+                &client,
                 operations::manager::DEFAULT_L2_NETWORK_URL,
-                funding_amount,
                 &format!("{:#x}", from_address),
+                funding_amount,
             )
             .await
             .expect("Failed to fund test address");
@@ -841,10 +841,11 @@ async fn test_new_transaction_types(#[case] test_name: &str) {
                 Address::from_str("0x1111111111111111111111111111111111111111").unwrap();
 
             let funding_amount = U256::from(operations::ETH_WEI); // 1 ETH
-            operations::native_balance_transfer(
+            operations::fund_address_and_wait_for_balance(
+                &client,
                 operations::manager::DEFAULT_L2_NETWORK_URL,
-                funding_amount,
                 &format!("{:#x}", from_address),
+                funding_amount,
             )
             .await
             .expect("Failed to fund test address");
@@ -925,10 +926,11 @@ async fn test_new_transaction_types(#[case] test_name: &str) {
             let from_address = signer.address();
 
             let funding_amount = U256::from(operations::ETH_WEI); // 1 ETH
-            operations::native_balance_transfer(
+            operations::fund_address_and_wait_for_balance(
+                &client,
                 operations::manager::DEFAULT_L2_NETWORK_URL,
-                funding_amount,
                 &format!("{:#x}", from_address),
+                funding_amount,
             )
             .await
             .expect("Failed to fund test address");

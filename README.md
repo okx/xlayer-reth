@@ -109,12 +109,6 @@ Below are the XLayer-specific configuration options:
 --rpc.legacy-url <URL>               # Legacy RPC endpoint for historical data
 --rpc.legacy-timeout <DUR>           # Timeout for legacy RPC requests (default: 30s)
 
-# Apollo Configuration Management
---apollo.enabled                     # Enable Apollo configuration (default: false)
---apollo.app-id <ID>                 # Apollo application ID
---apollo.ip <IP>                     # Apollo server IP
---apollo.cluster <CLUSTER>           # Apollo cluster name
---apollo.namespace <NS>              # Apollo namespace
 ```
 
 ## Development
@@ -184,6 +178,10 @@ cargo test -p xlayer-e2e-test --test flashblocks_tests -- --nocapture --test-thr
 just test false true
 ```
 
+To run all flashblocks tests (including ignored tests, also requires 2nd RPC node to be running), run:
+```
+cargo test -p xlayer-e2e-test --test flashblocks_tests -- --include-ignored --nocapture --test-threads=1
+```
 
 ## Contributing
 

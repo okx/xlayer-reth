@@ -1,0 +1,39 @@
+[package]
+name = "xlayer-flashblocks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+
+[dependencies]
+op-rbuilder.workspace = true
+reth-node-api.workspace = true
+reth-primitives-traits.workspace = true
+reth-tracing.workspace = true
+reth-optimism-flashblocks.workspace = true
+
+revm-context-interface.workspace = true
+revm-database.workspace = true
+
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+alloy-consensus.workspace = true
+alloy-evm.workspace = true
+alloy-eips.workspace = true
+
+tokio.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+once_cell.workspace = true
+eyre.workspace = true
+jsonrpsee.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

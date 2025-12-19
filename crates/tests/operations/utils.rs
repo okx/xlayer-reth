@@ -2,7 +2,8 @@
 
 use crate::operations::{
     contracts::*, eth_block_number, eth_gas_price, eth_get_block_by_number_or_hash,
-    eth_get_transaction_count, eth_get_transaction_receipt, manager::*, BlockId, HttpClient,
+    eth_get_transaction_count, eth_get_transaction_receipt, get_balance, manager::*, BlockId,
+    HttpClient,
 };
 use alloy_network::{EthereumWallet, TransactionBuilder};
 use alloy_primitives::{hex, Address, Bytes, U256};
@@ -68,6 +69,36 @@ pub async fn native_balance_transfer(
     wait_for_tx_mined(endpoint_url, &format!("{:#x}", tx_hash)).await?;
     println!("Transaction {:#x} confirmed successfully", tx_hash);
     Ok(format!("{:#x}", tx_hash))
+}
+
+/// Funds an address with native tokens and waits for the balance to be available
+pub async fn fund_address_and_wait_for_balance(
+    client: &HttpClient,
+    endpoint_url: &str,
+    to_address: &str,
+    funding_amount: U256,
+) -> Result<()> {
+    let funding_tx_hash = native_balance_transfer(endpoint_url, funding_amount, to_address).await?;
+
+    let receipt = eth_get_transaction_receipt(client, &funding_tx_hash).await?;
+    let funding_block_num = receipt["blockNumber"]
+        .as_str()
+        .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        .ok_or_else(|| eyre::eyre!("Failed to parse block number from receipt"))?;
+
+    wait_for_blocks(client, funding_block_num).await;
+
+    let balance = get_balance(client, to_address, None).await?;
+    if balance < funding_amount {
+        return Err(eyre::eyre!(
+            "Balance {} is less than funded amount {}",
+            balance,
+            funding_amount
+        ));
+    }
+
+    println!("Funded address {} with {} wei, balance verified", to_address, funding_amount);
+    Ok(())
 }
 
 /// Deploys smart contract using rich address

@@ -1,8 +1,8 @@
 //! Functional tests for flashblocks e2e tests
 //!
-//! Run all tests with: `cargo test -p xlayer-e2e-test --test flashblocks_tests -- --nocapture --test-threads=1`
-//! or run a specific test with: `cargo test -p xlayer-e2e-test --test flashblocks_tests -- <test_case_name> -- --nocapture --test-threads=1`
-//!
+//! Run flashblocks tests without benchmark and comparison tests: `cargo test -p xlayer-e2e-test --test flashblocks_tests -- --nocapture --test-threads=1`
+//! Run all tests (including ignored): `cargo test -p xlayer-e2e-test --test flashblocks_tests -- --include-ignored --nocapture --test-threads=1`
+//! Run a specific test: `cargo test -p xlayer-e2e-test --test flashblocks_tests -- <test_case_name> --include-ignored --nocapture --test-threads=1`
 
 use alloy_primitives::{hex, keccak256, Address, U256};
 use alloy_sol_types::{sol, SolCall};
@@ -196,6 +196,7 @@ async fn fb_smoke_test() {
 
 /// Flashblock native balance transfer tx confirmation benchmark between a flashblock
 /// node and a non-flashblock node.
+#[ignore = "Requires a second non-flashblock RPC node to be running"]
 #[tokio::test]
 async fn fb_benchmark_native_tx_confirmation() {
     let test_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
@@ -263,6 +264,7 @@ async fn fb_benchmark_native_tx_confirmation() {
 
 /// Flashblock erc20 transfer tx confirmation benchmark between a flashblock node
 /// and a non-flashblock node.
+#[ignore = "Requires a second non-flashblock RPC node to be running"]
 #[tokio::test]
 async fn fb_benchmark_erc20_tx_confirmation_test() {
     let test_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
@@ -340,6 +342,7 @@ async fn fb_benchmark_erc20_tx_confirmation_test() {
 #[rstest::rstest]
 #[case::stateless_api("StatelessApi")]
 #[case::state_api("StateApi")]
+#[ignore = "Requires a second non-flashblock RPC node to be running"]
 #[tokio::test]
 async fn fb_rpc_comparison_test(#[case] test_name: &str) {
     let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
@@ -931,6 +934,7 @@ async fn fb_rpc_comparison_test(#[case] test_name: &str) {
     }
 }
 
+#[ignore = "Requires a second non-flashblock RPC node to be running"]
 #[tokio::test]
 async fn fb_subscription_test() -> Result<()> {
     let ws_url = operations::manager::DEFAULT_FLASHBLOCKS_WS_URL;
