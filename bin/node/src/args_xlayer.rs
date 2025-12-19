@@ -9,10 +9,6 @@ pub struct XLayerArgs {
     #[command(flatten)]
     pub intercept: XLayerInterceptArgs,
 
-    /// Enable Apollo
-    #[command(flatten)]
-    pub apollo: ApolloArgs,
-
     /// Enable legacy rpc routing
     #[command(flatten)]
     pub legacy: LegacyRpcArgs,
@@ -146,30 +142,6 @@ pub struct LegacyRpcArgs {
         requires = "legacy_rpc_url"
     )]
     pub legacy_rpc_timeout: Duration,
-}
-
-/// Apollo configuration arguments
-#[derive(Debug, Clone, Args, PartialEq, Eq, Default)]
-pub struct ApolloArgs {
-    /// Enable Apollo
-    #[arg(id = "apollo.enabled", long = "apollo.enabled", default_value_t = false)]
-    pub enabled: bool,
-
-    /// Configure Apollo app ID.
-    #[arg(long = "apollo.app-id", default_value = "")]
-    pub apollo_app_id: String,
-
-    /// Configure Apollo IP.
-    #[arg(long = "apollo.ip", default_value = "")]
-    pub apollo_ip: String,
-
-    /// Configure Apollo cluster.
-    #[arg(long = "apollo.cluster", default_value = "")]
-    pub apollo_cluster: String,
-
-    /// Configure Apollo namespace.
-    #[arg(long = "apollo.namespace", default_value = "")]
-    pub apollo_namespace: String,
 }
 
 #[cfg(test)]

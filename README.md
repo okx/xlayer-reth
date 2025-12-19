@@ -109,12 +109,6 @@ Below are the XLayer-specific configuration options:
 --rpc.legacy-url <URL>               # Legacy RPC endpoint for historical data
 --rpc.legacy-timeout <DUR>           # Timeout for legacy RPC requests (default: 30s)
 
-# Apollo Configuration Management
---apollo.enabled                     # Enable Apollo configuration (default: false)
---apollo.app-id <ID>                 # Apollo application ID
---apollo.ip <IP>                     # Apollo server IP
---apollo.cluster <CLUSTER>           # Apollo cluster name
---apollo.namespace <NS>              # Apollo namespace
 ```
 
 ## Development

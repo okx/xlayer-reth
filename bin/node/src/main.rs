@@ -5,7 +5,7 @@ mod args_xlayer;
 use std::path::Path;
 use std::sync::Arc;
 
-use args_xlayer::{ApolloArgs, XLayerArgs};
+use args_xlayer::XLayerArgs;
 use clap::Parser;
 use tracing::{error, info};
 
@@ -21,7 +21,6 @@ use reth::{
 use reth_optimism_cli::Cli;
 use reth_optimism_node::OpNode;
 
-use xlayer_apollo::{ApolloConfig, ApolloService};
 use xlayer_chainspec::XLayerChainSpecParser;
 use xlayer_innertx::{
     cache_utils::initialize_inner_tx_cache,
@@ -102,7 +101,6 @@ fn main() {
             // Log XLayer feature status
             info!(
                 bridge_intercept_enabled = args.xlayer_args.intercept.enabled,
-                apollo_enabled = args.xlayer_args.apollo.enabled,
                 inner_tx_enabled = args.xlayer_args.enable_inner_tx,
                 "XLayer features configuration"
             );
@@ -141,10 +139,6 @@ fn main() {
             // If not enabled, the layer will not do any re-routing.
             let add_ons = op_node.add_ons()
                 .with_rpc_middleware(LegacyRpcRouterLayer::new(legacy_config));
-
-            if args.xlayer_args.apollo.enabled {
-                run_apollo(&args.xlayer_args.apollo).await;
-            }
 
             // Should run as sequencer if flashblocks.enabled = true. Doing so means you are
             // running a flashblocks producing sequencer.
@@ -257,30 +251,4 @@ fn main() {
             node_exit_future.await
         })
         .unwrap();
-}
-
-async fn run_apollo(apollo_args: &ApolloArgs) {
-    tracing::info!(target: "xlayer-apollo", "[Apollo] Apollo enabled: {:?}", apollo_args.enabled);
-    tracing::info!(target: "xlayer-apollo", "[Apollo] Apollo app ID: {:?}", apollo_args.apollo_app_id);
-    tracing::info!(target: "xlayer-apollo", "[Apollo] Apollo IP: {:?}", apollo_args.apollo_ip);
-    tracing::info!(target: "xlayer-apollo", "[Apollo] Apollo cluster: {:?}", apollo_args.apollo_cluster);
-    tracing::info!(target: "xlayer-apollo", "[Apollo] Apollo namespace: {:?}", apollo_args.apollo_namespace);
-
-    // Create Apollo config from args
-    let apollo_config = ApolloConfig {
-        meta_server: vec![apollo_args.apollo_ip.to_string()],
-        app_id: apollo_args.apollo_app_id.to_string(),
-        cluster_name: apollo_args.apollo_cluster.to_string(),
-        namespaces: Some(apollo_args.apollo_namespace.split(',').map(|s| s.to_string()).collect()),
-        secret: None,
-    };
-
-    tracing::info!(target: "xlayer-apollo", "[Apollo] Creating Apollo config");
-
-    // Initialize Apollo singleton
-    if let Err(e) = ApolloService::try_initialize(apollo_config).await {
-        tracing::error!(target: "xlayer-apollo", "[Apollo] Failed to initialize Apollo: {:?}; Proceeding with node launch without Apollo", e);
-    } else {
-        tracing::info!(target: "xlayer-apollo", "[Apollo] Apollo initialized successfully")
-    }
 }
