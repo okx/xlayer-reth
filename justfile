@@ -342,7 +342,10 @@ build-docker-dev reth_path="":
 
     # Restore local config for development (point to actual local path, not /reth)
     sed "s|RETH_PATH_PLACEHOLDER|$RETH_SRC|g" .reth-dev.toml > .cargo/config.toml
-    echo "✅ Restored local development config"
+
+    # Clean up .cargo/reth since it's only needed during Docker build
+    rm -rf .cargo/reth .cargo/.reth_source_path
+    echo "✅ Restored local development config and cleaned up build artifacts"
 
 watch-test:
     cargo watch -x test
