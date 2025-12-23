@@ -101,7 +101,6 @@ fn main() {
 
             // Log XLayer feature status
             info!(
-                bridge_intercept_enabled = args.xlayer_args.intercept.enabled,
                 inner_tx_enabled = args.xlayer_args.enable_inner_tx,
                 "XLayer features configuration"
             );

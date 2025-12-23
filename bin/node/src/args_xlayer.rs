@@ -1,14 +1,11 @@
 use clap::Args;
 use std::time::Duration;
+use url::Url;
 
 /// X Layer specific configuration flags
 #[derive(Debug, Clone, Args, PartialEq, Eq, Default)]
 #[command(next_help_heading = "X Layer")]
 pub struct XLayerArgs {
-    /// Bridge transaction interception configuration
-    #[command(flatten)]
-    pub intercept: XLayerInterceptArgs,
-
     /// Enable legacy rpc routing
     #[command(flatten)]
     pub legacy: LegacyRpcArgs,
@@ -25,7 +22,7 @@ pub struct XLayerArgs {
 impl XLayerArgs {
     /// Validate all X Layer configurations
     pub fn validate(&self) -> Result<(), String> {
-        self.intercept.validate()
+        self.legacy.validate()
     }
 
     /// Validate init command arguments for xlayer-mainnet and xlayer-testnet
@@ -66,66 +63,6 @@ impl XLayerArgs {
     }
 }
 
-/// X Layer Bridge transaction interception arguments
-#[derive(Debug, Clone, Args, PartialEq, Eq, Default)]
-pub struct XLayerInterceptArgs {
-    /// Enable bridge transaction interception
-    #[arg(
-        long = "xlayer.intercept.enabled",
-        help = "Enable bridge transaction interception for payload builder",
-        default_value = "false"
-    )]
-    pub enabled: bool,
-
-    /// Bridge contract address to monitor
-    #[arg(
-        long = "xlayer.intercept.bridge-contract",
-        help = "PolygonZkEVMBridge contract address to monitor for interception",
-        value_name = "ADDRESS"
-    )]
-    pub bridge_contract: Option<String>,
-
-    /// Target token address to intercept
-    #[arg(
-        long = "xlayer.intercept.target-token",
-        help = "Target token address to intercept (use empty string or '*' for wildcard mode)",
-        value_name = "ADDRESS"
-    )]
-    pub target_token: Option<String>,
-}
-
-impl XLayerInterceptArgs {
-    /// Validate the configuration
-    pub fn validate(&self) -> Result<(), String> {
-        if !self.enabled {
-            return Ok(());
-        }
-
-        if self.bridge_contract.is_none() {
-            return Err(
-                "--xlayer.intercept.bridge-contract is required when interception is enabled"
-                    .to_string(),
-            );
-        }
-
-        if let Some(addr) = &self.bridge_contract
-            && addr.parse::<alloy_primitives::Address>().is_err()
-        {
-            return Err(format!("Invalid bridge contract address format: {addr}"));
-        }
-
-        if let Some(token) = &self.target_token
-            && !token.is_empty()
-            && token != "*"
-            && token.parse::<alloy_primitives::Address>().is_err()
-        {
-            return Err(format!("Invalid target token address format: {token}"));
-        }
-
-        Ok(())
-    }
-}
-
 /// X Layer legacy RPC arguments
 #[derive(Debug, Clone, Args, PartialEq, Eq, Default)]
 pub struct LegacyRpcArgs {
@@ -144,6 +81,32 @@ pub struct LegacyRpcArgs {
     pub legacy_rpc_timeout: Duration,
 }
 
+impl LegacyRpcArgs {
+    /// Validate legacy RPC configuration
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(url_str) = &self.legacy_rpc_url {
+            // Validate URL format
+            Url::parse(url_str)
+                .map_err(|e| format!("Invalid legacy RPC URL '{url_str}': {e:?}"))?;
+
+            // Validate timeout is reasonable (not zero and not excessively long)
+            if self.legacy_rpc_timeout.is_zero() {
+                return Err("Legacy RPC timeout must be greater than zero".to_string());
+            }
+
+            // Warn if timeout is excessively long (more than 5 minutes)
+            if self.legacy_rpc_timeout > Duration::from_secs(300) {
+                tracing::warn!(
+                    "Warning: Legacy RPC timeout is set to {:?}, which is unusually long",
+                    self.legacy_rpc_timeout
+                );
+            }
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,130 +121,155 @@ mod tests {
 
     #[test]
     fn test_xlayer_args_default() {
-        let default_args = XLayerArgs::default();
         let args = CommandParser::<XLayerArgs>::parse_from(["reth"]).args;
-        assert_eq!(args.intercept.enabled, default_args.intercept.enabled);
-        assert_eq!(args.intercept.bridge_contract, default_args.intercept.bridge_contract);
-        assert_eq!(args.intercept.target_token, default_args.intercept.target_token);
         assert!(args.validate().is_ok());
     }
 
     #[test]
-    fn test_xlayer_args_disabled() {
-        let args = XLayerArgs::default();
-        assert!(!args.intercept.enabled);
+    fn test_legacy_rpc_disabled_by_default() {
+        let args = LegacyRpcArgs::default();
+        assert!(args.legacy_rpc_url.is_none());
         assert!(args.validate().is_ok());
     }
 
     #[test]
-    fn test_parse_xlayer_intercept_enabled() {
+    fn test_legacy_rpc_valid_http_url() {
+        let args = LegacyRpcArgs {
+            legacy_rpc_url: Some("http://localhost:8545".to_string()),
+            legacy_rpc_timeout: Duration::from_secs(30),
+        };
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn test_legacy_rpc_valid_https_url() {
+        let args = LegacyRpcArgs {
+            legacy_rpc_url: Some("https://mainnet.infura.io/v3/YOUR-PROJECT-ID".to_string()),
+            legacy_rpc_timeout: Duration::from_secs(30),
+        };
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn test_legacy_rpc_valid_url_with_port() {
+        let args = LegacyRpcArgs {
+            legacy_rpc_url: Some("http://192.168.1.100:8545".to_string()),
+            legacy_rpc_timeout: Duration::from_secs(30),
+        };
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn test_legacy_rpc_invalid_url_format() {
+        let args = LegacyRpcArgs {
+            legacy_rpc_url: Some("not-a-valid-url".to_string()),
+            legacy_rpc_timeout: Duration::from_secs(30),
+        };
+        let result = args.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid legacy RPC URL"));
+    }
+
+    #[test]
+    fn test_legacy_rpc_empty_url() {
+        let args = LegacyRpcArgs {
+            legacy_rpc_url: Some("".to_string()),
+            legacy_rpc_timeout: Duration::from_secs(30),
+        };
+        let result = args.validate();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_legacy_rpc_invalid_scheme() {
+        let args = LegacyRpcArgs {
+            legacy_rpc_url: Some("ftp://example.com".to_string()),
+            legacy_rpc_timeout: Duration::from_secs(30),
+        };
+        // This should pass validation (URL is valid, even if scheme is unusual)
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn test_legacy_rpc_zero_timeout() {
+        let args = LegacyRpcArgs {
+            legacy_rpc_url: Some("http://localhost:8545".to_string()),
+            legacy_rpc_timeout: Duration::from_secs(0),
+        };
+        let result = args.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("timeout must be greater than zero"));
+    }
+
+    #[test]
+    fn test_legacy_rpc_reasonable_timeout() {
+        let args = LegacyRpcArgs {
+            legacy_rpc_url: Some("http://localhost:8545".to_string()),
+            legacy_rpc_timeout: Duration::from_secs(60),
+        };
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn test_legacy_rpc_parse_with_url() {
         let args = CommandParser::<XLayerArgs>::parse_from([
             "reth",
-            "--xlayer.intercept.enabled",
-            "--xlayer.intercept.bridge-contract",
-            "0x2a3DD3EB832aF982ec71669E178424b10Dca2EDe",
-            "--xlayer.intercept.target-token",
-            "0x75231F58b43240C9718Dd58B4967c5114342a86c",
+            "--rpc.legacy-url",
+            "http://localhost:8545",
+            "--rpc.legacy-timeout",
+            "30s",
         ])
         .args;
 
-        assert!(args.intercept.enabled);
-        assert_eq!(
-            args.intercept.bridge_contract,
-            Some("0x2a3DD3EB832aF982ec71669E178424b10Dca2EDe".to_string())
-        );
-        assert_eq!(
-            args.intercept.target_token,
-            Some("0x75231F58b43240C9718Dd58B4967c5114342a86c".to_string())
-        );
+        assert_eq!(args.legacy.legacy_rpc_url, Some("http://localhost:8545".to_string()));
+        assert_eq!(args.legacy.legacy_rpc_timeout, Duration::from_secs(30));
         assert!(args.validate().is_ok());
     }
 
     #[test]
-    fn test_parse_xlayer_intercept_wildcard() {
+    fn test_legacy_rpc_parse_url_only_uses_default_timeout() {
         let args = CommandParser::<XLayerArgs>::parse_from([
             "reth",
-            "--xlayer.intercept.enabled",
-            "--xlayer.intercept.bridge-contract",
-            "0x2a3DD3EB832aF982ec71669E178424b10Dca2EDe",
-            "--xlayer.intercept.target-token",
-            "*",
+            "--rpc.legacy-url",
+            "http://localhost:8545",
         ])
         .args;
 
-        assert!(args.intercept.enabled);
-        assert_eq!(args.intercept.target_token, Some("*".to_string()));
-    }
-
-    #[test]
-    fn test_parse_xlayer_intercept_only_bridge_contract() {
-        let args = CommandParser::<XLayerArgs>::parse_from([
-            "reth",
-            "--xlayer.intercept.enabled",
-            "--xlayer.intercept.bridge-contract",
-            "0x2a3DD3EB832aF982ec71669E178424b10Dca2EDe",
-        ])
-        .args;
-
-        assert!(args.intercept.enabled);
-        assert_eq!(
-            args.intercept.bridge_contract,
-            Some("0x2a3DD3EB832aF982ec71669E178424b10Dca2EDe".to_string())
-        );
-        assert_eq!(args.intercept.target_token, None);
+        assert_eq!(args.legacy.legacy_rpc_url, Some("http://localhost:8545".to_string()));
+        assert_eq!(args.legacy.legacy_rpc_timeout, Duration::from_secs(30)); // default
         assert!(args.validate().is_ok());
     }
 
     #[test]
-    fn test_parse_xlayer_intercept_disabled_with_params() {
-        // Even with bridge contract set, if not enabled, should parse successfully
+    fn test_xlayer_args_with_valid_legacy_config() {
         let args = CommandParser::<XLayerArgs>::parse_from([
             "reth",
-            "--xlayer.intercept.bridge-contract",
-            "0x2a3DD3EB832aF982ec71669E178424b10Dca2EDe",
+            "--rpc.legacy-url",
+            "https://mainnet.infura.io/v3/test",
+            "--rpc.legacy-timeout",
+            "45s",
+            "--xlayer.enable-innertx",
         ])
         .args;
 
-        assert!(!args.intercept.enabled);
+        assert!(args.enable_inner_tx);
+        assert!(args.legacy.legacy_rpc_url.is_some());
+        assert_eq!(args.legacy.legacy_rpc_timeout, Duration::from_secs(45));
         assert!(args.validate().is_ok());
     }
 
     #[test]
-    fn test_xlayer_intercept_args_enabled_without_bridge_contract() {
-        let args = XLayerInterceptArgs { enabled: true, bridge_contract: None, target_token: None };
-        assert!(args.validate().is_err());
-    }
-
-    #[test]
-    fn test_xlayer_intercept_invalid_bridge_address() {
-        let args = XLayerInterceptArgs {
-            enabled: true,
-            bridge_contract: Some("invalid".to_string()),
-            target_token: None,
+    fn test_xlayer_args_with_invalid_legacy_url() {
+        let args = XLayerArgs {
+            legacy: LegacyRpcArgs {
+                legacy_rpc_url: Some("invalid-url".to_string()),
+                legacy_rpc_timeout: Duration::from_secs(30),
+            },
+            enable_inner_tx: false,
         };
 
-        assert!(args.validate().is_err());
-    }
-
-    #[test]
-    fn test_xlayer_intercept_invalid_token_address() {
-        let args = XLayerInterceptArgs {
-            enabled: true,
-            bridge_contract: Some("0x2a3DD3EB832aF982ec71669E178424b10Dca2EDe".to_string()),
-            target_token: Some("invalid_address".to_string()),
-        };
-
-        assert!(args.validate().is_err());
-    }
-
-    #[test]
-    fn test_xlayer_intercept_mixed_case_addresses() {
-        let args = XLayerInterceptArgs {
-            enabled: true,
-            bridge_contract: Some("0x2A3DD3eb832Af982EC71669e178424b10DcA2ede".to_string()),
-            target_token: Some("0x75231f58B43240c9718dd58b4967C5114342A86C".to_string()),
-        };
-
-        assert!(args.validate().is_ok());
+        let result = args.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid legacy RPC URL"));
     }
 }
