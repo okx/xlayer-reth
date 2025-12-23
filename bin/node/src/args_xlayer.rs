@@ -1,5 +1,6 @@
 use clap::Args;
 use std::time::Duration;
+use url::Url;
 
 /// X Layer specific configuration flags
 #[derive(Debug, Clone, Args, PartialEq, Eq, Default)]
@@ -21,7 +22,7 @@ pub struct XLayerArgs {
 impl XLayerArgs {
     /// Validate all X Layer configurations
     pub fn validate(&self) -> Result<(), String> {
-        Ok(())
+        self.legacy.validate()
     }
 
     /// Validate init command arguments for xlayer-mainnet and xlayer-testnet
@@ -80,6 +81,32 @@ pub struct LegacyRpcArgs {
     pub legacy_rpc_timeout: Duration,
 }
 
+impl LegacyRpcArgs {
+    /// Validate legacy RPC configuration
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(url_str) = &self.legacy_rpc_url {
+            // Validate URL format
+            Url::parse(url_str)
+                .map_err(|e| format!("Invalid legacy RPC URL '{url_str}': {e:?}"))?;
+
+            // Validate timeout is reasonable (not zero and not excessively long)
+            if self.legacy_rpc_timeout.is_zero() {
+                return Err("Legacy RPC timeout must be greater than zero".to_string());
+            }
+
+            // Warn if timeout is excessively long (more than 5 minutes)
+            if self.legacy_rpc_timeout > Duration::from_secs(300) {
+                tracing::warn!(
+                    "Warning: Legacy RPC timeout is set to {:?}, which is unusually long",
+                    self.legacy_rpc_timeout
+                );
+            }
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,5 +123,153 @@ mod tests {
     fn test_xlayer_args_default() {
         let args = CommandParser::<XLayerArgs>::parse_from(["reth"]).args;
         assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn test_legacy_rpc_disabled_by_default() {
+        let args = LegacyRpcArgs::default();
+        assert!(args.legacy_rpc_url.is_none());
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn test_legacy_rpc_valid_http_url() {
+        let args = LegacyRpcArgs {
+            legacy_rpc_url: Some("http://localhost:8545".to_string()),
+            legacy_rpc_timeout: Duration::from_secs(30),
+        };
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn test_legacy_rpc_valid_https_url() {
+        let args = LegacyRpcArgs {
+            legacy_rpc_url: Some("https://mainnet.infura.io/v3/YOUR-PROJECT-ID".to_string()),
+            legacy_rpc_timeout: Duration::from_secs(30),
+        };
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn test_legacy_rpc_valid_url_with_port() {
+        let args = LegacyRpcArgs {
+            legacy_rpc_url: Some("http://192.168.1.100:8545".to_string()),
+            legacy_rpc_timeout: Duration::from_secs(30),
+        };
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn test_legacy_rpc_invalid_url_format() {
+        let args = LegacyRpcArgs {
+            legacy_rpc_url: Some("not-a-valid-url".to_string()),
+            legacy_rpc_timeout: Duration::from_secs(30),
+        };
+        let result = args.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid legacy RPC URL"));
+    }
+
+    #[test]
+    fn test_legacy_rpc_empty_url() {
+        let args = LegacyRpcArgs {
+            legacy_rpc_url: Some("".to_string()),
+            legacy_rpc_timeout: Duration::from_secs(30),
+        };
+        let result = args.validate();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_legacy_rpc_invalid_scheme() {
+        let args = LegacyRpcArgs {
+            legacy_rpc_url: Some("ftp://example.com".to_string()),
+            legacy_rpc_timeout: Duration::from_secs(30),
+        };
+        // This should pass validation (URL is valid, even if scheme is unusual)
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn test_legacy_rpc_zero_timeout() {
+        let args = LegacyRpcArgs {
+            legacy_rpc_url: Some("http://localhost:8545".to_string()),
+            legacy_rpc_timeout: Duration::from_secs(0),
+        };
+        let result = args.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("timeout must be greater than zero"));
+    }
+
+    #[test]
+    fn test_legacy_rpc_reasonable_timeout() {
+        let args = LegacyRpcArgs {
+            legacy_rpc_url: Some("http://localhost:8545".to_string()),
+            legacy_rpc_timeout: Duration::from_secs(60),
+        };
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn test_legacy_rpc_parse_with_url() {
+        let args = CommandParser::<XLayerArgs>::parse_from([
+            "reth",
+            "--rpc.legacy-url",
+            "http://localhost:8545",
+            "--rpc.legacy-timeout",
+            "30s",
+        ])
+        .args;
+
+        assert_eq!(args.legacy.legacy_rpc_url, Some("http://localhost:8545".to_string()));
+        assert_eq!(args.legacy.legacy_rpc_timeout, Duration::from_secs(30));
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn test_legacy_rpc_parse_url_only_uses_default_timeout() {
+        let args = CommandParser::<XLayerArgs>::parse_from([
+            "reth",
+            "--rpc.legacy-url",
+            "http://localhost:8545",
+        ])
+        .args;
+
+        assert_eq!(args.legacy.legacy_rpc_url, Some("http://localhost:8545".to_string()));
+        assert_eq!(args.legacy.legacy_rpc_timeout, Duration::from_secs(30)); // default
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn test_xlayer_args_with_valid_legacy_config() {
+        let args = CommandParser::<XLayerArgs>::parse_from([
+            "reth",
+            "--rpc.legacy-url",
+            "https://mainnet.infura.io/v3/test",
+            "--rpc.legacy-timeout",
+            "45s",
+            "--xlayer.enable-innertx",
+        ])
+        .args;
+
+        assert!(args.enable_inner_tx);
+        assert!(args.legacy.legacy_rpc_url.is_some());
+        assert_eq!(args.legacy.legacy_rpc_timeout, Duration::from_secs(45));
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn test_xlayer_args_with_invalid_legacy_url() {
+        let args = XLayerArgs {
+            legacy: LegacyRpcArgs {
+                legacy_rpc_url: Some("invalid-url".to_string()),
+                legacy_rpc_timeout: Duration::from_secs(30),
+            },
+            enable_inner_tx: false,
+        };
+
+        let result = args.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid legacy RPC URL"));
     }
 }
