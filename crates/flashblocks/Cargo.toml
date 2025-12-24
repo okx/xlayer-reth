@@ -25,8 +25,19 @@ alloy-rlp.workspace = true
 alloy-consensus.workspace = true
 alloy-evm.workspace = true
 alloy-eips.workspace = true
+alloy-rpc-types-eth.workspace = true
+alloy-json-rpc.workspace = true
+
+reth-rpc.workspace = true
+reth-rpc-convert.workspace = true
+reth-rpc-eth-api.workspace = true
+reth-rpc-server-types.workspace = true
+reth-storage-api.workspace = true
+reth-chain-state.workspace = true
+reth-transaction-pool.workspace = true
 
 tokio.workspace = true
+tokio-stream.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -34,6 +45,7 @@ once_cell.workspace = true
 eyre.workspace = true
 jsonrpsee.workspace = true
 tracing.workspace = true
+async-trait.workspace = true
 
 [lints]
 workspace = true

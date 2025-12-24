@@ -21,8 +21,10 @@ use reth::{
 use reth_optimism_cli::Cli;
 use reth_optimism_node::OpNode;
 
+use reth_rpc_server_types::RethRpcModule;
 use xlayer_chainspec::XLayerChainSpecParser;
 use xlayer_flashblocks::handler::FlashblocksService;
+use xlayer_flashblocks::pubsub::OpEthPubSub;
 use xlayer_innertx::{
     cache_utils::initialize_inner_tx_cache,
     db_utils::initialize_inner_tx_db,
@@ -232,6 +234,23 @@ fn main() {
                             info!(target: "reth::cli", "xlayer flashblocks service initialized");
                         } else {
                             warn!(target: "reth::cli", "unable to get flashblock receiver, xlayer flashblocks service not initialized");
+                        }
+
+                        if let Some(pending_blocks_rx) = ctx.registry.eth_api().pending_block_rx() {
+                            let eth_pubsub = ctx.registry.eth_handlers().pubsub.clone();
+
+                            let op_eth_pubsub = OpEthPubSub::new(
+                                eth_pubsub,
+                                pending_blocks_rx,
+                                ctx.registry.eth_api().clone(),
+                            );
+                            ctx.modules.add_or_replace_if_module_configured(
+                                RethRpcModule::Eth,
+                                op_eth_pubsub.into_rpc(),
+                            )?;
+                            info!(target: "reth::cli", "xlayer eth pubsub initialized");
+                        } else {
+                            warn!(target: "reth::cli", "unable to get pending blocks receiver, flashblocks eth pubsub not replaced");
                         }
 
                         // Register XLayer RPC

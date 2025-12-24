@@ -106,6 +106,8 @@ reth-storage-api = { git = "https://github.com/okx/reth", rev = "da2995a95b1e3e0
 reth-tracing = { git = "https://github.com/okx/reth", rev = "da2995a95b1e3e02001e76dd8d194c0ec051e838" }
 reth-transaction-pool = { git = "https://github.com/okx/reth", rev = "da2995a95b1e3e02001e76dd8d194c0ec051e838" }
 reth-optimism-flashblocks = { git = "https://github.com/okx/reth", rev = "da2995a95b1e3e02001e76dd8d194c0ec051e838" }
+reth-rpc-server-types = { git = "https://github.com/okx/reth", rev = "da2995a95b1e3e02001e76dd8d194c0ec051e838" }
+
 
 # ------------------------------------------------------------------------------
 # Revm Dependencies (follows upstream reth)
@@ -167,6 +169,7 @@ futures = "0.3"
 futures-util = "0.3"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 tower = "0.5"
+async-trait = "0.1.89"
 
 # rpc
 jsonrpsee = "0.26.0"
