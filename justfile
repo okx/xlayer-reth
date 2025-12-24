@@ -340,6 +340,10 @@ build-docker-dev reth_path="":
     # Build Docker image with reth git info
     just build-docker dev "$RETH_GIT_SHA" "$RETH_GIT_TIMESTAMP"
 
+    # Clean up synced reth source (will be re-synced on next build)
+    rm -rf .cargo/reth
+    echo "🧹 Cleaned up .cargo/reth"
+
     # Restore local config for development (point to actual local path, not /reth)
     sed "s|RETH_PATH_PLACEHOLDER|$RETH_SRC|g" .reth-dev.toml > .cargo/config.toml
     echo "✅ Restored local development config"

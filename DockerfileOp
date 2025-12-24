@@ -38,17 +38,18 @@ ENV RUSTFLAGS="$RUSTFLAGS"
 ARG FEATURES=""
 ENV FEATURES=$FEATURES
 
-# Git metadata for vergen (used when .git is not available)
-ARG VERGEN_GIT_SHA="00000000" # should be at least 8 chars long
-ENV VERGEN_GIT_SHA=$VERGEN_GIT_SHA
+# Git metadata for vergen (optional - only used when .git is not available)
+ARG VERGEN_GIT_SHA
+ARG VERGEN_GIT_COMMIT_TIMESTAMP
 
-ARG VERGEN_GIT_COMMIT_TIMESTAMP=""
-ENV VERGEN_GIT_COMMIT_TIMESTAMP=$VERGEN_GIT_COMMIT_TIMESTAMP
-
-RUN cargo chef cook --profile $BUILD_PROFILE --features "$FEATURES" --recipe-path recipe.json --manifest-path /app/bin/node/Cargo.toml
+RUN if [ -n "$VERGEN_GIT_SHA" ]; then export VERGEN_GIT_SHA="$VERGEN_GIT_SHA"; fi && \
+    if [ -n "$VERGEN_GIT_COMMIT_TIMESTAMP" ]; then export VERGEN_GIT_COMMIT_TIMESTAMP="$VERGEN_GIT_COMMIT_TIMESTAMP"; fi && \
+    cargo chef cook --profile $BUILD_PROFILE --features "$FEATURES" --recipe-path recipe.json --manifest-path /app/bin/node/Cargo.toml
 
 COPY . .
-RUN cargo build --profile $BUILD_PROFILE --bin xlayer-reth-node --manifest-path /app/bin/node/Cargo.toml
+RUN if [ -n "$VERGEN_GIT_SHA" ]; then export VERGEN_GIT_SHA="$VERGEN_GIT_SHA"; fi && \
+    if [ -n "$VERGEN_GIT_COMMIT_TIMESTAMP" ]; then export VERGEN_GIT_COMMIT_TIMESTAMP="$VERGEN_GIT_COMMIT_TIMESTAMP"; fi && \
+    cargo build --profile $BUILD_PROFILE --bin xlayer-reth-node --manifest-path /app/bin/node/Cargo.toml
 
 # Copy binary to a fixed location
 RUN OUTPUT_DIR=$(if [ "$BUILD_PROFILE" = "dev" ] || [ "$BUILD_PROFILE" = "test" ]; then echo debug; else echo "$BUILD_PROFILE"; fi) && \
