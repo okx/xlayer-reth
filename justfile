@@ -374,11 +374,13 @@ build-docker-dev reth_path="":
     echo "✅ Restored local development config"
 
 watch-test:
-    cargo watch -x test
+    @command -v bacon >/dev/null 2>&1 || cargo install bacon
+    bacon test
 
 watch-check:
-    cargo watch -x "fmt --all -- --check" -x "clippy --all-targets -- -D warnings" -x test
+    @command -v bacon >/dev/null 2>&1 || cargo install bacon
+    bacon clippy
 
 xlayer:
-	cp .github/scripts/pre-commit-xlayer .git/hooks/pre-commit && \
-	chmod +x .git/hooks/pre-commit
+    cp .github/scripts/pre-commit-xlayer .git/hooks/pre-commit && \
+    chmod +x .git/hooks/pre-commit
