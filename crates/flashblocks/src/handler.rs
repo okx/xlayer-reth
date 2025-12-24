@@ -5,7 +5,7 @@ use reth_node_api::FullNodeComponents;
 use reth_optimism_flashblocks::FlashBlockRx;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 pub struct FlashblocksService<Node>
 where
@@ -65,7 +65,7 @@ where
         loop {
             match self.flashblock_rx.recv().await {
                 Ok(flashblock) => {
-                    debug!(
+                    trace!(
                         target: "flashblocks",
                         "Received flashblock: index={}, block_hash={}",
                         flashblock.index,
@@ -86,7 +86,7 @@ where
     async fn publish_flashblock(&self, flashblock: &Arc<reth_optimism_flashblocks::FlashBlock>) {
         match self.ws_pub.publish_op_payload(flashblock) {
             Ok(_) => {
-                debug!(
+                trace!(
                     target: "flashblocks",
                     "Published flashblock: index={}, block_hash={}",
                     flashblock.index,
