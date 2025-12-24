@@ -11,7 +11,6 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-revm.workspace = true
 tempfile.workspace = true
 
 # rpc

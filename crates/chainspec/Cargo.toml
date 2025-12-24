@@ -20,7 +20,6 @@ reth-cli = { workspace = true }
 # op-reth
 reth-optimism-primitives = { workspace = true }
 reth-optimism-chainspec = { workspace = true }
-reth-optimism-cli = { workspace = true }
 reth-optimism-forks = { workspace = true }
 reth-ethereum-forks = { workspace = true }
 
