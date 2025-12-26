@@ -1,3 +1,3 @@
 pub mod handler;
 pub mod pubsub;
-mod subscription;
+pub mod subscription;

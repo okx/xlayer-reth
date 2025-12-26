@@ -21,11 +21,12 @@ use reth::{
 use reth_optimism_cli::Cli;
 use reth_optimism_node::OpNode;
 
+use reth_node_api::FullNodeComponents;
 use reth_rpc_eth_api::EthApiTypes;
 use reth_rpc_server_types::RethRpcModule;
 use xlayer_chainspec::XLayerChainSpecParser;
 use xlayer_flashblocks::handler::FlashblocksService;
-use xlayer_flashblocks::pubsub::FlashblocksPubSub;
+use xlayer_flashblocks::subscription::FlashblocksPubSub;
 use xlayer_innertx::{
     cache_utils::initialize_inner_tx_cache,
     db_utils::initialize_inner_tx_db,
@@ -243,6 +244,7 @@ fn main() {
                             let flashblocks_pubsub = FlashblocksPubSub::new(
                                 eth_pubsub,
                                 pending_blocks_rx,
+                                Box::new(ctx.node().task_executor().clone()),
                                 new_op_eth_api.tx_resp_builder().clone(),
                             );
                             ctx.modules.add_or_replace_if_module_configured(
