@@ -9,6 +9,7 @@ use alloy_sol_types::{sol, SolCall};
 use eyre::Result;
 use futures_util::StreamExt;
 use scopeguard::defer;
+use serde_json::json;
 use std::{
     collections::HashSet,
     str::FromStr,
@@ -1053,6 +1054,144 @@ async fn fb_subscription_test() -> Result<()> {
     );
 
     println!("All {} transactions found in flashblocks", total);
+
+    Ok(())
+}
+
+#[ignore = "Requires flashblocks WebSocket server with flashblocks subscription support"]
+#[tokio::test]
+async fn fb_eth_subscribe_with_subscribed_address_test() -> Result<()> {
+    use serde_json::Value;
+
+    let ws_url = operations::manager::DEFAULT_WEBSOCKET_URL;
+    let sender_address = operations::DEFAULT_RICH_ADDRESS;
+    let test_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+
+    let current_block_number =
+        operations::eth_block_number(&fb_client).await.expect("Failed to get current block number");
+    println!("Current block number: {}", current_block_number);
+
+    println!("Connecting to flashblocks WebSocket at {ws_url}...");
+    let ws_client = operations::websocket::EthWebSocketClient::connect(ws_url).await?;
+    println!("Connected successfully");
+
+    // Subscribe to flashblocks with specific parameters
+    let subscription_params = json!({
+        "headerInfo": true,
+        "subTxFilter": {
+            "txInfo": true,
+            "txReceipt": true,
+            "subscribeAddresses": [sender_address]
+        }
+    });
+
+    let mut subscription: jsonrpsee::core::client::Subscription<Value> =
+        ws_client.subscribe("flashblocks", Some(subscription_params)).await?;
+    println!("Subscription created successfully");
+
+    // Guarantee cleanup on scope exit
+    defer! {
+        println!("Unsubscribing and closing WebSocket connection");
+    };
+
+    let num_txs = 3;
+
+    // Send all transactions first
+    let mut remaining: HashSet<String> = HashSet::new();
+    for i in 0..num_txs {
+        let tx_hash = operations::native_balance_transfer(
+            operations::DEFAULT_L2_NETWORK_URL_FB,
+            U256::from(operations::GWEI),
+            test_address,
+        )
+        .await?;
+        println!("Sent tx {}: {}", i + 1, tx_hash);
+        remaining.insert(tx_hash);
+    }
+    let total = remaining.len();
+    println!(
+        "Waiting for {} txs to appear in flashblocks (timeout: {:?})...",
+        total, WEB_SOCKET_TIMEOUT
+    );
+
+    // Wait for all transactions with a single timeout
+    let result = tokio::time::timeout(WEB_SOCKET_TIMEOUT, async {
+        while !remaining.is_empty() {
+            match subscription.next().await {
+                Some(Ok(notification)) => {
+                    println!(
+                        "Received notification: {}",
+                        serde_json::to_string_pretty(&notification).unwrap_or_default()
+                    );
+                    let Some(transactions) =
+                        notification.get("transactions").and_then(|v| v.as_array())
+                    else {
+                        continue;
+                    };
+
+                    if transactions.is_empty() {
+                        continue;
+                    }
+
+                    for tx in transactions {
+                        // Validate required fields based on our filter settings
+                        assert!(
+                            tx.get("txData").is_some(),
+                            "txData field should be present when txInfo is true"
+                        );
+
+                        assert!(
+                            tx.get("receipt").is_some(),
+                            "receipt field should be present when txReceipt is true"
+                        );
+
+                        let tx_hash_field =
+                            tx.get("txHash").expect("txHash field should always be present");
+                        let received_hash =
+                            tx_hash_field.as_str().expect("txHash should be a string");
+
+                        if remaining.remove(received_hash) {
+                            let found = total - remaining.len();
+                            println!("Found tx {}/{}: {}", found, total, received_hash);
+                            if remaining.is_empty() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                Some(Err(e)) => {
+                    eprintln!("Subscription error: {}", e);
+                    break;
+                }
+                None => {
+                    eprintln!("Subscription ended unexpectedly");
+                    break;
+                }
+            }
+        }
+    })
+    .await;
+
+    if result.is_err() {
+        eprintln!("Timeout: Stopped waiting after {:?}", WEB_SOCKET_TIMEOUT);
+    }
+
+    if !remaining.is_empty() {
+        eprintln!("\nMissing txs in flashblocks:");
+        for tx in &remaining {
+            eprintln!("  - {}", tx);
+        }
+    }
+
+    assert!(
+        remaining.is_empty(),
+        "Expected all {} txs to appear in flashblocks, but {} were missing",
+        total,
+        remaining.len()
+    );
+
+    println!("\nAll {} transactions received via flashblocks subscription", total);
 
     Ok(())
 }
