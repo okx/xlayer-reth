@@ -1060,7 +1060,7 @@ async fn fb_subscription_test() -> Result<()> {
 
 #[ignore = "Requires flashblocks WebSocket server with flashblocks subscription support"]
 #[tokio::test]
-async fn fb_eth_subscribe_with_subscribed_address_test() -> Result<()> {
+async fn fb_eth_subscribe_test() -> Result<()> {
     use serde_json::Value;
 
     let ws_url = operations::manager::DEFAULT_WEBSOCKET_URL;
