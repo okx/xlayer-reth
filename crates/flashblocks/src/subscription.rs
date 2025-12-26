@@ -138,7 +138,7 @@ where
     ) -> Result<(), ErrorObject<'static>> {
         match kind {
             FlashblockSubscriptionKind::Flashblocks => {
-                let FlashblockParams::FlashblocksFilter(filter) = params.unwrap() else {
+                let Some(FlashblockParams::FlashblocksFilter(filter)) = params else {
                     return Err(invalid_params_rpc_err("invalid params for flashblocks"));
                 };
 
