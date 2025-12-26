@@ -1077,7 +1077,7 @@ async fn fb_eth_subscribe_test() -> Result<()> {
         "subTxFilter": {
             "txInfo": true,
             "txReceipt": true,
-            "subscribeAddresses": [sender_address]
+            "subscribeAddresses": [sender_address, test_address]
         }
     });
 
