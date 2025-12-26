@@ -10,75 +10,64 @@ use jsonrpsee::{
     proc_macros::rpc, server::SubscriptionMessage, types::ErrorObject, PendingSubscriptionSink,
     SubscriptionSink,
 };
+use reth_chain_state::CanonStateSubscriptions;
 use reth_optimism_flashblocks::{PendingBlockRx, PendingFlashBlock};
-use reth_primitives_traits::{Recovered, TransactionMeta};
+use reth_primitives_traits::{NodePrimitives, Recovered, SealedBlock, TransactionMeta};
 use reth_rpc::eth::pubsub::EthPubSub;
 use reth_rpc_convert::{transaction::ConvertReceiptInput, RpcConvert};
 use reth_rpc_eth_api::pubsub::EthPubSubApiServer;
+use reth_rpc_eth_api::{EthApiTypes, RpcNodeCore, RpcReceipt, RpcTransaction};
 use reth_rpc_server_types::result::{internal_rpc_err, invalid_params_rpc_err};
+use reth_storage_api::BlockNumReader;
+use reth_transaction_pool::TransactionPool;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 use tokio_stream::{wrappers::WatchStream, Stream};
 
 const FLASHBLOCKS: &str = "flashblocks";
-const NEW_HEADS: &str = "newHeads";
-const LOGS: &str = "logs";
-const NEW_PENDING_TRANSACTIONS: &str = "newPendingTransactions";
-const SYNCING: &str = "syncing";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Subscription kind.
-pub enum OpSubscriptionKind {
+pub enum FlashblockSubscriptionKind {
     /// Standard Ethereum subscription.
     Standard(AlloySubscriptionKind),
     /// Flashblocks subscription.
     Flashblocks,
 }
 
-impl<'de> Deserialize<'de> for OpSubscriptionKind {
+impl<'de> Deserialize<'de> for FlashblockSubscriptionKind {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        let s = String::deserialize(deserializer)?;
+        let value = serde_json::Value::deserialize(deserializer)?;
 
-        match s.as_str() {
-            FLASHBLOCKS => Ok(OpSubscriptionKind::Flashblocks),
-            NEW_HEADS => Ok(OpSubscriptionKind::Standard(AlloySubscriptionKind::NewHeads)),
-            LOGS => Ok(OpSubscriptionKind::Standard(AlloySubscriptionKind::Logs)),
-            NEW_PENDING_TRANSACTIONS => {
-                Ok(OpSubscriptionKind::Standard(AlloySubscriptionKind::NewPendingTransactions))
+        if let Some(s) = value.as_str() {
+            if s == FLASHBLOCKS {
+                return Ok(FlashblockSubscriptionKind::Flashblocks);
             }
-            SYNCING => Ok(OpSubscriptionKind::Standard(AlloySubscriptionKind::Syncing)),
-            _ => Err(serde::de::Error::unknown_variant(
-                &s,
-                &[FLASHBLOCKS, NEW_HEADS, LOGS, NEW_PENDING_TRANSACTIONS, SYNCING],
-            )),
+        }
+
+        match serde_json::from_value::<AlloySubscriptionKind>(value.clone()) {
+            Ok(kind) => Ok(FlashblockSubscriptionKind::Standard(kind)),
+            Err(_) => Err(serde::de::Error::custom("Invalid subscription kind")),
         }
     }
 }
 
-impl Serialize for OpSubscriptionKind {
+impl Serialize for FlashblockSubscriptionKind {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
         match self {
-            OpSubscriptionKind::Standard(kind) => {
-                let s = match kind {
-                    AlloySubscriptionKind::NewHeads => NEW_HEADS,
-                    AlloySubscriptionKind::Logs => LOGS,
-                    AlloySubscriptionKind::NewPendingTransactions => NEW_PENDING_TRANSACTIONS,
-                    AlloySubscriptionKind::Syncing => SYNCING,
-                };
-                serializer.serialize_str(s)
-            }
-            OpSubscriptionKind::Flashblocks => serializer.serialize_str(FLASHBLOCKS),
+            FlashblockSubscriptionKind::Standard(kind) => kind.serialize(serializer),
+            FlashblockSubscriptionKind::Flashblocks => serializer.serialize_str(FLASHBLOCKS),
         }
     }
 }
 
-impl OpSubscriptionKind {
+impl FlashblockSubscriptionKind {
     /// Returns the inner standard subscription kind, if any.
     pub const fn as_standard(&self) -> Option<&AlloySubscriptionKind> {
         match self {
@@ -88,7 +77,7 @@ impl OpSubscriptionKind {
     }
 }
 
-impl From<AlloySubscriptionKind> for OpSubscriptionKind {
+impl From<AlloySubscriptionKind> for FlashblockSubscriptionKind {
     fn from(kind: AlloySubscriptionKind) -> Self {
         Self::Standard(kind)
     }
@@ -251,7 +240,7 @@ pub trait FlashblocksPubSubApi<T: RpcObject> {
 }
 
 /// Optimism-specific Ethereum pubsub handler that extends standard subscriptions with flashblocks support.
-pub struct OpEthPubSub<Eth, N: reth_primitives_traits::NodePrimitives> {
+pub struct FlashblocksPubSub<Eth: EthApiTypes, N: NodePrimitives> {
     /// Standard eth pubsub handler
     eth_pubsub: EthPubSub<Eth>,
     /// Pending block receiver from flashblocks, if available
@@ -260,9 +249,10 @@ pub struct OpEthPubSub<Eth, N: reth_primitives_traits::NodePrimitives> {
     eth_api: Eth,
 }
 
-impl<Eth, N: reth_primitives_traits::NodePrimitives> Clone for OpEthPubSub<Eth, N>
+impl<Eth: EthApiTypes, N: NodePrimitives> Clone for FlashblocksPubSub<Eth, N>
 where
     Eth: Clone,
+    Eth::RpcConvert: Clone,
 {
     fn clone(&self) -> Self {
         Self {
@@ -273,17 +263,7 @@ where
     }
 }
 
-impl<Eth, N: reth_primitives_traits::NodePrimitives> std::fmt::Debug for OpEthPubSub<Eth, N> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OpEthPubSub")
-            .field("eth_pubsub", &self.eth_pubsub)
-            .field("pending_block_rx", &self.pending_block_rx)
-            .finish()
-    }
-}
-
-impl<Eth, N: reth_primitives_traits::NodePrimitives> OpEthPubSub<Eth, N> {
-    /// Creates a new `OpEthPubSub` instance.
+    /// Creates a new `FlashblocksPubSub` instance.
     pub fn new(
         eth_pubsub: EthPubSub<Eth>,
         pending_block_rx: PendingBlockRx<N>,
@@ -292,37 +272,31 @@ impl<Eth, N: reth_primitives_traits::NodePrimitives> OpEthPubSub<Eth, N> {
         Self { eth_pubsub, pending_block_rx, eth_api }
     }
 
-    /// Converts this `OpEthPubSub` into an RPC module.
+    /// Converts this `FlashblocksPubSub` into an RPC module.
     pub fn into_rpc(self) -> jsonrpsee::RpcModule<()>
     where
-        Eth: reth_rpc_eth_api::EthApiTypes,
-        OpEthPubSub<Eth, N>:
-            FlashblocksPubSubApiServer<reth_rpc_eth_api::RpcTransaction<Eth::NetworkTypes>>,
+        FlashblocksPubSub<Eth, N>: FlashblocksPubSubApiServer<RpcTransaction<Eth::NetworkTypes>>,
     {
-        <OpEthPubSub<Eth, N> as FlashblocksPubSubApiServer<
-            reth_rpc_eth_api::RpcTransaction<Eth::NetworkTypes>,
+        <FlashblocksPubSub<Eth, N> as FlashblocksPubSubApiServer<
+            RpcTransaction<Eth::NetworkTypes>,
         >>::into_rpc(self)
         .remove_context()
     }
 }
 
 #[async_trait::async_trait]
-impl<Eth, N: reth_primitives_traits::NodePrimitives>
-    FlashblocksPubSubApiServer<reth_rpc_eth_api::RpcTransaction<Eth::NetworkTypes>>
-    for OpEthPubSub<Eth, N>
+impl<Eth: EthApiTypes, N: NodePrimitives>
+    FlashblocksPubSubApiServer<RpcTransaction<Eth::NetworkTypes>> for FlashblocksPubSub<Eth, N>
 where
-    Eth: reth_rpc_eth_api::RpcNodeCore<
-            Primitives = N,
-            Provider: reth_storage_api::BlockNumReader
-                          + reth_chain_state::CanonStateSubscriptions<Primitives = N>,
-            Pool: reth_transaction_pool::TransactionPool,
-        > + reth_rpc_eth_api::EthApiTypes<RpcConvert: reth_rpc_convert::RpcConvert<Primitives = N>>
-        + 'static,
+    Eth: RpcNodeCore<Primitives = N> + 'static,
+    Eth::Provider: BlockNumReader + CanonStateSubscriptions<Primitives = N>,
+    Eth::Pool: TransactionPool,
+    Eth::RpcConvert: RpcConvert<Primitives = N> + Clone,
 {
     async fn subscribe(
         &self,
         pending: PendingSubscriptionSink,
-        kind: OpSubscriptionKind,
+        kind: FlashblockSubscriptionKind,
         params: Option<OpParams>,
     ) -> jsonrpsee::core::SubscriptionResult {
         // Extract FlashBlocksFilter from params if present
@@ -330,7 +304,7 @@ where
             params.as_ref().and_then(|p| p.as_flashblocks_filter()).cloned().unwrap_or_default();
 
         match kind {
-            OpSubscriptionKind::Flashblocks => {
+            FlashblockSubscriptionKind::Flashblocks => {
                 if (filter.sub_tx_filter.tx_info || filter.sub_tx_filter.tx_receipt)
                     && filter.sub_tx_filter.subscribe_addresses.is_empty()
                 {
@@ -345,7 +319,7 @@ where
                     .filter_flashblocks_stream(pending, &self.pending_block_rx, &filter)
                     .await;
             }
-            OpSubscriptionKind::Standard(alloy_kind) => {
+            FlashblockSubscriptionKind::Standard(alloy_kind) => {
                 // If it is a non-flashblocks subscription, forward it to the original subscribe implementation
                 let standard_params = params.and_then(|p| p.as_standard().cloned());
 
@@ -356,15 +330,12 @@ where
     }
 }
 
-impl<Eth, N: reth_primitives_traits::NodePrimitives> OpEthPubSub<Eth, N>
+impl<Eth: EthApiTypes, N: NodePrimitives> FlashblocksPubSub<Eth, N>
 where
-    Eth: reth_rpc_eth_api::RpcNodeCore<
-            Primitives = N,
-            Provider: reth_storage_api::BlockNumReader
-                          + reth_chain_state::CanonStateSubscriptions<Primitives = N>,
-            Pool: reth_transaction_pool::TransactionPool,
-        > + reth_rpc_eth_api::EthApiTypes<RpcConvert: reth_rpc_convert::RpcConvert<Primitives = N>>
-        + 'static,
+    Eth: RpcNodeCore<Primitives = N> + 'static,
+    Eth::Provider: BlockNumReader + CanonStateSubscriptions<Primitives = N>,
+    Eth::Pool: TransactionPool,
+    Eth::RpcConvert: RpcConvert<Primitives = N> + Clone,
 {
     async fn filter_flashblocks_stream(
         &self,
@@ -404,12 +375,8 @@ where
     ) -> Option<
         EnrichedFlashblock<
             N::BlockHeader,
-            reth_rpc_eth_api::RpcTransaction<
-                <Eth::RpcConvert as reth_rpc_convert::RpcConvert>::Network,
-            >,
-            reth_rpc_eth_api::RpcReceipt<
-                <Eth::RpcConvert as reth_rpc_convert::RpcConvert>::Network,
-            >,
+            RpcTransaction<<Eth::RpcConvert as RpcConvert>::Network>,
+            RpcReceipt<<Eth::RpcConvert as RpcConvert>::Network>,
         >,
     > {
         let header = if filter.header_info {
@@ -431,12 +398,8 @@ where
 
         let transactions: Vec<
             EnrichedTransaction<
-                reth_rpc_eth_api::RpcTransaction<
-                    <Eth::RpcConvert as reth_rpc_convert::RpcConvert>::Network,
-                >,
-                reth_rpc_eth_api::RpcReceipt<
-                    <Eth::RpcConvert as reth_rpc_convert::RpcConvert>::Network,
-                >,
+                RpcTransaction<<Eth::RpcConvert as RpcConvert>::Network>,
+                RpcReceipt<<Eth::RpcConvert as RpcConvert>::Network>,
             >,
         > = block
             .transactions_with_sender()
@@ -497,13 +460,9 @@ where
         sender: Address,
         idx: usize,
         tx_hash: alloy_primitives::TxHash,
-        sealed_block: &reth_primitives_traits::SealedBlock<N::Block>,
+        sealed_block: &SealedBlock<N::Block>,
         rpc_convert: &Eth::RpcConvert,
-    ) -> Option<
-        reth_rpc_eth_api::RpcTransaction<
-            <Eth::RpcConvert as reth_rpc_convert::RpcConvert>::Network,
-        >,
-    > {
+    ) -> Option<RpcTransaction<<Eth::RpcConvert as RpcConvert>::Network>> {
         if !filter.sub_tx_filter.tx_info {
             return None;
         }
@@ -535,11 +494,9 @@ where
         idx: usize,
         tx_hash: alloy_primitives::TxHash,
         receipts: &[N::Receipt],
-        sealed_block: &reth_primitives_traits::SealedBlock<N::Block>,
+        sealed_block: &SealedBlock<N::Block>,
         tx_converter: &Eth::RpcConvert,
-    ) -> Option<
-        reth_rpc_eth_api::RpcReceipt<<Eth::RpcConvert as reth_rpc_convert::RpcConvert>::Network>,
-    > {
+    ) -> Option<RpcReceipt<<Eth::RpcConvert as RpcConvert>::Network>> {
         if !filter.sub_tx_filter.tx_receipt {
             return None;
         }
@@ -641,7 +598,7 @@ where
 }
 
 /// Extract Header from PendingFlashBlock
-fn extract_header_from_pending_block<N: reth_primitives_traits::NodePrimitives>(
+fn extract_header_from_pending_block<N: NodePrimitives>(
     pending_block: &PendingFlashBlock<N>,
 ) -> Result<Header<N::BlockHeader>, ErrorObject<'static>> {
     let block = pending_block.block();

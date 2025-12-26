@@ -24,7 +24,7 @@ use reth_optimism_node::OpNode;
 use reth_rpc_server_types::RethRpcModule;
 use xlayer_chainspec::XLayerChainSpecParser;
 use xlayer_flashblocks::handler::FlashblocksService;
-use xlayer_flashblocks::pubsub::OpEthPubSub;
+use xlayer_flashblocks::pubsub::FlashblocksPubSub;
 use xlayer_innertx::{
     cache_utils::initialize_inner_tx_cache,
     db_utils::initialize_inner_tx_db,
@@ -239,14 +239,14 @@ fn main() {
                         if let Some(pending_blocks_rx) = ctx.registry.eth_api().pending_block_rx() {
                             let eth_pubsub = ctx.registry.eth_handlers().pubsub.clone();
 
-                            let op_eth_pubsub = OpEthPubSub::new(
+                            let flashblocks_pubsub = FlashblocksPubSub::new(
                                 eth_pubsub,
                                 pending_blocks_rx,
                                 ctx.registry.eth_api().clone(),
                             );
                             ctx.modules.add_or_replace_if_module_configured(
                                 RethRpcModule::Eth,
-                                op_eth_pubsub.into_rpc(),
+                                flashblocks_pubsub.into_rpc(),
                             )?;
                             info!(target: "reth::cli", "xlayer eth pubsub initialized");
                         } else {
