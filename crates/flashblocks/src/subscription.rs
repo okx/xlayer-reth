@@ -98,11 +98,10 @@ where
         self.inner.new_flashblocks_stream(filter)
     }
 
-    async fn handle_accepted(
+    fn validate_params(
         &self,
-        accepted_sink: SubscriptionSink,
-        kind: FlashblockSubscriptionKind,
-        params: Option<FlashblockParams>,
+        kind: &FlashblockSubscriptionKind,
+        params: &Option<FlashblockParams>,
     ) -> Result<(), ErrorObject<'static>> {
         match kind {
             FlashblockSubscriptionKind::Flashblocks => {
@@ -118,18 +117,39 @@ where
                     ));
                 }
 
+                Ok(())
+            }
+            FlashblockSubscriptionKind::Standard(_) => {
+                if matches!(params, Some(FlashblockParams::FlashblocksFilter(_))) {
+                    return Err(invalid_params_rpc_err(
+                        "invalid params, incorrect filter provided for standard eth subscription type",
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    async fn handle_accepted(
+        &self,
+        accepted_sink: SubscriptionSink,
+        kind: FlashblockSubscriptionKind,
+        params: Option<FlashblockParams>,
+    ) -> Result<(), ErrorObject<'static>> {
+        match kind {
+            FlashblockSubscriptionKind::Flashblocks => {
+                let FlashblockParams::FlashblocksFilter(filter) = params.unwrap() else {
+                    return Err(invalid_params_rpc_err("invalid params for flashblocks"));
+                };
+
                 let stream = self.new_flashblocks_stream(filter);
                 pipe_from_stream(accepted_sink, stream).await
             }
             FlashblockSubscriptionKind::Standard(alloy_kind) => {
                 let standard_params = match params {
                     Some(FlashblockParams::Standard(p)) => Some(p),
-                    Some(FlashblockParams::FlashblocksFilter(_)) => {
-                        return Err(invalid_params_rpc_err(
-                            "invalid params, incorrect flashblocks filter provided for standard eth subscription type",
-                        ));
-                    }
                     None => None,
+                    _ => return Err(invalid_params_rpc_err("invalid params for standard eth subscription")),
                 };
                 self.eth_pubsub.handle_accepted(accepted_sink, alloy_kind, standard_params).await
             }
@@ -151,6 +171,12 @@ where
         kind: FlashblockSubscriptionKind,
         params: Option<FlashblockParams>,
     ) -> jsonrpsee::core::SubscriptionResult {
+        // Validate and reject with error message if invalid
+        if let Err(err) = self.validate_params(&kind, &params) {
+            pending.reject(err).await;
+            return Ok(());
+        }
+
         let sink = pending.accept().await?;
         let pubsub = self.clone();
         self.inner.subscription_task_spawner.spawn(Box::pin(async move {
