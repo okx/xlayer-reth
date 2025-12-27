@@ -6,7 +6,7 @@ use alloy_consensus::{transaction::TxHashRef, BlockHeader as _, Transaction as _
 use alloy_json_rpc::RpcObject;
 use alloy_primitives::Address;
 use alloy_rpc_types_eth::{Header, TransactionInfo};
-use futures::{stream::select, StreamExt};
+use futures::StreamExt;
 use jsonrpsee::{
     proc_macros::rpc, server::SubscriptionMessage, types::ErrorObject, PendingSubscriptionSink,
     SubscriptionSink,
@@ -22,18 +22,9 @@ use reth_rpc_eth_api::{EthApiTypes, RpcNodeCore, RpcReceipt, RpcTransaction};
 use reth_rpc_server_types::result::{internal_rpc_err, invalid_params_rpc_err};
 use reth_storage_api::{BlockNumReader, ReceiptProvider};
 use reth_tasks::TaskSpawner;
-use reth_tracing::tracing::{error, warn};
-use serde::Serialize;
-use std::sync::atomic::{AtomicU64, Ordering};
+use reth_tracing::tracing::warn;
 use std::{future::ready, sync::Arc};
-use tokio::sync::broadcast;
-use tokio::sync::broadcast::Sender;
-use tokio_stream::{
-    wrappers::{BroadcastStream, WatchStream},
-    Stream,
-};
-
-const CHANNEL_CAPACITY: usize = 100;
+use tokio_stream::{wrappers::WatchStream, Stream};
 
 type FlashblockItem<N, C> = EnrichedFlashblock<
     <N as NodePrimitives>::BlockHeader,
@@ -101,21 +92,8 @@ where
         tx_converter: Eth::RpcConvert,
         provider: Provider,
     ) -> Self {
-        let (canonical_state_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
-
-        let broadcast_tx = canonical_state_tx.clone();
-        let provider_clone = provider.clone();
-        subscription_task_spawner.spawn(Box::pin(async move {
-            let mut stream = provider_clone.canonical_state_stream();
-            while let Some(notification) = stream.next().await {
-                let _ = broadcast_tx.send(notification);
-            }
-        }));
-
         let inner = FlashblocksPubSubInner {
             pending_block_rx,
-            canonical_state_tx,
-            flashblocks_height: Arc::new(AtomicU64::new(0)),
             subscription_task_spawner,
             tx_converter,
             provider,
@@ -140,6 +118,13 @@ where
         filter: FlashblocksFilter,
     ) -> impl Stream<Item = FlashblockItem<N, Eth::RpcConvert>> {
         self.inner.new_flashblocks_stream(filter)
+    }
+
+    pub fn new_canonical_state_stream(
+        &self,
+        filter: FlashblocksFilter,
+    ) -> impl Stream<Item = FlashblockItem<N, Eth::RpcConvert>> {
+        self.inner.new_canonical_state_stream(filter)
     }
 
     fn validate_params(
@@ -186,8 +171,14 @@ where
                     return Err(invalid_params_rpc_err("invalid params for flashblocks"));
                 };
 
-                let stream = self.new_flashblocks_stream(filter);
-                pipe_from_stream(accepted_sink, stream).await
+                let fb_stream = self.new_flashblocks_stream(filter.clone());
+                let canon_stream = self.new_canonical_state_stream(filter);
+                pipe_from_flashblocks_and_canonical_state_stream::<N, Eth, _, _>(
+                    accepted_sink,
+                    fb_stream,
+                    canon_stream,
+                )
+                .await
             }
             FlashblockSubscriptionKind::Standard(alloy_kind) => {
                 let standard_params = match params {
@@ -244,22 +235,21 @@ where
 pub struct FlashblocksPubSubInner<Eth: EthApiTypes, N: NodePrimitives, Provider> {
     /// Pending block receiver from flashblocks, if available
     pub(crate) pending_block_rx: PendingBlockRx<N>,
-    /// Canonical state notifications broadcaster
-    pub(crate) canonical_state_tx: Sender<CanonStateNotification<N>>,
-    /// Tracks the highest block number seen from flashblocks
-    pub(crate) flashblocks_height: Arc<AtomicU64>,
     /// The type that's used to spawn subscription tasks.
     pub(crate) subscription_task_spawner: Box<dyn TaskSpawner>,
-    /// RPC transaction converter
+    /// RPC transaction converter.
     pub(crate) tx_converter: Eth::RpcConvert,
-    /// Provider for fetching receipts from storage
+    /// Blockchain provider for chainstate notifications and fetching receipts.
     pub(crate) provider: Provider,
 }
 
 impl<Eth: EthApiTypes, N: NodePrimitives, Provider> FlashblocksPubSubInner<Eth, N, Provider>
 where
     Eth: RpcNodeCore<Primitives = N> + 'static,
-    Provider: ReceiptProvider<Receipt = N::Receipt> + Clone + 'static,
+    Provider: ReceiptProvider<Receipt = N::Receipt>
+        + CanonStateSubscriptions<Primitives = N>
+        + Clone
+        + 'static,
     Eth::RpcConvert: RpcConvert<Primitives = N> + Clone,
 {
     fn new_flashblocks_stream(
@@ -267,59 +257,40 @@ where
         filter: FlashblocksFilter,
     ) -> impl Stream<Item = FlashblockItem<N, Eth::RpcConvert>> {
         let tx_converter = self.tx_converter.clone();
-        let filter_clone = filter.clone();
+        WatchStream::new(self.pending_block_rx.clone()).filter_map(move |pending_block_opt| {
+            ready(pending_block_opt.and_then(|pending_block| {
+                Self::filter_and_enrich_flashblock(&pending_block, &filter, &tx_converter)
+            }))
+        })
+    }
 
-        let flashblocks_stream =
-            WatchStream::new(self.pending_block_rx.clone()).filter_map(move |pending_block_opt| {
-                ready(pending_block_opt.and_then(|pending_block| {
-                    let block_number = pending_block.block().sealed_block().number();
-                    self.flashblocks_height.fetch_max(block_number, Ordering::Relaxed);
-
-                    Self::filter_and_enrich_flashblock(&pending_block, &filter_clone, &tx_converter)
-                }))
-            });
-
-        // Stream from canonical state (as backup when flashblocks falls behind)
-        let canonical_stream =
-            BroadcastStream::new(self.canonical_state_tx.subscribe()).flat_map(move |result| {
-                let notification = match result {
-                    Ok(n) => n,
-                    Err(_) => return futures::stream::iter(vec![]),
-                };
-
-                let flashblocks_height_val = self.flashblocks_height.load(Ordering::Relaxed);
-
-                let chain = match notification {
+    fn new_canonical_state_stream(
+        &self,
+        filter: FlashblocksFilter,
+    ) -> impl Stream<Item = FlashblockItem<N, Eth::RpcConvert>> {
+        self.provider
+            .canonical_state_stream()
+            .map(move |canon_state| {
+                let chain = match canon_state {
                     CanonStateNotification::Commit { new } => new,
                     CanonStateNotification::Reorg { old: _, new } => new,
                 };
 
-                futures::stream::iter(
-                    chain
-                        .blocks_iter()
-                        .filter_map(|block| {
-                            if block.number() > flashblocks_height_val {
-                                warn!(
-                                    target: "xlayer::flashblocks",
-                                    block_number = block.number(),
-                                    flashblocks_height = flashblocks_height_val,
-                                    "Canonical state fallback activated - flashblocks is behind"
-                                );
-                                Self::filter_and_enrich_canonical_block(
-                                    block,
-                                    &self.provider,
-                                    &filter,
-                                    &self.tx_converter,
-                                )
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>(),
-                )
-            });
+                let blocks: Vec<_> = chain
+                    .blocks_iter()
+                    .filter_map(|block| {
+                        Self::filter_and_enrich_canonical_block(
+                            block,
+                            &self.provider,
+                            &filter,
+                            &self.tx_converter,
+                        )
+                    })
+                    .collect();
 
-        select(flashblocks_stream, canonical_stream)
+                futures::stream::iter(blocks)
+            })
+            .flatten()
     }
 
     /// Filter and enrich a flashblock based on the provided filter criteria.
@@ -375,7 +346,7 @@ where
         let receipts_vec = match receipts_result {
             Ok(Some(receipts)) => receipts,
             Ok(None) => {
-                error!(
+                warn!(
                     target: "xlayer::flashblocks",
                     block_number = sealed_block.number(),
                     block_hash = ?sealed_block.hash(),
@@ -384,7 +355,7 @@ where
                 vec![]
             }
             Err(e) => {
-                error!(
+                warn!(
                     target: "xlayer::flashblocks",
                     block_number = sealed_block.number(),
                     block_hash = ?sealed_block.hash(),
@@ -570,28 +541,68 @@ impl From<SubscriptionSerializeError> for ErrorObject<'static> {
 }
 
 /// Pipes all stream items to the subscription sink.
-async fn pipe_from_stream<T, St>(
+async fn pipe_from_flashblocks_and_canonical_state_stream<N, Eth, FbSt, CanonSt>(
     sink: SubscriptionSink,
-    mut stream: St,
+    mut fb_stream: FbSt,
+    mut canon_stream: CanonSt,
 ) -> Result<(), ErrorObject<'static>>
 where
-    St: Stream<Item = T> + Unpin,
-    T: Serialize,
+    N: NodePrimitives,
+    N::BlockHeader: alloy_consensus::BlockHeader,
+    Eth: EthApiTypes + RpcNodeCore<Primitives = N> + 'static,
+    Eth::RpcConvert: RpcConvert<Primitives = N> + Clone,
+    FbSt: Stream<Item = FlashblockItem<N, Eth::RpcConvert>> + Unpin,
+    CanonSt: Stream<Item = FlashblockItem<N, Eth::RpcConvert>> + Unpin,
 {
+    let mut last_sent_height = 0;
     loop {
         tokio::select! {
             _ = sink.closed() => {
                 // connection dropped
                 break Ok(())
             },
-            maybe_item = stream.next() => {
-                let item = match maybe_item {
+            maybe_fb_item = fb_stream.next() => {
+                let item = match maybe_fb_item {
                     Some(item) => item,
                     None => {
                         // stream ended
-                        break  Ok(())
+                        break Ok(())
                     },
                 };
+
+                let block_num = item.block_number();
+                if block_num < last_sent_height {
+                    // Flashblocks stream is lagging, skip
+                    continue
+                }
+
+                last_sent_height = block_num;
+                let msg = SubscriptionMessage::new(
+                    sink.method_name(),
+                    sink.subscription_id(),
+                    &item
+                ).map_err(SubscriptionSerializeError::new)?;
+
+                if sink.send(msg).await.is_err() {
+                    break Ok(());
+                }
+            }
+            maybe_canon_item = canon_stream.next() => {
+                let item = match maybe_canon_item {
+                    Some(item) => item,
+                    None => {
+                        // stream ended
+                        break Ok(())
+                    },
+                };
+
+                let block_num = item.block_number();
+                if block_num <= last_sent_height {
+                    // Fallback - same height is not allowed. Canonical stream is lagging, skip
+                    continue
+                }
+
+                last_sent_height = block_num;
                 let msg = SubscriptionMessage::new(
                     sink.method_name(),
                     sink.subscription_id(),

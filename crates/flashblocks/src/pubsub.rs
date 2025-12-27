@@ -1,4 +1,5 @@
-use alloy_primitives::Address;
+use alloy_consensus::BlockHeader;
+use alloy_primitives::{Address, TxHash};
 use alloy_rpc_types_eth::{
     pubsub::{Params as AlloyParams, SubscriptionKind as AlloySubscriptionKind},
     Header,
@@ -104,12 +105,21 @@ pub struct EnrichedFlashblock<H, Tx, R> {
     pub transactions: Vec<EnrichedTransaction<Tx, R>>,
 }
 
+impl<H, Tx, R> EnrichedFlashblock<H, Tx, R>
+where
+    H: BlockHeader,
+{
+    pub fn block_number(&self) -> u64 {
+        self.header.as_ref().map(|h| h.number()).unwrap_or(0)
+    }
+}
+
 /// Transaction data with optional enrichment based on `FlashblocksFilter`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnrichedTransaction<Tx, R> {
     /// Transaction hash.
-    pub tx_hash: alloy_primitives::TxHash,
+    pub tx_hash: TxHash,
 
     /// Transaction data (if `tx_info` is true in filter criteria).
     #[serde(skip_serializing_if = "Option::is_none")]
