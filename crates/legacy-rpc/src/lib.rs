@@ -365,8 +365,11 @@ mod tests {
 
     #[test]
     fn test_parse_tx_hash_param_valid() {
-        let cases: [(&str, Option<&str>); 3] = [
-            (r#"["0xcf2563e07aa150208b2e9b30655d710c339c83263b8ec185f813ea572aadac18"]"#, None),
+        let cases = [
+            (
+                r#"["0xcf2563e07aa150208b2e9b30655d710c339c83263b8ec185f813ea572aadac18"]"#,
+                Some("0xcf2563e07aa150208b2e9b30655d710c339c83263b8ec185f813ea572aadac18"),
+            ),
             (r#"["cf2563e07aa150208b2e9b30655d710c339c83263b8ec185f813ea572aadac18"]"#, None),
             (r#"["0xcf2563e07aa150208b2e9b30655d710c339c83263b8ec185f813ea572aadac1"]"#, None),
         ];
