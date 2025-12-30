@@ -1,46 +1,57 @@
-use std::fmt::Debug;
+use std::fmt;
 
 use alloy_primitives::{BlockHash, TxHash};
 use alloy_rlp::{decode_exact, encode, Encodable};
 use eyre::Report;
 use once_cell::sync::OnceCell;
 
-use crate::{
-    innertx_inspector::InternalTransaction,
-    structs::{BlockTable, DBTables, TxTable},
-};
+use crate::innertx_inspector::InternalTransaction;
 use reth_db::{
-    create_db,
+    init_db,
     mdbx::{Database, DatabaseArguments, Transaction, WriteFlags, RW},
-    table::Table,
     DatabaseEnv,
+};
+use reth_db_api::{
+    models::ClientVersion,
+    table::{Table, TableInfo},
+    tables, TableSet, TableType, TableViewer,
 };
 
 static XLAYERDB: OnceCell<DatabaseEnv> = OnceCell::new();
 
+reth_db_api::tables! {
+    /// Maps transaction hash to vector of internal transactions
+    /// Key: TxHash (as Vec<u8>)
+    /// Value: Vec<InternalTransaction> (RLP encoded as Vec<u8>)
+    table TxTable {
+        type Key = Vec<u8>;
+        type Value = Vec<u8>;
+    }
+
+    /// Maps block hash to vector of transaction hashes in that block
+    /// Key: BlockHash (as Vec<u8>)
+    /// Value: Vec<TxHash> (RLP encoded as Vec<u8>)
+    table BlockTable {
+        type Key = Vec<u8>;
+        type Value = Vec<u8>;
+    }
+}
+
 pub fn initialize_inner_tx_db(db_path: &str) -> Result<(), Report> {
     let db_dir = format!("{}/{}", db_path, "xlayerdb");
-    let db_create_result = create_db(&db_dir, DatabaseArguments::default());
-    if let Err(e) = db_create_result {
-        return Err(e.wrap_err(format!("xlayerdb creation failed at path {db_dir}")));
-    }
 
-    let mut db = db_create_result.unwrap();
+    let db = init_db(&db_dir, DatabaseArguments::new(ClientVersion::default()))?;
+    // .wrap_err(format!("xlayerdb initialization failed at path {db_dir}"))?;
 
-    let tables_create_result = db.create_and_track_tables_for::<DBTables>();
-    if let Err(err) = tables_create_result {
-        return Err(Into::<Report>::into(err).wrap_err("xlayerdb tables creation failed"));
-    }
-
-    let db_set_result = XLAYERDB.set(db);
-    if db_set_result.is_err() {
-        return Err(Report::msg("xlayerdb was initialize_inner_tx_db more than once"));
-    }
+    XLAYERDB.set(db).map_err(|_| Report::msg("xlayerdb was initialized more than once"))?;
 
     Ok(())
 }
 
-pub fn write_single<T: Table, P: Encodable + Debug>(key: Vec<u8>, value: P) -> Result<(), Report> {
+pub fn write_single<T: Table, P: Encodable + std::fmt::Debug>(
+    key: Vec<u8>,
+    value: P,
+) -> Result<(), Report> {
     let txn_begin_result = XLAYERDB.get().unwrap().begin_rw_txn();
     if let Err(err) = txn_begin_result {
         return Err(Into::<Report>::into(err).wrap_err("write single txn begin failed"));

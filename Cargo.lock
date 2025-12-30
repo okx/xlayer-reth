@@ -13906,6 +13906,7 @@ dependencies = [
  "once_cell",
  "reth-chain-state",
  "reth-db",
+ "reth-db-api",
  "reth-evm",
  "reth-exex",
  "reth-node-api",

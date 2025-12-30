@@ -20,8 +20,8 @@ use crate::{
     db_utils::{
         delete_single, rw_batch_delete, rw_batch_end, rw_batch_start, rw_batch_write, write_single,
     },
+    db_utils::{BlockTable, TxTable},
     innertx_inspector::TraceCollector,
-    structs::{BlockTable, TxTable},
 };
 
 pub fn replay_and_index_block<P, E, N>(
