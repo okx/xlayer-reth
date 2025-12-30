@@ -13813,6 +13813,7 @@ dependencies = [
  "reth-cli",
  "reth-ethereum-forks",
  "reth-optimism-chainspec",
+ "reth-optimism-cli",
  "reth-optimism-forks",
  "reth-optimism-primitives",
  "reth-primitives-traits",
