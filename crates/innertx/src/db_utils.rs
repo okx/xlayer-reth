@@ -41,7 +41,6 @@ pub fn initialize_inner_tx_db(db_path: &str) -> Result<(), Report> {
     let db_dir = format!("{}/{}", db_path, "xlayerdb");
 
     let db = init_db(&db_dir, DatabaseArguments::new(ClientVersion::default()))?;
-    // .wrap_err(format!("xlayerdb initialization failed at path {db_dir}"))?;
 
     XLAYERDB.set(db).map_err(|_| Report::msg("xlayerdb was initialized more than once"))?;
 
