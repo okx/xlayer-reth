@@ -2,7 +2,7 @@ use reth::version::{
     default_reth_version_metadata, try_init_version_metadata, RethCliVersionConsts,
 };
 
-pub const XLAYER_RETH_CLIENT_VERSION: &str = concat!("xlayer/v", env!("CARGO_PKG_VERSION"));
+const XLAYER_RETH_CLIENT_VERSION: &str = concat!("xlayer/v", env!("CARGO_PKG_VERSION"));
 
 pub fn init_version_metadata() {
     // NOTE: these versions are the upstream repo default values.
