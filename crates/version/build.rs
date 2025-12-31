@@ -58,7 +58,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Build Features: jemalloc
     // Build Profile: maxperf
     // ```
-    println!("cargo:rustc-env=RETH_LONG_VERSION_0=Version: {pkg_version}{version_suffix} ({sha_short})");
+    println!(
+        "cargo:rustc-env=RETH_LONG_VERSION_0=Version: {pkg_version}{version_suffix} ({sha_short})"
+    );
     println!(
         "cargo:rustc-env=RETH_LONG_VERSION_1=Build Timestamp: {}",
         env::var("VERGEN_BUILD_TIMESTAMP")?
