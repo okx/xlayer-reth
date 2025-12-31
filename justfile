@@ -52,7 +52,7 @@ check-clippy:
     cargo clippy --all-targets --workspace -- -D warnings
 
 fix-clippy:
-    cargo clippy --all-targets --fix --allow-dirty --allow-staged
+    cargo clippy --all-targets --workspace --fix --allow-dirty --allow-staged
 
 build:
     @rm -rf .cargo  # Clean dev mode files
