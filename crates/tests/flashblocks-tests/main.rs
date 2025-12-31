@@ -8,7 +8,6 @@ use alloy_primitives::{hex, keccak256, Address, U256};
 use alloy_sol_types::{sol, SolCall};
 use eyre::Result;
 use futures_util::StreamExt;
-use scopeguard::defer;
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
@@ -954,11 +953,6 @@ async fn fb_subscription_test() -> Result<()> {
     let (ws_stream, response) = connect_async(ws_url).await?;
     println!("Connected: {:?}", response.status());
     let (_, mut read) = ws_stream.split();
-
-    // Guarantee cleanup on scope exit
-    defer! {
-        println!("Closing WebSocket connection");
-    };
 
     let mut remaining: HashSet<String> = HashSet::new();
     for i in 0..num_txs {
