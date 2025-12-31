@@ -37,7 +37,7 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    xlayer_version::init_version_metadata();
+    xlayer_version::init_version!();
 
     reth_cli_util::sigsegv_handler::install();
 

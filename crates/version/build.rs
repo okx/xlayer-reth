@@ -52,7 +52,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Example:
     //
     // ```text
-    // XLayer Reth Commit SHA: 0.1.0-dev (3c0647e)
+    // xlayer-reth-node Commit SHA: 0.1.0-dev (3c0647e)
     // Upstream Reth Version: 3ba1e5d3
     // Build Timestamp: 2023-05-19T01:47:19.815651705Z
     // Build Features: jemalloc

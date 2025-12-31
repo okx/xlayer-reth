@@ -1,10 +1,27 @@
 use reth::version::{
     default_reth_version_metadata, try_init_version_metadata, RethCliVersionConsts,
 };
+use std::borrow::Cow;
 
 const XLAYER_RETH_CLIENT_VERSION: &str = concat!("xlayer/v", env!("CARGO_PKG_VERSION"));
 
-pub fn init_version_metadata() {
+/// Convenience macro to initialize version metadata using the current crate's package name.
+///
+/// This macro automatically captures `CARGO_PKG_NAME` from the calling crate's environment
+/// and passes it to `init_version_metadata`.
+///
+/// # Example
+/// ```no_run
+/// xlayer_version::init_version!();
+/// ```
+#[macro_export]
+macro_rules! init_version {
+    () => {
+        $crate::init_version_metadata(env!("CARGO_PKG_NAME"))
+    };
+}
+
+pub fn init_version_metadata(name: &'static str) {
     // NOTE: these versions are the upstream repo default values.
     let default_version_metadata = default_reth_version_metadata();
 
@@ -20,7 +37,7 @@ pub fn init_version_metadata() {
     );
 
     try_init_version_metadata(RethCliVersionConsts {
-        name_client: "XLayer Reth".to_string().into(),
+        name_client: Cow::Borrowed(name),
         cargo_pkg_version: format!(
             "{}/{}",
             default_version_metadata.cargo_pkg_version,
@@ -48,14 +65,16 @@ pub fn init_version_metadata() {
 
 #[cfg(test)]
 mod tests {
-    use crate::init_version_metadata;
     use reth_node_core::version::version_metadata;
 
     #[test]
     fn verify_version() {
-        init_version_metadata();
+        init_version!();
         let version_output = version_metadata();
+        let name = std::env::var("CARGO_PKG_NAME").unwrap();
         let sha = std::env::var("VERGEN_GIT_SHA").unwrap();
+
+        assert_eq!(name, version_output.name_client);
         assert_eq!(sha, version_output.vergen_git_sha_long);
     }
 }
