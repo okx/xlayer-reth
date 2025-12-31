@@ -119,10 +119,15 @@ where
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum FlashblockStreamEvent<H, Tx, R> {
     /// Block header event
-    Header { block_number: u64, header: Header<H> },
+    Header {
+        #[serde(skip_serializing)]
+        block_number: u64,
+        header: Header<H>,
+    },
 
     /// Individual transaction event
     Transaction {
+        #[serde(skip_serializing)]
         block_number: u64,
         transaction: EnrichedTransaction<Tx, R>,
     },
