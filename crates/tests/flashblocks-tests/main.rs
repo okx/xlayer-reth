@@ -1182,7 +1182,7 @@ async fn fb_benchmark_new_heads_subscription_test() -> Result<()> {
     let ws_client = operations::websocket::EthWebSocketClient::connect(ws_url).await?;
     println!("Connected successfully");
 
-    // Subscribe to flashblocks (realtime) with specific parameters
+    // Subscribe to flashblocks with specific parameters
     let subscription_params = json!({
         "headerInfo": true
     });
@@ -1208,15 +1208,12 @@ async fn fb_benchmark_new_heads_subscription_test() -> Result<()> {
             Some(result) = flashblocks_subscription.next() => {
                 match result {
                     Ok(notification) => {
-                        // Extract block number from flashblocks notification
-                        if let Some(header) = notification.get("header") {
-                            if let Some(number_hex) = header.get("number").and_then(|n| n.as_str()) {
-                                // Parse hex string to u64
-                                if let Ok(height) = u64::from_str_radix(number_hex.trim_start_matches("0x"), 16) {
-                                    heights.insert(height, Instant::now());
-                                    println!("Flashblocks received block #{}", height);
-                                }
-                            }
+                        if let Some(header) = notification.get("header")
+                            && let Some(number_hex) = header.get("number").and_then(|n| n.as_str())
+                            && let Ok(height) = u64::from_str_radix(number_hex.trim_start_matches("0x"), 16)
+                        {
+                            heights.insert(height, Instant::now());
+                            println!("Flashblocks received block #{height}");
                         }
                     }
                     Err(e) => {
@@ -1229,29 +1226,28 @@ async fn fb_benchmark_new_heads_subscription_test() -> Result<()> {
             Some(result) = eth_subscription.next() => {
                 match result {
                     Ok(notification) => {
-                        if let Some(number_hex) = notification.get("number").and_then(|n| n.as_str()) {
-                            if let Ok(height) = u64::from_str_radix(number_hex.trim_start_matches("0x"), 16) {
-                                if let Some(flashblocks_time) = heights.get(&height) {
-                                    let time_diff = flashblocks_time.elapsed();
-                                    count += 1;
+                        if let Some(number_hex) = notification.get("number").and_then(|n| n.as_str())
+                            && let Ok(height) = u64::from_str_radix(number_hex.trim_start_matches("0x"), 16)
+                        {
+                            if let Some(flashblocks_time) = heights.get(&height) {
+                                let time_diff = flashblocks_time.elapsed();
+                                count += 1;
 
-                                    if count == 1 {
-                                        continue;
-                                    }
-
-                                    total_sub_time_diff += time_diff;
-                                    println!(
-                                        "Flashblocks newHeads sub is faster than ETH newHeads sub by: {:?} (block #{})",
-                                        time_diff, height
-                                    );
-                                } else {
-                                    println!("Eth newHeads received block #{} (not in flashblocks yet)", height);
+                                if count == 1 {
+                                    continue;
                                 }
+
+                                total_sub_time_diff += time_diff;
+                                println!(
+                                    "Flashblocks newHeads sub is faster than ETH newHeads sub by: {time_diff:?} (block #{height})"
+                                );
+                            } else {
+                                println!("Eth newHeads received block #{height} (not in flashblocks yet)");
                             }
                         }
                     }
                     Err(e) => {
-                        eprintln!("Eth subscription error: {}", e);
+                        eprintln!("Eth subscription error: {e}");
                         break;
                     }
                 }
@@ -1260,10 +1256,8 @@ async fn fb_benchmark_new_heads_subscription_test() -> Result<()> {
     }
 
     let avg_time_diff = total_sub_time_diff / (ITERATIONS - 1) as u32;
-    println!(
-        "\n=== Benchmark Results ===\nAvg Flashblocks newHeads sub is faster than ETH newHeads sub by: {:?}",
-        avg_time_diff
-    );
+    println!("\n=== Benchmark Results ===");
+    println!("Avg Flashblocks newHeads sub is faster than ETH newHeads sub by: {avg_time_diff:?}");
 
     Ok(())
 }
@@ -1295,10 +1289,8 @@ async fn fb_benchmark_new_transactions_subscription_test() -> Result<()> {
 
     let mut total_flashblocks_duration = Duration::ZERO;
 
-    println!("Starting benchmark: measuring flashblocks newTx subscription latency...");
-
     for i in 0..ITERATIONS {
-        println!("\n--- Iteration {} ---", i);
+        println!("\n--- Iteration {i} ---");
 
         // Send native balance transfer
         let tx_hash = operations::native_balance_transfer(
@@ -1309,7 +1301,7 @@ async fn fb_benchmark_new_transactions_subscription_test() -> Result<()> {
         )
         .await?;
 
-        println!("Sent transaction: {}", tx_hash);
+        println!("Sent transaction: {tx_hash}");
         let start_time = Instant::now();
 
         // Wait for transaction to appear in flashblocks subscription
@@ -1317,23 +1309,13 @@ async fn fb_benchmark_new_transactions_subscription_test() -> Result<()> {
             loop {
                 match flashblocks_subscription.next().await {
                     Some(Ok(notification)) => {
-                        let Some(transactions) =
-                            notification.get("transactions").and_then(|t| t.as_array())
-                        else {
-                            continue;
-                        };
-
-                        for tx in transactions {
-                            if let Some(tx_hash_str) = tx.get("txHash").and_then(|h| h.as_str()) {
-                                if tx_hash_str == tx_hash {
-                                    return Ok(start_time.elapsed());
-                                }
-                            }
+                        if operations::contains_tx_hash(&notification, &tx_hash) {
+                            return Ok(start_time.elapsed());
                         }
                     }
                     Some(Err(e)) => {
-                        eprintln!("Flashblocks subscription error: {}", e);
-                        return Err(eyre::eyre!("Subscription error: {}", e));
+                        eprintln!("Flashblocks subscription error: {e}");
+                        return Err(eyre::eyre!("Subscription error: {e}"));
                     }
                     None => {
                         eprintln!("Flashblocks subscription ended unexpectedly");
@@ -1347,7 +1329,7 @@ async fn fb_benchmark_new_transactions_subscription_test() -> Result<()> {
             eyre::eyre!("Timeout waiting for transaction in flashblocks subscription")
         })??;
 
-        println!("Flashblocks newTx sub duration: {:?}", sub_duration);
+        println!("Flashblocks newTx sub duration: {sub_duration:?}");
 
         if i == 0 {
             continue;
@@ -1357,7 +1339,8 @@ async fn fb_benchmark_new_transactions_subscription_test() -> Result<()> {
     }
 
     let avg_duration = total_flashblocks_duration / (ITERATIONS - 1) as u32;
-    println!("\n=== Benchmark Results ===\nAvg Flashblocks newTx sub duration: {:?}", avg_duration);
+    println!("\n=== Benchmark Results ===");
+    println!("Avg Flashblocks newTx sub duration: {avg_duration:?}");
 
     Ok(())
 }

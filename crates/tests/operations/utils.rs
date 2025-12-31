@@ -378,16 +378,15 @@ pub async fn wait_for_tx_mined(endpoint_url: &str, tx_hash: &str) -> Result<serd
     let client = create_test_client(endpoint_url);
     tokio::time::timeout(DEFAULT_TIMEOUT_TX_TO_BE_MINED, async {
         loop {
-            if let Ok(receipt) = eth_get_transaction_receipt(&client, tx_hash).await {
-                if !receipt.is_null() {
-                    let status = receipt["status"]
-                        .as_str()
-                        .ok_or(eyre!("tx receipt missing status field"))?;
-                    if status == "0x1" {
-                        return Ok(receipt);
-                    } else {
-                        return Err(eyre!("tx execution failed with status: {}", status));
-                    }
+            if let Ok(receipt) = eth_get_transaction_receipt(&client, tx_hash).await
+                && !receipt.is_null()
+            {
+                let status =
+                    receipt["status"].as_str().ok_or(eyre!("tx receipt missing status field"))?;
+                if status == "0x1" {
+                    return Ok(receipt);
+                } else {
+                    return Err(eyre!("tx execution failed with status: {}", status));
                 }
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -482,16 +481,16 @@ pub fn get_refund_counter_from_trace(trace_result: &serde_json::Value, opcode: &
     // Iterate through each log entry
     for entry in struct_logs {
         // Check if this log has the matching opcode
-        if let Some(op) = entry["op"].as_str() {
-            if op == opcode {
-                // Extract the refund value
-                if let Some(refund) = entry["refund"].as_u64() {
-                    refund_counter = refund;
-                    break;
-                } else if let Some(refund) = entry["refund"].as_f64() {
-                    refund_counter = refund as u64;
-                    break;
-                }
+        if let Some(op) = entry["op"].as_str()
+            && op == opcode
+        {
+            // Extract the refund value
+            if let Some(refund) = entry["refund"].as_u64() {
+                refund_counter = refund;
+                break;
+            } else if let Some(refund) = entry["refund"].as_f64() {
+                refund_counter = refund as u64;
+                break;
             }
         }
     }
@@ -597,4 +596,21 @@ pub fn validate_internal_transaction(
     }
 
     Ok(())
+}
+
+/// Check if a flashblocks notification contains a specific transaction hash
+pub fn contains_tx_hash(notification: &serde_json::Value, tx_hash: &str) -> bool {
+    let Some(transactions) = notification.get("transactions").and_then(|t| t.as_array()) else {
+        return false;
+    };
+
+    for tx in transactions {
+        if let Some(tx_hash_str) = tx.get("txHash").and_then(|h| h.as_str())
+            && tx_hash_str == tx_hash
+        {
+            return true;
+        }
+    }
+
+    false
 }
