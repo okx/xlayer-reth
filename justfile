@@ -22,11 +22,18 @@ alias sdt := sync-dev-template
 alias wt := watch-test
 alias wc := watch-check
 alias xl := xlayer
+alias sc := sweep-check
 
 default:
     @just --list
 
-check: check-format check-clippy test
+sweep-check:
+    # Manually check all crates.
+    cargo metadata --no-deps --format-version 1 | \
+    jq -r '.packages[] | select(.source == null) | .name' | \
+    xargs -I {} sh -c 'echo "=== Checking {} ===" && cargo check -p {} || exit 255'
+
+check: sweep-check check-format check-clippy test
 
 fix: fix-format fix-clippy
 
