@@ -179,8 +179,7 @@ async fn fb_smoke_test() {
     .expect("Pending eth_getBlockTransactionCountByNumber failed");
     assert!(
         fb_block_transaction_count >= 1,
-        "Block transaction count should be at least 1, got {}",
-        fb_block_transaction_count
+        "Block transaction count should be at least 1, got {fb_block_transaction_count}"
     );
 
     // eth_getBlockInternalTransactions
@@ -215,7 +214,7 @@ async fn fb_benchmark_native_tx_confirmation() {
         )
         .await
         .unwrap();
-        println!("Sent tx: {}", signed_tx);
+        println!("Sent tx: {signed_tx}");
 
         // Run benchmark - both nodes check concurrently with independent timers
         let signed_tx_clone = signed_tx.clone();
@@ -250,17 +249,17 @@ async fn fb_benchmark_native_tx_confirmation() {
         total_fb_duration += fb_duration;
         total_non_fb_duration += non_fb_duration;
 
-        println!("Iteration {}", i);
-        println!("Flashblocks native tx transfer confirmation took: {}ms", fb_duration);
-        println!("Non-flashblocks native tx transfer confirmation took: {}ms", non_fb_duration);
+        println!("Iteration {i}");
+        println!("Flashblocks native tx transfer confirmation took: {fb_duration}ms");
+        println!("Non-flashblocks native tx transfer confirmation took: {non_fb_duration}ms");
     }
 
     let avg_fb_duration = total_fb_duration / ITERATIONS as u128;
     let avg_non_fb_duration = total_non_fb_duration / ITERATIONS as u128;
 
     // Log out metrics
-    println!("Avg flashblocks native tx transfer confirmation took: {}ms", avg_fb_duration);
-    println!("Avg non-flashblocks native tx transfer confirmation took: {}ms", avg_non_fb_duration);
+    println!("Avg flashblocks native tx transfer confirmation took: {avg_fb_duration}ms");
+    println!("Avg non-flashblocks native tx transfer confirmation took: {avg_non_fb_duration}ms");
 }
 
 /// Flashblock erc20 transfer tx confirmation benchmark between a flashblock node
@@ -290,7 +289,7 @@ async fn fb_benchmark_erc20_tx_confirmation_test() {
         )
         .await
         .unwrap();
-        println!("Sent erc20 tx: {}", signed_tx);
+        println!("Sent erc20 tx: {signed_tx}");
 
         // Run benchmark - both nodes check concurrently with independent timers
         let signed_tx_clone = signed_tx.clone();
@@ -325,17 +324,17 @@ async fn fb_benchmark_erc20_tx_confirmation_test() {
         total_fb_duration += fb_duration;
         total_non_fb_duration += non_fb_duration;
 
-        println!("Iteration {}", i);
-        println!("Flashblocks erc20 tx transfer confirmation took: {}ms", fb_duration);
-        println!("Non-flashblocks erc20 tx transfer confirmation took: {}ms", non_fb_duration);
+        println!("Iteration {i}");
+        println!("Flashblocks erc20 tx transfer confirmation took: {fb_duration}ms");
+        println!("Non-flashblocks erc20 tx transfer confirmation took: {non_fb_duration}ms");
     }
 
     let avg_fb_duration = total_fb_duration / ITERATIONS as u128;
     let avg_non_fb_duration = total_non_fb_duration / ITERATIONS as u128;
 
     // Log out metrics
-    println!("Avg flashblocks erc20 tx transfer confirmation took: {}ms", avg_fb_duration);
-    println!("Avg non-flashblocks erc20 tx transfer confirmation took: {}ms", avg_non_fb_duration);
+    println!("Avg flashblocks erc20 tx transfer confirmation took: {avg_fb_duration}ms");
+    println!("Avg non-flashblocks erc20 tx transfer confirmation took: {avg_non_fb_duration}ms");
 }
 
 /// Flashblock RPC comparison test compares the supported flashblocks RPC APIs with
@@ -931,7 +930,7 @@ async fn fb_rpc_comparison_test(#[case] test_name: &str) {
                 "eth_getStorageAt with block hash not identical"
             );
         }
-        _ => panic!("Unknown test case: {}", test_name),
+        _ => panic!("Unknown test case: {test_name}"),
     }
 }
 
@@ -945,7 +944,7 @@ async fn fb_subscription_test() -> Result<()> {
     let current_block_number = operations::eth_block_number(&non_fb_client)
         .await
         .expect("Failed to get current block number");
-    println!("Current block number: {}", current_block_number);
+    println!("Current block number: {current_block_number}");
 
     let num_txs: usize = 5;
 
@@ -972,8 +971,7 @@ async fn fb_subscription_test() -> Result<()> {
     }
     let total = remaining.len();
     println!(
-        "Waiting for {} txs to appear in flashblocks (timeout: {:?})...",
-        total, WEB_SOCKET_TIMEOUT
+        "Waiting for {total} txs to appear in flashblocks (timeout: {WEB_SOCKET_TIMEOUT:?})..."
     );
 
     // Read flashblocks until all txs are found or timeout
@@ -991,9 +989,7 @@ async fn fb_subscription_test() -> Result<()> {
 
                     assert!(
                         block_num >= current_block_number,
-                        "Flashblock block number {} should be >= current block {}",
-                        block_num,
-                        current_block_number
+                        "Flashblock block number {block_num} should be >= current block {current_block_number}"
                     );
 
                     if let Some(txs) = notification["diff"]["transactions"].as_array() {
@@ -1001,7 +997,7 @@ async fn fb_subscription_test() -> Result<()> {
                             let Some(tx_rlp_hex) = tx.as_str() else { continue };
                             let raw = tx_rlp_hex.trim_start_matches("0x");
                             let Ok(bytes) = hex::decode(raw) else {
-                                eprintln!("Failed to hex-decode RLP: {}", tx_rlp_hex);
+                                eprintln!("Failed to hex-decode RLP: {tx_rlp_hex}");
                                 continue;
                             };
 
@@ -1011,8 +1007,7 @@ async fn fb_subscription_test() -> Result<()> {
                             if remaining.remove(&hash_str) {
                                 let found = total - remaining.len();
                                 println!(
-                                    "Found tx {}/{} in block {}: {}",
-                                    found, total, block_num, hash_str
+                                    "Found tx {found}/{total} in block {block_num}: {hash_str}"
                                 );
                                 if remaining.is_empty() {
                                     break;
@@ -1023,7 +1018,7 @@ async fn fb_subscription_test() -> Result<()> {
                 }
                 Some(Ok(_)) => {} // ignore non-text
                 Some(Err(e)) => {
-                    eprintln!("WebSocket error: {}", e);
+                    eprintln!("WebSocket error: {e}");
                     break;
                 }
                 None => {
@@ -1036,13 +1031,13 @@ async fn fb_subscription_test() -> Result<()> {
     .await;
 
     if result.is_err() {
-        eprintln!("Timeout: Stopped waiting after {:?}", WEB_SOCKET_TIMEOUT);
+        eprintln!("Timeout: Stopped waiting after {WEB_SOCKET_TIMEOUT:?}");
     }
 
     if !remaining.is_empty() {
         eprintln!("\nMissing txs in flashblocks:");
         for tx in &remaining {
-            eprintln!("  - {}", tx);
+            eprintln!("  - {tx}");
         }
     }
 
@@ -1053,7 +1048,7 @@ async fn fb_subscription_test() -> Result<()> {
         remaining.len()
     );
 
-    println!("All {} transactions found in flashblocks", total);
+    println!("All {total} transactions found in flashblocks");
 
     Ok(())
 }
@@ -1105,8 +1100,7 @@ async fn fb_eth_subscribe_test() -> Result<()> {
     }
     let total = remaining.len();
     println!(
-        "Waiting for {} txs to appear in flashblocks (timeout: {:?})...",
-        total, WEB_SOCKET_TIMEOUT
+        "Waiting for {total} txs to appear in flashblocks (timeout: {WEB_SOCKET_TIMEOUT:?})..."
     );
 
     let result = tokio::time::timeout(WEB_SOCKET_TIMEOUT, async {
@@ -1145,7 +1139,7 @@ async fn fb_eth_subscribe_test() -> Result<()> {
 
                         if remaining.remove(received_hash) {
                             let found = total - remaining.len();
-                            println!("Found tx {}/{}: {}", found, total, received_hash);
+                            println!("Found tx {found}/{total}: {received_hash}");
                             if remaining.is_empty() {
                                 break;
                             }
@@ -1153,7 +1147,7 @@ async fn fb_eth_subscribe_test() -> Result<()> {
                     }
                 }
                 Some(Err(e)) => {
-                    eprintln!("Subscription error: {}", e);
+                    eprintln!("Subscription error: {e}");
                     break;
                 }
                 None => {
@@ -1166,13 +1160,13 @@ async fn fb_eth_subscribe_test() -> Result<()> {
     .await;
 
     if result.is_err() {
-        eprintln!("Timeout: Stopped waiting after {:?}", WEB_SOCKET_TIMEOUT);
+        eprintln!("Timeout: Stopped waiting after {WEB_SOCKET_TIMEOUT:?}");
     }
 
     if !remaining.is_empty() {
         eprintln!("\nMissing txs in flashblocks:");
         for tx in &remaining {
-            eprintln!("  - {}", tx);
+            eprintln!("  - {tx}");
         }
     }
 
@@ -1183,7 +1177,7 @@ async fn fb_eth_subscribe_test() -> Result<()> {
         remaining.len()
     );
 
-    println!("\nAll {} transactions received via flashblocks subscription", total);
+    println!("\nAll {total} transactions received via flashblocks subscription");
 
     Ok(())
 }
