@@ -2,7 +2,7 @@
 target/
 
 # Git
-.git/
+#.git/
 .gitignore
 
 # IDE & System
