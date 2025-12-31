@@ -49,7 +49,7 @@ fix-format:
     cargo fmt --all
 
 check-clippy:
-    cargo clippy --all-targets -- -D warnings
+    cargo clippy --all-targets --workspace -- -D warnings
 
 fix-clippy:
     cargo clippy --all-targets --fix --allow-dirty --allow-staged
