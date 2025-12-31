@@ -1,5 +1,5 @@
 use crate::pubsub::{
-    EnrichedFlashblock, EnrichedTransaction, FlashblockParams, FlashblockSubscriptionKind,
+    EnrichedTransaction, FlashblockParams, FlashblockStreamEvent, FlashblockSubscriptionKind,
     FlashblocksFilter,
 };
 use alloy_consensus::{transaction::TxHashRef, BlockHeader as _, Transaction as _, TxReceipt as _};
@@ -23,10 +23,10 @@ use reth_rpc_server_types::result::{internal_rpc_err, invalid_params_rpc_err};
 use reth_storage_api::{BlockNumReader, ReceiptProvider};
 use reth_tasks::TaskSpawner;
 use reth_tracing::tracing::warn;
-use std::{future::ready, sync::Arc};
+use std::{collections::HashSet, future::ready, sync::Arc};
 use tokio_stream::{wrappers::WatchStream, Stream};
 
-type FlashblockItem<N, C> = EnrichedFlashblock<
+type FlashblockItem<N, C> = FlashblockStreamEvent<
     <N as NodePrimitives>::BlockHeader,
     RpcTransaction<<C as RpcConvert>::Network>,
     RpcReceipt<<C as RpcConvert>::Network>,
@@ -249,11 +249,17 @@ where
         filter: FlashblocksFilter,
     ) -> impl Stream<Item = FlashblockItem<N, Eth::RpcConvert>> {
         let tx_converter = self.tx_converter.clone();
-        WatchStream::new(self.pending_block_rx.clone()).filter_map(move |pending_block_opt| {
-            ready(pending_block_opt.and_then(|pending_block| {
-                Self::filter_and_enrich_flashblock(&pending_block, &filter, &tx_converter)
-            }))
-        })
+        WatchStream::new(self.pending_block_rx.clone())
+            .filter_map(move |pending_block_opt| {
+                ready(pending_block_opt.map(|pending_block| {
+                    futures::stream::iter(Self::flashblock_to_stream_events(
+                        &pending_block,
+                        &filter,
+                        &tx_converter,
+                    ))
+                }))
+            })
+            .flatten()
     }
 
     fn new_canonical_state_stream(
@@ -268,10 +274,10 @@ where
                     CanonStateNotification::Reorg { old: _, new } => new,
                 };
 
-                let blocks: Vec<_> = chain
+                let events: Vec<_> = chain
                     .blocks_iter()
-                    .filter_map(|block| {
-                        Self::filter_and_enrich_canonical_block(
+                    .flat_map(|block| {
+                        Self::canonical_block_to_stream_events(
                             block,
                             &self.provider,
                             &filter,
@@ -280,57 +286,55 @@ where
                     })
                     .collect();
 
-                futures::stream::iter(blocks)
+                futures::stream::iter(events)
             })
             .flatten()
     }
 
-    /// Filter and enrich a flashblock based on the provided filter criteria.
-    fn filter_and_enrich_flashblock(
+    /// Convert a flashblock into a stream of events (header + individual transactions)
+    fn flashblock_to_stream_events(
         pending_block: &PendingFlashBlock<N>,
         filter: &FlashblocksFilter,
         tx_converter: &Eth::RpcConvert,
-    ) -> Option<FlashblockItem<N, Eth::RpcConvert>> {
-        let header = if filter.header_info {
-            Some(match extract_header_from_pending_block(pending_block) {
-                Ok(h) => h,
-                Err(e) => {
-                    warn!(target: "xlayer::flashblocks", error = ?e, "Failed to extract header");
-                    return None;
-                }
-            })
-        } else {
-            None
-        };
-
+    ) -> Vec<FlashblockItem<N, Eth::RpcConvert>> {
         let block = pending_block.block();
         let receipts = pending_block.receipts.as_ref();
         let sealed_block = block.sealed_block();
+        let block_number = sealed_block.header().number();
+
+        let mut events = Vec::new();
+
+        if filter.header_info {
+            match extract_header_from_pending_block(pending_block) {
+                Ok(header) => {
+                    events.push(FlashblockStreamEvent::Header { block_number, header });
+                }
+                Err(e) => {
+                    warn!(target: "xlayer::flashblocks", error = ?e, "Failed to extract header");
+                    return vec![];
+                }
+            }
+        }
 
         let transactions =
             Self::collect_transactions(block, filter, receipts, tx_converter, sealed_block);
 
-        if filter.sub_tx_filter.has_address_filter() && transactions.is_empty() {
-            return None;
+        for transaction in transactions {
+            events.push(FlashblockStreamEvent::Transaction { block_number, transaction });
         }
 
-        Some(EnrichedFlashblock { header, transactions })
+        events
     }
 
-    fn filter_and_enrich_canonical_block(
+    /// Convert a canonical block into a stream of events (header + individual transactions)
+    fn canonical_block_to_stream_events(
         block: &RecoveredBlock<N::Block>,
         provider: &Provider,
         filter: &FlashblocksFilter,
         tx_converter: &Eth::RpcConvert,
-    ) -> Option<FlashblockItem<N, Eth::RpcConvert>> {
-        let header = if filter.header_info {
-            let sealed_header = block.clone_sealed_header();
-            Some(Header::from_consensus(sealed_header.into(), None, None))
-        } else {
-            None
-        };
-
+    ) -> Vec<FlashblockItem<N, Eth::RpcConvert>> {
         let sealed_block = block.sealed_block();
+        let block_number = sealed_block.number();
 
         let receipts_result =
             provider.receipts_by_block(alloy_eips::BlockHashOrNumber::Hash(sealed_block.hash()));
@@ -340,7 +344,7 @@ where
             Ok(None) => {
                 warn!(
                     target: "xlayer::flashblocks",
-                    block_number = sealed_block.number(),
+                    block_number,
                     block_hash = ?sealed_block.hash(),
                     "No receipts found in storage for canonical block"
                 );
@@ -349,7 +353,7 @@ where
             Err(e) => {
                 warn!(
                     target: "xlayer::flashblocks",
-                    block_number = sealed_block.number(),
+                    block_number,
                     block_hash = ?sealed_block.hash(),
                     error = ?e,
                     "Failed to fetch receipts from provider"
@@ -358,14 +362,22 @@ where
             }
         };
 
+        let mut events = Vec::new();
+
+        if filter.header_info {
+            let sealed_header = block.clone_sealed_header();
+            let header = Header::from_consensus(sealed_header.into(), None, None);
+            events.push(FlashblockStreamEvent::Header { block_number, header });
+        }
+
         let transactions =
             Self::collect_transactions(block, filter, &receipts_vec, tx_converter, sealed_block);
 
-        if filter.sub_tx_filter.has_address_filter() && transactions.is_empty() {
-            return None;
+        for transaction in transactions {
+            events.push(FlashblockStreamEvent::Transaction { block_number, transaction });
         }
 
-        Some(EnrichedFlashblock { header, transactions })
+        events
     }
 
     fn collect_transactions(
@@ -546,7 +558,13 @@ where
     FbSt: Stream<Item = FlashblockItem<N, Eth::RpcConvert>> + Unpin,
     CanonSt: Stream<Item = FlashblockItem<N, Eth::RpcConvert>> + Unpin,
 {
-    let mut last_sent_height = 0;
+    // Track which (block_number, tx_hash) pairs we've sent to avoid duplicates
+    // Flashblocks may emit the same transaction multiple times as the block builds up
+    let mut sent_tx_events = HashSet::new();
+
+    let mut highest_fb_block = 0;
+    let mut highest_canon_block = 0;
+
     loop {
         tokio::select! {
             _ = sink.closed() => {
@@ -563,12 +581,28 @@ where
                 };
 
                 let block_num = item.block_number();
-                if block_num < last_sent_height {
-                    // Flashblocks stream is lagging, skip
-                    continue
+
+                if block_num <= highest_canon_block {
+                    continue;
                 }
 
-                last_sent_height = block_num;
+                // For transactions, check if we've already sent this (block, tx_hash) pair
+                // For headers, always send
+                let should_send = match &item {
+                    FlashblockStreamEvent::Header { .. } => {
+                        true
+                    }
+                    FlashblockStreamEvent::Transaction { block_number, transaction } => {
+                        sent_tx_events.insert((*block_number, transaction.tx_hash))
+                    }
+                };
+
+                if !should_send {
+                    continue;
+                }
+
+                highest_fb_block = block_num;
+
                 let msg = SubscriptionMessage::new(
                     sink.method_name(),
                     sink.subscription_id(),
@@ -589,12 +623,25 @@ where
                 };
 
                 let block_num = item.block_number();
-                if block_num <= last_sent_height {
-                    // Fallback - same height is not allowed. Canonical stream is lagging, skip
-                    continue
+
+                if block_num > highest_canon_block {
+                    highest_canon_block = block_num;
+                    sent_tx_events.retain(|(b, _)| *b >= highest_canon_block);
                 }
 
-                last_sent_height = block_num;
+                let should_send = match &item {
+                    FlashblockStreamEvent::Header { block_number, .. } => {
+                        *block_number > highest_fb_block
+                    }
+                    FlashblockStreamEvent::Transaction { block_number, transaction } => {
+                        sent_tx_events.insert((*block_number, transaction.tx_hash))
+                    }
+                };
+
+                if !should_send {
+                    continue;
+                }
+
                 let msg = SubscriptionMessage::new(
                     sink.method_name(),
                     sink.subscription_id(),

@@ -114,6 +114,30 @@ where
     }
 }
 
+/// Streaming flashblock event which is either a header or an individual transaction
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum FlashblockStreamEvent<H, Tx, R> {
+    /// Block header event
+    Header { block_number: u64, header: Header<H> },
+
+    /// Individual transaction event
+    Transaction {
+        block_number: u64,
+        transaction: EnrichedTransaction<Tx, R>,
+    },
+}
+
+impl<H, Tx, R> FlashblockStreamEvent<H, Tx, R> {
+    /// Get the block number for this event
+    pub fn block_number(&self) -> u64 {
+        match self {
+            FlashblockStreamEvent::Header { block_number, .. } => *block_number,
+            FlashblockStreamEvent::Transaction { block_number, .. } => *block_number,
+        }
+    }
+}
+
 /// Transaction data with optional enrichment based on `FlashblocksFilter`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
