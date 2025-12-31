@@ -55,11 +55,7 @@ mod tests {
     fn verify_version() {
         init_version_metadata();
         let version_output = version_metadata();
-
-        println!("Short version: {:?}", version_output.short_version);
-        println!("Long version: {:?}", version_output.long_version);
-
-        // TODO: verify as binary.
-        // test --version prints correct version
+        let sha = std::env::var("VERGEN_GIT_SHA").unwrap();
+        assert_eq!(sha, version_output.vergen_git_sha_long);
     }
 }
