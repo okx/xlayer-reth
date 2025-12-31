@@ -65,7 +65,7 @@ sweep-check *crates="":
 
 check: 
     # Upstream flashblocks inner dependency reth-optimism-primitives does not
-    # specify deps reth-codec and serde-bincode-compat. So we skip.
+    # specify feats reth-codec and serde-bincode-compat. So we skip.
     just sweep-check xlayer-innertx
     just check-format 
     just check-clippy 
