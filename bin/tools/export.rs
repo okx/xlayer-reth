@@ -143,8 +143,7 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> ExportCommand<C> {
 
                     writer.write_all(&blocks_rlp_concat).wrap_err_with(|| {
                         format!(
-                            "Failed to write block range {} to {} to file",
-                            current_block, batch_end
+                            "Failed to write block range {current_block} to {batch_end} to file"
                         )
                     })?;
                 }
