@@ -354,12 +354,10 @@ async fn test_eth_block_rpc(#[case] test_name: &str) {
                 block["hash"].as_str().expect("Block hash should not be empty").to_string();
 
             // Test getting block receipts by block hash
-            let receipts_by_hash = operations::eth_get_block_receipts(
-                &client,
-                operations::BlockId::Hash(block_hash),
-            )
-            .await
-            .expect("Failed to get block receipts by hash");
+            let receipts_by_hash =
+                operations::eth_get_block_receipts(&client, operations::BlockId::Hash(block_hash))
+                    .await
+                    .expect("Failed to get block receipts by hash");
 
             assert!(!receipts_by_hash.is_null(), "Block receipts by hash should not be null");
 
@@ -949,9 +947,7 @@ async fn test_new_transaction_types(#[case] test_name: &str) {
             let contract_address =
                 receipt["contractAddress"].as_str().expect("Should have contract address");
 
-            println!(
-                "Contract address (self-destructed): {contract_address}, tx hash: {tx_hash}"
-            );
+            println!("Contract address (self-destructed): {contract_address}, tx hash: {tx_hash}");
 
             tokio::time::sleep(Duration::from_millis(1000)).await;
 
@@ -1137,7 +1133,9 @@ async fn test_eth_get_block_internal_transactions() {
             operations::BlockId::Number(*block_num),
         )
         .await
-        .unwrap_or_else(|_| panic!("Failed to get block internal transactions for block {block_num}"));
+        .unwrap_or_else(|_| {
+            panic!("Failed to get block internal transactions for block {block_num}")
+        });
 
         assert!(
             !block_inner_txs.is_null(),
@@ -1176,11 +1174,14 @@ async fn test_eth_get_block_internal_transactions() {
             )
             .unwrap_or_else(|_| panic!("Failed to validate block internal transaction {tx_idx}"));
 
-            let individual_inner_txs = operations::eth_get_internal_transactions(&client, tx_hash)
-                .await
-                .unwrap_or_else(|_| panic!("Failed to get individual inner transactions for tx {tx_idx}"));
+            let individual_inner_txs =
+                operations::eth_get_internal_transactions(&client, tx_hash).await.unwrap_or_else(
+                    |_| panic!("Failed to get individual inner transactions for tx {tx_idx}"),
+                );
 
-            let individual_inner_txs_array = individual_inner_txs.as_array().unwrap_or_else(|| panic!("Individual inner transactions should be an array for tx {tx_idx}"));
+            let individual_inner_txs_array = individual_inner_txs.as_array().unwrap_or_else(|| {
+                panic!("Individual inner transactions should be an array for tx {tx_idx}")
+            });
 
             assert_eq!(
                 individual_inner_txs_array.len(),
