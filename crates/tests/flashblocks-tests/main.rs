@@ -9,9 +9,9 @@ use alloy_sol_types::{sol, SolCall};
 use eyre::Result;
 use futures_util::StreamExt;
 use scopeguard::defer;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     str::FromStr,
     time::{Duration, Instant},
 };
@@ -49,6 +49,7 @@ async fn fb_smoke_test() {
         operations::DEFAULT_L2_NETWORK_URL_FB,
         U256::from(operations::GWEI),
         test_address,
+        true,
     )
     .await
     .expect("Failed to send tx");
@@ -211,6 +212,7 @@ async fn fb_benchmark_native_tx_confirmation() {
             operations::DEFAULT_L2_NETWORK_URL,
             U256::from(operations::GWEI),
             test_address,
+            true,
         )
         .await
         .unwrap();
@@ -964,6 +966,7 @@ async fn fb_subscription_test() -> Result<()> {
             operations::DEFAULT_L2_NETWORK_URL_FB,
             U256::from(operations::GWEI),
             test_address,
+            true,
         )
         .await?;
         println!("Sent tx {}: {}", i + 1, tx_hash);
@@ -1056,8 +1059,6 @@ async fn fb_subscription_test() -> Result<()> {
 #[ignore = "Requires flashblocks WebSocket server with flashblocks subscription support"]
 #[tokio::test]
 async fn fb_eth_subscribe_test() -> Result<()> {
-    use serde_json::Value;
-
     let ws_url = operations::manager::DEFAULT_WEBSOCKET_URL;
     let sender_address = operations::DEFAULT_RICH_ADDRESS;
     let test_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
@@ -1080,11 +1081,6 @@ async fn fb_eth_subscribe_test() -> Result<()> {
         ws_client.subscribe("flashblocks", Some(subscription_params)).await?;
     println!("Subscription created successfully");
 
-    // Guarantee cleanup on scope exit
-    defer! {
-        println!("Unsubscribing and closing WebSocket connection");
-    };
-
     let num_txs = 3;
 
     let mut remaining: HashSet<String> = HashSet::new();
@@ -1093,6 +1089,7 @@ async fn fb_eth_subscribe_test() -> Result<()> {
             operations::DEFAULT_L2_NETWORK_URL_FB,
             U256::from(operations::GWEI),
             test_address,
+            true,
         )
         .await?;
         println!("Sent tx {}: {}", i + 1, tx_hash);
@@ -1178,6 +1175,195 @@ async fn fb_eth_subscribe_test() -> Result<()> {
     );
 
     println!("\nAll {total} transactions received via flashblocks subscription");
+
+    Ok(())
+}
+
+#[ignore = "Requires flashblocks WebSocket server with flashblocks subscription support"]
+#[tokio::test]
+async fn fb_benchmark_new_heads_subscription_test() -> Result<()> {
+    let ws_url = operations::manager::DEFAULT_WEBSOCKET_URL;
+
+    println!("Connecting to flashblocks WebSocket at {ws_url}...");
+    let ws_client = operations::websocket::EthWebSocketClient::connect(ws_url).await?;
+    println!("Connected successfully");
+
+    // Subscribe to flashblocks (realtime) with specific parameters
+    let subscription_params = json!({
+        "headerInfo": true
+    });
+
+    let mut flashblocks_subscription: jsonrpsee::core::client::Subscription<Value> =
+        ws_client.subscribe("flashblocks", Some(subscription_params)).await?;
+    println!("Flashblocks subscription created successfully");
+
+    let mut eth_subscription: jsonrpsee::core::client::Subscription<Value> =
+        ws_client.subscribe("newHeads", None).await?;
+    println!("Eth newHeads subscription created successfully");
+
+    // Benchmark variables
+    let mut total_sub_time_diff = Duration::ZERO;
+    let mut heights = HashMap::<u64, Instant>::new();
+    let mut count = 0;
+
+    println!("Starting benchmark: comparing flashblocks vs eth newHeads subscriptions...");
+
+    while count < ITERATIONS {
+        tokio::select! {
+            // Flashblocks subscription message
+            Some(result) = flashblocks_subscription.next() => {
+                match result {
+                    Ok(notification) => {
+                        // Extract block number from flashblocks notification
+                        if let Some(header) = notification.get("header") {
+                            if let Some(number_hex) = header.get("number").and_then(|n| n.as_str()) {
+                                // Parse hex string to u64
+                                if let Ok(height) = u64::from_str_radix(number_hex.trim_start_matches("0x"), 16) {
+                                    heights.insert(height, Instant::now());
+                                    println!("Flashblocks received block #{}", height);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Flashblocks subscription error: {}", e);
+                        break;
+                    }
+                }
+            }
+            // Eth newHeads subscription message
+            Some(result) = eth_subscription.next() => {
+                match result {
+                    Ok(notification) => {
+                        if let Some(number_hex) = notification.get("number").and_then(|n| n.as_str()) {
+                            if let Ok(height) = u64::from_str_radix(number_hex.trim_start_matches("0x"), 16) {
+                                if let Some(flashblocks_time) = heights.get(&height) {
+                                    let time_diff = flashblocks_time.elapsed();
+                                    count += 1;
+
+                                    if count == 1 {
+                                        continue;
+                                    }
+
+                                    total_sub_time_diff += time_diff;
+                                    println!(
+                                        "Flashblocks newHeads sub is faster than ETH newHeads sub by: {:?} (block #{})",
+                                        time_diff, height
+                                    );
+                                } else {
+                                    println!("Eth newHeads received block #{} (not in flashblocks yet)", height);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Eth subscription error: {}", e);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let avg_time_diff = total_sub_time_diff / (ITERATIONS - 1) as u32;
+    println!(
+        "\n=== Benchmark Results ===\nAvg Flashblocks newHeads sub is faster than ETH newHeads sub by: {:?}",
+        avg_time_diff
+    );
+
+    Ok(())
+}
+
+#[ignore = "Requires flashblocks WebSocket server with flashblocks subscription support"]
+#[tokio::test]
+async fn fb_benchmark_new_transactions_subscription_test() -> Result<()> {
+    let ws_url = operations::manager::DEFAULT_WEBSOCKET_URL;
+    let sender_address = operations::DEFAULT_RICH_ADDRESS;
+    let test_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
+
+    println!("Connecting to flashblocks WebSocket at {ws_url}...");
+    let ws_client = operations::websocket::EthWebSocketClient::connect(ws_url).await?;
+    println!("Connected successfully");
+
+    // Subscribe to flashblocks (realtime) with specific parameters
+    let subscription_params = json!({
+        "headerInfo": true,
+        "subTxFilter": {
+            "txInfo": true,
+            "txReceipt": true,
+            "subscribeAddresses": [sender_address, test_address]
+        }
+    });
+
+    let mut flashblocks_subscription: jsonrpsee::core::client::Subscription<Value> =
+        ws_client.subscribe("flashblocks", Some(subscription_params)).await?;
+    println!("Flashblocks subscription created successfully");
+
+    let mut total_flashblocks_duration = Duration::ZERO;
+
+    println!("Starting benchmark: measuring flashblocks newTx subscription latency...");
+
+    for i in 0..ITERATIONS {
+        println!("\n--- Iteration {} ---", i);
+
+        // Send native balance transfer
+        let tx_hash = operations::native_balance_transfer(
+            operations::DEFAULT_L2_NETWORK_URL_FB,
+            U256::from(operations::GWEI),
+            test_address,
+            false,
+        )
+        .await?;
+
+        println!("Sent transaction: {}", tx_hash);
+        let start_time = Instant::now();
+
+        // Wait for transaction to appear in flashblocks subscription
+        let sub_duration = tokio::time::timeout(TX_CONFIRMATION_TIMEOUT, async {
+            loop {
+                match flashblocks_subscription.next().await {
+                    Some(Ok(notification)) => {
+                        let Some(transactions) =
+                            notification.get("transactions").and_then(|t| t.as_array())
+                        else {
+                            continue;
+                        };
+
+                        for tx in transactions {
+                            if let Some(tx_hash_str) = tx.get("txHash").and_then(|h| h.as_str()) {
+                                if tx_hash_str == tx_hash {
+                                    return Ok(start_time.elapsed());
+                                }
+                            }
+                        }
+                    }
+                    Some(Err(e)) => {
+                        eprintln!("Flashblocks subscription error: {}", e);
+                        return Err(eyre::eyre!("Subscription error: {}", e));
+                    }
+                    None => {
+                        eprintln!("Flashblocks subscription ended unexpectedly");
+                        return Err(eyre::eyre!("Subscription ended"));
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|_| {
+            eyre::eyre!("Timeout waiting for transaction in flashblocks subscription")
+        })??;
+
+        println!("Flashblocks newTx sub duration: {:?}", sub_duration);
+
+        if i == 0 {
+            continue;
+        }
+
+        total_flashblocks_duration += sub_duration;
+    }
+
+    let avg_duration = total_flashblocks_duration / (ITERATIONS - 1) as u32;
+    println!("\n=== Benchmark Results ===\nAvg Flashblocks newTx sub duration: {:?}", avg_duration);
 
     Ok(())
 }
