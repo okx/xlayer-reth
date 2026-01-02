@@ -13,6 +13,7 @@ default = []
 [dependencies]
 reth-revm.workspace = true
 reth-db = { workspace = true, features = ["mdbx"] }
+reth-db-api.workspace = true
 reth-exex.workspace = true
 reth-node-api.workspace = true
 reth-provider.workspace = true
