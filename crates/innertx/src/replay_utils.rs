@@ -6,7 +6,6 @@ use eyre::Result;
 use futures::TryStreamExt;
 use revm_database::states::State;
 
-use crate::cache_utils::{write_block_cache, write_tx_cache};
 use reth_evm::ConfigureEvm;
 use reth_exex::{ExExContext, ExExEvent, ExExNotification};
 use reth_node_api::FullNodeComponents;
@@ -87,76 +86,6 @@ where
     rw_batch_end::<TxTable>(rw_tx)?;
 
     write_single::<BlockTable, Vec<TxHash>>(block.hash().to_vec(), tx_hashes)?;
-
-    Ok(())
-}
-
-/// Extract and store internal transactions for a pending block (flashblocks support).
-pub fn extract_and_store_inner_tx_for_pending_block<P, E, N>(
-    provider: P,
-    evm_config: E,
-    block: RecoveredBlock<<N as NodePrimitives>::Block>,
-    receipts: &[<N as NodePrimitives>::Receipt],
-) -> Result<()>
-where
-    P: StateProviderFactory + Send + Sync + 'static,
-    E: ConfigureEvm<Primitives = N> + Send + Sync + 'static,
-    N: NodePrimitives + 'static,
-    <N as NodePrimitives>::Receipt: TxReceipt,
-{
-    let state_provider = provider.history_by_block_hash(block.parent_hash())?;
-
-    let mut db = State::builder()
-        .with_database(StateProviderDatabase::new(&state_provider))
-        .with_bundle_update()
-        .without_state_clear()
-        .build();
-
-    let mut inspector = TraceCollector::default();
-    let evm_env = evm_config.evm_env(block.header())?;
-    let evm = evm_config.evm_with_env_and_inspector(&mut db, evm_env, &mut inspector);
-    let block_ctx = evm_config.context_for_block(&block)?;
-    let mut executor = evm_config.create_executor(evm, block_ctx);
-
-    executor.set_state_hook(None);
-    let output = executor.execute_block(block.transactions_recovered())?;
-
-    if output.receipts.len() != receipts.len() {
-        return Err(eyre::eyre!(
-            "Re-execution produced {} receipts but block has {} transactions",
-            output.receipts.len(),
-            receipts.len(),
-        ));
-    }
-
-    let mut internal_transactions = inspector.get();
-    let mut tx_hashes = Vec::<TxHash>::default();
-
-    let mut prev_cumulative_gas = 0u64;
-    for (index, tx) in block.transactions_recovered().enumerate() {
-        let success = receipts.get(index).map(|r| r.status()).unwrap_or(false);
-
-        let current_cumulative_gas =
-            receipts.get(index).map(|r| r.cumulative_gas_used()).unwrap_or(prev_cumulative_gas);
-        let tx_gas_used = current_cumulative_gas - prev_cumulative_gas;
-        prev_cumulative_gas = current_cumulative_gas;
-
-        if !success
-            || (!internal_transactions.is_empty() && !internal_transactions[index].is_empty())
-        {
-            if !internal_transactions.is_empty()
-                && !internal_transactions[index].is_empty()
-                && let Some(first_inner_tx) = internal_transactions[index].first_mut()
-            {
-                first_inner_tx.set_transaction_gas(tx.gas_limit(), tx_gas_used);
-            }
-
-            tx_hashes.push(*tx.tx_hash());
-            write_tx_cache(*tx.tx_hash(), internal_transactions[index].clone())?;
-        }
-    }
-
-    write_block_cache(block.hash(), tx_hashes)?;
 
     Ok(())
 }

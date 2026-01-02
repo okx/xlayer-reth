@@ -23,7 +23,6 @@ reth-storage-api.workspace = true
 reth-rpc-eth-api.workspace = true
 reth-rpc.workspace = true
 reth-chain-state.workspace = true
-reth-optimism-flashblocks.workspace = true
 
 revm-context-interface.workspace = true
 revm-database.workspace = true
@@ -40,7 +39,6 @@ serde.workspace = true
 once_cell.workspace = true
 eyre.workspace = true
 jsonrpsee.workspace = true
-moka.workspace = true
 
 [lints]
 workspace = true

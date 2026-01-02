@@ -27,7 +27,6 @@ use xlayer_chainspec::XLayerChainSpecParser;
 use xlayer_flashblocks::handler::FlashblocksService;
 use xlayer_flashblocks::subscription::FlashblocksPubSub;
 use xlayer_innertx::{
-    cache_utils::initialize_inner_tx_cache,
     db_utils::initialize_inner_tx_db,
     rpc_utils::{XlayerInnerTxExt, XlayerInnerTxExtApiServer},
     subscriber_utils::initialize_innertx_replay,
@@ -90,12 +89,6 @@ fn main() {
                     Ok(_) => info!(target: "reth::cli", "xlayer db initialize_inner_tx_db"),
                     Err(e) => {
                         error!(target: "reth::cli", "xlayer db failed to initialize_inner_tx_db {:#?}", e)
-                    }
-                }
-                match initialize_inner_tx_cache() {
-                    Ok(_) => info!(target: "reth::cli", "xlayer cache initialize_inner_tx_cache"),
-                    Err(e) => {
-                        error!(target: "reth::cli", "xlayer cache failed to initialize_inner_tx_cache {:#?}", e)
                     }
                 }
             }
@@ -190,11 +183,6 @@ fn main() {
                             let custom_rpc = XlayerInnerTxExt { backend: new_op_eth_api.clone() };
                             ctx.modules.merge_configured(custom_rpc.into_rpc())?;
                             info!(target: "reth::cli", "xlayer innertx rpc enabled");
-
-                            // Initialize inner tx extraction for pending flashblocks
-                            let pending_block_rx = new_op_eth_api.pending_block_rx();
-                            xlayer_innertx::subscriber_utils::initialize_innertx_flashblocks(pending_block_rx, ctx.node());
-                            info!(target: "reth::cli", "xlayer inner tx flashblocks handler initialized");
                         }
 
                         if let Some(flashblock_rx) = new_op_eth_api.subscribe_received_flashblocks() {
