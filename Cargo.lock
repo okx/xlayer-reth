@@ -13867,6 +13867,7 @@ dependencies = [
  "eyre",
  "futures",
  "jsonrpsee",
+ "moka",
  "once_cell",
  "op-rbuilder",
  "reth-chain-state",

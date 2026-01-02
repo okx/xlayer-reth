@@ -1,4 +1,3 @@
-use alloy_consensus::BlockHeader;
 use alloy_primitives::{Address, TxHash};
 use alloy_rpc_types_eth::{
     pubsub::{Params as AlloyParams, SubscriptionKind as AlloySubscriptionKind},
@@ -92,25 +91,31 @@ impl SubTxFilter {
     }
 }
 
-/// Flashblock data returned to subscribers based on `FlashblocksFilter`.
+/// Streaming flashblock event which is either a header or transaction message
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EnrichedFlashblock<H, Tx, R> {
-    /// Block header (if `header_info` is true in filter criteria).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub header: Option<Header<H>>,
-
-    /// Transactions with optional enrichment, based on the tx filter critera.
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub transactions: Vec<EnrichedTransaction<Tx, R>>,
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum FlashblockStreamEvent<H, Tx, R> {
+    /// Block header event
+    Header {
+        #[serde(skip_serializing)]
+        block_number: u64,
+        header: Header<H>,
+    },
+    /// Individual transaction event
+    Transaction {
+        #[serde(skip_serializing)]
+        block_number: u64,
+        transaction: EnrichedTransaction<Tx, R>,
+    },
 }
 
-impl<H, Tx, R> EnrichedFlashblock<H, Tx, R>
-where
-    H: BlockHeader,
-{
+impl<H, Tx, R> FlashblockStreamEvent<H, Tx, R> {
+    /// Get the block number for this event
     pub fn block_number(&self) -> u64 {
-        self.header.as_ref().map(|h| h.number()).unwrap_or(0)
+        match self {
+            FlashblockStreamEvent::Header { block_number, .. } => *block_number,
+            FlashblockStreamEvent::Transaction { block_number, .. } => *block_number,
+        }
     }
 }
 

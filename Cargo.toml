@@ -195,6 +195,7 @@ time = { version = "0.3.36", features = ["macros", "formatting", "parsing"] }
 tracing = { version = "0.1.41" }
 url = "2.5"
 uuid = { version = "1.6.1", features = ["serde", "v5", "v4"] }
+moka = { version = "0.12.11", features = ["sync"] }
 
 # ==============================================================================
 # Dependency Patches

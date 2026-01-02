@@ -217,7 +217,6 @@ fn main() {
                                 pending_blocks_rx,
                                 Box::new(ctx.node().task_executor().clone()),
                                 new_op_eth_api.tx_resp_builder().clone(),
-                                ctx.node().provider().clone(),
                             );
                             ctx.modules.add_or_replace_if_module_configured(
                                 RethRpcModule::Eth,

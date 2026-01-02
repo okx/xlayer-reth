@@ -1097,43 +1097,41 @@ async fn fb_eth_subscribe_test() -> Result<()> {
         while !remaining.is_empty() {
             match subscription.next().await {
                 Some(Ok(notification)) => {
-                    println!(
-                        "Received notification: {}",
-                        serde_json::to_string_pretty(&notification).unwrap_or_default()
-                    );
-                    let Some(transactions) =
-                        notification.get("transactions").and_then(|v| v.as_array())
-                    else {
-                        continue;
+                    // Skip header messages
+                    let Some(type_field) = notification.get("type") else {
+                        panic!("Notification missing 'type' field");
                     };
 
-                    if transactions.is_empty() {
+                    let type_str = type_field.as_str().expect("type should be a string");
+                    if type_str == "header" {
                         continue;
                     }
 
-                    for tx in transactions {
-                        assert!(
-                            tx.get("txData").is_some(),
-                            "txData field should be present when txInfo is true"
-                        );
+                    assert_eq!(type_str, "transaction", "Expected transaction event");
 
-                        assert!(
-                            tx.get("receipt").is_some(),
-                            "receipt field should be present when txReceipt is true"
-                        );
+                    let Some(tx) = notification.get("transaction") else {
+                        panic!("Transaction event missing 'transaction' field");
+                    };
 
-                        let tx_hash_field =
-                            tx.get("txHash").expect("txHash field should always be present");
-                        let received_hash =
-                            tx_hash_field.as_str().expect("txHash should be a string");
+                    // Validate enrichment fields
+                    assert!(
+                        tx.get("txData").is_some(),
+                        "txData field should be present when txInfo is true"
+                    );
 
-                        if remaining.remove(received_hash) {
-                            let found = total - remaining.len();
-                            println!("Found tx {found}/{total}: {received_hash}");
-                            if remaining.is_empty() {
-                                break;
-                            }
-                        }
+                    assert!(
+                        tx.get("receipt").is_some(),
+                        "receipt field should be present when txReceipt is true"
+                    );
+
+                    // Extract tx hash
+                    let tx_hash_field =
+                        tx.get("txHash").expect("txHash field should always be present");
+                    let received_hash = tx_hash_field.as_str().expect("txHash should be a string");
+
+                    if remaining.remove(received_hash) {
+                        let found = total - remaining.len();
+                        println!("Found tx {found}/{total}: {received_hash}");
                     }
                 }
                 Some(Err(e)) => {
@@ -1214,7 +1212,7 @@ async fn fb_benchmark_new_heads_subscription_test() -> Result<()> {
                         }
                     }
                     Err(e) => {
-                        eprintln!("Flashblocks subscription error: {}", e);
+                        eprintln!("Flashblocks subscription error: {e}");
                         break;
                     }
                 }
