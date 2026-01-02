@@ -1131,7 +1131,7 @@ async fn fb_eth_subscribe_test() -> Result<()> {
 
                     if remaining.remove(received_hash) {
                         let found = total - remaining.len();
-                        println!("Found tx {}/{}: {}", found, total, received_hash);
+                        println!("Found tx {found}/{total}: {received_hash}");
                     }
                 }
                 Some(Err(e)) => {
@@ -1212,7 +1212,7 @@ async fn fb_benchmark_new_heads_subscription_test() -> Result<()> {
                         }
                     }
                     Err(e) => {
-                        eprintln!("Flashblocks subscription error: {}", e);
+                        eprintln!("Flashblocks subscription error: {e}");
                         break;
                     }
                 }
