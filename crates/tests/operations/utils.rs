@@ -610,4 +610,3 @@ pub fn contains_tx_hash(notification: &serde_json::Value, tx_hash: &str) -> bool
 
     tx_hash_str == tx_hash
 }
-
