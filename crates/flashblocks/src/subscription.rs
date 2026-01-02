@@ -134,17 +134,9 @@ where
     ) -> Result<(), ErrorObject<'static>> {
         match kind {
             FlashblockSubscriptionKind::Flashblocks => {
-                let Some(FlashblockParams::FlashblocksFilter(filter)) = params else {
+                let Some(FlashblockParams::FlashblocksFilter(_)) = params else {
                     return Err(invalid_params_rpc_err("invalid params for flashblocks"));
                 };
-
-                if (filter.sub_tx_filter.tx_info || filter.sub_tx_filter.tx_receipt)
-                    && filter.sub_tx_filter.subscribe_addresses.is_empty()
-                {
-                    return Err(invalid_params_rpc_err(
-                        "invalid params for flashblocks, subcribe address required when txInfo or txReceipt is enabled",
-                    ));
-                }
 
                 Ok(())
             }
