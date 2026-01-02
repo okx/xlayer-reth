@@ -291,7 +291,7 @@ where
             .flatten()
     }
 
-    /// Convert a flashblock into a stream of events (header + individual transactions)
+    /// Convert a flashblock into a stream of events (header + transaction messages)
     fn flashblock_to_stream_events(
         pending_block: &PendingFlashBlock<N>,
         filter: &FlashblocksFilter,
@@ -325,7 +325,7 @@ where
         events
     }
 
-    /// Convert a canonical block into a stream of events (header + individual transactions)
+    /// Convert a canonical block into a stream of events (header + transactions messages)
     fn canonical_block_to_stream_events(
         block: &RecoveredBlock<N::Block>,
         provider: &Provider,
