@@ -91,7 +91,7 @@ impl SubTxFilter {
     }
 }
 
-/// Streaming flashblock event which is either a header or an individual transaction
+/// Streaming flashblock event which is either a header or transaction message
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum FlashblockStreamEvent<H, Tx, R> {
@@ -101,7 +101,6 @@ pub enum FlashblockStreamEvent<H, Tx, R> {
         block_number: u64,
         header: Header<H>,
     },
-
     /// Individual transaction event
     Transaction {
         #[serde(skip_serializing)]
