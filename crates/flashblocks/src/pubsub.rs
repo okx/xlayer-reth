@@ -1,4 +1,3 @@
-use alloy_consensus::BlockHeader;
 use alloy_primitives::{Address, TxHash};
 use alloy_rpc_types_eth::{
     pubsub::{Params as AlloyParams, SubscriptionKind as AlloySubscriptionKind},
@@ -89,28 +88,6 @@ impl SubTxFilter {
     /// Returns `true` if address filtering is enabled.
     pub fn has_address_filter(&self) -> bool {
         !self.subscribe_addresses.is_empty()
-    }
-}
-
-/// Flashblock data returned to subscribers based on `FlashblocksFilter`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EnrichedFlashblock<H, Tx, R> {
-    /// Block header (if `header_info` is true in filter criteria).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub header: Option<Header<H>>,
-
-    /// Transactions with optional enrichment, based on the tx filter critera.
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub transactions: Vec<EnrichedTransaction<Tx, R>>,
-}
-
-impl<H, Tx, R> EnrichedFlashblock<H, Tx, R>
-where
-    H: BlockHeader,
-{
-    pub fn block_number(&self) -> u64 {
-        self.header.as_ref().map(|h| h.number()).unwrap_or(0)
     }
 }
 
