@@ -75,12 +75,6 @@ async fn fb_smoke_test() {
         .expect("Pending eth_getRawTransactionByHash failed");
     assert!(!raw_tx.is_null(), "Raw transaction should not be empty");
 
-    // eth_getInternalTransactions
-    // let internal_transactions = operations::eth_get_internal_transactions(&fb_client, &tx_hash)
-    //     .await
-    //     .expect("Pending eth_getInternalTransactions failed");
-    // assert!(!internal_transactions.is_null(), "Internal transactions should not be empty");
-
     // eth_getBalance
     let balance =
         operations::get_balance(&fb_client, sender_address, Some(operations::BlockId::Pending))
@@ -181,12 +175,6 @@ async fn fb_smoke_test() {
         fb_block_transaction_count >= 1,
         "Block transaction count should be at least 1, got {fb_block_transaction_count}"
     );
-
-    // eth_getBlockInternalTransactions
-    // let _ =
-    //     operations::eth_get_block_internal_transactions(&fb_client, operations::BlockId::Pending)
-    //         .await
-    //         .expect("Pending eth_getBlockInternalTransactions failed");
 
     // eth_getBlockReceipts
     let _ = operations::eth_get_block_receipts(&fb_client, operations::BlockId::Pending)
@@ -501,25 +489,6 @@ async fn fb_rpc_comparison_test(#[case] test_name: &str) {
                 "eth_getBlockTransactionCountByHash not identical"
             );
 
-            // // eth_getBlockInternalTransactions
-            // let fb_block_internal_transactions = operations::eth_get_block_internal_transactions(
-            //     &fb_client,
-            //     operations::BlockId::Number(block_num),
-            // )
-            // .await
-            // .expect("Failed to get block internal transactions from fb client");
-            // let non_fb_block_internal_transactions =
-            //     operations::eth_get_block_internal_transactions(
-            //         &non_fb_client,
-            //         operations::BlockId::Number(block_num),
-            //     )
-            //     .await
-            //     .expect("Failed to get block internal transactions from non-fb client");
-            // assert_eq!(
-            //     fb_block_internal_transactions, non_fb_block_internal_transactions,
-            //     "eth_getBlockInternalTransactions not identical"
-            // );
-
             // eth_getTransactionByHash
             for tx_hash in tx_hashes.clone() {
                 let fb_transaction = operations::eth_get_transaction_by_hash(&fb_client, &tx_hash)
@@ -566,22 +535,6 @@ async fn fb_rpc_comparison_test(#[case] test_name: &str) {
                     "eth_getTransactionReceipt not identical"
                 );
             }
-
-            // eth_getInternalTransactions
-            // for tx_hash in tx_hashes.clone() {
-            //     let fb_internal_transactions =
-            //         operations::eth_get_internal_transactions(&fb_client, &tx_hash)
-            //             .await
-            //             .expect("Failed to get internal transactions from fb client");
-            //     let non_fb_internal_transactions =
-            //         operations::eth_get_internal_transactions(&non_fb_client, &tx_hash)
-            //             .await
-            //             .expect("Failed to get internal transactions from non-fb client");
-            //     assert_eq!(
-            //         fb_internal_transactions, non_fb_internal_transactions,
-            //         "eth_getInternalTransactions not identical"
-            //     );
-            // }
 
             // eth_getTransactionByBlockNumberAndIndex
             for tx_hash in tx_hashes.clone() {

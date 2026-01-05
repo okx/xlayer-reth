@@ -4,18 +4,15 @@
 //! process canonical state notifications for inner transaction indexing.
 
 use futures::StreamExt;
-use reth_node_api::{FullNodeComponents, FullNodeTypes};
-use reth_optimism_flashblocks::PendingBlockRx;
 
 use reth_chain_state::{CanonStateNotification, CanonStateSubscriptions};
 use reth_evm::ConfigureEvm;
-use reth_primitives_traits::{AlloyBlockHeader, NodePrimitives};
+use reth_node_api::{FullNodeComponents, FullNodeTypes};
+use reth_primitives_traits::NodePrimitives;
 use reth_provider::StateProviderFactory;
-use reth_tracing::tracing::{debug, error, info, warn};
+use reth_tracing::tracing::{debug, error, info};
 
-use crate::replay_utils::{
-    extract_and_store_inner_tx_for_pending_block, remove_block, replay_and_index_block,
-};
+use crate::replay_utils::{remove_block, replay_and_index_block};
 
 /// Initializes the inner transaction replay handler that listens to `canonical_state_stream`
 /// and indexes internal transactions for each new canonical block.
@@ -133,95 +130,4 @@ async fn handle_canonical_state_stream<P, E, N>(
     }
 
     info!(target: "xlayer::subscriber", "Inner tx replay handler stopped - canonical state stream closed");
-}
-
-/// Initializes the inner transaction extraction handler for pending flashblocks.
-/// This listens to pending block updates and extracts internal transactions immediately.
-pub fn initialize_innertx_flashblocks<Node, N>(
-    pending_block_rx: Option<PendingBlockRx<N>>,
-    node: &Node,
-) where
-    Node: FullNodeComponents + Clone + 'static,
-    N: NodePrimitives + 'static,
-    <N as NodePrimitives>::Receipt: alloy_consensus::TxReceipt,
-    <Node as FullNodeTypes>::Provider: StateProviderFactory + Clone + Send + Sync + 'static,
-    Node::Evm: ConfigureEvm<Primitives = N> + Clone + Send + Sync + 'static,
-{
-    let Some(pending_block_rx) = pending_block_rx else {
-        warn!(target: "xlayer::subscriber", "Pending block receiver not available, flashblocks may not be enabled");
-        return;
-    };
-
-    let provider = node.provider().clone();
-    let evm_config = node.evm_config().clone();
-    let task_executor = node.task_executor().clone();
-
-    info!(target: "xlayer::subscriber", "Initializing inner tx extraction handler for pending flashblocks");
-
-    task_executor.spawn_critical(
-        "xlayer-innertx-flashblocks",
-        Box::pin(async move {
-            handle_pending_flashblocks(pending_block_rx, provider, evm_config).await;
-        }),
-    );
-}
-
-/// Handles pending flashblock updates and extracts internal transactions.
-async fn handle_pending_flashblocks<P, E, N>(
-    mut pending_block_rx: PendingBlockRx<N>,
-    provider: P,
-    evm_config: E,
-) where
-    P: StateProviderFactory + Clone + Send + Sync + 'static,
-    E: ConfigureEvm<Primitives = N> + Clone + Send + Sync + 'static,
-    N: NodePrimitives + 'static,
-    <N as NodePrimitives>::Receipt: alloy_consensus::TxReceipt,
-{
-    info!(target: "xlayer::subscriber", "Inner tx flashblocks handler started, waiting for pending block updates");
-
-    loop {
-        if pending_block_rx.changed().await.is_err() {
-            warn!(target: "xlayer::subscriber", "Pending block receiver closed");
-            break;
-        }
-
-        let pending_flashblock = pending_block_rx.borrow().clone();
-        let Some(pending) = pending_flashblock else {
-            continue;
-        };
-
-        let executed_block = &pending.pending.executed_block;
-
-        let recovered_block = (*executed_block.recovered_block).clone();
-        let receipts: Vec<_> = pending.pending.receipts.iter().cloned().collect();
-
-        let block_number = recovered_block.number();
-        let block_hash = recovered_block.hash();
-
-        debug!(
-            target: "xlayer::subscriber",
-            "Processing pending flashblock: block_number={}, hash={:?}",
-            block_number,
-            block_hash
-        );
-
-        let provider_clone = provider.clone();
-        let evm_config_clone = evm_config.clone();
-
-        if let Err(err) = extract_and_store_inner_tx_for_pending_block(
-            provider_clone,
-            evm_config_clone,
-            recovered_block,
-            receipts.as_slice(),
-        ) {
-            error!(
-                target: "xlayer::subscriber",
-                "Failed to extract internal transactions for pending flashblock {:?}: {:?}",
-                block_hash,
-                err
-            );
-        }
-    }
-
-    info!(target: "xlayer::subscriber", "Inner tx flashblocks handler stopped");
 }
