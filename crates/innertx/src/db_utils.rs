@@ -7,7 +7,7 @@ use once_cell::sync::OnceCell;
 
 use crate::innertx_inspector::InternalTransaction;
 use reth_db::{
-    init_db,
+    mdbx::init_db_for,
     mdbx::{Database, DatabaseArguments, Transaction, WriteFlags, RW},
     DatabaseEnv,
 };
@@ -40,7 +40,7 @@ reth_db_api::tables! {
 pub fn initialize_inner_tx_db(db_path: &str) -> Result<(), Report> {
     let db_dir = format!("{}/{}", db_path, "xlayerdb");
 
-    let db = init_db(&db_dir, DatabaseArguments::new(ClientVersion::default()))?;
+    let db = init_db_for::<_, Tables>(&db_dir, DatabaseArguments::new(ClientVersion::default()))?;
 
     XLAYERDB.set(db).map_err(|_| Report::msg("xlayerdb was initialized more than once"))?;
 
