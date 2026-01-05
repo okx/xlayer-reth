@@ -43,6 +43,7 @@ pub async fn native_balance_transfer(
     endpoint_url: &str,
     amount: U256,
     to_address: &str,
+    wait_for_confirmation: bool,
 ) -> Result<String> {
     let signer = PrivateKeySigner::from_str(DEFAULT_RICH_PRIVATE_KEY.trim_start_matches("0x"))?;
     let wallet = EthereumWallet::from(signer.clone());
@@ -63,12 +64,16 @@ pub async fn native_balance_transfer(
     let pending_tx = provider.send_transaction(tx).await?;
 
     let tx_hash = *pending_tx.tx_hash();
-    println!("Tx sent: {:#x}, waiting for tx receipt confirmation.", tx_hash);
 
-    // Wait for the transaction to be mined
-    wait_for_tx_mined(endpoint_url, &format!("{:#x}", tx_hash)).await?;
-    println!("Transaction {:#x} confirmed successfully", tx_hash);
-    Ok(format!("{:#x}", tx_hash))
+    if wait_for_confirmation {
+        println!("Tx sent: {tx_hash:#x}, waiting for tx receipt confirmation.");
+        wait_for_tx_mined(endpoint_url, &format!("{tx_hash:#x}")).await?;
+        println!("Transaction {tx_hash:#x} confirmed successfully");
+    } else {
+        println!("Tx sent: {tx_hash:#x}");
+    }
+
+    Ok(format!("{tx_hash:#x}"))
 }
 
 /// Funds an address with native tokens and waits for the balance to be available
@@ -78,7 +83,8 @@ pub async fn fund_address_and_wait_for_balance(
     to_address: &str,
     funding_amount: U256,
 ) -> Result<()> {
-    let funding_tx_hash = native_balance_transfer(endpoint_url, funding_amount, to_address).await?;
+    let funding_tx_hash =
+        native_balance_transfer(endpoint_url, funding_amount, to_address, true).await?;
 
     let receipt = eth_get_transaction_receipt(client, &funding_tx_hash).await?;
     let funding_block_num = receipt["blockNumber"]
@@ -97,7 +103,7 @@ pub async fn fund_address_and_wait_for_balance(
         ));
     }
 
-    println!("Funded address {} with {} wei, balance verified", to_address, funding_amount);
+    println!("Funded address {to_address} with {funding_amount} wei, balance verified");
     Ok(())
 }
 
@@ -150,7 +156,7 @@ pub async fn try_deploy_contracts() -> Result<&'static DeployedContracts> {
     // Deploy ContractB (no constructor args)
     println!("Deploying ContractB...");
     let contract_b = deploy_contract(DEFAULT_L2_NETWORK_URL, CONTRACT_B_BYTECODE_STR, None).await?;
-    println!("ContractB deployed at: {:#x}", contract_b);
+    println!("ContractB deployed at: {contract_b:#x}");
 
     // Deploy ContractA (requires ContractB address as constructor arg)
     println!("Deploying ContractA...");
@@ -161,23 +167,23 @@ pub async fn try_deploy_contracts() -> Result<&'static DeployedContracts> {
         Some(Bytes::from(contract_a_constructor_args)),
     )
     .await?;
-    println!("ContractA deployed at: {:#x}", contract_a);
+    println!("ContractA deployed at: {contract_a:#x}");
 
     // Deploy ContractFactory (no constructor args)
     println!("Deploying ContractFactory...");
     let factory =
         deploy_contract(DEFAULT_L2_NETWORK_URL, CONTRACT_FACTORY_BYTECODE_STR, None).await?;
-    println!("ContractFactory deployed at: {:#x}", factory);
+    println!("ContractFactory deployed at: {factory:#x}");
 
     // Deploy ContractC (no constructor args)
     println!("Deploying ContractC...");
     let contract_c = deploy_contract(DEFAULT_L2_NETWORK_URL, CONTRACT_C_BYTECODE_STR, None).await?;
-    println!("ContractC deployed at: {:#x}", contract_c);
+    println!("ContractC deployed at: {contract_c:#x}");
 
     // Deploy ERC20 (no constructor args)
     println!("Deploying ERC20...");
     let erc20 = deploy_contract(DEFAULT_L2_NETWORK_URL, ERC20_BYTECODE_STR, None).await?;
-    println!("ERC20 deployed at: {:#x}", erc20);
+    println!("ERC20 deployed at: {erc20:#x}");
 
     // Store deployed contract addresses in global state
     let contracts = DeployedContracts { contract_a, contract_b, contract_c, factory, erc20 };
@@ -186,11 +192,11 @@ pub async fn try_deploy_contracts() -> Result<&'static DeployedContracts> {
     DEPLOYED_CONTRACTS.set(contracts).map_err(|_| eyre!("Failed to cache deployed contracts"))?;
 
     println!("\n=== All contracts deployed successfully! ===");
-    println!("ContractA: {:#x}", contract_a);
-    println!("ContractB: {:#x}", contract_b);
-    println!("ContractC: {:#x}", contract_c);
-    println!("Factory: {:#x}", factory);
-    println!("ERC20: {:#x}", erc20);
+    println!("ContractA: {contract_a:#x}");
+    println!("ContractB: {contract_b:#x}");
+    println!("ContractC: {contract_c:#x}");
+    println!("Factory: {factory:#x}");
+    println!("ERC20: {erc20:#x}");
     println!("ContractsDeployed: true");
     Ok(DEPLOYED_CONTRACTS.get().unwrap())
 }
@@ -200,7 +206,7 @@ pub async fn wait_for_blocks(client: &HttpClient, min_blocks: u64) -> u64 {
     let mut block_number: u64 = 0;
     for i in 0..30 {
         block_number = eth_block_number(client).await.unwrap();
-        println!("Block number: {}, attempt {}", block_number, i);
+        println!("Block number: {block_number}, attempt {i}");
         if block_number > min_blocks {
             break;
         }
@@ -294,7 +300,7 @@ pub async fn erc20_balance_transfer(
     let pending_tx = provider.send_transaction(tx).await?;
 
     let tx_hash = *pending_tx.tx_hash();
-    Ok(format!("{:#x}", tx_hash))
+    Ok(format!("{tx_hash:#x}"))
 }
 
 /// Sends a batch of ERC20 token transfers and waits for them to be mined
@@ -313,7 +319,7 @@ pub async fn transfer_erc20_token_batch(
         eth_get_transaction_count(&client, DEFAULT_RICH_ADDRESS, Some(BlockId::Pending)).await?;
 
     // Send transactions with incrementing nonces (1 to batch_size-1)
-    println!("Starting batch transfer of {} transactions", batch_size);
+    println!("Starting batch transfer of {batch_size} transactions");
     for i in 1..batch_size {
         let nonce = start_nonce + i as u64;
         let tx_hash = erc20_balance_transfer(
@@ -340,7 +346,7 @@ pub async fn transfer_erc20_token_batch(
     )
     .await?;
     tx_hashes.push(tx_hash.clone());
-    println!("Sent final transaction: {}", tx_hash);
+    println!("Sent final transaction: {tx_hash}");
 
     // Wait for all transactions to be mined
     println!("Waiting for all transactions to be mined...");
@@ -372,16 +378,15 @@ pub async fn wait_for_tx_mined(endpoint_url: &str, tx_hash: &str) -> Result<serd
     let client = create_test_client(endpoint_url);
     tokio::time::timeout(DEFAULT_TIMEOUT_TX_TO_BE_MINED, async {
         loop {
-            if let Ok(receipt) = eth_get_transaction_receipt(&client, tx_hash).await {
-                if !receipt.is_null() {
-                    let status = receipt["status"]
-                        .as_str()
-                        .ok_or(eyre!("tx receipt missing status field"))?;
-                    if status == "0x1" {
-                        return Ok(receipt);
-                    } else {
-                        return Err(eyre!("tx execution failed with status: {}", status));
-                    }
+            if let Ok(receipt) = eth_get_transaction_receipt(&client, tx_hash).await
+                && !receipt.is_null()
+            {
+                let status =
+                    receipt["status"].as_str().ok_or(eyre!("tx receipt missing status field"))?;
+                if status == "0x1" {
+                    return Ok(receipt);
+                } else {
+                    return Err(eyre!("tx execution failed with status: {}", status));
                 }
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -399,7 +404,7 @@ pub async fn wait_for_block_on_both_nodes(
     block_num: u64,
     timeout: Duration,
 ) -> Result<()> {
-    println!("Waiting for block {} to be available on both nodes...", block_num);
+    println!("Waiting for block {block_num} to be available on both nodes...");
 
     tokio::time::timeout(timeout, async {
         loop {
@@ -418,7 +423,7 @@ pub async fn wait_for_block_on_both_nodes(
                     .unwrap_or(false);
 
             if fb_available && non_fb_available {
-                println!("Block {} is now available on both nodes", block_num);
+                println!("Block {block_num} is now available on both nodes");
                 return Ok(());
             }
 
@@ -447,9 +452,9 @@ pub async fn sign_and_send_transaction(
         .map_err(|e| eyre!("Failed to send transaction: {}", e))?;
 
     let tx_hash = *pending_tx.tx_hash();
-    println!("tx sent: {:#x}", tx_hash);
+    println!("tx sent: {tx_hash:#x}");
 
-    let receipt = wait_for_tx_mined(endpoint_url, &format!("{:#x}", tx_hash)).await?;
+    let receipt = wait_for_tx_mined(endpoint_url, &format!("{tx_hash:#x}")).await?;
     let block_number = receipt["blockNumber"]
         .as_str()
         .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
@@ -458,9 +463,9 @@ pub async fn sign_and_send_transaction(
         .as_str()
         .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
         .ok_or_else(|| eyre!("Failed to parse gas used"))?;
-    println!("tx mined in block {}, gas used: {}", block_number, gas_used);
+    println!("tx mined in block {block_number}, gas used: {gas_used}");
 
-    Ok((format!("{:#x}", tx_hash), receipt))
+    Ok((format!("{tx_hash:#x}"), receipt))
 }
 
 /// Extracts the refund counter for a specific opcode from a debug trace result
@@ -476,16 +481,16 @@ pub fn get_refund_counter_from_trace(trace_result: &serde_json::Value, opcode: &
     // Iterate through each log entry
     for entry in struct_logs {
         // Check if this log has the matching opcode
-        if let Some(op) = entry["op"].as_str() {
-            if op == opcode {
-                // Extract the refund value
-                if let Some(refund) = entry["refund"].as_u64() {
-                    refund_counter = refund;
-                    break;
-                } else if let Some(refund) = entry["refund"].as_f64() {
-                    refund_counter = refund as u64;
-                    break;
-                }
+        if let Some(op) = entry["op"].as_str()
+            && op == opcode
+        {
+            // Extract the refund value
+            if let Some(refund) = entry["refund"].as_u64() {
+                refund_counter = refund;
+                break;
+            } else if let Some(refund) = entry["refund"].as_f64() {
+                refund_counter = refund as u64;
+                break;
             }
         }
     }
@@ -526,9 +531,9 @@ pub async fn make_contract_call(
         .map_err(|e| eyre!("Failed to send contract call transaction: {}", e))?;
 
     let tx_hash = *pending_tx.tx_hash();
-    println!("Contract call tx sent: {:#x}", tx_hash);
+    println!("Contract call tx sent: {tx_hash:#x}");
 
-    let receipt = wait_for_tx_mined(endpoint_url, &format!("{:#x}", tx_hash)).await?;
+    let receipt = wait_for_tx_mined(endpoint_url, &format!("{tx_hash:#x}")).await?;
     let block_number = receipt["blockNumber"]
         .as_str()
         .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
@@ -537,7 +542,7 @@ pub async fn make_contract_call(
         .as_str()
         .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
         .ok_or_else(|| eyre!("Failed to parse gas used"))?;
-    println!("Contract call tx mined in block {}, gas used: {}", block_number, gas_used);
+    println!("Contract call tx mined in block {block_number}, gas used: {gas_used}");
 
     // Return transaction hash as JSON
     Ok(serde_json::json!({
@@ -591,4 +596,17 @@ pub fn validate_internal_transaction(
     }
 
     Ok(())
+}
+
+/// Check if a flashblocks notification contains a specific transaction hash
+pub fn contains_tx_hash(notification: &serde_json::Value, tx_hash: &str) -> bool {
+    let Some(tx_hash_str) = notification
+        .get("transaction")
+        .and_then(|tx| tx.get("txHash"))
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+
+    tx_hash_str == tx_hash
 }

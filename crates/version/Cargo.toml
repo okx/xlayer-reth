@@ -1,0 +1,21 @@
+[package]
+name = "xlayer-version"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+reth.workspace = true
+
+[dev-dependencies]
+reth-node-core.workspace = true
+
+[build-dependencies]
+vergen = "=9.0.6"
+vergen-git2 = "1.0.7"
+
+[lints]
+workspace = true

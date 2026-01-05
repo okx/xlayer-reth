@@ -18,6 +18,7 @@ path = "main.rs"
 [dependencies]
 # internal
 xlayer-chainspec.workspace = true
+xlayer-version.workspace = true
 
 # reth
 reth-optimism-node.workspace = true

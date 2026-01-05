@@ -16,7 +16,6 @@ use op_rbuilder::{
 use reth::{
     builder::{EngineNodeLauncher, Node, NodeHandle, TreeConfig},
     providers::providers::BlockchainProvider,
-    version::{default_reth_version_metadata, try_init_version_metadata, RethCliVersionConsts},
 };
 use reth_optimism_cli::Cli;
 use reth_optimism_node::OpNode;
@@ -51,34 +50,9 @@ struct Args {
     pub xlayer_args: XLayerArgs,
 }
 
-pub const XLAYER_RETH_CLIENT_VERSION: &str = concat!("xlayer/v", env!("CARGO_PKG_VERSION"));
-
-fn init_version_metadata() {
-    let default_version_metadata = default_reth_version_metadata();
-    try_init_version_metadata(RethCliVersionConsts {
-        name_client: "XLayer Reth Export".to_string().into(),
-        cargo_pkg_version: format!(
-            "{}/{}",
-            default_version_metadata.cargo_pkg_version,
-            env!("CARGO_PKG_VERSION")
-        )
-        .into(),
-        p2p_client_version: format!(
-            "{}/{}",
-            default_version_metadata.p2p_client_version, XLAYER_RETH_CLIENT_VERSION
-        )
-        .into(),
-        extra_data: format!(
-            "{}/{}",
-            default_version_metadata.extra_data, XLAYER_RETH_CLIENT_VERSION
-        )
-        .into(),
-        ..default_version_metadata
-    })
-    .expect("Unable to init version metadata");
-}
-
 fn main() {
+    xlayer_version::init_version!();
+
     reth_cli_util::sigsegv_handler::install();
 
     // Enable backtraces unless a RUST_BACKTRACE value has already been explicitly provided.
@@ -87,9 +61,6 @@ fn main() {
             std::env::set_var("RUST_BACKTRACE", "1");
         }
     }
-
-    // Initialize version metadata
-    init_version_metadata();
 
     XLayerArgs::validate_init_command();
 
@@ -246,7 +217,6 @@ fn main() {
                                 pending_blocks_rx,
                                 Box::new(ctx.node().task_executor().clone()),
                                 new_op_eth_api.tx_resp_builder().clone(),
-                                ctx.node().provider().clone(),
                             );
                             ctx.modules.add_or_replace_if_module_configured(
                                 RethRpcModule::Eth,

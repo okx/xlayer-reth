@@ -214,8 +214,7 @@ mod tests {
     impl MockProvider {
         fn latest_header(&self) -> Result<Option<Header>, String> {
             if let Some(base_fee) = self.base_fee {
-                let mut header = Header::default();
-                header.base_fee_per_gas = Some(base_fee);
+                let header = Header { base_fee_per_gas: Some(base_fee), ..Header::default() };
                 Ok(Some(header))
             } else {
                 Ok(None)

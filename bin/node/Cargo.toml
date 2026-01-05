@@ -18,6 +18,7 @@ xlayer-flashblocks.workspace = true
 xlayer-chainspec.workspace = true
 xlayer-rpc.workspace = true
 xlayer-legacy-rpc.workspace = true
+xlayer-version.workspace = true
 
 # reth
 reth.workspace = true

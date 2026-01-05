@@ -51,7 +51,7 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> ImportCommand<C> {
         N: CliNodeTypes<ChainSpec = C::ChainSpec>,
         Comp: CliNodeComponents<N>,
     {
-        info!(target: "reth::cli", "reth {} starting", version_metadata().short_version);
+        info!(target: "reth::cli", "{} ({}) starting", version_metadata().name_client, version_metadata().short_version);
         info!(target: "reth::cli", "Importing blockchain from file: {}", self.path.display());
 
         let Environment { provider_factory, config, .. } = self.env.init::<N>(AccessRights::RW)?;

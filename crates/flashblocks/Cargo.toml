@@ -48,6 +48,7 @@ eyre.workspace = true
 jsonrpsee.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
+moka.workspace = true
 
 [lints]
 workspace = true

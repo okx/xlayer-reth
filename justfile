@@ -22,11 +22,54 @@ alias sdt := sync-dev-template
 alias wt := watch-test
 alias wc := watch-check
 alias xl := xlayer
+alias sc := sweep-check
 
 default:
     @just --list
 
-check: check-format check-clippy test
+# Runs target checks on all crates, except [crate1], [crate2], ...
+sweep-check *crates="":
+    #!/usr/bin/env bash
+    set -e
+    # Check all local crates, skipping any specified in the parameters.
+    if [ -z "{{crates}}" ]; then
+        echo "📦 Checking all local crates..."
+        cargo metadata --no-deps --format-version 1 | \
+        jq -r '.packages[] | select(.source == null) | .name' | \
+        xargs -I {} sh -c 'echo "=== Checking {} ===" && cargo check -p {} || exit 255'
+    else
+        echo "📦 Checking all local crates except: {{crates}}"
+        # Get all local crates
+        all_crates=$(cargo metadata --no-deps --format-version 1 | \
+            jq -r '.packages[] | select(.source == null) | .name')
+        
+        # Convert skip list to array
+        skip_crates=({{crates}})
+        
+        # Check each crate unless it's in the skip list
+        for crate in $all_crates; do
+            skip=false
+            for skip_crate in "${skip_crates[@]}"; do
+                if [ "$crate" = "$skip_crate" ]; then
+                    echo "⏭️  Skipping $crate"
+                    skip=true
+                    break
+                fi
+            done
+            if [ "$skip" = false ]; then
+                echo "=== Checking $crate ==="
+                cargo check -p "$crate" || exit 255
+            fi
+        done
+    fi
+
+check: 
+    # Upstream flashblocks inner dependency reth-optimism-primitives does not
+    # specify feats reth-codec and serde-bincode-compat. So we skip.
+    just sweep-check xlayer-innertx
+    just check-format 
+    just check-clippy 
+    just test
 
 fix: fix-format fix-clippy
 
@@ -49,10 +92,10 @@ fix-format:
     cargo fmt --all
 
 check-clippy:
-    cargo clippy --all-targets -- -D warnings
+    cargo clippy --all-targets --workspace -- -D warnings
 
 fix-clippy:
-    cargo clippy --all-targets --fix --allow-dirty --allow-staged
+    cargo clippy --all-targets --workspace --fix --allow-dirty --allow-staged
 
 build:
     @rm -rf .cargo  # Clean dev mode files

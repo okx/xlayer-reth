@@ -19,6 +19,7 @@ members = [
     "crates/rpc",
     "crates/tests",
     "crates/legacy-rpc",
+    "crates/version",
 
     "bin/tools",
     "bin/node"
@@ -56,9 +57,9 @@ codegen-units = 1
 
 [workspace.dependencies]
 
-# ------------------------------------------------------------------------------
+# ==============================================================================
 # Internal Dependencies
-# ------------------------------------------------------------------------------
+# ==============================================================================
 
 xlayer-chainspec = { path = "crates/chainspec" }
 xlayer-flashblocks = { path = "crates/flashblocks" }
@@ -66,10 +67,11 @@ xlayer-innertx = { path = "crates/innertx" }
 xlayer-reth-node = { path = "bin/node" }
 xlayer-rpc = { path = "crates/rpc" }
 xlayer-legacy-rpc = { path = "crates/legacy-rpc" }
+xlayer-version = { path = "crates/version" }
 
-# ------------------------------------------------------------------------------
+# ==============================================================================
 # Reth Dependencies (points to our fork)
-# ------------------------------------------------------------------------------
+# ==============================================================================
 reth = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
 reth-chain-state = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
 reth-chainspec = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
@@ -111,9 +113,9 @@ reth-optimism-flashblocks = { git = "https://github.com/okx/reth", rev = "3ba1e5
 reth-rpc-server-types = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
 
 
-# ------------------------------------------------------------------------------
+# ==============================================================================
 # Revm Dependencies (follows upstream reth)
-# ------------------------------------------------------------------------------
+# ==============================================================================
 revm = { version = "31.0.2", default-features = false }
 revm-context-interface = { version = "12.0.1", default-features = false }
 revm-database = { version = "9.0.5", default-features = false }
@@ -121,14 +123,14 @@ revm-inspectors = { version = "0.32.0", default-features = false, features = [
     "serde",
 ] }
 
-# ------------------------------------------------------------------------------
+# ============================================================================== 
 # Flashblocks Dependencies
-# ------------------------------------------------------------------------------
+# ============================================================================== 
 op-rbuilder = { git = "https://github.com/okx/op-rbuilder", tag = "v0.2.0" }
 
-# ------------------------------------------------------------------------------
+# ==============================================================================
 # Alloy Dependencies
-# ------------------------------------------------------------------------------
+# ==============================================================================
 alloy-chains = { version = "0.2.20", default-features = false }
 alloy-consensus = { version = "1.0.41" }
 alloy-eips = { version = "1.0.41", default-features = false }
@@ -159,9 +161,9 @@ op-alloy-rpc-jsonrpsee = { version = "0.22.0", default-features = false }
 op-alloy-rpc-types = { version = "0.22.0", default-features = false }
 op-alloy-rpc-types-engine = { version = "0.22.0", default-features = false }
 
-# ------------------------------------------------------------------------------
+# ==============================================================================
 # Support Dependencies
-# ------------------------------------------------------------------------------
+# ==============================================================================
 tokio = { version = "1.44.2", features = ["full"] }
 tokio-stream = "0.1.11"
 tokio-tungstenite = { version = "0.26.2", features = ["native-tls"] }
@@ -194,6 +196,7 @@ time = { version = "0.3.36", features = ["macros", "formatting", "parsing"] }
 tracing = { version = "0.1.41" }
 url = "2.5"
 uuid = { version = "1.6.1", features = ["serde", "v5", "v4"] }
+moka = { version = "0.12.11", features = ["sync"] }
 
 # ==============================================================================
 # Dependency Patches

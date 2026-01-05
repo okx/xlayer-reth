@@ -23,7 +23,7 @@ impl BlockId {
     /// Convert BlockId to a string suitable for RPC calls
     pub fn to_rpc_param(&self) -> String {
         match self {
-            BlockId::Number(num) => format!("0x{:x}", num),
+            BlockId::Number(num) => format!("0x{num:x}"),
             BlockId::Hash(hash) => hash.clone(),
             BlockId::Latest => "latest".to_string(),
             BlockId::Pending => "pending".to_string(),

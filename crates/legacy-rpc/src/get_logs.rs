@@ -373,7 +373,7 @@ mod tests {
         let _p = modified_req.params();
         let modified_params = _p.as_str().unwrap();
         let parsed: serde_json::Value = serde_json::from_str(modified_params).unwrap();
-        let filter = parsed.as_array().unwrap().get(0).unwrap();
+        let filter = parsed.as_array().unwrap().first().unwrap();
 
         assert_eq!(filter.get("fromBlock").and_then(|v| v.as_str()), Some("0x64"));
         assert_eq!(filter.get("toBlock").and_then(|v| v.as_str()), Some("0xc8"));
