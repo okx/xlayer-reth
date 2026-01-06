@@ -6,3 +6,6 @@ pub mod innertx_inspector;
 pub mod replay_utils;
 pub mod rpc_utils;
 pub mod subscriber_utils;
+
+#[cfg(test)]
+mod innertx_inspector_tests;
