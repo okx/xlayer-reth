@@ -1,7 +1,9 @@
+extern crate alloc;
+
 use reth::version::{
     default_reth_version_metadata, try_init_version_metadata, RethCliVersionConsts,
 };
-use std::borrow::Cow;
+use alloc::borrow::Cow;
 
 const XLAYER_RETH_CLIENT_VERSION: &str = concat!("xlayer/v", env!("CARGO_PKG_VERSION"));
 
