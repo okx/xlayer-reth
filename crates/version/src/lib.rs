@@ -75,8 +75,8 @@ mod tests {
     fn verify_version() {
         init_version!();
         let version_output = version_metadata();
-        let name = std::env::var("CARGO_PKG_NAME").unwrap();
-        let sha = std::env::var("VERGEN_GIT_SHA").unwrap();
+        let name = env!("CARGO_PKG_NAME");
+        let sha = env!("VERGEN_GIT_SHA");
 
         assert_eq!(name, version_output.name_client);
         assert_eq!(sha, version_output.vergen_git_sha_long);
