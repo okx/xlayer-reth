@@ -41,5 +41,8 @@ once_cell.workspace = true
 eyre.workspace = true
 jsonrpsee.workspace = true
 
+[dev-dependencies]
+serde_json.workspace = true
+
 [lints]
 workspace = true

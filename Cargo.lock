@@ -14009,6 +14009,7 @@ dependencies = [
  "revm-context-interface",
  "revm-database",
  "serde",
+ "serde_json",
  "tokio",
 ]
 
