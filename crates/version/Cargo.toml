@@ -8,13 +8,10 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
-reth.workspace = true
-
-[dev-dependencies]
 reth-node-core.workspace = true
 
 [build-dependencies]
-vergen = "=9.0.6"
+vergen = { version = "=9.0.6", features = ["cargo", "emit_and_set"] }
 vergen-git2 = "1.0.7"
 
 [lints]

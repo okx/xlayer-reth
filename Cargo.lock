@@ -14136,7 +14136,6 @@ dependencies = [
 name = "xlayer-version"
 version = "0.1.0"
 dependencies = [
- "reth",
  "reth-node-core",
  "vergen",
  "vergen-git2",
