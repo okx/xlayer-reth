@@ -233,30 +233,6 @@ pub(crate) fn parse_block_param(params: &str, index: usize) -> Option<String> {
     }
 }
 
-#[inline]
-fn parse_tx_hash_param(params: &str, index: usize) -> Option<String> {
-    let parsed: serde_json::Value = serde_json::from_str(params).ok()?;
-    let arr = parsed.as_array()?;
-
-    if index >= arr.len() {
-        return None;
-    }
-
-    let tx_hash = arr.get(index)?;
-
-    match tx_hash {
-        serde_json::Value::String(s) => {
-            // Validate it's a valid transaction hash (0x + 64 hex chars = 66 total)
-            if s.starts_with("0x") && s.len() == 66 {
-                Some(s.to_string())
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,23 +337,5 @@ mod tests {
             tx,
             Some("0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890".into())
         );
-    }
-
-    #[test]
-    fn test_parse_tx_hash_param_valid() {
-        let cases = [
-            (
-                r#"["0xcf2563e07aa150208b2e9b30655d710c339c83263b8ec185f813ea572aadac18"]"#,
-                Some("0xcf2563e07aa150208b2e9b30655d710c339c83263b8ec185f813ea572aadac18"),
-            ),
-            (r#"["cf2563e07aa150208b2e9b30655d710c339c83263b8ec185f813ea572aadac18"]"#, None),
-            (r#"["0xcf2563e07aa150208b2e9b30655d710c339c83263b8ec185f813ea572aadac1"]"#, None),
-        ];
-
-        for c in cases {
-            let params = c.0;
-            let result = super::parse_tx_hash_param(params, 0);
-            assert_eq!(result, c.1.map(String::from));
-        }
     }
 }
