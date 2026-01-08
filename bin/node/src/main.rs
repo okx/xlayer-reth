@@ -185,7 +185,7 @@ fn main() {
                             info!(target: "reth::cli", "xlayer innertx rpc enabled");
                         }
 
-                        if args.xlayer_args.enable_flashblocks_subscription && let Some(flashblock_rx) = new_op_eth_api.subscribe_received_flashblocks() {
+                        if let Some(flashblock_rx) = new_op_eth_api.subscribe_received_flashblocks() {
                             let service = FlashblocksService::new(
                                 ctx.node().clone(),
                                 flashblock_rx,
@@ -197,7 +197,7 @@ fn main() {
                             trace!(target: "reth::cli", "unable to get flashblock receiver, xlayer flashblocks service not initialized");
                         }
 
-                        if let Some(pending_blocks_rx) = new_op_eth_api.pending_block_rx() {
+                        if args.xlayer_args.enable_flashblocks_subscription && let Some(pending_blocks_rx) = new_op_eth_api.pending_block_rx() {
                             let eth_pubsub = ctx.registry.eth_handlers().pubsub.clone();
 
                             let flashblocks_pubsub = FlashblocksPubSub::new(
