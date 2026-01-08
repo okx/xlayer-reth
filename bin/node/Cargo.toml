@@ -13,7 +13,6 @@ workspace = true
 
 [dependencies]
 # internal
-xlayer-innertx.workspace = true
 xlayer-flashblocks.workspace = true
 xlayer-chainspec.workspace = true
 xlayer-rpc.workspace = true

@@ -13981,10 +13981,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "xlayer-innertx"
-version = "0.1.0"
-
-[[package]]
 name = "xlayer-legacy-rpc"
 version = "0.1.0"
 dependencies = [
@@ -14041,7 +14037,6 @@ dependencies = [
  "uuid",
  "xlayer-chainspec",
  "xlayer-flashblocks",
- "xlayer-innertx",
  "xlayer-legacy-rpc",
  "xlayer-rpc",
  "xlayer-version",
