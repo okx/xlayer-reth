@@ -185,7 +185,7 @@ fn main() {
                             info!(target: "reth::cli", "xlayer innertx rpc enabled");
                         }
 
-                        if let Some(flashblock_rx) = new_op_eth_api.subscribe_received_flashblocks() {
+                        if args.xlayer_args.enable_flashblocks_subscription && let Some(flashblock_rx) = new_op_eth_api.subscribe_received_flashblocks() {
                             let service = FlashblocksService::new(
                                 ctx.node().clone(),
                                 flashblock_rx,

@@ -17,6 +17,14 @@ pub struct XLayerArgs {
         default_value = "false"
     )]
     pub enable_inner_tx: bool,
+
+    /// Enable custom flashblocks subscription
+    #[arg(
+        long = "xlayer.flashblocks-subscription",
+        help = "Enable custom flashblocks subscription (disabled by default)",
+        default_value = "false"
+    )]
+    pub enable_flashblocks_subscription: bool,
 }
 
 impl XLayerArgs {
@@ -249,10 +257,12 @@ mod tests {
             "--rpc.legacy-timeout",
             "45s",
             "--xlayer.enable-innertx",
+            "--xlayer.flashblocks-subscription",
         ])
         .args;
 
         assert!(args.enable_inner_tx);
+        assert!(args.enable_flashblocks_subscription);
         assert!(args.legacy.legacy_rpc_url.is_some());
         assert_eq!(args.legacy.legacy_rpc_timeout, Duration::from_secs(45));
         assert!(args.validate().is_ok());
@@ -266,6 +276,7 @@ mod tests {
                 legacy_rpc_timeout: Duration::from_secs(30),
             },
             enable_inner_tx: false,
+            enable_flashblocks_subscription: false,
         };
 
         let result = args.validate();
