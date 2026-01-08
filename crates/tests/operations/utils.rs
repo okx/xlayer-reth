@@ -551,53 +551,6 @@ pub async fn make_contract_call(
     }))
 }
 
-pub fn validate_internal_transaction(
-    inner_tx: &serde_json::Value,
-    expected_from: String,
-    expected_to: String,
-    context: &str,
-) -> Result<()> {
-    let has_error = inner_tx["is_error"]
-        .as_bool()
-        .ok_or_else(|| eyre!("{}: 'is_error' field must be a boolean", context))?;
-
-    if has_error {
-        return Err(eyre!(
-            "{}: Inner transaction should not have an error (is_error: {:?})",
-            context,
-            inner_tx["is_error"]
-        ));
-    }
-
-    let from_addr = inner_tx["from"]
-        .as_str()
-        .ok_or_else(|| eyre!("{}: Inner transaction should have 'from' field", context))?;
-
-    if from_addr.to_lowercase() != expected_from.to_lowercase() {
-        return Err(eyre!(
-            "{}: Inner transaction from address mismatch. Expected: {}, Got: {}",
-            context,
-            expected_from,
-            from_addr
-        ));
-    }
-
-    let to_addr = inner_tx["to"]
-        .as_str()
-        .ok_or_else(|| eyre!("{}: Inner transaction should have 'to' field", context))?;
-
-    if to_addr.to_lowercase() != expected_to.to_lowercase() {
-        return Err(eyre!(
-            "{}: Inner transaction to address mismatch. Expected: {}, Got: {}",
-            context,
-            expected_to,
-            to_addr
-        ));
-    }
-
-    Ok(())
-}
-
 /// Check if a flashblocks notification contains a specific transaction hash
 pub fn contains_tx_hash(notification: &serde_json::Value, tx_hash: &str) -> bool {
     let Some(tx_hash_str) = notification
