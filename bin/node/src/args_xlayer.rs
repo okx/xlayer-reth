@@ -248,6 +248,7 @@ mod tests {
             "https://mainnet.infura.io/v3/test",
             "--rpc.legacy-timeout",
             "45s",
+            "--xlayer.flashblocks-subscription",
         ])
         .args;
 
