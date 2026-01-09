@@ -12,8 +12,6 @@ use jsonrpsee::{
     SubscriptionSink,
 };
 use lru::LruCache;
-use std::cell::RefCell;
-use std::num::NonZeroUsize;
 use reth_optimism_flashblocks::{PendingBlockRx, PendingFlashBlock};
 use reth_primitives_traits::{
     NodePrimitives, Recovered, RecoveredBlock, SealedBlock, TransactionMeta,
@@ -25,6 +23,8 @@ use reth_rpc_server_types::result::{internal_rpc_err, invalid_params_rpc_err};
 use reth_storage_api::BlockNumReader;
 use reth_tasks::TaskSpawner;
 use reth_tracing::tracing::warn;
+use std::cell::RefCell;
+use std::num::NonZeroUsize;
 use std::{future::ready, sync::Arc};
 use tokio_stream::{wrappers::WatchStream, Stream};
 
@@ -189,9 +189,8 @@ where
         filter: FlashblocksFilter,
     ) -> impl Stream<Item = FlashblockItem<N, Eth::RpcConvert>> {
         let tx_converter = self.tx_converter.clone();
-        let txhash_cache = RefCell::new(
-            LruCache::new(NonZeroUsize::new(MAX_TXHASH_CACHE_SIZE).unwrap())
-        );
+        let txhash_cache =
+            RefCell::new(LruCache::new(NonZeroUsize::new(MAX_TXHASH_CACHE_SIZE).unwrap()));
 
         WatchStream::new(self.pending_block_rx.clone())
             .filter_map(move |pending_block_opt| {
