@@ -7,7 +7,6 @@ use jsonrpsee::{
     types::Request,
     MethodResponse,
 };
-use jsonrpsee_types::ErrorObject;
 use tracing::debug;
 
 use crate::LegacyRpcRouterService;
@@ -39,8 +38,6 @@ pub fn is_legacy_routable(method: &str) -> bool {
             | "eth_estimateGas"
             | "eth_createAccessList"
             | "eth_getLogs"
-            | "eth_getInternalTransactions"
-            | "eth_getBlockInternalTransactions"
             | "eth_transactionPreExec"
             | "debug_traceTransaction"
     )
@@ -65,7 +62,6 @@ fn need_parse_block(method: &str) -> bool {
             | "eth_estimateGas"
             | "eth_createAccessList"
             | "eth_transactionPreExec"
-            | "eth_getBlockInternalTransactions"
     )
 }
 
@@ -175,8 +171,6 @@ where
 
             if method == "eth_getLogs" {
                 return crate::get_logs::handle_eth_get_logs(req, client, config, inner).await;
-            } else if method == "eth_getInternalTransactions" {
-                return handle_eth_get_internal_transactions(req, client, config, inner).await;
             } else if need_try_local_then_legacy(method) {
                 return handle_try_local_then_legacy(req, client, config, inner).await;
             } else if need_parse_block(method) {
@@ -199,37 +193,6 @@ where
         n: Notification<'a>,
     ) -> impl Future<Output = Self::NotificationResponse> + Send + 'a {
         self.inner.notification(n)
-    }
-}
-
-async fn handle_eth_get_internal_transactions<S>(
-    req: Request<'_>,
-    client: reqwest::Client,
-    config: std::sync::Arc<crate::LegacyRpcRouterConfig>,
-    inner: S,
-) -> MethodResponse
-where
-    S: RpcServiceT<MethodResponse = MethodResponse> + Send + Sync + Clone + 'static,
-{
-    let _p = req.params(); // keeps compiler quiet
-    let params = _p.as_str().unwrap();
-    let tx_hash = crate::parse_tx_hash_param(params, 0);
-    if tx_hash.is_none() {
-        return MethodResponse::error(
-            req.id(),
-            ErrorObject::owned(-32603, "Need proper txn hash", None::<()>),
-        );
-    }
-
-    let service = LegacyRpcRouterService { inner: inner.clone(), config, client };
-    let res = service.get_transaction_by_hash(&tx_hash.unwrap()).await;
-
-    // Route to legacy only if tx hash cannot be found
-    if res.is_ok_and(|hash| hash.is_none()) {
-        service.forward_to_legacy(req).await
-    } else {
-        debug!(target:"xlayer_legacy_rpc", "No legacy routing for method = {}", req.method_name());
-        inner.call(req).await
     }
 }
 

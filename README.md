@@ -102,13 +102,9 @@ XLayer Reth inherits all configuration options from [Reth](https://reth.rs/) and
 Below are the XLayer-specific configuration options:
 
 ```bash
-# XLayer Options
---xlayer.enable-innertx              # Enable inner transaction capture and storage (default: false)
-
 # Legacy RPC Routing
 --rpc.legacy-url <URL>               # Legacy RPC endpoint for historical data
 --rpc.legacy-timeout <DUR>           # Timeout for legacy RPC requests (default: 30s)
-
 ```
 
 ## Development

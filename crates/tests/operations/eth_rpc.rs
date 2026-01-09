@@ -236,19 +236,6 @@ pub async fn eth_get_transaction_by_block_number_or_hash_and_index(
     Ok(result)
 }
 
-/// For eth_getInternalTransactions
-pub async fn eth_get_internal_transactions(
-    client_rpc: &HttpClient,
-    tx_hash: &str,
-) -> Result<Value> {
-    let result: Value = tokio::time::timeout(
-        RPC_TIMEOUT,
-        client_rpc.request("eth_getInternalTransactions", jsonrpsee::rpc_params![tx_hash]),
-    )
-    .await??;
-    Ok(result)
-}
-
 /// For eth_getBlockByNumber or eth_getBlockByHash
 pub async fn eth_get_block_by_number_or_hash(
     client_rpc: &HttpClient,
@@ -281,20 +268,6 @@ pub async fn eth_get_block_receipts(client_rpc: &HttpClient, block_id: BlockId) 
     let result: Value = tokio::time::timeout(
         RPC_TIMEOUT,
         client_rpc.request("eth_getBlockReceipts", jsonrpsee::rpc_params![block_id]),
-    )
-    .await??;
-    Ok(result)
-}
-
-// For eth_getBlockInternalTransactions
-pub async fn eth_get_block_internal_transactions(
-    client_rpc: &HttpClient,
-    block_id: BlockId,
-) -> Result<Value> {
-    let block_id = block_id.to_rpc_param();
-    let result: Value = tokio::time::timeout(
-        RPC_TIMEOUT,
-        client_rpc.request("eth_getBlockInternalTransactions", jsonrpsee::rpc_params![block_id]),
     )
     .await??;
     Ok(result)

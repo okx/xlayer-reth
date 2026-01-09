@@ -10,14 +10,6 @@ pub struct XLayerArgs {
     #[command(flatten)]
     pub legacy: LegacyRpcArgs,
 
-    /// Enable inner transaction capture and storage
-    #[arg(
-        long = "xlayer.enable-innertx",
-        help = "Enable inner transaction capture and storage (disabled by default)",
-        default_value = "false"
-    )]
-    pub enable_inner_tx: bool,
-
     /// Enable custom flashblocks subscription
     #[arg(
         long = "xlayer.flashblocks-subscription",
@@ -256,12 +248,10 @@ mod tests {
             "https://mainnet.infura.io/v3/test",
             "--rpc.legacy-timeout",
             "45s",
-            "--xlayer.enable-innertx",
             "--xlayer.flashblocks-subscription",
         ])
         .args;
 
-        assert!(args.enable_inner_tx);
         assert!(args.enable_flashblocks_subscription);
         assert!(args.legacy.legacy_rpc_url.is_some());
         assert_eq!(args.legacy.legacy_rpc_timeout, Duration::from_secs(45));
@@ -275,7 +265,6 @@ mod tests {
                 legacy_rpc_url: Some("invalid-url".to_string()),
                 legacy_rpc_timeout: Duration::from_secs(30),
             },
-            enable_inner_tx: false,
             enable_flashblocks_subscription: false,
         };
 
