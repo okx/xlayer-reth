@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use args_xlayer::XLayerArgs;
 use clap::Parser;
-use tracing::{info, trace};
+use tracing::info;
 
 use op_rbuilder::{
     args::OpRbuilderArgs,
@@ -81,18 +81,21 @@ fn main() {
 
             // Build add-ons with RPC middleware
             // If not enabled, the layer will not do any re-routing.
-            let add_ons = op_node.add_ons()
-                .with_rpc_middleware(LegacyRpcRouterLayer::new(legacy_config));
+            let add_ons =
+                op_node.add_ons().with_rpc_middleware(LegacyRpcRouterLayer::new(legacy_config));
 
             // Should run as sequencer if flashblocks.enabled = true. Doing so means you are
             // running a flashblocks producing sequencer.
-            let NodeHandle { node: _node, node_exit_future } = if args.node_args.flashblocks.enabled {
+            let NodeHandle { node: _node, node_exit_future } = if args.node_args.flashblocks.enabled
+            {
                 let builder_config = BuilderConfig::try_from(args.node_args.clone())
                     .expect("Failed to convert builder args to builder config");
 
                 builder
                     .with_types_and_provider::<OpNode, BlockchainProvider<_>>()
-                    .with_components(op_node.components().payload(FlashblocksServiceBuilder(builder_config)))
+                    .with_components(
+                        op_node.components().payload(FlashblocksServiceBuilder(builder_config)),
+                    )
                     .with_add_ons(add_ons)
                     .on_component_initialized(move |_ctx| {
                         // TODO: Initialize XLayer components here
@@ -111,7 +114,9 @@ fn main() {
                     })
                     .launch_with_fn(|builder| {
                         let engine_tree_config = TreeConfig::default()
-                            .with_persistence_threshold(builder.config().engine.persistence_threshold)
+                            .with_persistence_threshold(
+                                builder.config().engine.persistence_threshold,
+                            )
                             .with_memory_block_buffer_target(
                                 builder.config().engine.memory_block_buffer_target,
                             );
@@ -137,7 +142,8 @@ fn main() {
                     .extend_rpc_modules(move |ctx| {
                         let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
 
-                        if let Some(flashblock_rx) = new_op_eth_api.subscribe_received_flashblocks() {
+                        if let Some(flashblock_rx) = new_op_eth_api.subscribe_received_flashblocks()
+                        {
                             let service = FlashblocksService::new(
                                 ctx.node().clone(),
                                 flashblock_rx,
@@ -145,11 +151,11 @@ fn main() {
                             )?;
                             service.spawn();
                             info!(target: "reth::cli", "xlayer flashblocks service initialized");
-                        } else {
-                            trace!(target: "reth::cli", "unable to get flashblock receiver, xlayer flashblocks service not initialized");
                         }
 
-                        if let Some(pending_blocks_rx) = new_op_eth_api.pending_block_rx() {
+                        if args.xlayer_args.enable_flashblocks_subscription
+                            && let Some(pending_blocks_rx) = new_op_eth_api.pending_block_rx()
+                        {
                             let eth_pubsub = ctx.registry.eth_handlers().pubsub.clone();
 
                             let flashblocks_pubsub = FlashblocksPubSub::new(
@@ -163,8 +169,6 @@ fn main() {
                                 flashblocks_pubsub.into_rpc(),
                             )?;
                             info!(target: "reth::cli", "xlayer eth pubsub initialized");
-                        } else {
-                            trace!(target: "reth::cli", "unable to get pending blocks receiver, flashblocks pubsub not initialized");
                         }
 
                         // Register XLayer RPC
@@ -178,7 +182,9 @@ fn main() {
                     })
                     .launch_with_fn(|builder| {
                         let engine_tree_config = TreeConfig::default()
-                            .with_persistence_threshold(builder.config().engine.persistence_threshold)
+                            .with_persistence_threshold(
+                                builder.config().engine.persistence_threshold,
+                            )
                             .with_memory_block_buffer_target(
                                 builder.config().engine.memory_block_buffer_target,
                             );

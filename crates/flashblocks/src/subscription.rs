@@ -11,6 +11,7 @@ use jsonrpsee::{
     proc_macros::rpc, server::SubscriptionMessage, types::ErrorObject, PendingSubscriptionSink,
     SubscriptionSink,
 };
+use moka::policy::EvictionPolicy;
 use moka::sync::Cache;
 use reth_optimism_flashblocks::{PendingBlockRx, PendingFlashBlock};
 use reth_primitives_traits::{
@@ -26,7 +27,7 @@ use reth_tracing::tracing::warn;
 use std::{future::ready, sync::Arc};
 use tokio_stream::{wrappers::WatchStream, Stream};
 
-const MAX_TXHASH_CACHE_SIZE: u64 = 2_000;
+const MAX_TXHASH_CACHE_SIZE: u64 = 10_000;
 
 type FlashblockItem<N, C> = FlashblockStreamEvent<
     <N as NodePrimitives>::BlockHeader,
@@ -187,7 +188,10 @@ where
         filter: FlashblocksFilter,
     ) -> impl Stream<Item = FlashblockItem<N, Eth::RpcConvert>> {
         let tx_converter = self.tx_converter.clone();
-        let txhash_cache = Cache::builder().max_capacity(MAX_TXHASH_CACHE_SIZE).build();
+        let txhash_cache = Cache::builder()
+            .max_capacity(MAX_TXHASH_CACHE_SIZE)
+            .eviction_policy(EvictionPolicy::lru())
+            .build();
 
         WatchStream::new(self.pending_block_rx.clone())
             .filter_map(move |pending_block_opt| {

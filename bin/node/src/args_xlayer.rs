@@ -9,6 +9,14 @@ pub struct XLayerArgs {
     /// Enable legacy rpc routing
     #[command(flatten)]
     pub legacy: LegacyRpcArgs,
+
+    /// Enable custom flashblocks subscription
+    #[arg(
+        long = "xlayer.flashblocks-subscription",
+        help = "Enable custom flashblocks subscription (disabled by default)",
+        default_value = "false"
+    )]
+    pub enable_flashblocks_subscription: bool,
 }
 
 impl XLayerArgs {
@@ -243,6 +251,7 @@ mod tests {
         ])
         .args;
 
+        assert!(args.enable_flashblocks_subscription);
         assert!(args.legacy.legacy_rpc_url.is_some());
         assert_eq!(args.legacy.legacy_rpc_timeout, Duration::from_secs(45));
         assert!(args.validate().is_ok());
@@ -255,6 +264,7 @@ mod tests {
                 legacy_rpc_url: Some("invalid-url".to_string()),
                 legacy_rpc_timeout: Duration::from_secs(30),
             },
+            enable_flashblocks_subscription: false,
         };
 
         let result = args.validate();
