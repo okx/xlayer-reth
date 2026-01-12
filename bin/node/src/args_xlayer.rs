@@ -17,6 +17,14 @@ pub struct XLayerArgs {
         default_value = "false"
     )]
     pub enable_flashblocks_subscription: bool,
+
+    /// Set the number of subscribed addresses in flashblocks subscription
+    #[arg(
+        long = "xlayer.flashblocks-subscription-max-addresses",
+        help = "Set the number of subscribed addresses in flashblocks subscription",
+        default_value = "1000"
+    )]
+    pub flashblocks_subscription_max_addresses: usize,
 }
 
 impl XLayerArgs {
@@ -249,12 +257,15 @@ mod tests {
             "--rpc.legacy-timeout",
             "45s",
             "--xlayer.flashblocks-subscription",
+            "--xlayer.flashblocks-subscription-max-addresses",
+            "2000",
         ])
         .args;
 
         assert!(args.enable_flashblocks_subscription);
         assert!(args.legacy.legacy_rpc_url.is_some());
         assert_eq!(args.legacy.legacy_rpc_timeout, Duration::from_secs(45));
+        assert_eq!(args.flashblocks_subscription_max_addresses, 2000);
         assert!(args.validate().is_ok());
     }
 
@@ -266,6 +277,7 @@ mod tests {
                 legacy_rpc_timeout: Duration::from_secs(30),
             },
             enable_flashblocks_subscription: false,
+            flashblocks_subscription_max_addresses: 1000,
         };
 
         let result = args.validate();

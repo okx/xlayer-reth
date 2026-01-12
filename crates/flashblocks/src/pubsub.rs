@@ -3,7 +3,10 @@ use alloy_rpc_types_eth::{
     pubsub::{Params as AlloyParams, SubscriptionKind as AlloySubscriptionKind},
     Header,
 };
+use jsonrpsee::types::ErrorObject;
+use reth_rpc_server_types::result::invalid_params_rpc_err;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 const FLASHBLOCKS: &str = "flashblocks";
 
@@ -52,6 +55,18 @@ pub enum FlashblockParams {
     Standard(AlloyParams),
 }
 
+impl FlashblockParams {
+    /// Validates the flashblock params.
+    pub fn validate(&self, max_subscribed_addresses: usize) -> Result<(), ErrorObject<'static>> {
+        if let FlashblockParams::FlashblocksFilter(filter) = self {
+            if filter.sub_tx_filter.subscribe_addresses.len() > max_subscribed_addresses {
+                return Err(invalid_params_rpc_err("too many subscribe addresses"));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Criteria for filtering and enriching flashblock subscription data.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields, default)]
@@ -75,7 +90,7 @@ impl FlashblocksFilter {
 #[serde(rename_all = "camelCase", deny_unknown_fields, default)]
 pub struct SubTxFilter {
     /// Subscribed transactions involving these addresses.
-    pub subscribe_addresses: Vec<Address>,
+    pub subscribe_addresses: HashSet<Address>,
 
     /// Flag to include full transaction information.
     pub tx_info: bool,

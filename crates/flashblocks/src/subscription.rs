@@ -24,7 +24,7 @@ use reth_rpc_server_types::result::{internal_rpc_err, invalid_params_rpc_err};
 use reth_storage_api::BlockNumReader;
 use reth_tasks::TaskSpawner;
 use reth_tracing::tracing::warn;
-use std::{future::ready, sync::Arc};
+use std::{collections::HashSet, future::ready, sync::Arc};
 use tokio_stream::{wrappers::WatchStream, Stream};
 
 const MAX_TXHASH_CACHE_SIZE: u64 = 10_000;
@@ -89,9 +89,14 @@ where
         pending_block_rx: PendingBlockRx<N>,
         subscription_task_spawner: Box<dyn TaskSpawner>,
         tx_converter: Eth::RpcConvert,
+        max_subscribed_addresses: usize,
     ) -> Self {
-        let inner =
-            FlashblocksPubSubInner { pending_block_rx, subscription_task_spawner, tx_converter };
+        let inner = FlashblocksPubSubInner {
+            pending_block_rx,
+            subscription_task_spawner,
+            tx_converter,
+            max_subscribed_addresses,
+        };
         Self { eth_pubsub, inner: Arc::new(inner) }
     }
 
@@ -158,6 +163,13 @@ where
         kind: FlashblockSubscriptionKind,
         params: Option<FlashblockParams>,
     ) -> jsonrpsee::core::SubscriptionResult {
+        if let Some(params) = &params {
+            if let Err(err) = params.validate(self.inner.max_subscribed_addresses) {
+                pending.reject(err).await;
+                return Ok(());
+            }
+        }
+
         let sink = pending.accept().await?;
         let pubsub = self.clone();
         self.inner.subscription_task_spawner.spawn(Box::pin(async move {
@@ -176,6 +188,8 @@ pub struct FlashblocksPubSubInner<Eth: EthApiTypes, N: NodePrimitives> {
     pub(crate) subscription_task_spawner: Box<dyn TaskSpawner>,
     /// RPC transaction converter.
     pub(crate) tx_converter: Eth::RpcConvert,
+    /// Maximum number of subscribed addresses.
+    pub(crate) max_subscribed_addresses: usize,
 }
 
 impl<Eth: EthApiTypes, N: NodePrimitives> FlashblocksPubSubInner<Eth, N>
@@ -370,7 +384,7 @@ where
         sender: Address,
         tx: &N::SignedTx,
         receipt: Option<&N::Receipt>,
-        addresses: &[Address],
+        addresses: &HashSet<Address>,
     ) -> bool {
         // Check sender
         if addresses.contains(&sender) {

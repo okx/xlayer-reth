@@ -163,6 +163,7 @@ fn main() {
                                 pending_blocks_rx,
                                 Box::new(ctx.node().task_executor().clone()),
                                 new_op_eth_api.tx_resp_builder().clone(),
+                                args.xlayer_args.flashblocks_subscription_max_addresses,
                             );
                             ctx.modules.add_or_replace_if_module_configured(
                                 RethRpcModule::Eth,
