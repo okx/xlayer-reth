@@ -372,12 +372,11 @@ where
             },
         };
 
-        let rpc_receipts = ctx
-            .tx_converter
+        ctx.tx_converter
             .convert_receipts_with_block(vec![receipt_input], ctx.sealed_block)
-            .ok()?;
-
-        rpc_receipts.into_iter().next()
+            .ok()?
+            .into_iter()
+            .next()
     }
 
     fn is_address_in_transaction(
