@@ -280,7 +280,7 @@ where
                     return None;
                 }
                 let Some(receipt) = receipts.get(idx) else {
-                    warn!(target: "xlayer::flashblocks", "Missing receipt for transaction {idx}");
+                    warn!(target: "xlayer::flashblocks", "failed to collect transaction idx {idx}, missing receipt");
                     return None;
                 };
 
@@ -452,12 +452,9 @@ where
                 break Ok(())
             },
             maybe_fb_item = fb_stream.next() => {
-                let item = match maybe_fb_item {
-                    Some(item) => item,
-                    None => {
-                        // stream ended
-                        break Ok(())
-                    },
+                let Some(item) = maybe_fb_item else {
+                    // stream ended
+                    break Ok(());
                 };
 
                 let msg = SubscriptionMessage::new(
