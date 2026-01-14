@@ -479,7 +479,9 @@ fn extract_header_from_pending_block<N: NodePrimitives>(
     pending_block: &PendingFlashBlock<N>,
 ) -> Result<Header<N::BlockHeader>, ErrorObject<'static>> {
     let block = pending_block.block();
-    let sealed_header = block.clone_sealed_header();
-
-    Ok(Header::from_consensus(sealed_header.into(), None, None))
+    Ok(Header::from_consensus(
+        block.clone_sealed_header().into(),
+        None,
+        Some(U256::from(block.rlp_length())),
+    ))
 }
