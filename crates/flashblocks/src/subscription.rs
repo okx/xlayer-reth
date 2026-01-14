@@ -276,19 +276,14 @@ where
             .enumerate()
             .filter_map(|(idx, (sender, tx))| {
                 let tx_hash = *tx.tx_hash();
-
                 if txhash_cache.get(&tx_hash).is_some() {
                     return None;
                 }
-                
-                let receipt = match receipts.get(idx) {
-                    Some(receipt) => receipt,
-                    None => {
-                        warn!(target: "xlayer::flashblocks", "Missing receipt for transaction {idx}");
-                        return None;
-                    }
+                let Some(receipt) = receipts.get(idx) else {
+                    warn!(target: "xlayer::flashblocks", "Missing receipt for transaction {idx}");
+                    return None;
                 };
-                
+
                 if filter.requires_address_filtering() {
                     let matches_filter = Self::is_address_in_transaction(
                         *sender,
@@ -311,7 +306,6 @@ where
                     tx_converter,
                 };
 
-
                 let tx_data = Self::enrich_transaction_data(filter, &ctx);
                 let tx_receipt = Self::enrich_receipt(filter, receipt, receipts, &ctx);
 
@@ -329,8 +323,7 @@ where
             return None;
         }
 
-        let recovered =
-            Recovered::new_unchecked(ctx.tx.clone(), ctx.sender);
+        let recovered = Recovered::new_unchecked(ctx.tx.clone(), ctx.sender);
 
         let rpc_tx = ctx
             .tx_converter
