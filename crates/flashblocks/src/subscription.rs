@@ -280,7 +280,7 @@ where
                     return None;
                 }
                 let Some(receipt) = receipts.get(idx) else {
-                    warn!(target: "xlayer::flashblocks", "failed to collect transaction idx {idx}, missing receipt");
+                    warn!(target: "xlayer::flashblocks", "failed to collect transaction idx: {idx}, missing receipt");
                     return None;
                 };
 
