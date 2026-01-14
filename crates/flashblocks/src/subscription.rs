@@ -359,7 +359,7 @@ where
         let receipt_input = ConvertReceiptInput {
             receipt: receipt.clone(),
             tx: Recovered::new_unchecked(ctx.tx, ctx.sender),
-            gas_used,
+            gas_used: receipt.cumulative_gas_used() - gas_used,
             next_log_index,
             meta: TransactionMeta {
                 tx_hash: ctx.tx_hash,
