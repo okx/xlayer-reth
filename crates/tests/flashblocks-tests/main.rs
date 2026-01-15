@@ -1096,7 +1096,7 @@ async fn fb_eth_subscribe_test() -> Result<()> {
 
 #[ignore = "Requires flashblocks WebSocket server with flashblocks subscription support"]
 #[tokio::test]
-async fn fb_eth_subscribe_invalid_params_test() -> Result<()> {
+async fn fb_eth_subscribe_empty_params_test() -> Result<()> {
     let ws_url = operations::manager::DEFAULT_WEBSOCKET_URL;
     let ws_client = operations::websocket::EthWebSocketClient::connect(ws_url).await?;
     println!("Connected successfully");

@@ -166,7 +166,11 @@ where
     ) -> jsonrpsee::core::SubscriptionResult {
         if kind == FlashblockSubscriptionKind::Flashblocks {
             let Some(params) = &params else {
-                pending.reject(invalid_params_rpc_err("no params specified error")).await;
+                pending
+                    .reject(invalid_params_rpc_err(
+                        "flashblocks subscription requires filter params, no params specified",
+                    ))
+                    .await;
                 return Ok(());
             };
 
