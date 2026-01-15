@@ -1096,6 +1096,22 @@ async fn fb_eth_subscribe_test() -> Result<()> {
 
 #[ignore = "Requires flashblocks WebSocket server with flashblocks subscription support"]
 #[tokio::test]
+async fn fb_eth_subscribe_invalid_params_test() -> Result<()> {
+    let ws_url = operations::manager::DEFAULT_WEBSOCKET_URL;
+    let ws_client = operations::websocket::EthWebSocketClient::connect(ws_url).await?;
+    println!("Connected successfully");
+
+    // Expect error
+    let _ = ws_client
+        .subscribe("flashblocks", Option::<Value>::None)
+        .await
+        .expect_err("Expected subscription to fail with invalid params");
+
+    Ok(())
+}
+
+#[ignore = "Requires flashblocks WebSocket server with flashblocks subscription support"]
+#[tokio::test]
 async fn fb_benchmark_new_heads_subscription_test() -> Result<()> {
     let ws_url = operations::manager::DEFAULT_WEBSOCKET_URL;
 
