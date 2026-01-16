@@ -1,0 +1,45 @@
+[package]
+name = "xlayer-evm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Reth dependencies
+reth-chainspec.workspace = true
+reth-primitives.workspace = true
+reth-evm.workspace = true
+reth-optimism-chainspec.workspace = true
+reth-optimism-evm.workspace = true
+reth-optimism-forks.workspace = true
+reth-optimism-primitives.workspace = true
+reth-node-api.workspace = true
+reth-execution-types.workspace = true
+reth-primitives-traits.workspace = true
+reth-storage-errors.workspace = true
+
+# Revm dependencies
+revm.workspace = true
+revm-context-interface.workspace = true
+revm-database.workspace = true
+op-revm = { version = "12.0.2", default-features = false }
+
+# Alloy
+alloy-primitives.workspace = true
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+op-alloy-consensus.workspace = true
+op-alloy-rpc-types-engine.workspace = true
+
+# Poseidon implementation
+poseidon-rs = "0.0.10"
+num-bigint = "0.4"
+ff_ce = "0.11"
+
+# Utils
+once_cell.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]

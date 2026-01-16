@@ -1,0 +1,35 @@
+[package]
+name = "xlayer-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Internal dependencies
+xlayer-chainspec.workspace = true
+xlayer-evm.workspace = true
+
+# Reth dependencies
+reth-chainspec.workspace = true
+reth-node-api.workspace = true
+reth-node-builder.workspace = true
+reth-node-types.workspace = true
+reth-optimism-node.workspace = true
+reth-optimism-chainspec.workspace = true
+reth-optimism-evm.workspace = true
+reth-optimism-forks.workspace = true
+reth-optimism-primitives.workspace = true
+reth-evm.workspace = true
+reth-primitives.workspace = true
+
+# Revm
+revm.workspace = true
+
+# Alloy
+alloy-primitives.workspace = true
+
+# Utils
+tracing.workspace = true
+eyre.workspace = true

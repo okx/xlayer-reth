@@ -14,7 +14,9 @@ repository = "https://github.com/okx/xlayer-reth.git"
 resolver = "2"
 members = [
     "crates/chainspec",
+    "crates/evm",
     "crates/flashblocks",
+    "crates/node",
     "crates/rpc",
     "crates/tests",
     "crates/legacy-rpc",
@@ -61,7 +63,9 @@ codegen-units = 1
 # ==============================================================================
 
 xlayer-chainspec = { path = "crates/chainspec" }
+xlayer-evm = { path = "crates/evm" }
 xlayer-flashblocks = { path = "crates/flashblocks" }
+xlayer-node = { path = "crates/node" }
 xlayer-reth-node = { path = "bin/node" }
 xlayer-rpc = { path = "crates/rpc" }
 xlayer-legacy-rpc = { path = "crates/legacy-rpc" }
@@ -105,11 +109,13 @@ reth-rpc-convert = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff4
 reth-rpc-eth-api = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
 reth-rpc-eth-types = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
 reth-storage-api = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
+reth-storage-errors = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
 reth-tasks = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
 reth-tracing = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
 reth-transaction-pool = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
 reth-optimism-flashblocks = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
 reth-rpc-server-types = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
+reth-payload-builder = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
 
 
 # ==============================================================================

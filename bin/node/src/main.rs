@@ -8,25 +8,63 @@ use args_xlayer::XLayerArgs;
 use clap::Parser;
 use tracing::info;
 
+use op_alloy_network::Optimism;
 use op_rbuilder::{
     args::OpRbuilderArgs,
     builders::{BuilderConfig, FlashblocksServiceBuilder},
+    traits::{NodeBounds, PoolBounds},
 };
 use reth::{
-    builder::{EngineNodeLauncher, Node, NodeHandle, TreeConfig},
+    builder::{EngineNodeLauncher, NodeHandle, TreeConfig},
     providers::providers::BlockchainProvider,
 };
 use reth_optimism_cli::Cli;
 use reth_optimism_node::OpNode;
 
-use reth_node_api::FullNodeComponents;
+use reth_node_api::{FullNodeComponents, NodeTypes};
+use reth_node_builder::{
+    BuilderContext,
+    components::PayloadServiceBuilder,
+    rpc::BasicEngineValidatorBuilder,
+};
+use reth_optimism_evm::OpEvmConfig;
+use reth_optimism_node::{OpEngineApiBuilder, OpEngineValidatorBuilder};
+use reth_payload_builder::PayloadBuilderHandle;
 use reth_rpc_eth_api::EthApiTypes;
 use reth_rpc_server_types::RethRpcModule;
 use xlayer_chainspec::XLayerChainSpecParser;
 use xlayer_flashblocks::handler::FlashblocksService;
 use xlayer_flashblocks::subscription::FlashblocksPubSub;
 use xlayer_legacy_rpc::{layer::LegacyRpcRouterLayer, LegacyRpcRouterConfig};
+use xlayer_node::{XLayerNode, XLayerExecutorBuilder};
 use xlayer_rpc::xlayer_ext::{XlayerRpcExt, XlayerRpcExtApiServer};
+
+/// Flashblocks payload builder wrapper that accepts XLayerEvmConfig.
+struct XLayerFlashblocksServiceBuilder(FlashblocksServiceBuilder);
+
+impl<Node, Pool> PayloadServiceBuilder<Node, Pool, xlayer_evm::XLayerEvmConfig>
+    for XLayerFlashblocksServiceBuilder
+where
+    Node: NodeBounds,
+    Pool: PoolBounds,
+{
+    async fn spawn_payload_builder_service(
+        self,
+        ctx: &BuilderContext<Node>,
+        pool: Pool,
+        _evm_config: xlayer_evm::XLayerEvmConfig,
+    ) -> eyre::Result<PayloadBuilderHandle<<Node::Types as NodeTypes>::Payload>> {
+        // Delegate to the original flashblocks builder using the standard OP EVM config.
+        let base_evm = OpEvmConfig::optimism(ctx.chain_spec());
+        <FlashblocksServiceBuilder as PayloadServiceBuilder<Node, Pool, OpEvmConfig>>::spawn_payload_builder_service(
+            self.0,
+            ctx,
+            pool,
+            base_evm,
+        )
+        .await
+    }
+}
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
@@ -67,7 +105,9 @@ fn main() {
                 std::process::exit(1);
             }
 
-            let op_node = OpNode::new(args.node_args.rollup_args.clone());
+            // Create XLayerNode (re-exported OpNode)
+            let xlayer_node = XLayerNode::new(args.node_args.rollup_args.clone());
+            info!(target: "reth::cli", "XLayer node initialized with Poseidon precompile support");
 
             let genesis_block = builder.config().chain.genesis().number.unwrap_or_default();
             info!("XLayer genesis block = {}", genesis_block);
@@ -79,11 +119,6 @@ fn main() {
                 timeout: args.xlayer_args.legacy.legacy_rpc_timeout,
             };
 
-            // Build add-ons with RPC middleware
-            // If not enabled, the layer will not do any re-routing.
-            let add_ons =
-                op_node.add_ons().with_rpc_middleware(LegacyRpcRouterLayer::new(legacy_config));
-
             // Should run as sequencer if flashblocks.enabled = true. Doing so means you are
             // running a flashblocks producing sequencer.
             let NodeHandle { node: _node, node_exit_future } = if args.node_args.flashblocks.enabled
@@ -94,9 +129,24 @@ fn main() {
                 builder
                     .with_types_and_provider::<OpNode, BlockchainProvider<_>>()
                     .with_components(
-                        op_node.components().payload(FlashblocksServiceBuilder(builder_config)),
+                        xlayer_node
+                            .components()
+                            .executor(XLayerExecutorBuilder)
+                            .payload(XLayerFlashblocksServiceBuilder(
+                                FlashblocksServiceBuilder(builder_config),
+                            )),
                     )
-                    .with_add_ons(add_ons)
+                    .with_add_ons(
+                        xlayer_node
+                            .add_ons_builder::<Optimism>()
+                            .with_rpc_middleware(LegacyRpcRouterLayer::new(legacy_config))
+                            .build::<
+                                _,
+                                OpEngineValidatorBuilder,
+                                OpEngineApiBuilder<OpEngineValidatorBuilder>,
+                                BasicEngineValidatorBuilder<OpEngineValidatorBuilder>,
+                            >(),
+                    )
                     .on_component_initialized(move |_ctx| {
                         // TODO: Initialize XLayer components here
                         Ok(())
@@ -133,8 +183,21 @@ fn main() {
             } else {
                 builder
                     .with_types_and_provider::<OpNode, BlockchainProvider<_>>()
-                    .with_components(op_node.components())
-                    .with_add_ons(add_ons)
+                    .with_components(
+                        xlayer_node.components()
+                            .executor(XLayerExecutorBuilder) // ← 使用自定义 Executor with Poseidon
+                    )
+                    .with_add_ons(
+                        xlayer_node
+                            .add_ons_builder::<Optimism>()
+                            .with_rpc_middleware(LegacyRpcRouterLayer::new(legacy_config))
+                            .build::<
+                                _,
+                                OpEngineValidatorBuilder,
+                                OpEngineApiBuilder<OpEngineValidatorBuilder>,
+                                BasicEngineValidatorBuilder<OpEngineValidatorBuilder>,
+                            >(),
+                    )
                     .on_component_initialized(move |_ctx| {
                         // TODO: Initialize XLayer components here
                         Ok(())
