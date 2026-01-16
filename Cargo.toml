@@ -204,11 +204,6 @@ moka = { version = "0.12.11", features = ["sync"] }
 # Redirects all paradigmxyz/reth dependencies to okx/reth fork for op-rbuilder.
 [patch."https://github.com/paradigmxyz/reth"]
 reth = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
-
-# Patch reth-monitor for op-rbuilder to use the same instance
-# TODO (This ensures op-rbuilder uses the same reth-monitor crate as xlayer-reth)
-[patch."https://github.com/okx/reth"]
-reth-monitor = { git = "https://github.com/okx/reth", branch = "leo/support-full-trace" }
 reth-basic-payload-builder = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
 reth-chain-state = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
 reth-chainspec = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
