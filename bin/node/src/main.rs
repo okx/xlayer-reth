@@ -1,17 +1,16 @@
 #![allow(missing_docs, rustdoc::missing_crate_level_docs)]
 
 mod args_xlayer;
+mod payload_builder;
 
 use std::sync::Arc;
 
 use args_xlayer::XLayerArgs;
 use clap::Parser;
+use payload_builder::XLayerPayloadServiceBuilder;
 use tracing::info;
 
-use op_rbuilder::{
-    args::OpRbuilderArgs,
-    builders::{BuilderConfig, FlashblocksServiceBuilder},
-};
+use op_rbuilder::args::OpRbuilderArgs;
 use reth::{
     builder::{EngineNodeLauncher, Node, NodeHandle, TreeConfig},
     providers::providers::BlockchainProvider,
@@ -84,64 +83,28 @@ fn main() {
             let add_ons =
                 op_node.add_ons().with_rpc_middleware(LegacyRpcRouterLayer::new(legacy_config));
 
-            // Should run as sequencer if flashblocks.enabled = true. Doing so means you are
-            // running a flashblocks producing sequencer.
-            let NodeHandle { node: _node, node_exit_future } = if args.node_args.flashblocks.enabled
-            {
-                let builder_config = BuilderConfig::try_from(args.node_args.clone())
-                    .expect("Failed to convert builder args to builder config");
+            // Create the XLayer payload service builder
+            // It handles both flashblocks and default modes internally
+            let payload_builder = XLayerPayloadServiceBuilder::new(
+                args.node_args.clone(),
+                args.node_args.rollup_args.clone(),
+                Default::default(), // OpDAConfig
+                Default::default(), // OpGasLimitConfig
+            )?;
 
-                builder
-                    .with_types_and_provider::<OpNode, BlockchainProvider<_>>()
-                    .with_components(
-                        op_node.components().payload(FlashblocksServiceBuilder(builder_config)),
-                    )
-                    .with_add_ons(add_ons)
-                    .on_component_initialized(move |_ctx| {
-                        // TODO: Initialize XLayer components here
-                        Ok(())
-                    })
-                    .extend_rpc_modules(move |ctx| {
-                        let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
+            let NodeHandle { node: _node, node_exit_future } = builder
+                .with_types_and_provider::<OpNode, BlockchainProvider<_>>()
+                .with_components(op_node.components().payload(payload_builder))
+                .with_add_ons(add_ons)
+                .on_component_initialized(move |_ctx| {
+                    // TODO: Initialize XLayer components here
+                    Ok(())
+                })
+                .extend_rpc_modules(move |ctx| {
+                    let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
 
-                        // Register XLayer RPC
-                        let xlayer_rpc = XlayerRpcExt { backend: new_op_eth_api };
-                        ctx.modules.merge_configured(xlayer_rpc.into_rpc())?;
-                        info!(target: "reth::cli", "xlayer rpc extension enabled");
-
-                        info!(message = "XLayer RPC modules initialized");
-                        Ok(())
-                    })
-                    .launch_with_fn(|builder| {
-                        let engine_tree_config = TreeConfig::default()
-                            .with_persistence_threshold(
-                                builder.config().engine.persistence_threshold,
-                            )
-                            .with_memory_block_buffer_target(
-                                builder.config().engine.memory_block_buffer_target,
-                            );
-
-                        let launcher = EngineNodeLauncher::new(
-                            builder.task_executor().clone(),
-                            builder.config().datadir(),
-                            engine_tree_config,
-                        );
-
-                        builder.launch_with(launcher)
-                    })
-                    .await?
-            } else {
-                builder
-                    .with_types_and_provider::<OpNode, BlockchainProvider<_>>()
-                    .with_components(op_node.components())
-                    .with_add_ons(add_ons)
-                    .on_component_initialized(move |_ctx| {
-                        // TODO: Initialize XLayer components here
-                        Ok(())
-                    })
-                    .extend_rpc_modules(move |ctx| {
-                        let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
-
+                    // Initialize flashblocks service if not in flashblocks mode
+                    if !args.node_args.flashblocks.enabled {
                         if let Some(flashblock_rx) = new_op_eth_api.subscribe_received_flashblocks()
                         {
                             let service = FlashblocksService::new(
@@ -171,35 +134,32 @@ fn main() {
                             )?;
                             info!(target: "reth::cli", "xlayer eth pubsub initialized");
                         }
+                    }
 
-                        // Register XLayer RPC
-                        let xlayer_rpc = XlayerRpcExt { backend: new_op_eth_api };
-                        ctx.modules.merge_configured(xlayer_rpc.into_rpc())?;
+                    // Register XLayer RPC
+                    let xlayer_rpc = XlayerRpcExt { backend: new_op_eth_api };
+                    ctx.modules.merge_configured(xlayer_rpc.into_rpc())?;
+                    info!(target: "reth::cli", "xlayer rpc extension enabled");
 
-                        info!(target: "reth::cli", "xlayer rpc extension enabled");
-
-                        info!(message = "XLayer RPC modules initialized");
-                        Ok(())
-                    })
-                    .launch_with_fn(|builder| {
-                        let engine_tree_config = TreeConfig::default()
-                            .with_persistence_threshold(
-                                builder.config().engine.persistence_threshold,
-                            )
-                            .with_memory_block_buffer_target(
-                                builder.config().engine.memory_block_buffer_target,
-                            );
-
-                        let launcher = EngineNodeLauncher::new(
-                            builder.task_executor().clone(),
-                            builder.config().datadir(),
-                            engine_tree_config,
+                    info!(message = "XLayer RPC modules initialized");
+                    Ok(())
+                })
+                .launch_with_fn(|builder| {
+                    let engine_tree_config = TreeConfig::default()
+                        .with_persistence_threshold(builder.config().engine.persistence_threshold)
+                        .with_memory_block_buffer_target(
+                            builder.config().engine.memory_block_buffer_target,
                         );
 
-                        builder.launch_with(launcher)
-                    })
-                    .await?
-            };
+                    let launcher = EngineNodeLauncher::new(
+                        builder.task_executor().clone(),
+                        builder.config().datadir(),
+                        engine_tree_config,
+                    );
+
+                    builder.launch_with(launcher)
+                })
+                .await?;
 
             node_exit_future.await
         })
