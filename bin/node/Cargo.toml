@@ -53,6 +53,7 @@ reqwest.workspace = true
 
 # rpc
 jsonrpsee.workspace = true
+op-alloy-network.workspace = true
 
 # alloy
 alloy-primitives.workspace = true

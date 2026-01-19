@@ -15,8 +15,9 @@ use reth_rpc_eth_api::{
     helpers::{Call, LoadState, SpawnBlocking, Trace},
     EthApiTypes, RpcTypes,
 };
+use revm::context::result::ExecutionResult;
 use revm::context_interface::block::Block; // for block_env.number()
-use revm::{context_interface::result::ExecutionResult, DatabaseCommit};
+use revm::DatabaseCommit;
 use revm_inspectors::tracing::MuxInspector;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
@@ -327,7 +328,7 @@ pub trait PreExec: EthCall {
 
             pre_exec_res.error = match exec.result {
                 ExecutionResult::Success { .. } => PreExecError::default(),
-                ExecutionResult::Revert { output, .. } => {
+                ExecutionResult::Revert { output, gas_used: _ } => {
                     PreExecError::reverted(format!("execution reverted: 0x{}", hex::encode(output)))
                 }
                 ExecutionResult::Halt { reason, .. } => Self::classify_error(format!("{reason:?}")),
