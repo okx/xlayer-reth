@@ -156,11 +156,7 @@ where
 
         let api = self.backend.clone();
         self.backend
-            .spawn_with_state_at_block(at, move |state| {
-                let mut db = reth_revm::db::CacheDB::new(
-                    reth_revm::database::StateProviderDatabase::new(state),
-                );
-
+            .spawn_with_state_at_block(at, move |_state, mut db| {
                 if let Some(overrides) = state_overrides
                     && let Err(e) = apply_state_overrides(overrides, &mut db)
                 {

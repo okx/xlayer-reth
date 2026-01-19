@@ -19,8 +19,9 @@ use reth::{
 use reth_optimism_cli::Cli;
 use reth_optimism_node::OpNode;
 
+use op_alloy_network::Optimism;
+use reth::rpc::eth::EthApiTypes;
 use reth_node_api::FullNodeComponents;
-use reth_rpc_eth_api::EthApiTypes;
 use reth_rpc_server_types::RethRpcModule;
 use xlayer_chainspec::XLayerChainSpecParser;
 use xlayer_flashblocks::handler::FlashblocksService;
@@ -38,7 +39,6 @@ struct Args {
     #[command(flatten)]
     pub node_args: OpRbuilderArgs,
 
-    /// X Layer specific configuration
     #[command(flatten)]
     pub xlayer_args: XLayerArgs,
 }
@@ -106,7 +106,9 @@ fn main() {
 
                         // Register XLayer RPC
                         let xlayer_rpc = XlayerRpcExt { backend: new_op_eth_api };
-                        ctx.modules.merge_configured(xlayer_rpc.into_rpc())?;
+                        ctx.modules.merge_configured(
+                            XlayerRpcExtApiServer::<Optimism>::into_rpc(xlayer_rpc),
+                        )?;
                         info!(target: "reth::cli", "xlayer rpc extension enabled");
 
                         info!(message = "XLayer RPC modules initialized");
@@ -162,7 +164,7 @@ fn main() {
                                 eth_pubsub,
                                 pending_blocks_rx,
                                 Box::new(ctx.node().task_executor().clone()),
-                                new_op_eth_api.tx_resp_builder().clone(),
+                                new_op_eth_api.converter().clone(),
                                 args.xlayer_args.flashblocks_subscription_max_addresses,
                             );
                             ctx.modules.add_or_replace_if_module_configured(
