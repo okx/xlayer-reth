@@ -1,11 +1,11 @@
 #![allow(missing_docs, rustdoc::missing_crate_level_docs)]
 
-mod args_xlayer;
-mod payload_xlayer;
+mod args;
+mod payload;
 
-use args_xlayer::XLayerArgs;
+use args::XLayerArgs;
 use clap::Parser;
-use payload_xlayer::XLayerPayloadServiceBuilder;
+use payload::XLayerPayloadServiceBuilder;
 use std::sync::Arc;
 use tracing::info;
 
