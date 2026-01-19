@@ -21,7 +21,7 @@ members = [
     "crates/version",
 
     "bin/tools",
-    "bin/node"
+    "bin/node",
 ]
 default-members = ["bin/node"]
 
@@ -93,9 +93,11 @@ reth-optimism-consensus = { git = "https://github.com/okx/reth", rev = "1ae6a8b1
 reth-optimism-evm = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
 reth-optimism-forks = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
 reth-optimism-node = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
+reth-optimism-payload-builder = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
 reth-optimism-primitives = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
 reth-optimism-rpc = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
 reth-optimism-txpool = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
+reth-payload-builder = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
 reth-primitives = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
 reth-primitives-traits = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
 reth-provider = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
@@ -110,7 +112,6 @@ reth-tracing = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe
 reth-transaction-pool = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
 reth-optimism-flashblocks = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
 reth-rpc-server-types = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
-
 
 # ==============================================================================
 # Revm Dependencies (follows upstream reth)
