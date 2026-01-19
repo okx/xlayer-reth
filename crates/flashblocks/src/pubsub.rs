@@ -58,10 +58,10 @@ pub enum FlashblockParams {
 impl FlashblockParams {
     /// Validates the flashblock params.
     pub fn validate(&self, max_subscribed_addresses: usize) -> Result<(), ErrorObject<'static>> {
-        if let FlashblockParams::FlashblocksFilter(filter) = self {
-            if filter.sub_tx_filter.subscribe_addresses.len() > max_subscribed_addresses {
-                return Err(invalid_params_rpc_err("too many subscribe addresses"));
-            }
+        if let FlashblockParams::FlashblocksFilter(filter) = self
+            && filter.sub_tx_filter.subscribe_addresses.len() > max_subscribed_addresses
+        {
+            return Err(invalid_params_rpc_err("too many subscribe addresses"));
         }
         Ok(())
     }

@@ -11,7 +11,7 @@ use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
 /// Payload builder strategy for XLayer
 enum Builder {
     /// Use FlashblocksServiceBuilder for flashblocks mode
-    Flashblocks(FlashblocksServiceBuilder),
+    Flashblocks(Box<FlashblocksServiceBuilder>),
     /// Use BasicPayloadServiceBuilder with OpPayloadBuilder (which implements PayloadBuilderBuilder)
     Default(BasicPayloadServiceBuilder<OpPayloadBuilder>),
 }
@@ -30,7 +30,7 @@ impl XLayerPayloadServiceBuilder {
     ) -> eyre::Result<Self> {
         let builder = if op_rbuilder_args.flashblocks.enabled {
             let builder_config = BuilderConfig::try_from(op_rbuilder_args)?;
-            Builder::Flashblocks(FlashblocksServiceBuilder(builder_config))
+            Builder::Flashblocks(Box::new(FlashblocksServiceBuilder(builder_config)))
         } else {
             let payload_builder = OpPayloadBuilder::new(rollup_args.compute_pending_block)
                 .with_da_config(da_config)
