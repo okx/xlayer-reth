@@ -8,23 +8,27 @@ use reth_optimism_evm::OpEvmConfig;
 use reth_optimism_node::{args::RollupArgs, node::OpPayloadBuilder};
 use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
 
-/// Payload builder strategy for XLayer
+/// Payload builder strategy for X Layer.
 enum Builder {
-    /// Use FlashblocksServiceBuilder for flashblocks mode
+    /// Uses [`FlashblocksServiceBuilder`] for sequencer nodes producing flashblocks.
     Flashblocks(Box<FlashblocksServiceBuilder>),
-    /// Use BasicPayloadServiceBuilder with OpPayloadBuilder (which implements PayloadBuilderBuilder)
+    /// Uses [`BasicPayloadServiceBuilder`] with [`OpPayloadBuilder`] for follower/RPC nodes.
     Default(BasicPayloadServiceBuilder<OpPayloadBuilder>),
 }
 
-/// XLayer payload service builder that wraps either FlashblocksServiceBuilder or the default OpPayloadBuilder
+/// The X Layer payload service builder that delegates to either [`FlashblocksServiceBuilder`]
+/// or the default [`BasicPayloadServiceBuilder`].
 pub struct XLayerPayloadServiceBuilder {
     builder: Builder,
 }
 
 impl XLayerPayloadServiceBuilder {
-    pub fn new(
+    pub fn new(op_rbuilder_args: OpRbuilderArgs) -> eyre::Result<Self> {
+        Self::with_config(op_rbuilder_args, OpDAConfig::default(), OpGasLimitConfig::default())
+    }
+
+    pub fn with_config(
         op_rbuilder_args: OpRbuilderArgs,
-        rollup_args: RollupArgs,
         da_config: OpDAConfig,
         gas_limit_config: OpGasLimitConfig,
     ) -> eyre::Result<Self> {
@@ -32,9 +36,10 @@ impl XLayerPayloadServiceBuilder {
             let builder_config = BuilderConfig::try_from(op_rbuilder_args)?;
             Builder::Flashblocks(Box::new(FlashblocksServiceBuilder(builder_config)))
         } else {
-            let payload_builder = OpPayloadBuilder::new(rollup_args.compute_pending_block)
-                .with_da_config(da_config)
-                .with_gas_limit_config(gas_limit_config);
+            let payload_builder =
+                OpPayloadBuilder::new(op_rbuilder_args.rollup_args.compute_pending_block)
+                    .with_da_config(da_config)
+                    .with_gas_limit_config(gas_limit_config);
             Builder::Default(BasicPayloadServiceBuilder::new(payload_builder))
         };
 

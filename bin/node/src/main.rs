@@ -85,12 +85,7 @@ fn main() {
 
             // Create the XLayer payload service builder
             // It handles both flashblocks and default modes internally
-            let payload_builder = XLayerPayloadServiceBuilder::new(
-                args.node_args.clone(),
-                args.node_args.rollup_args.clone(),
-                Default::default(), // OpDAConfig
-                Default::default(), // OpGasLimitConfig
-            )?;
+            let payload_builder = XLayerPayloadServiceBuilder::new(args.node_args.clone())?;
 
             let NodeHandle { node: _node, node_exit_future } = builder
                 .with_types_and_provider::<OpNode, BlockchainProvider<_>>()
@@ -103,7 +98,7 @@ fn main() {
                 .extend_rpc_modules(move |ctx| {
                     let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
 
-                    // Initialize flashblocks service if not in flashblocks mode
+                    // Initialize flashblocks RPC service if not in flashblocks sequencer mode
                     if !args.node_args.flashblocks.enabled {
                         if let Some(flashblock_rx) = new_op_eth_api.subscribe_received_flashblocks()
                         {
