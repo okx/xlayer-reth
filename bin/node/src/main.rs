@@ -138,9 +138,9 @@ fn main() {
 
                     // Register XLayer RPC
                     let xlayer_rpc = XlayerRpcExt { backend: new_op_eth_api };
-                    ctx.modules.merge_configured(
-                        XlayerRpcExtApiServer::<Optimism>::into_rpc(xlayer_rpc),
-                    )?;
+                    ctx.modules.merge_configured(XlayerRpcExtApiServer::<Optimism>::into_rpc(
+                        xlayer_rpc,
+                    ))?;
                     info!(target: "reth::cli", "xlayer rpc extension enabled");
 
                     info!(message = "XLayer RPC modules initialized");
