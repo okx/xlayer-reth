@@ -67,6 +67,39 @@ where
         crate::RpcTracerLayer::new(self)
     }
 
+    /// Initialize blockchain tracer to monitor canonical state changes.
+    ///
+    /// This spawns a background task that subscribes to canonical state notifications
+    /// and calls the tracer's event handlers for each block and transaction.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let tracer = Arc::new(Tracer::new(xlayer_args));
+    /// tracer.initialize_blockchain_tracer(ctx.node());
+    /// ```
+    pub fn initialize_blockchain_tracer<Node>(self: Arc<Self>, node: &Node)
+    where
+        Node: reth_node_api::FullNodeComponents + Clone + 'static,
+        <Node as reth_node_api::FullNodeTypes>::Provider: reth_chain_state::CanonStateSubscriptions,
+    {
+        use reth_chain_state::CanonStateSubscriptions as _;
+
+        let provider = node.provider().clone();
+        let task_executor = node.task_executor().clone();
+
+        // Subscribe to canonical state updates
+        let canonical_stream = provider.canonical_state_stream();
+
+        tracing::info!(target: "xlayer::full_trace::blockchain", "Initializing blockchain tracer for canonical state stream");
+
+        task_executor.spawn_critical(
+            "xlayer-blockchain-tracer",
+            Box::pin(async move {
+                crate::handle_canonical_state_stream(canonical_stream, self).await;
+            }),
+        );
+    }
+
     /// Handle fork choice updated events.
     ///
     /// This method is called when a fork choice update API is invoked (before execution).
@@ -132,6 +165,44 @@ where
         );
 
         // TODO: add RpcReceiveTxEnd, SeqReceiveTxEnd here, use xlayer_args if you want
+    }
+
+    /// Handle block commit events.
+    ///
+    /// This method is called when a block is committed to the canonical chain.
+    /// Implement your custom tracing logic here.
+    ///
+    /// # Parameters
+    /// - `block_info`: Block information containing block number and hash
+    pub(crate) fn on_block_commit(&self, block_info: &BlockInfo) {
+        tracing::info!(
+            target: "xlayer::full_trace::block_commit",
+            "Block committed: block_number={}, block_hash={:?}",
+            block_info.block_number,
+            block_info.block_hash
+        );
+
+        // TODO: add SeqBlockBuildEnd, RpcBlockInsertEnd here
+    }
+
+    /// Handle transaction commit events.
+    ///
+    /// This method is called when a transaction is committed to the canonical chain.
+    /// Implement your custom tracing logic here.
+    ///
+    /// # Parameters
+    /// - `block_info`: Block information containing block number and hash
+    /// - `tx_hash`: The transaction hash
+    pub(crate) fn on_tx_commit(&self, block_info: &BlockInfo, tx_hash: B256) {
+        tracing::info!(
+            target: "xlayer::full_trace::tx_commit",
+            "Transaction committed: block_number={}, block_hash={:?}, tx_hash={:?}",
+            block_info.block_number,
+            block_info.block_hash,
+            tx_hash
+        );
+
+        // TODO: add SeqTxExecutionEnd here if flashblocks is disabled, you can use xlayer_args if you want
     }
 }
 

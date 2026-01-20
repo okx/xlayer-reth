@@ -87,6 +87,7 @@ fn main() {
             let tracer = Arc::new(Tracer::new(xlayer_args.clone()));
             let engine_api_tracer = tracer.clone();
             let rpc_tracer = tracer.clone();
+            let blockchain_tracer = tracer.clone();
             let op_engine_builder = OpEngineApiBuilder::<OpEngineValidatorBuilder>::default();
 
             // Use EngineApiTracer as the middleware with built-in event handlers
@@ -113,6 +114,9 @@ fn main() {
                 })
                 .extend_rpc_modules(move |ctx| {
                     let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
+
+                    // Initialize blockchain tracer to monitor canonical state changes
+                    blockchain_tracer.clone().initialize_blockchain_tracer(ctx.node());
 
                     // Initialize flashblocks RPC service if not in flashblocks sequencer mode
                     if !args.node_args.flashblocks.enabled {

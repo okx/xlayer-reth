@@ -15,14 +15,18 @@ default = []
 xlayer-engine-api.workspace = true
 
 # Reth dependencies
+reth-chain-state.workspace = true
 reth-chainspec.workspace = true
 reth-node-api.workspace = true
 reth-optimism-rpc.workspace = true
+reth-primitives-traits.workspace = true
+reth-provider.workspace = true
 reth-rpc-api.workspace = true
 reth-storage-api.workspace = true
 reth-transaction-pool.workspace = true
 
 # Alloy dependencies
+alloy-consensus.workspace = true
 alloy-primitives.workspace = true
 alloy-rpc-types-engine.workspace = true
 alloy-eips.workspace = true

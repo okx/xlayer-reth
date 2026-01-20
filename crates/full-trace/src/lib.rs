@@ -56,10 +56,12 @@
 
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
+mod blockchain_tracer;
 mod engine_api_tracer;
 mod rpc_tracer;
 mod tracer;
 
+pub use blockchain_tracer::handle_canonical_state_stream;
 pub use engine_api_tracer::EngineApiTracer;
 pub use rpc_tracer::{RpcTracerLayer, RpcTracerService};
 pub use tracer::{BlockInfo, Tracer};
