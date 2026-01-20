@@ -14009,6 +14009,7 @@ dependencies = [
 name = "xlayer-full-trace"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
  "alloy-eips",
  "alloy-primitives",
  "alloy-rpc-types-engine",
@@ -14018,9 +14019,12 @@ dependencies = [
  "futures-util",
  "jsonrpsee",
  "op-alloy-rpc-types-engine",
+ "reth-chain-state",
  "reth-chainspec",
  "reth-node-api",
  "reth-optimism-rpc",
+ "reth-primitives-traits",
+ "reth-provider",
  "reth-rpc-api",
  "reth-storage-api",
  "reth-transaction-pool",
