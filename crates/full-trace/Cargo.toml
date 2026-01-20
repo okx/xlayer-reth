@@ -35,12 +35,20 @@ jsonrpsee.workspace = true
 
 # Async dependencies
 async-trait.workspace = true
+futures.workspace = true
+futures-util.workspace = true
 
 # Logging
 tracing.workspace = true
 
 # Error handling
 eyre.workspace = true
+
+# Tower middleware
+tower.workspace = true
+
+# Serialization
+serde_json.workspace = true
 
 [lints]
 workspace = true

@@ -14014,6 +14014,8 @@ dependencies = [
  "alloy-rpc-types-engine",
  "async-trait",
  "eyre",
+ "futures",
+ "futures-util",
  "jsonrpsee",
  "op-alloy-rpc-types-engine",
  "reth-chainspec",
@@ -14022,6 +14024,8 @@ dependencies = [
  "reth-rpc-api",
  "reth-storage-api",
  "reth-transaction-pool",
+ "serde_json",
+ "tower",
  "tracing",
  "xlayer-engine-api",
 ]

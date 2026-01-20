@@ -86,7 +86,7 @@ where
 {
     async fn new_payload_v2(&self, payload: ExecutionPayloadInputV2) -> RpcResult<PayloadStatus> {
         trace!(
-            target: "xlayer::trace::engine",
+            target: "xlayer::full_trace::engine",
             "TRACE: new_payload_v2 called"
         );
 
@@ -114,7 +114,7 @@ where
         parent_beacon_block_root: B256,
     ) -> RpcResult<PayloadStatus> {
         trace!(
-            target: "xlayer::trace::engine",
+            target: "xlayer::full_trace::engine",
             "TRACE: new_payload_v3 called"
         );
 
@@ -145,7 +145,7 @@ where
         execution_requests: Requests,
     ) -> RpcResult<PayloadStatus> {
         trace!(
-            target: "xlayer::trace::engine",
+            target: "xlayer::full_trace::engine",
             "TRACE: new_payload_v4 called"
         );
 
@@ -181,7 +181,7 @@ where
         payload_attributes: Option<EngineT::PayloadAttributes>,
     ) -> RpcResult<ForkchoiceUpdated> {
         trace!(
-            target: "xlayer::trace::engine",
+            target: "xlayer::full_trace::engine",
             "TRACE: fork_choice_updated_v1 - head={:?}, safe={:?}, finalized={:?}, has_attrs={}",
             fork_choice_state.head_block_hash,
             fork_choice_state.safe_block_hash,
@@ -210,7 +210,7 @@ where
         payload_attributes: Option<EngineT::PayloadAttributes>,
     ) -> RpcResult<ForkchoiceUpdated> {
         trace!(
-            target: "xlayer::trace::engine",
+            target: "xlayer::full_trace::engine",
             "TRACE: fork_choice_updated_v2 - head={:?}, safe={:?}, finalized={:?}, has_attrs={}",
             fork_choice_state.head_block_hash,
             fork_choice_state.safe_block_hash,
@@ -239,7 +239,7 @@ where
         payload_attributes: Option<EngineT::PayloadAttributes>,
     ) -> RpcResult<ForkchoiceUpdated> {
         trace!(
-            target: "xlayer::trace::engine",
+            target: "xlayer::full_trace::engine",
             "TRACE: fork_choice_updated_v3 - head={:?}, safe={:?}, finalized={:?}, has_attrs={}",
             fork_choice_state.head_block_hash,
             fork_choice_state.safe_block_hash,
@@ -267,7 +267,7 @@ where
         payload_id: PayloadId,
     ) -> RpcResult<EngineT::ExecutionPayloadEnvelopeV2> {
         trace!(
-            target: "xlayer::trace::engine",
+            target: "xlayer::full_trace::engine",
             "TRACE: get_payload_v2 called with id={:?}",
             payload_id
         );
@@ -286,7 +286,7 @@ where
         payload_id: PayloadId,
     ) -> RpcResult<EngineT::ExecutionPayloadEnvelopeV3> {
         trace!(
-            target: "xlayer::trace::engine",
+            target: "xlayer::full_trace::engine",
             "TRACE: get_payload_v3 called with id={:?}",
             payload_id
         );
@@ -305,7 +305,7 @@ where
         payload_id: PayloadId,
     ) -> RpcResult<EngineT::ExecutionPayloadEnvelopeV4> {
         trace!(
-            target: "xlayer::trace::engine",
+            target: "xlayer::full_trace::engine",
             "TRACE: get_payload_v4 called with id={:?}",
             payload_id
         );
@@ -324,7 +324,7 @@ where
         block_hashes: Vec<BlockHash>,
     ) -> RpcResult<ExecutionPayloadBodiesV1> {
         trace!(
-            target: "xlayer::trace::engine",
+            target: "xlayer::full_trace::engine",
             "TRACE: get_payload_bodies_by_hash_v1 called"
         );
         match self.inner() {
@@ -343,7 +343,7 @@ where
         count: U64,
     ) -> RpcResult<ExecutionPayloadBodiesV1> {
         trace!(
-            target: "xlayer::trace::engine",
+            target: "xlayer::full_trace::engine",
             "TRACE: get_payload_bodies_by_range_v1 called with start={}, count={}",
             start,
             count
@@ -360,7 +360,7 @@ where
 
     async fn signal_superchain_v1(&self, signal: SuperchainSignal) -> RpcResult<ProtocolVersion> {
         trace!(
-            target: "xlayer::trace::engine",
+            target: "xlayer::full_trace::engine",
             "TRACE: signal_superchain_v1 called"
         );
         match self.inner() {
@@ -378,7 +378,7 @@ where
         client: ClientVersionV1,
     ) -> RpcResult<Vec<ClientVersionV1>> {
         trace!(
-            target: "xlayer::trace::engine",
+            target: "xlayer::full_trace::engine",
             "TRACE: get_client_version_v1 called"
         );
         match self.inner() {
@@ -393,7 +393,7 @@ where
 
     async fn exchange_capabilities(&self, capabilities: Vec<String>) -> RpcResult<Vec<String>> {
         trace!(
-            target: "xlayer::trace::engine",
+            target: "xlayer::full_trace::engine",
             "TRACE: exchange_capabilities called with {} capabilities",
             capabilities.len()
         );

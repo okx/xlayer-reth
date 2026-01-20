@@ -58,6 +58,15 @@ where
         EngineApiTracer::new(self)
     }
 
+    /// Build an RpcTracerLayer with this tracer instance.
+    ///
+    /// This creates a new RpcTracerLayer instance that holds a reference to this tracer.
+    pub fn build_rpc_tracer(
+        self: Arc<Self>,
+    ) -> crate::RpcTracerLayer<Provider, EngineT, Pool, Validator, ChainSpec, Args> {
+        crate::RpcTracerLayer::new(self)
+    }
+
     /// Handle fork choice updated events.
     ///
     /// This method is called when a fork choice update API is invoked (before execution).
@@ -104,6 +113,25 @@ where
         );
 
         // TODO: add SeqBlockSendStart, RpcBlockReceiveEnd here, use xlayer_args if you want
+    }
+
+    /// Handle transaction received events.
+    ///
+    /// This method is called when a transaction is received via RPC (e.g., eth_sendRawTransaction).
+    /// Implement your custom tracing logic here.
+    ///
+    /// # Parameters
+    /// - `method`: The RPC method name (e.g., "eth_sendRawTransaction")
+    /// - `tx_hash`: The transaction hash
+    pub fn on_recv_transaction(&self, method: &str, tx_hash: B256) {
+        tracing::info!(
+            target: "xlayer::full_trace::recv_transaction",
+            "Transaction received via {}: tx_hash={:?}",
+            method,
+            tx_hash
+        );
+
+        // TODO: add RpcReceiveTxEnd, SeqReceiveTxEnd here, use xlayer_args if you want
     }
 }
 
