@@ -170,21 +170,22 @@ pub mod helpers {
             if let Some(stripped) = inner.to.strip_prefix("0x") {
                 inner.to = format!("0x000000000000000000000000{}", stripped.to_lowercase());
             }
-            if inner.call_type == "callcode" {
-                if let Some(to_addr) = frame.to {
-                    let hex = format!("{to_addr:?}");
-                    if let Some(stripped) = hex.strip_prefix("0x") {
+            match inner.call_type.as_str() {
+                "callcode" if frame.to.is_some() => {
+                    let hex = format!("{:?}", frame.to.unwrap());
+                    if let Some(s) = hex.strip_prefix("0x") {
                         inner.code_address =
-                            format!("0x000000000000000000000000{}", stripped.to_lowercase());
+                            format!("0x000000000000000000000000{}", s.to_lowercase());
                     }
                 }
-            }
-            if inner.call_type == "delegatecall" {
-                let hex = format!("{:?}", frame.from);
-                if let Some(stripped) = hex.strip_prefix("0x") {
-                    inner.trace_address =
-                        format!("0x000000000000000000000000{}", stripped.to_lowercase());
+                "delegatecall" => {
+                    let hex = format!("{:?}", frame.from);
+                    if let Some(s) = hex.strip_prefix("0x") {
+                        inner.trace_address =
+                            format!("0x000000000000000000000000{}", s.to_lowercase());
+                    }
                 }
+                _ => {}
             }
             let current_root = if depth_index_root.is_empty() {
                 format!("_{index}")
