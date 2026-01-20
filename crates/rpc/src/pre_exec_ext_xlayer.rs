@@ -171,7 +171,20 @@ pub mod helpers {
                 inner.to = format!("0x000000000000000000000000{}", stripped.to_lowercase());
             }
             if inner.call_type == "callcode" {
-                inner.code_address = frame.to.map(|a| format!("{a:?}")).unwrap_or_default();
+                if let Some(to_addr) = frame.to {
+                    let hex = format!("{to_addr:?}");
+                    if let Some(stripped) = hex.strip_prefix("0x") {
+                        inner.code_address =
+                            format!("0x000000000000000000000000{}", stripped.to_lowercase());
+                    }
+                }
+            }
+            if inner.call_type == "delegatecall" {
+                let hex = format!("{:?}", frame.from);
+                if let Some(stripped) = hex.strip_prefix("0x") {
+                    inner.trace_address =
+                        format!("0x000000000000000000000000{}", stripped.to_lowercase());
+                }
             }
             let current_root = if depth_index_root.is_empty() {
                 format!("_{index}")
