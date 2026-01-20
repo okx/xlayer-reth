@@ -22,6 +22,10 @@ use std::sync::Arc;
 use tracing::trace;
 use xlayer_engine_api::XLayerEngineApiMiddleware;
 
+/// Type alias for the inner OpEngineApi to reduce type complexity.
+type InnerOpEngineApi<Provider, EngineT, Pool, Validator, ChainSpec> =
+    Arc<OpEngineApi<Provider, EngineT, Pool, Validator, ChainSpec>>;
+
 /// Engine API tracer middleware that wraps OpEngineApi and traces all Engine API calls.
 pub struct EngineApiTracer<Provider, EngineT, Pool, Validator, ChainSpec, Args>
 where
@@ -29,7 +33,7 @@ where
     Args: Clone + Send + Sync + 'static,
 {
     /// The inner OpEngineApi (set during build)
-    inner: Option<Arc<OpEngineApi<Provider, EngineT, Pool, Validator, ChainSpec>>>,
+    inner: Option<InnerOpEngineApi<Provider, EngineT, Pool, Validator, ChainSpec>>,
     /// The tracer instance that handles events
     tracer: Arc<Tracer<Provider, EngineT, Pool, Validator, ChainSpec, Args>>,
 }
