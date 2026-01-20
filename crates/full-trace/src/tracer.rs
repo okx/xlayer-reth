@@ -95,7 +95,6 @@ where
     /// - `version`: The payload version (e.g., "v2", "v3", "v4")
     /// - `block_info`: Block information containing block number and hash
     pub(crate) fn on_new_payload(&self, version: &str, block_info: &BlockInfo) {
-        // TODO: Implement your custom new payload tracing logic here
         tracing::info!(
             target: "xlayer::full_trace::new_payload",
             "New payload {} called: block_number={}, block_hash={:?}",
