@@ -10,6 +10,10 @@ pub struct XLayerArgs {
     #[command(flatten)]
     pub legacy: LegacyRpcArgs,
 
+    /// Enable full trace
+    #[command(flatten)]
+    pub full_trace: FullTraceArgs,
+
     /// Enable custom flashblocks subscription
     #[arg(
         long = "xlayer.flashblocks-subscription",
@@ -30,7 +34,9 @@ pub struct XLayerArgs {
 impl XLayerArgs {
     /// Validate all X Layer configurations
     pub fn validate(&self) -> Result<(), String> {
-        self.legacy.validate()
+        self.legacy.validate()?;
+        self.full_trace.validate()?;
+        Ok(())
     }
 
     /// Validate init command arguments for xlayer-mainnet and xlayer-testnet
@@ -111,6 +117,27 @@ impl LegacyRpcArgs {
             }
         }
 
+        Ok(())
+    }
+}
+
+/// X Layer full trace arguments
+#[derive(Debug, Clone, Args, PartialEq, Eq, Default)]
+pub struct FullTraceArgs {
+    /// Enable full trace functionality
+    #[arg(
+        long = "xlayer.full-trace",
+        help = "Enable full trace functionality (disabled by default)",
+        default_value = "false"
+    )]
+    pub enable: bool,
+    // TODO: add more full trace configuration here
+}
+
+impl FullTraceArgs {
+    /// Validate full trace configuration
+    pub fn validate(&self) -> Result<(), String> {
+        // No validation needed for now, just a simple enable flag
         Ok(())
     }
 }
@@ -276,6 +303,7 @@ mod tests {
                 legacy_rpc_url: Some("invalid-url".to_string()),
                 legacy_rpc_timeout: Duration::from_secs(30),
             },
+            full_trace: FullTraceArgs::default(),
             enable_flashblocks_subscription: false,
             flashblocks_subscription_max_addresses: 1000,
         };

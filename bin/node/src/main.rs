@@ -84,7 +84,7 @@ fn main() {
 
             // Build add-ons with RPC middleware and custom Engine API
             // XLayerEngineApiBuilder wraps OpEngineApiBuilder with middleware
-            let tracer = Arc::new(Tracer::new(xlayer_args.clone()));
+            let tracer = Arc::new(Tracer::new(xlayer_args.full_trace.clone()));
             let engine_api_tracer = tracer.clone();
             let rpc_tracer = tracer.clone();
             let blockchain_tracer = tracer.clone();
@@ -92,12 +92,12 @@ fn main() {
 
             // Use EngineApiTracer as the middleware with built-in event handlers
             let xlayer_engine_builder = XLayerEngineApiBuilder::new(op_engine_builder)
-                .with_middleware(move || engine_api_tracer.clone().build_engine_api_tracer());
+                .with_middleware(move || engine_api_tracer.build_engine_api_tracer());
 
             let add_ons = op_node
                 .add_ons()
                 .with_rpc_middleware(LegacyRpcRouterLayer::new(legacy_config))
-                .with_rpc_middleware(rpc_tracer.clone().build_rpc_tracer()) // Add RPC tracer middleware
+                .with_rpc_middleware(rpc_tracer.build_rpc_tracer()) // Add RPC tracer middleware
                 .with_engine_api(xlayer_engine_builder);
 
             // Create the XLayer payload service builder

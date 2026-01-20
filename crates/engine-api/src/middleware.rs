@@ -12,11 +12,6 @@ use reth_transaction_pool::TransactionPool;
 ///
 /// This trait defines the requirements for an Engine API middleware implementation.
 ///
-/// Middleware implementations must:
-/// 1. Implement `set_inner()` to receive the inner OpEngineApi
-/// 2. Implement `OpEngineApiServer` to handle Engine API calls
-/// 3. Implement `IntoEngineApiRpcModule` to convert to RPC module
-/// 4. Be `Send + Sync` for thread safety
 pub trait XLayerEngineApiMiddleware<Provider, EngineT, Pool, Validator, ChainSpec>:
     OpEngineApiServer<EngineT> + IntoEngineApiRpcModule + Send + Sync
 where
