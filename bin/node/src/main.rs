@@ -8,6 +8,8 @@ use clap::Parser;
 use payload::XLayerPayloadServiceBuilder;
 use std::sync::Arc;
 use tracing::info;
+use xlayer_engine_api::XLayerEngineApiBuilder;
+use xlayer_full_trace::Tracer;
 
 use op_rbuilder::args::OpRbuilderArgs;
 use reth::{
@@ -15,7 +17,7 @@ use reth::{
     providers::providers::BlockchainProvider,
 };
 use reth_optimism_cli::Cli;
-use reth_optimism_node::OpNode;
+use reth_optimism_node::{OpEngineApiBuilder, OpEngineValidatorBuilder, OpNode};
 
 use op_alloy_network::Optimism;
 use reth::rpc::eth::EthApiTypes;
@@ -70,17 +72,29 @@ fn main() {
             let genesis_block = builder.config().chain.genesis().number.unwrap_or_default();
             info!("XLayer genesis block = {}", genesis_block);
 
+            // Clone xlayer_args early to avoid partial move issues
+            let xlayer_args = args.xlayer_args.clone();
+
             let legacy_config = LegacyRpcRouterConfig {
-                enabled: args.xlayer_args.legacy.legacy_rpc_url.is_some(),
-                legacy_endpoint: args.xlayer_args.legacy.legacy_rpc_url.unwrap_or_default(),
+                enabled: xlayer_args.legacy.legacy_rpc_url.is_some(),
+                legacy_endpoint: xlayer_args.legacy.legacy_rpc_url.clone().unwrap_or_default(),
                 cutoff_block: genesis_block,
-                timeout: args.xlayer_args.legacy.legacy_rpc_timeout,
+                timeout: xlayer_args.legacy.legacy_rpc_timeout,
             };
 
-            // Build add-ons with RPC middleware
-            // If not enabled, the layer will not do any re-routing.
-            let add_ons =
-                op_node.add_ons().with_rpc_middleware(LegacyRpcRouterLayer::new(legacy_config));
+            // Build add-ons with RPC middleware and custom Engine API
+            // XLayerEngineApiBuilder wraps OpEngineApiBuilder with middleware
+            let tracer = Arc::new(Tracer::new(xlayer_args.clone()));
+            let op_engine_builder = OpEngineApiBuilder::<OpEngineValidatorBuilder>::default();
+
+            // Use EngineApiTracer as the middleware with built-in event handlers
+            let xlayer_engine_builder = XLayerEngineApiBuilder::new(op_engine_builder)
+                .with_middleware(move || tracer.clone().build_engine_api_tracer()); // Build creates EngineApiTracer with tracer instance
+
+            let add_ons = op_node
+                .add_ons()
+                .with_rpc_middleware(LegacyRpcRouterLayer::new(legacy_config))
+                .with_engine_api(xlayer_engine_builder);
 
             // Create the XLayer payload service builder
             // It handles both flashblocks and default modes internally
@@ -110,7 +124,7 @@ fn main() {
                             info!(target: "reth::cli", "xlayer flashblocks service initialized");
                         }
 
-                        if args.xlayer_args.enable_flashblocks_subscription
+                        if xlayer_args.enable_flashblocks_subscription
                             && let Some(pending_blocks_rx) = new_op_eth_api.pending_block_rx()
                         {
                             let eth_pubsub = ctx.registry.eth_handlers().pubsub.clone();
@@ -120,7 +134,7 @@ fn main() {
                                 pending_blocks_rx,
                                 Box::new(ctx.node().task_executor().clone()),
                                 new_op_eth_api.converter().clone(),
-                                args.xlayer_args.flashblocks_subscription_max_addresses,
+                                xlayer_args.flashblocks_subscription_max_addresses,
                             );
                             ctx.modules.add_or_replace_if_module_configured(
                                 RethRpcModule::Eth,

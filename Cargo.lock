@@ -13944,6 +13944,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "xlayer-engine-api"
+version = "0.1.0"
+dependencies = [
+ "alloy-eips",
+ "alloy-primitives",
+ "alloy-rpc-types-engine",
+ "async-trait",
+ "eyre",
+ "jsonrpsee",
+ "op-alloy-rpc-types-engine",
+ "reth-chainspec",
+ "reth-node-api",
+ "reth-node-builder",
+ "reth-optimism-rpc",
+ "reth-rpc-api",
+ "reth-storage-api",
+ "reth-transaction-pool",
+ "tracing",
+]
+
+[[package]]
 name = "xlayer-flashblocks"
 version = "0.1.0"
 dependencies = [
@@ -13985,6 +14006,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "xlayer-full-trace"
+version = "0.1.0"
+dependencies = [
+ "alloy-eips",
+ "alloy-primitives",
+ "alloy-rpc-types-engine",
+ "async-trait",
+ "eyre",
+ "jsonrpsee",
+ "op-alloy-rpc-types-engine",
+ "reth-chainspec",
+ "reth-node-api",
+ "reth-optimism-rpc",
+ "reth-rpc-api",
+ "reth-storage-api",
+ "reth-transaction-pool",
+ "tracing",
+ "xlayer-engine-api",
+]
+
+[[package]]
 name = "xlayer-legacy-rpc"
 version = "0.1.0"
 dependencies = [
@@ -14002,9 +14044,13 @@ dependencies = [
 name = "xlayer-reth-node"
 version = "0.1.0"
 dependencies = [
+ "alloy-eips",
  "alloy-primitives",
+ "alloy-rpc-types-engine",
+ "async-trait",
  "chrono",
  "clap",
+ "derive_more",
  "eyre",
  "futures",
  "futures-util",
@@ -14015,13 +14061,16 @@ dependencies = [
  "metrics-derive",
  "once_cell",
  "op-alloy-network",
+ "op-alloy-rpc-types-engine",
  "op-rbuilder",
  "reqwest",
  "reth",
+ "reth-chainspec",
  "reth-cli-util",
  "reth-exex",
  "reth-node-api",
  "reth-node-builder",
+ "reth-node-core",
  "reth-optimism-chainspec",
  "reth-optimism-cli",
  "reth-optimism-evm",
@@ -14031,9 +14080,13 @@ dependencies = [
  "reth-optimism-rpc",
  "reth-payload-builder",
  "reth-primitives",
+ "reth-rpc-api",
  "reth-rpc-convert",
+ "reth-rpc-engine-api",
  "reth-rpc-eth-api",
  "reth-rpc-server-types",
+ "reth-storage-api",
+ "reth-transaction-pool",
  "serde",
  "serde_json",
  "time",
@@ -14044,7 +14097,9 @@ dependencies = [
  "url",
  "uuid",
  "xlayer-chainspec",
+ "xlayer-engine-api",
  "xlayer-flashblocks",
+ "xlayer-full-trace",
  "xlayer-legacy-rpc",
  "xlayer-rpc",
  "xlayer-version",

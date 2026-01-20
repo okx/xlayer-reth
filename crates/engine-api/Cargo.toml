@@ -1,0 +1,44 @@
+[package]
+name = "xlayer-engine-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+
+[dependencies]
+# Reth dependencies
+reth-chainspec.workspace = true
+reth-node-api.workspace = true
+reth-node-builder.workspace = true
+reth-optimism-rpc.workspace = true
+reth-rpc-api.workspace = true
+reth-storage-api.workspace = true
+reth-transaction-pool.workspace = true
+
+# Alloy dependencies
+alloy-primitives.workspace = true
+alloy-rpc-types-engine.workspace = true
+alloy-eips.workspace = true
+
+# OP Stack dependencies
+op-alloy-rpc-types-engine.workspace = true
+
+# JSON-RPC dependencies
+jsonrpsee.workspace = true
+
+# Async dependencies
+async-trait.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Error handling
+eyre.workspace = true
+
+[lints]
+workspace = true
