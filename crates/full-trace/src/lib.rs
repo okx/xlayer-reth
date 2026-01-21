@@ -24,23 +24,23 @@
 //! use xlayer_engine_api::XLayerEngineApiBuilder;
 //!
 //! // Create a shared tracer configuration (returns Arc<Tracer<Args>>)
-//! let tracer_config = Tracer::new(xlayer_args.full_trace);
+//! let tracer = Tracer::new(xlayer_args.full_trace);
 //!
 //! // Build the Engine API with tracer middleware
 //! let xlayer_engine_builder = XLayerEngineApiBuilder::new(op_engine_builder)
 //!     .with_middleware({
-//!         let config = tracer_config.clone();
+//!         let config = tracer.clone();
 //!         move || EngineApiTracer::new(config)
 //!     });
 //!
 //! // Add RPC tracing middleware
 //! let add_ons = op_node
 //!     .add_ons()
-//!     .with_rpc_middleware(RpcTracerLayer::new(tracer_config.clone()))
+//!     .with_rpc_middleware(RpcTracerLayer::new(tracer.clone()))
 //!     .with_engine_api(xlayer_engine_builder);
 //!
 //! // Later, in extend_rpc_modules, initialize blockchain tracer
-//! tracer_config.initialize_blockchain_tracer(ctx.node());
+//! tracer.initialize_blockchain_tracer(ctx.node());
 //! ```
 //!
 //! # Implementing Custom Event Handlers

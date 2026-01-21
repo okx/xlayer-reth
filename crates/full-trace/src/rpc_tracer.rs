@@ -22,16 +22,16 @@ pub struct RpcTracerLayer<Args>
 where
     Args: Clone + Send + Sync + 'static,
 {
-    config: Arc<Tracer<Args>>,
+    tracer: Arc<Tracer<Args>>,
 }
 
 impl<Args> RpcTracerLayer<Args>
 where
     Args: Clone + Send + Sync + 'static,
 {
-    /// Create a new RPC tracer layer with a shared tracer configuration.
-    pub fn new(config: Arc<Tracer<Args>>) -> Self {
-        Self { config }
+    /// Create a new RPC tracer layer with a shared tracer.
+    pub fn new(tracer: Arc<Tracer<Args>>) -> Self {
+        Self { tracer }
     }
 }
 
@@ -42,7 +42,7 @@ where
     type Service = RpcTracerService<S, Args>;
 
     fn layer(&self, inner: S) -> Self::Service {
-        RpcTracerService { inner, config: self.config.clone() }
+        RpcTracerService { inner, tracer: self.tracer.clone() }
     }
 }
 
@@ -56,7 +56,7 @@ where
     Args: Clone + Send + Sync + 'static,
 {
     inner: S,
-    config: Arc<Tracer<Args>>,
+    tracer: Arc<Tracer<Args>>,
 }
 
 impl<S, Args> RpcServiceT for RpcTracerService<S, Args>
@@ -85,7 +85,7 @@ where
             method
         );
 
-        let config = self.config.clone();
+        let tracer = self.tracer.clone();
         let inner = self.inner.clone();
         let method_owned = method.to_string();
 
@@ -99,7 +99,7 @@ where
                 && let Some(tx_hash_str) = result.as_str()
                 && let Ok(tx_hash) = tx_hash_str.parse::<B256>()
             {
-                config.on_recv_transaction(&method_owned, tx_hash);
+                tracer.on_recv_transaction(&method_owned, tx_hash);
             }
 
             response

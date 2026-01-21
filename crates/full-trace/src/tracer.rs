@@ -1,4 +1,4 @@
-//! Tracer configuration for full trace support
+//! Tracer for full trace support
 
 use alloy_primitives::B256;
 use alloy_rpc_types_engine::ForkchoiceState;
@@ -153,8 +153,8 @@ where
     ///
     /// # Example
     /// ```rust,ignore
-    /// let config = Tracer::new(xlayer_args);
-    /// config.initialize_blockchain_tracer(ctx.node());
+    /// let tracer = Tracer::new(xlayer_args);
+    /// tracer.initialize_blockchain_tracer(ctx.node());
     /// ```
     pub fn initialize_blockchain_tracer<Node>(self: &Arc<Self>, node: &Node)
     where
@@ -171,11 +171,11 @@ where
 
         tracing::info!(target: "xlayer::full_trace::blockchain", "Initializing blockchain tracer for canonical state stream");
 
-        let config = self.clone();
+        let tracer = self.clone();
         task_executor.spawn_critical(
             "xlayer-blockchain-tracer",
             Box::pin(async move {
-                crate::handle_canonical_state_stream(canonical_stream, config).await;
+                crate::handle_canonical_state_stream(canonical_stream, tracer).await;
             }),
         );
     }

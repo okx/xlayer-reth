@@ -87,20 +87,20 @@ fn main() {
             //
             // Tracer is a simple struct with only Args generic, making it easy to share.
             // It returns Arc<Tracer<Args>> directly from new().
-            let tracer_config = Tracer::new(xlayer_args.full_trace);
+            let tracer = Tracer::new(xlayer_args.full_trace);
             let op_engine_builder = OpEngineApiBuilder::<OpEngineValidatorBuilder>::default();
 
             // Use EngineApiTracer as the middleware with built-in event handlers
             let xlayer_engine_builder = XLayerEngineApiBuilder::new(op_engine_builder)
                 .with_middleware({
-                    let config = tracer_config.clone();
-                    move || EngineApiTracer::new(config)
+                    let tracer = tracer.clone();
+                    move || EngineApiTracer::new(tracer)
                 });
 
             let add_ons = op_node
                 .add_ons()
                 .with_rpc_middleware(LegacyRpcRouterLayer::new(legacy_config))
-                .with_rpc_middleware(RpcTracerLayer::new(tracer_config.clone()))
+                .with_rpc_middleware(RpcTracerLayer::new(tracer.clone()))
                 .with_engine_api(xlayer_engine_builder);
 
             // Create the XLayer payload service builder
@@ -119,7 +119,7 @@ fn main() {
                     let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
 
                     // Initialize blockchain tracer to monitor canonical state changes
-                    tracer_config.initialize_blockchain_tracer(ctx.node());
+                    tracer.initialize_blockchain_tracer(ctx.node());
 
                     // Initialize flashblocks RPC service if not in flashblocks sequencer mode
                     if !args.node_args.flashblocks.enabled {

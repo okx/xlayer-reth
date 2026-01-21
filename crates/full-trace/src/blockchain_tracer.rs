@@ -15,14 +15,14 @@ use tracing::{debug, info};
 ///
 /// # Parameters
 /// - `stream`: The canonical state notification stream from the blockchain provider
-/// - `config`: The tracer configuration that handles events
+/// - `tracer`: The tracer that handles events
 ///
 /// # Note
 /// This function is called internally by `Tracer::initialize_blockchain_tracer()`.
 /// You typically don't need to call this directly.
 pub async fn handle_canonical_state_stream<Args, N>(
     mut stream: impl StreamExt<Item = CanonStateNotification<N>> + Unpin,
-    config: Arc<Tracer<Args>>,
+    tracer: Arc<Tracer<Args>>,
 ) where
     Args: Clone + Send + Sync + 'static,
     N: reth_primitives_traits::NodePrimitives + 'static,
@@ -46,12 +46,12 @@ pub async fn handle_canonical_state_stream<Args, N>(
                     let block_info = BlockInfo { block_number, block_hash };
 
                     // Notify block commit
-                    config.on_block_commit(&block_info);
+                    tracer.on_block_commit(&block_info);
 
                     // Notify each transaction commit
                     for tx in sealed_block.body().transactions() {
                         let tx_hash = *tx.tx_hash();
-                        config.on_tx_commit(&block_info, tx_hash);
+                        tracer.on_tx_commit(&block_info, tx_hash);
                     }
                 }
             }
@@ -81,12 +81,12 @@ pub async fn handle_canonical_state_stream<Args, N>(
                     let block_info = BlockInfo { block_number, block_hash };
 
                     // Notify block commit
-                    config.on_block_commit(&block_info);
+                    tracer.on_block_commit(&block_info);
 
                     // Notify each transaction commit
                     for tx in sealed_block.body().transactions() {
                         let tx_hash = *tx.tx_hash();
-                        config.on_tx_commit(&block_info, tx_hash);
+                        tracer.on_tx_commit(&block_info, tx_hash);
                     }
                 }
             }
