@@ -110,7 +110,7 @@ pub mod helpers {
         call_frame: &GethCallFrame,
     ) -> Result<Vec<PreExecInnerTx>, PreExecError> {
         let mut inner_txs = Vec::new();
-        convert_call_frame_recursive(call_frame, &mut inner_txs, 0, 0, String::new(), false);
+        convert_call_frame_recursive(call_frame, &mut inner_txs, 0, 0, String::new(), false, None);
         let has_deep = inner_txs.iter().any(|it| it.dept > 0);
         let has_failed = inner_txs.iter().any(|it| it.is_error || !it.error.is_empty());
         if !(has_deep || has_failed) {
@@ -127,6 +127,7 @@ pub mod helpers {
         index: i64,
         depth_index_root: String,
         parent_error: bool,
+        parent_from: Option<Address>,
     ) {
         let mut is_error = parent_error;
         let mut error_msg = String::new();
@@ -179,10 +180,13 @@ pub mod helpers {
                     }
                 }
                 "delegatecall" => {
-                    let hex = format!("{:?}", frame.from);
-                    if let Some(s) = hex.strip_prefix("0x") {
-                        inner.trace_address =
-                            format!("0x000000000000000000000000{}", s.to_lowercase());
+                    // trace_address is the caller
+                    if let Some(addr) = parent_from {
+                        let hex = format!("{addr:?}");
+                        if let Some(s) = hex.strip_prefix("0x") {
+                            inner.trace_address =
+                                format!("0x000000000000000000000000{}", s.to_lowercase());
+                        }
                     }
                 }
                 _ => {}
@@ -209,6 +213,7 @@ pub mod helpers {
                     i as i64,
                     next_root.clone(),
                     parent_err,
+                    Some(frame.from),
                 );
             }
         }
@@ -458,6 +463,7 @@ pub trait PreExec: EthCall {
         index: i64,
         depth_index_root: String,
         parent_error: bool,
+        parent_from: Option<Address>,
     ) {
         helpers::convert_call_frame_recursive(
             frame,
@@ -466,6 +472,7 @@ pub trait PreExec: EthCall {
             index,
             depth_index_root,
             parent_error,
+            parent_from,
         )
     }
 
@@ -868,7 +875,7 @@ mod tests {
             revert_reason: None,
         };
 
-        helpers::convert_call_frame_recursive(&frame, &mut out, 0, 0, String::new(), false);
+        helpers::convert_call_frame_recursive(&frame, &mut out, 0, 0, String::new(), false, None);
 
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].dept, 0);
