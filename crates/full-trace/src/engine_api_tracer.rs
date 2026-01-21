@@ -30,6 +30,7 @@ type InnerOpEngineApi<Provider, EngineT, Pool, Validator, ChainSpec> =
 ///
 /// This struct uses `Tracer<Args>` for shared configuration, keeping the type
 /// signature cleaner while still satisfying the necessary trait bounds through PhantomData.
+#[derive(Clone)]
 pub struct EngineApiTracer<Provider, EngineT, Pool, Validator, ChainSpec, Args>
 where
     EngineT: EngineTypes<ExecutionData = OpExecutionData>,
@@ -62,17 +63,6 @@ where
     /// Get the inner OpEngineApi.
     pub fn inner(&self) -> Option<&OpEngineApi<Provider, EngineT, Pool, Validator, ChainSpec>> {
         self.inner.as_ref().map(|arc| arc.as_ref())
-    }
-}
-
-impl<Provider, EngineT, Pool, Validator, ChainSpec, Args> Clone
-    for EngineApiTracer<Provider, EngineT, Pool, Validator, ChainSpec, Args>
-where
-    EngineT: EngineTypes<ExecutionData = OpExecutionData>,
-    Args: Clone + Send + Sync + 'static,
-{
-    fn clone(&self) -> Self {
-        Self { inner: self.inner.clone(), tracer: self.tracer.clone(), _phantom: PhantomData }
     }
 }
 
