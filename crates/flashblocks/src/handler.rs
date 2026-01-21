@@ -33,7 +33,7 @@ where
 
         let metrics = Arc::new(OpRBuilderMetrics::default());
         let ws_pub = Arc::new(
-            WebSocketPublisher::new(ws_addr, metrics)
+            WebSocketPublisher::new(ws_addr, metrics, op_args.flashblocks.ws_subscriber_limit)
                 .map_err(|e| eyre::eyre!("Failed to create WebSocket publisher: {e}"))?,
         );
 
