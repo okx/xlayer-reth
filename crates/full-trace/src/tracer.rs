@@ -1,9 +1,6 @@
 //! Tracer for full trace support
 
 use alloy_primitives::B256;
-use alloy_rpc_types_engine::ForkchoiceState;
-use op_alloy_rpc_types_engine::OpExecutionData;
-use reth_node_api::EngineTypes;
 use std::sync::Arc;
 
 /// Block information for tracing.
@@ -41,32 +38,23 @@ where
         Arc::new(Self { xlayer_args })
     }
 
-    /// Handle fork choice updated events.
+    /// Handle block build start events.
     ///
-    /// This method is called when a fork choice update API is invoked (before execution).
-    /// Implement your custom tracing logic here.
+    /// This method is called when a block build process is initiated via fork choice update.
+    /// It is only called when payload attributes are present, indicating a new block is being built.
     ///
     /// # Parameters
     /// - `version`: The fork choice updated version (e.g., "v1", "v2", "v3")
-    /// - `state`: The fork choice state containing head, safe, and finalized block hashes
-    /// - `attrs`: Optional payload attributes for block building
-    pub fn on_fork_choice_updated<EngineT: EngineTypes<ExecutionData = OpExecutionData>>(
-        &self,
-        version: &str,
-        state: &ForkchoiceState,
-        _attrs: &Option<EngineT::PayloadAttributes>,
-    ) {
+    /// - `new_block_number`: The block number of the new block being built
+    pub fn on_block_build_start(&self, version: &str, new_block_number: u64) {
         tracing::info!(
-            target: "xlayer::full_trace::fork_choice_updated",
-            "Fork choice updated {} called: head={:?}, safe={:?}, finalized={:?}, has_attrs={}",
+            target: "xlayer::full_trace::block_build",
+            "Block build start {} called: new_block_number={}",
             version,
-            state.head_block_hash,
-            state.safe_block_hash,
-            state.finalized_block_hash,
-            _attrs.is_some()
+            new_block_number
         );
 
-        // TODO: add SeqBlockBuildStart here
+        // TODO: add SeqBlockBuildStart here, use xlayer_args if you want
     }
 
     /// Handle new payload events.

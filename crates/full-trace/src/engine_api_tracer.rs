@@ -23,7 +23,7 @@ use reth_rpc_api::IntoEngineApiRpcModule;
 use reth_storage_api::{BlockReader, HeaderProvider, StateProviderFactory};
 use reth_transaction_pool::TransactionPool;
 use std::{marker::PhantomData, sync::Arc};
-use tracing::{info, trace};
+use tracing::{info, trace, warn};
 
 use reth_optimism_node::OpEngineApiBuilder;
 
@@ -43,10 +43,12 @@ where
 {
     /// The inner OpEngineApi (set during build)
     inner: Option<InnerOpEngineApi<Provider, EngineT, Pool, Validator, ChainSpec>>,
+    /// The provider to query block information
+    provider: Option<Provider>,
     /// The tracer that handles events
     tracer: Arc<Tracer<Args>>,
     /// Phantom data for unused type parameters
-    _phantom: PhantomData<(Provider, EngineT, Pool, Validator, ChainSpec)>,
+    _phantom: PhantomData<(EngineT, Pool, Validator, ChainSpec)>,
 }
 
 impl<Provider, EngineT, Pool, Validator, ChainSpec, Args>
@@ -57,7 +59,7 @@ where
 {
     /// Create a new Engine API tracer with a shared tracer.
     pub fn new(tracer: Arc<Tracer<Args>>) -> Self {
-        Self { inner: None, tracer, _phantom: PhantomData }
+        Self { inner: None, provider: None, tracer, _phantom: PhantomData }
     }
 
     /// Set the inner OpEngineApi.
@@ -65,9 +67,35 @@ where
         self.inner = Some(Arc::new(inner));
     }
 
+    /// Set the provider for querying block information.
+    pub fn set_provider(&mut self, provider: Provider) {
+        self.provider = Some(provider);
+    }
+
     /// Get the inner OpEngineApi.
     pub fn inner(&self) -> Option<&OpEngineApi<Provider, EngineT, Pool, Validator, ChainSpec>> {
         self.inner.as_ref().map(|arc| arc.as_ref())
+    }
+}
+
+impl<Provider, EngineT, Pool, Validator, ChainSpec, Args>
+    EngineApiTracer<Provider, EngineT, Pool, Validator, ChainSpec, Args>
+where
+    Provider: HeaderProvider,
+    EngineT: EngineTypes<ExecutionData = OpExecutionData>,
+    Args: Clone + Send + Sync + 'static,
+{
+    /// Query the new block number for a fork choice update with payload attributes.
+    /// Returns None if provider is not set or if the head block cannot be found.
+    fn query_new_block_number(&self, head_block_hash: B256) -> Option<u64>
+    where
+        Provider: HeaderProvider,
+    {
+        use alloy_consensus::BlockHeader as _;
+
+        self.provider.as_ref().and_then(|provider| {
+            provider.header(head_block_hash).ok().flatten().map(|header| header.number() + 1)
+        })
     }
 }
 
@@ -187,12 +215,19 @@ where
             payload_attributes.is_some()
         );
 
-        // Call the tracer before execution
-        self.tracer.on_fork_choice_updated::<EngineT>(
-            "v1",
-            &fork_choice_state,
-            &payload_attributes,
-        );
+        // Call the tracer if building a new block
+        if payload_attributes.is_some() {
+            if let Some(new_block_number) =
+                self.query_new_block_number(fork_choice_state.head_block_hash)
+            {
+                self.tracer.on_block_build_start("v1", new_block_number);
+            } else {
+                warn!(
+                    target: "xlayer::full_trace::engine",
+                    "Could not query head block for fork_choice_updated_v1"
+                );
+            }
+        }
 
         match self.inner() {
             Some(inner) => {
@@ -220,12 +255,19 @@ where
             payload_attributes.is_some()
         );
 
-        // Call the tracer before execution
-        self.tracer.on_fork_choice_updated::<EngineT>(
-            "v2",
-            &fork_choice_state,
-            &payload_attributes,
-        );
+        // Call the tracer if building a new block
+        if payload_attributes.is_some() {
+            if let Some(new_block_number) =
+                self.query_new_block_number(fork_choice_state.head_block_hash)
+            {
+                self.tracer.on_block_build_start("v2", new_block_number);
+            } else {
+                warn!(
+                    target: "xlayer::full_trace::engine",
+                    "Could not query head block for fork_choice_updated_v2"
+                );
+            }
+        }
 
         match self.inner() {
             Some(inner) => {
@@ -253,12 +295,19 @@ where
             payload_attributes.is_some()
         );
 
-        // Call the tracer before execution
-        self.tracer.on_fork_choice_updated::<EngineT>(
-            "v3",
-            &fork_choice_state,
-            &payload_attributes,
-        );
+        // Call the tracer if building a new block
+        if payload_attributes.is_some() {
+            if let Some(new_block_number) =
+                self.query_new_block_number(fork_choice_state.head_block_hash)
+            {
+                self.tracer.on_block_build_start("v3", new_block_number);
+            } else {
+                warn!(
+                    target: "xlayer::full_trace::engine",
+                    "Could not query head block for fork_choice_updated_v3"
+                );
+            }
+        }
 
         match self.inner() {
             Some(inner) => {
@@ -468,6 +517,8 @@ where
 
         info!(target: "xlayer::engine", "XLayer Engine API initialized with tracer middleware");
 
+        // Store the provider for querying block information
+        self.set_provider(ctx.node.provider().clone());
         self.set_inner(op_engine_api);
         Ok(self)
     }
