@@ -110,7 +110,7 @@ pub mod helpers {
         call_frame: &GethCallFrame,
     ) -> Result<Vec<PreExecInnerTx>, PreExecError> {
         let mut inner_txs = Vec::new();
-        convert_call_frame_recursive(call_frame, &mut inner_txs, 0, 0, String::new(), false);
+        convert_call_frame_recursive(call_frame, &mut inner_txs, 0, 0, String::new(), false, None);
         let has_deep = inner_txs.iter().any(|it| it.dept > 0);
         let has_failed = inner_txs.iter().any(|it| it.is_error || !it.error.is_empty());
         if !(has_deep || has_failed) {
@@ -127,6 +127,7 @@ pub mod helpers {
         index: i64,
         depth_index_root: String,
         parent_error: bool,
+        parent_from: Option<Address>,
     ) {
         let mut is_error = parent_error;
         let mut error_msg = String::new();
@@ -170,8 +171,25 @@ pub mod helpers {
             if let Some(stripped) = inner.to.strip_prefix("0x") {
                 inner.to = format!("0x000000000000000000000000{}", stripped.to_lowercase());
             }
-            if inner.call_type == "callcode" {
-                inner.code_address = frame.to.map(|a| format!("{a:?}")).unwrap_or_default();
+            match inner.call_type.as_str() {
+                "callcode" if frame.to.is_some() => {
+                    let hex = format!("{:?}", frame.to.unwrap());
+                    if let Some(s) = hex.strip_prefix("0x") {
+                        inner.code_address =
+                            format!("0x000000000000000000000000{}", s.to_lowercase());
+                    }
+                }
+                "delegatecall" => {
+                    // trace_address is the caller
+                    if let Some(addr) = parent_from {
+                        let hex = format!("{addr:?}");
+                        if let Some(s) = hex.strip_prefix("0x") {
+                            inner.trace_address =
+                                format!("0x000000000000000000000000{}", s.to_lowercase());
+                        }
+                    }
+                }
+                _ => {}
             }
             let current_root = if depth_index_root.is_empty() {
                 format!("_{index}")
@@ -186,6 +204,10 @@ pub mod helpers {
         if !frame.calls.is_empty() {
             let next_root =
                 if depth == 0 { String::new() } else { format!("{depth_index_root}_{index}") };
+            // For delegatecall, caller (msg.sender) stays the same, so pass parent_from unchanged
+            // For other call types, the current frame becomes the new caller
+            let is_delegatecall = frame.typ.to_string().to_lowercase() == "delegatecall";
+            let next_parent_from = if is_delegatecall { parent_from } else { Some(frame.from) };
             for (i, nested) in frame.calls.iter().enumerate() {
                 let parent_err = out.last().map(|x| x.is_error).unwrap_or(false);
                 convert_call_frame_recursive(
@@ -195,6 +217,7 @@ pub mod helpers {
                     i as i64,
                     next_root.clone(),
                     parent_err,
+                    next_parent_from,
                 );
             }
         }
@@ -444,6 +467,7 @@ pub trait PreExec: EthCall {
         index: i64,
         depth_index_root: String,
         parent_error: bool,
+        parent_from: Option<Address>,
     ) {
         helpers::convert_call_frame_recursive(
             frame,
@@ -452,6 +476,7 @@ pub trait PreExec: EthCall {
             index,
             depth_index_root,
             parent_error,
+            parent_from,
         )
     }
 
@@ -854,7 +879,7 @@ mod tests {
             revert_reason: None,
         };
 
-        helpers::convert_call_frame_recursive(&frame, &mut out, 0, 0, String::new(), false);
+        helpers::convert_call_frame_recursive(&frame, &mut out, 0, 0, String::new(), false, None);
 
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].dept, 0);
