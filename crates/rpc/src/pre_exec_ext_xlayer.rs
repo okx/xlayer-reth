@@ -204,6 +204,10 @@ pub mod helpers {
         if !frame.calls.is_empty() {
             let next_root =
                 if depth == 0 { String::new() } else { format!("{depth_index_root}_{index}") };
+            // For delegatecall, caller (msg.sender) stays the same, so pass parent_from unchanged
+            // For other call types, the current frame becomes the new caller
+            let is_delegatecall = frame.typ.to_string().to_lowercase() == "delegatecall";
+            let next_parent_from = if is_delegatecall { parent_from } else { Some(frame.from) };
             for (i, nested) in frame.calls.iter().enumerate() {
                 let parent_err = out.last().map(|x| x.is_error).unwrap_or(false);
                 convert_call_frame_recursive(
@@ -213,7 +217,7 @@ pub mod helpers {
                     i as i64,
                     next_root.clone(),
                     parent_err,
-                    Some(frame.from),
+                    next_parent_from,
                 );
             }
         }
