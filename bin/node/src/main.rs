@@ -100,8 +100,8 @@ fn main() {
             let add_ons = op_node
                 .add_ons()
                 .with_rpc_middleware((
-                    LegacyRpcRouterLayer::new(legacy_config),
-                    RpcTracerLayer::new(tracer.clone()),
+                    RpcTracerLayer::new(tracer.clone()),      // Execute first
+                    LegacyRpcRouterLayer::new(legacy_config), // Execute second
                 ))
                 .with_engine_api(xlayer_engine_builder);
 
