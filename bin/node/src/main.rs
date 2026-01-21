@@ -99,8 +99,10 @@ fn main() {
 
             let add_ons = op_node
                 .add_ons()
-                .with_rpc_middleware(LegacyRpcRouterLayer::new(legacy_config))
-                .with_rpc_middleware(RpcTracerLayer::new(tracer.clone()))
+                .with_rpc_middleware((
+                    LegacyRpcRouterLayer::new(legacy_config),
+                    RpcTracerLayer::new(tracer.clone()),
+                ))
                 .with_engine_api(xlayer_engine_builder);
 
             // Create the XLayer payload service builder
