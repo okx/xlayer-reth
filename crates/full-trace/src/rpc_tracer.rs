@@ -89,7 +89,7 @@ where
         let inner = self.inner.clone();
         let method_owned = method.to_string();
 
-        Either::Right(Box::pin(async move {
+        Either::Right(async move {
             // Call the inner service
             let response = inner.call(req).await;
 
@@ -103,7 +103,7 @@ where
             }
 
             response
-        }))
+        })
     }
 
     fn batch<'a>(&self, req: Batch<'a>) -> impl Future<Output = Self::BatchResponse> + Send + 'a {
