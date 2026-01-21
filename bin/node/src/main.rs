@@ -83,11 +83,10 @@ fn main() {
             };
 
             // For X Layer full link monitor
-            let monitor = XLayerMonitor::new(xlayer_args.engine_api.monitor);
+            let monitor = XLayerMonitor::new(xlayer_args.monitor);
 
             // Custom X Layer engine api builder
-            let engine_api_builder =
-                XLayerEngineApiBuilder::new(xlayer_args.engine_api, monitor.clone());
+            let engine_api_builder = XLayerEngineApiBuilder::new(monitor.clone());
 
             let add_ons = op_node
                 .add_ons()

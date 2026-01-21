@@ -2,7 +2,7 @@ use clap::Args;
 use std::time::Duration;
 use url::Url;
 
-use xlayer_full_trace::args::EngineApiArgs;
+use xlayer_monitor::FullLinkMonitorArgs;
 
 /// X Layer specific configuration flags
 #[derive(Debug, Clone, Args, PartialEq, Eq, Default)]
@@ -12,9 +12,9 @@ pub struct XLayerArgs {
     #[command(flatten)]
     pub legacy: LegacyRpcArgs,
 
-    /// Custom engine API configuration
+    /// Full link monitor configuration
     #[command(flatten)]
-    pub engine_api: EngineApiArgs,
+    pub monitor: FullLinkMonitorArgs,
 
     /// Enable custom flashblocks subscription
     #[arg(
@@ -37,7 +37,7 @@ impl XLayerArgs {
     /// Validate all X Layer configurations
     pub fn validate(&self) -> Result<(), String> {
         self.legacy.validate()?;
-        self.full_trace.validate()?;
+        self.monitor.validate()?;
         Ok(())
     }
 
@@ -284,7 +284,7 @@ mod tests {
                 legacy_rpc_url: Some("invalid-url".to_string()),
                 legacy_rpc_timeout: Duration::from_secs(30),
             },
-            engine_api: EngineApiArgs::default(),
+            monitor: FullLinkMonitorArgs::default(),
             enable_flashblocks_subscription: false,
             flashblocks_subscription_max_addresses: 1000,
         };

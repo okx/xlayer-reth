@@ -1,6 +1,5 @@
 //! X Layer Engine API
 
-use crate::args::EngineApiArgs;
 use xlayer_monitor::{BlockInfo, XLayerMonitor};
 
 use async_trait::async_trait;
@@ -225,13 +224,12 @@ where
 }
 
 pub struct XLayerEngineApiBuilder {
-    pub engine_api: EngineApiArgs,
     pub monitor: Arc<XLayerMonitor>,
 }
 
 impl XLayerEngineApiBuilder {
-    pub fn new(args: EngineApiArgs, monitor: Arc<XLayerMonitor>) -> Self {
-        Self { engine_api: args, monitor }
+    pub fn new(monitor: Arc<XLayerMonitor>) -> Self {
+        Self { monitor }
     }
 }
 
