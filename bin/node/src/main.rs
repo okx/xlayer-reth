@@ -1,8 +1,10 @@
 #![allow(missing_docs, rustdoc::missing_crate_level_docs)]
 
+mod add_ons;
 mod args;
 mod payload;
 
+use add_ons::XLayerAddOns;
 use args::XLayerArgs;
 use clap::Parser;
 use payload::XLayerPayloadServiceBuilder;
@@ -22,11 +24,10 @@ use reth_optimism_node::OpNode;
 use reth_rpc_server_types::RethRpcModule;
 
 use xlayer_chainspec::XLayerChainSpecParser;
-use xlayer_engine_api::XLayerEngineApiBuilder;
 use xlayer_flashblocks::handler::FlashblocksService;
 use xlayer_flashblocks::subscription::FlashblocksPubSub;
-use xlayer_legacy_rpc::{layer::LegacyRpcRouterLayer, LegacyRpcRouterConfig};
-use xlayer_monitor::{RpcMonitorLayer, XLayerMonitor};
+use xlayer_legacy_rpc::LegacyRpcRouterConfig;
+use xlayer_monitor::{PayloadListener, XLayerMonitor};
 use xlayer_rpc::xlayer_ext::{XlayerRpcExt, XlayerRpcExtApiServer};
 
 #[global_allocator]
@@ -85,16 +86,8 @@ fn main() {
             // For X Layer full link monitor
             let monitor = XLayerMonitor::new(xlayer_args.monitor);
 
-            // Custom X Layer engine api builder
-            let engine_api_builder = XLayerEngineApiBuilder::new(monitor.clone());
-
-            let add_ons = op_node
-                .add_ons()
-                .with_rpc_middleware((
-                    RpcMonitorLayer::new(monitor.clone()),    // Execute first
-                    LegacyRpcRouterLayer::new(legacy_config), // Execute second
-                ))
-                .with_engine_api(engine_api_builder);
+            // Wrap add_ons with XLayerAddOns to initialize engine events monitor
+            let add_ons = XLayerAddOns::new(op_node.add_ons(), monitor.clone(), legacy_config);
 
             // Create the X Layer payload service builder
             // It handles both flashblocks and default modes internally
@@ -111,8 +104,11 @@ fn main() {
                 .extend_rpc_modules(move |ctx| {
                     let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
 
-                    // Initialize full link monitor canon state handle
-                    monitor.init_canon_state_handle(ctx.node());
+                    // Initialize payload events listener to track block building
+                    // Uses BuiltPayload events for accurate block numbers
+                    let payload_listener = PayloadListener::new(monitor.clone());
+                    payload_listener
+                        .listen(ctx.node().payload_builder_handle(), ctx.node().task_executor());
 
                     // Initialize flashblocks RPC service if not in flashblocks sequencer mode
                     if !args.node_args.flashblocks.enabled {
