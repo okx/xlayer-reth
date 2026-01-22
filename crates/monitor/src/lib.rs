@@ -9,5 +9,5 @@ mod rpc;
 
 pub use args::FullLinkMonitorArgs;
 pub use handle::start_monitor_handle;
-pub use monitor::{BlockInfo, XLayerMonitor};
+pub use monitor::XLayerMonitor;
 pub use rpc::RpcMonitorLayer;

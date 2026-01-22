@@ -6,15 +6,6 @@ use tracing::debug;
 use alloy_eips::BlockNumHash;
 use alloy_primitives::B256;
 
-/// Block information for tracing.
-#[derive(Debug, Clone)]
-pub struct BlockInfo {
-    /// The block number
-    pub block_number: u64,
-    /// The block hash
-    pub block_hash: B256,
-}
-
 /// XLayerMonitor holds monitoring hook logic for full link monitoring requirements.
 #[derive(Clone, Default)]
 pub struct XLayerMonitor {
@@ -50,25 +41,25 @@ impl XLayerMonitor {
 
     /// Handle block received event (when newPayload is called).
     /// This is triggered by ConsensusEngineEvent::BlockReceived.
-    pub fn on_block_received(&self, block_num_hash: BlockNumHash) {
+    pub fn on_block_received(&self, num_hash: BlockNumHash) {
         debug!(
             target: "xlayer::monitor",
-            block_number = block_num_hash.number,
-            block_hash = %block_num_hash.hash,
+            block_number = num_hash.number,
+            block_hash = %num_hash.hash,
             "block received from consensus engine"
         );
         // TODO: add RpcBlockReceiveEnd here based on xlayer_args
     }
 
     /// Handle transaction commits to the canonical chain.
-    pub fn on_tx_commit(&self, _block_info: &BlockInfo, tx_hash: B256) {
+    pub fn on_tx_commit(&self, _num_hash: BlockNumHash, tx_hash: B256) {
         debug!(target: "xlayer::monitor", tx_hash = %tx_hash, "transaction committed to canonical chain");
         // TODO: add SeqTxExecutionEnd here if flashblocks is disabled, you can use xlayer_args if you want
     }
 
     /// Handle block commits to the canonical chain.
-    pub fn on_block_commit(&self, block_info: &BlockInfo) {
-        debug!(target: "xlayer::monitor", block_number = block_info.block_number, block_hash = %block_info.block_hash, "block committed to canonical chain");
+    pub fn on_block_commit(&self, num_hash: BlockNumHash) {
+        debug!(target: "xlayer::monitor", block_number = num_hash.number, block_hash = %num_hash.hash, "block committed to canonical chain");
         // TODO: add SeqBlockBuildEnd, RpcBlockInsertEnd here
     }
 }

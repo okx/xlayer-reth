@@ -1,10 +1,11 @@
-use crate::monitor::{BlockInfo, XLayerMonitor};
+use crate::monitor::XLayerMonitor;
 
 use futures::StreamExt;
 use std::sync::Arc;
 use tracing::info;
 
 use alloy_consensus::{transaction::TxHashRef, BlockHeader as _};
+use alloy_eips::BlockNumHash;
 use reth_engine_primitives::ConsensusEngineEvent;
 use reth_payload_builder::PayloadBuilderHandle;
 use reth_payload_builder_primitives::Events;
@@ -58,12 +59,12 @@ pub fn start_monitor_handle<N, T, Provider>(
                         }
                         ConsensusEngineEvent::CanonicalBlockAdded(executed_block, _duration) => {
                             let sealed_block = &executed_block.recovered_block;
-                            let block_info = BlockInfo { block_number: sealed_block.header().number(), block_hash: sealed_block.hash() };
+                            let num_hash = BlockNumHash::new(sealed_block.header().number(), sealed_block.hash());
 
                             for tx in sealed_block.body().transactions() {
-                                monitor.on_tx_commit(&block_info, *tx.tx_hash());
+                                monitor.on_tx_commit(num_hash, *tx.tx_hash());
                             }
-                            monitor.on_block_commit(&block_info);
+                            monitor.on_block_commit(num_hash);
                         }
                         _ => {}
                     }
