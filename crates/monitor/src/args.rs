@@ -9,11 +9,9 @@ pub struct FullLinkMonitorArgs {
         default_value = "false"
     )]
     pub enable: bool,
-    // TODO: add more full link monitor configuration here
 }
 
 impl FullLinkMonitorArgs {
-    /// Validate full link monitor configuration
     pub fn validate(&self) -> Result<(), String> {
         Ok(())
     }
