@@ -3,9 +3,10 @@
 mod args;
 mod payload;
 
+use payload::XLayerPayloadServiceBuilder;
+
 use args::XLayerArgs;
 use clap::Parser;
-use payload::XLayerPayloadServiceBuilder;
 use std::sync::Arc;
 use tracing::info;
 
