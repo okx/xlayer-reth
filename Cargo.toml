@@ -20,6 +20,7 @@ members = [
     "crates/tests",
     "crates/legacy-rpc",
     "crates/version",
+    "crates/node",
 
     "bin/tools",
     "bin/node",
@@ -68,6 +69,7 @@ xlayer-reth-node = { path = "bin/node" }
 xlayer-rpc = { path = "crates/rpc" }
 xlayer-legacy-rpc = { path = "crates/legacy-rpc" }
 xlayer-version = { path = "crates/version" }
+xlayer-node-lib = { path = "crates/node" }
 
 # ==============================================================================
 # Reth Dependencies (points to our fork)

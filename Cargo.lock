@@ -14032,6 +14032,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "xlayer-node-lib"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "eyre",
+ "humantime",
+ "op-rbuilder",
+ "reth",
+ "reth-db",
+ "reth-node-api",
+ "reth-node-builder",
+ "reth-optimism-chainspec",
+ "reth-optimism-evm",
+ "reth-optimism-node",
+ "reth-optimism-payload-builder",
+ "reth-payload-builder",
+ "reth-provider",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "xlayer-reth-node"
 version = "0.1.0"
 dependencies = [
