@@ -58,9 +58,7 @@ pub fn start_monitor_handle<N, T, Provider>(
                         }
                         ConsensusEngineEvent::CanonicalBlockAdded(executed_block, _duration) => {
                             let sealed_block = &executed_block.recovered_block;
-                            let block_hash = sealed_block.hash();
-                            let block_number = sealed_block.header().number();
-                            let block_info = BlockInfo { block_number, block_hash };
+                            let block_info = BlockInfo { block_number: sealed_block.header().number(), block_hash: sealed_block.hash() };
 
                             for tx in sealed_block.body().transactions() {
                                 monitor.on_tx_commit(&block_info, *tx.tx_hash());
