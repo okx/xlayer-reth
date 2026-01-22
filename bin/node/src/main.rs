@@ -107,10 +107,7 @@ fn main() {
                 .with_types_and_provider::<OpNode, BlockchainProvider<_>>()
                 .with_components(op_node.components().payload(payload_builder))
                 .with_add_ons(add_ons)
-                .on_component_initialized(move |_ctx| {
-                    // TODO: Initialize XLayer components here
-                    Ok(())
-                })
+                .on_component_initialized(move |_ctx| Ok(()))
                 .extend_rpc_modules(move |ctx| {
                     let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
 

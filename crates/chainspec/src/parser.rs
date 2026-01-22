@@ -88,7 +88,7 @@ fn xlayer_chain_value_parser(s: &str) -> eyre::Result<Arc<OpChainSpec>> {
                 return Ok(op_chain_spec);
             }
 
-            // Otherwise, parse as genesis file/JSON with XLayer extensions
+            // Otherwise, parse as genesis file/JSON with XLayer plugins
             Ok(Arc::new(parse_genesis(s)?.into()))
         }
     }
