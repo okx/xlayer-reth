@@ -20,7 +20,7 @@ pub struct BlockInfo {
 pub struct XLayerMonitor {
     /// XLayer arguments (reserved for future use)
     #[allow(dead_code)]
-    args: FullLinkMonitorArgs,
+    pub args: FullLinkMonitorArgs,
 }
 
 impl XLayerMonitor {
@@ -29,7 +29,7 @@ impl XLayerMonitor {
     }
 
     /// Handle transaction received via RPC (eth_sendRawTransaction).
-    pub fn on_recv_transaction(&self, _method: &str, _tx_hash: B256) {
+    pub fn on_recv_transaction(&self, _method: &str, tx_hash: B256) {
         debug!(target: "xlayer::monitor", tx_hash = %tx_hash, "transaction received via RPC");
         // TODO: add RpcReceiveTxEnd, SeqReceiveTxEnd here, use xlayer_args if you want
     }
@@ -61,13 +61,13 @@ impl XLayerMonitor {
     }
 
     /// Handle transaction commits to the canonical chain.
-    pub fn on_tx_commit(&self, _block_info: &BlockInfo, _tx_hash: B256) {
+    pub fn on_tx_commit(&self, _block_info: &BlockInfo, tx_hash: B256) {
         debug!(target: "xlayer::monitor", tx_hash = %tx_hash, "transaction committed to canonical chain");
         // TODO: add SeqTxExecutionEnd here if flashblocks is disabled, you can use xlayer_args if you want
     }
 
     /// Handle block commits to the canonical chain.
-    pub fn on_block_commit(&self, _block_info: &BlockInfo) {
+    pub fn on_block_commit(&self, block_info: &BlockInfo) {
         debug!(target: "xlayer::monitor", block_number = block_info.block_number, block_hash = %block_info.block_hash, "block committed to canonical chain");
         // TODO: add SeqBlockBuildEnd, RpcBlockInsertEnd here
     }

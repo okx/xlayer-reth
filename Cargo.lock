@@ -14038,6 +14038,7 @@ dependencies = [
  "reth-tokio-util",
  "serde_json",
  "tokio",
+ "tokio-stream",
  "tower",
  "tracing",
 ]

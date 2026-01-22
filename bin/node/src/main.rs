@@ -1,10 +1,8 @@
 #![allow(missing_docs, rustdoc::missing_crate_level_docs)]
 
-mod add_ons;
 mod args;
 mod payload;
 
-use add_ons::XLayerAddOns;
 use args::XLayerArgs;
 use clap::Parser;
 use payload::XLayerPayloadServiceBuilder;
@@ -26,8 +24,8 @@ use reth_rpc_server_types::RethRpcModule;
 use xlayer_chainspec::XLayerChainSpecParser;
 use xlayer_flashblocks::handler::FlashblocksService;
 use xlayer_flashblocks::subscription::FlashblocksPubSub;
-use xlayer_legacy_rpc::LegacyRpcRouterConfig;
-use xlayer_monitor::{PayloadListener, XLayerMonitor};
+use xlayer_legacy_rpc::{layer::LegacyRpcRouterLayer, LegacyRpcRouterConfig};
+use xlayer_monitor::{start_monitor_handle, RpcMonitorLayer, XLayerMonitor};
 use xlayer_rpc::xlayer_ext::{XlayerRpcExt, XlayerRpcExtApiServer};
 
 #[global_allocator]
@@ -86,14 +84,16 @@ fn main() {
             // For X Layer full link monitor
             let monitor = XLayerMonitor::new(xlayer_args.monitor);
 
-            // Wrap add_ons with XLayerAddOns to initialize engine events monitor
-            let add_ons = XLayerAddOns::new(op_node.add_ons(), monitor.clone(), legacy_config);
+            let add_ons = op_node.add_ons().with_rpc_middleware((
+                RpcMonitorLayer::new(monitor.clone()),    // Execute first
+                LegacyRpcRouterLayer::new(legacy_config), // Execute second
+            ));
 
             // Create the X Layer payload service builder
             // It handles both flashblocks and default modes internally
             let payload_builder = XLayerPayloadServiceBuilder::new(args.node_args.clone())?;
 
-            let NodeHandle { node: _node, node_exit_future } = builder
+            let NodeHandle { node, node_exit_future } = builder
                 .with_types_and_provider::<OpNode, BlockchainProvider<_>>()
                 .with_components(op_node.components().payload(payload_builder))
                 .with_add_ons(add_ons)
@@ -103,13 +103,6 @@ fn main() {
                 })
                 .extend_rpc_modules(move |ctx| {
                     let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
-
-                    // Initialize payload events listener to track block building
-                    // Uses Attributes and BuiltPayload events for accurate block numbers
-                    let payload_listener =
-                        PayloadListener::new(monitor.clone(), ctx.provider().clone());
-                    payload_listener
-                        .listen(ctx.node().payload_builder_handle(), ctx.node().task_executor());
 
                     // Initialize flashblocks RPC service if not in flashblocks sequencer mode
                     if !args.node_args.flashblocks.enabled {
@@ -170,6 +163,15 @@ fn main() {
                     builder.launch_with(launcher)
                 })
                 .await?;
+
+            // Start X Layer full link monitor handle
+            start_monitor_handle(
+                node.tasks(),
+                monitor.clone(),
+                node.provider().clone(),
+                node.payload_builder_handle.clone(),
+                node.add_ons_handle.engine_events.new_listener(),
+            );
 
             node_exit_future.await
         })
