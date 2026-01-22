@@ -56,15 +56,15 @@ impl ConsensusListener {
                             let sealed_block = &executed_block.recovered_block;
                             let block_hash = sealed_block.hash();
                             let block_number = sealed_block.header().number();
-
-                            // Notify block commit
                             let block_info = BlockInfo { block_number, block_hash };
-                            monitor.on_block_commit(&block_info);
 
                             // Notify each transaction commit
                             for tx in sealed_block.body().transactions() {
                                 monitor.on_tx_commit(&block_info, *tx.tx_hash());
                             }
+
+                            // Notify block commit
+                            monitor.on_block_commit(&block_info);
                         }
                         _ => {
                             // Ignore other events

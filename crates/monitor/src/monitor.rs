@@ -34,23 +34,18 @@ impl XLayerMonitor {
         // TODO: add RpcReceiveTxEnd, SeqReceiveTxEnd here, use xlayer_args if you want
     }
 
-    /// Handle block commits to the canonical chain.
-    pub fn on_block_commit(&self, _block_info: &BlockInfo) {
-        info!(target: "xlayer::monitor", "monitor: Block committed to canonical chain");
-        // TODO: add SeqBlockBuildEnd, RpcBlockInsertEnd here
-    }
-
-    /// Handle transaction commits to the canonical chain.
-    pub fn on_tx_commit(&self, _block_info: &BlockInfo, _tx_hash: B256) {
-        info!(target: "xlayer::monitor", "monitor: Transaction committed to canonical chain");
-        // TODO: add SeqTxExecutionEnd here if flashblocks is disabled, you can use xlayer_args if you want
-    }
-
-    /// Handle block building start event (when payload attributes are received).
-    /// This is triggered when forkchoiceUpdated contains payload attributes.
+    /// Handle block build start event (when payload attributes are received from CL).
+    /// This is triggered when the consensus layer sends payload attributes via engine_forkchoiceUpdatedV*.
     pub fn on_block_build_start(&self, block_number: u64) {
-        info!(target: "xlayer::monitor", block_number, "monitor: Block building started");
-        // TODO: add SeqBlockBuildStart or RpcBlockBuildStart here based on xlayer_args
+        info!(target: "xlayer::monitor", block_number, "monitor: Block build started");
+        // TODO: add SeqBlockBuildStart here based on xlayer_args
+    }
+
+    /// Handle block send start event (when payload is built and ready to send).
+    /// This is triggered when CL calls getPayload and the block is built.
+    pub fn on_block_send_start(&self, block_number: u64) {
+        info!(target: "xlayer::monitor", block_number, "monitor: Block send started");
+        // TODO: add SeqBlockSendStart here based on xlayer_args
     }
 
     /// Handle block received event (when newPayload is called).
@@ -62,6 +57,18 @@ impl XLayerMonitor {
             block_hash = %block_num_hash.hash,
             "monitor: Block received from consensus engine"
         );
-        // TODO: add RpcBlockReceiveEnd or SeqBlockReceiveEnd here based on xlayer_args
+        // TODO: add RpcBlockReceiveEnd here based on xlayer_args
+    }
+
+    /// Handle transaction commits to the canonical chain.
+    pub fn on_tx_commit(&self, _block_info: &BlockInfo, _tx_hash: B256) {
+        info!(target: "xlayer::monitor", "monitor: Transaction committed to canonical chain");
+        // TODO: add SeqTxExecutionEnd here if flashblocks is disabled, you can use xlayer_args if you want
+    }
+
+    /// Handle block commits to the canonical chain.
+    pub fn on_block_commit(&self, _block_info: &BlockInfo) {
+        info!(target: "xlayer::monitor", "monitor: Block committed to canonical chain");
+        // TODO: add SeqBlockBuildEnd, RpcBlockInsertEnd here
     }
 }

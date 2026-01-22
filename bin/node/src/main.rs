@@ -105,8 +105,9 @@ fn main() {
                     let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
 
                     // Initialize payload events listener to track block building
-                    // Uses BuiltPayload events for accurate block numbers
-                    let payload_listener = PayloadListener::new(monitor.clone());
+                    // Uses Attributes and BuiltPayload events for accurate block numbers
+                    let payload_listener =
+                        PayloadListener::new(monitor.clone(), ctx.provider().clone());
                     payload_listener
                         .listen(ctx.node().payload_builder_handle(), ctx.node().task_executor());
 
