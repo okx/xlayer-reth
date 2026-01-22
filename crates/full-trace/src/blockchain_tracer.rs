@@ -20,11 +20,10 @@ use tracing::{debug, info};
 /// # Note
 /// This function is called internally by `Tracer::initialize_blockchain_tracer()`.
 /// You typically don't need to call this directly.
-pub async fn handle_canonical_state_stream<Args, N>(
+pub async fn handle_canonical_state_stream<N>(
     mut stream: impl StreamExt<Item = CanonStateNotification<N>> + Unpin,
-    tracer: Arc<Tracer<Args>>,
+    tracer: Arc<Tracer>,
 ) where
-    Args: Clone + Send + Sync + 'static,
     N: reth_primitives_traits::NodePrimitives + 'static,
     N::SignedTx: alloy_consensus::transaction::TxHashRef,
 {

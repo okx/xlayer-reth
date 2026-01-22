@@ -6,6 +6,12 @@ use op_alloy_rpc_types_engine::OpExecutionData;
 use reth_node_api::EngineTypes;
 use std::sync::Arc;
 
+#[derive(Default, Clone)]
+pub struct TracerConfig {
+    #[allow(dead_code)]
+    enable: bool,
+}
+
 /// Block information for tracing.
 #[derive(Debug, Clone)]
 pub struct BlockInfo {
@@ -19,26 +25,17 @@ pub struct BlockInfo {
 ///
 /// This is the main entry point for the full trace functionality.
 /// It manages the tracing configuration and implements event handlers.
-///
-/// This struct is intentionally simple with only the `Args` generic parameter,
-/// making it easy to share across different tracer components without
-/// carrying unnecessary type complexity.
-pub struct Tracer<Args>
-where
-    Args: Clone + Send + Sync + 'static,
-{
-    /// XLayer arguments (reserved for future use)
+#[derive(Default, Clone)]
+pub struct Tracer {
+    /// reserved for future use
     #[allow(dead_code)]
-    xlayer_args: Args,
+    xlayer_args: TracerConfig,
 }
 
-impl<Args> Tracer<Args>
-where
-    Args: Clone + Send + Sync + 'static,
-{
+impl Tracer {
     /// Create a new Tracer instance wrapped in Arc for sharing.
-    pub fn new(xlayer_args: Args) -> Arc<Self> {
-        Arc::new(Self { xlayer_args })
+    pub fn new(enable: bool) -> Arc<Self> {
+        Arc::new(Self { xlayer_args: TracerConfig { enable } })
     }
 
     /// Handle fork choice updated events.
@@ -163,8 +160,8 @@ where
     {
         use reth_chain_state::CanonStateSubscriptions as _;
 
-        let provider = node.provider().clone();
-        let task_executor = node.task_executor().clone();
+        let provider = node.provider();
+        let task_executor = node.task_executor();
 
         // Subscribe to canonical state updates
         let canonical_stream = provider.canonical_state_stream();
@@ -178,14 +175,5 @@ where
                 crate::handle_canonical_state_stream(canonical_stream, tracer).await;
             }),
         );
-    }
-}
-
-impl<Args> Default for Tracer<Args>
-where
-    Args: Clone + Send + Sync + Default + 'static,
-{
-    fn default() -> Self {
-        Self { xlayer_args: Args::default() }
     }
 }

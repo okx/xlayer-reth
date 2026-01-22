@@ -14,32 +14,20 @@ use tower::Layer;
 use tracing::trace;
 
 /// Layer that creates the RPC tracing middleware.
-///
-/// This layer is generic only over `Args`, making it simple to use
-/// while still providing access to the shared `Tracer`.
 #[derive(Clone)]
-pub struct RpcTracerLayer<Args>
-where
-    Args: Clone + Send + Sync + 'static,
-{
-    tracer: Arc<Tracer<Args>>,
+pub struct RpcTracerLayer {
+    tracer: Arc<Tracer>,
 }
 
-impl<Args> RpcTracerLayer<Args>
-where
-    Args: Clone + Send + Sync + 'static,
-{
+impl RpcTracerLayer {
     /// Create a new RPC tracer layer with a shared tracer.
-    pub fn new(tracer: Arc<Tracer<Args>>) -> Self {
+    pub fn new(tracer: Arc<Tracer>) -> Self {
         Self { tracer }
     }
 }
 
-impl<S, Args> Layer<S> for RpcTracerLayer<Args>
-where
-    Args: Clone + Send + Sync + 'static,
-{
-    type Service = RpcTracerService<S, Args>;
+impl<S> Layer<S> for RpcTracerLayer {
+    type Service = RpcTracerService<S>;
 
     fn layer(&self, inner: S) -> Self::Service {
         RpcTracerService { inner, tracer: self.tracer.clone() }
@@ -48,21 +36,17 @@ where
 
 /// RPC tracer service that intercepts RPC calls.
 ///
-/// This service is generic only over the inner service `S` and `Args`,
+/// This service is generic only over the inner service `S`,
 /// making it simple to use while still providing access to the shared `Tracer`.
 #[derive(Clone)]
-pub struct RpcTracerService<S, Args>
-where
-    Args: Clone + Send + Sync + 'static,
-{
+pub struct RpcTracerService<S> {
     inner: S,
-    tracer: Arc<Tracer<Args>>,
+    tracer: Arc<Tracer>,
 }
 
-impl<S, Args> RpcServiceT for RpcTracerService<S, Args>
+impl<S> RpcServiceT for RpcTracerService<S>
 where
     S: RpcServiceT<MethodResponse = MethodResponse> + Send + Sync + Clone + 'static,
-    Args: Clone + Send + Sync + 'static,
 {
     type MethodResponse = MethodResponse;
     type NotificationResponse = S::NotificationResponse;

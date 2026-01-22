@@ -33,30 +33,28 @@ type InnerOpEngineApi<Provider, EngineT, Pool, Validator, ChainSpec> =
 
 /// Engine API tracer middleware that wraps OpEngineApi and traces all Engine API calls.
 ///
-/// This struct uses `Tracer<Args>` for shared configuration, keeping the type
+/// This struct uses `Tracer` for shared configuration, keeping the type
 /// signature cleaner while still satisfying the necessary trait bounds through PhantomData.
 #[derive(Clone)]
-pub struct EngineApiTracer<Provider, EngineT, Pool, Validator, ChainSpec, Args>
+pub struct EngineApiTracer<Provider, EngineT, Pool, Validator, ChainSpec>
 where
     EngineT: EngineTypes<ExecutionData = OpExecutionData>,
-    Args: Clone + Send + Sync + 'static,
 {
     /// The inner OpEngineApi (set during build)
     inner: Option<InnerOpEngineApi<Provider, EngineT, Pool, Validator, ChainSpec>>,
     /// The tracer that handles events
-    tracer: Arc<Tracer<Args>>,
+    tracer: Arc<Tracer>,
     /// Phantom data for unused type parameters
     _phantom: PhantomData<(Provider, EngineT, Pool, Validator, ChainSpec)>,
 }
 
-impl<Provider, EngineT, Pool, Validator, ChainSpec, Args>
-    EngineApiTracer<Provider, EngineT, Pool, Validator, ChainSpec, Args>
+impl<Provider, EngineT, Pool, Validator, ChainSpec>
+    EngineApiTracer<Provider, EngineT, Pool, Validator, ChainSpec>
 where
     EngineT: EngineTypes<ExecutionData = OpExecutionData>,
-    Args: Clone + Send + Sync + 'static,
 {
     /// Create a new Engine API tracer with a shared tracer.
-    pub fn new(tracer: Arc<Tracer<Args>>) -> Self {
+    pub fn new(tracer: Arc<Tracer>) -> Self {
         Self { inner: None, tracer, _phantom: PhantomData }
     }
 
@@ -72,15 +70,14 @@ where
 }
 
 #[async_trait]
-impl<Provider, EngineT, Pool, Validator, ChainSpec, Args> OpEngineApiServer<EngineT>
-    for EngineApiTracer<Provider, EngineT, Pool, Validator, ChainSpec, Args>
+impl<Provider, EngineT, Pool, Validator, ChainSpec> OpEngineApiServer<EngineT>
+    for EngineApiTracer<Provider, EngineT, Pool, Validator, ChainSpec>
 where
     Provider: HeaderProvider + BlockReader + StateProviderFactory + 'static,
     EngineT: EngineTypes<ExecutionData = OpExecutionData>,
     Pool: TransactionPool + 'static,
     Validator: EngineApiValidator<EngineT>,
     ChainSpec: EthereumHardforks + Send + Sync + 'static,
-    Args: Clone + Send + Sync + 'static,
 {
     async fn new_payload_v2(&self, payload: ExecutionPayloadInputV2) -> RpcResult<PayloadStatus> {
         trace!(
@@ -418,11 +415,10 @@ where
     }
 }
 
-impl<Provider, EngineT, Pool, Validator, ChainSpec, Args> IntoEngineApiRpcModule
-    for EngineApiTracer<Provider, EngineT, Pool, Validator, ChainSpec, Args>
+impl<Provider, EngineT, Pool, Validator, ChainSpec> IntoEngineApiRpcModule
+    for EngineApiTracer<Provider, EngineT, Pool, Validator, ChainSpec>
 where
     EngineT: EngineTypes<ExecutionData = OpExecutionData>,
-    Args: Clone + Send + Sync + 'static,
     Self: OpEngineApiServer<EngineT>,
 {
     fn into_rpc_module(self) -> RpcModule<()> {
@@ -434,14 +430,13 @@ where
 // This eliminates the need for a separate middleware wrapper crate
 //
 // We use OpEngineValidatorBuilder directly here since we need a concrete type
-impl<N, Args> EngineApiBuilder<N>
+impl<N> EngineApiBuilder<N>
     for EngineApiTracer<
         N::Provider,
         <N::Types as NodeTypes>::Payload,
         N::Pool,
         <OpEngineValidatorBuilder as PayloadValidatorBuilder<N>>::Validator,
         <N::Types as NodeTypes>::ChainSpec,
-        Args,
     >
 where
     N: FullNodeComponents<
@@ -455,7 +450,6 @@ where
     OpEngineValidatorBuilder: PayloadValidatorBuilder<N>,
     <OpEngineValidatorBuilder as PayloadValidatorBuilder<N>>::Validator:
         EngineApiValidator<<N::Types as NodeTypes>::Payload>,
-    Args: Clone + Send + Sync + 'static,
 {
     type EngineApi = Self;
 

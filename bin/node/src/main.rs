@@ -85,8 +85,8 @@ fn main() {
             // EngineApiTracer now directly implements EngineApiBuilder
             //
             // Tracer is a simple struct with only Args generic, making it easy to share.
-            // It returns Arc<Tracer<Args>> directly from new().
-            let tracer = Tracer::new(xlayer_args.full_trace);
+            // It returns Arc<Tracer> directly from new().
+            let tracer = Tracer::new(xlayer_args.full_trace.enable);
 
             // Create EngineApiTracer directly - it implements EngineApiBuilder
             let engine_tracer = EngineApiTracer::new(tracer.clone());
