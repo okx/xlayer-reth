@@ -257,8 +257,7 @@ where
                     }
                 }
                 Err(err) => {
-                    debug!(target:"xlayer_legacy_rpc", "Error getting block by hash = {err:?}, forwarding to legacy");
-                    return service.forward_to_legacy(req).await;
+                    debug!(target:"xlayer_legacy_rpc", "Error getting block by hash = {err:?}");
                 }
             }
         } else {
