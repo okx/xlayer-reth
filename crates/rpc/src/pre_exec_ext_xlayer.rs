@@ -42,9 +42,7 @@ pub mod helpers {
     {
         let req = tx.as_ref();
         let from: Address = req.from.ok_or_else(|| PreExecError::check_args("from is nil"))?;
-        if req.to.is_none() {
-            return Err(PreExecError::check_args("to is nil"));
-        }
+        // Note: to field can be None for contract creation transactions
 
         let msg_nonce =
             req.nonce.ok_or_else(|| PreExecError::check_args(format!("{from}, nonce is nil")))?;
@@ -615,19 +613,20 @@ mod tests {
     }
 
     #[test]
-    fn test_pre_args_check_missing_to() {
-        let mut db = MockDatabase::new();
+    fn test_pre_args_check_contract_creation() {
+        // Test that missing 'to' is valid for contract creation transactions
         let from = Address::random();
+        let mut db = MockDatabase::new().with_account(from, U256::from(1000), 1);
         let mut tx = OpTransactionRequest::default();
         tx.as_mut().from = Some(from);
         tx.as_mut().nonce = Some(1);
+        tx.as_mut().gas = Some(100000);
+        // to is None - this is a contract creation transaction
 
         let result = helpers::validate_pre_args(&mut db, &tx, None, 0);
 
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.code, 1003); // CHECK_PRE_ARGS_ERROR_CODE
-        assert!(err.msg.contains("to is nil"));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 100000);
     }
 
     #[test]
