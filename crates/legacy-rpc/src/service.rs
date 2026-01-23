@@ -193,44 +193,15 @@ where
             return Either::Left(self.inner.batch(req));
         }
 
-        let config = self.config.clone();
         let service = self.clone();
 
         Either::Right(Box::pin(async move {
-            let cutoff_block = config.cutoff_block;
-
-            // Categorize requests and track their positions
-            let mut legacy_batch_requests = Vec::new(); // Requests that go directly to legacy as a batch
-            let mut individual_requests = Vec::new(); // Requests processed via call() method
-            let mut response_index = 0;
+            let mut requests = Vec::new();
 
             for entry in req {
                 match entry {
                     Ok(BatchEntry::Call(request)) => {
-                        let method = request.method_name();
-
-                        // Check if this request can be batched to legacy
-                        if is_legacy_routable(method)
-                            && need_parse_block(method)
-                            && !matches!(method, "eth_getLogs")
-                        {
-                            // Parse block parameter to determine if it goes to legacy batch
-                            let _p = request.params();
-                            let params = _p.as_str().unwrap_or("[]");
-                            let block_param =
-                                crate::parse_block_param(params, block_param_pos(method));
-
-                            if block_below_cutoff(method, block_param, cutoff_block) {
-                                // Can batch this to legacy
-                                legacy_batch_requests.push((request, response_index));
-                                response_index += 1;
-                                continue;
-                            }
-                        }
-
-                        // All other requests are processed individually via call()
-                        individual_requests.push((request, response_index));
-                        response_index += 1;
+                        requests.push(request);
                     }
                     Ok(BatchEntry::Notification(notif)) => {
                         // Process notification immediately (no response needed)
@@ -243,32 +214,11 @@ where
                 }
             }
 
-            // Responses must return in the same order as requests.
-            let mut responses: Vec<Option<MethodResponse>> =
-                (0..response_index).map(|_| None).collect();
-
-            // Process legacy batch requests as a single batch
-            if !legacy_batch_requests.is_empty() {
-                debug!(
-                    target: "xlayer_legacy_rpc",
-                    "Forwarding {} requests to legacy as batch",
-                    legacy_batch_requests.len()
-                );
-                let legacy_responses = service.forward_batch_to_legacy(legacy_batch_requests).await;
-                for (response, pos) in legacy_responses {
-                    responses[pos] = Some(response);
-                }
-            }
-
-            // Process individual requests using the call() method
+            // Process all requests using the call() method
             // This ensures consistent routing logic between single and batch requests
-            for (request, pos) in individual_requests {
-                let response = service.call(request).await;
-                responses[pos] = Some(response);
-            }
-
             let mut batch_response = BatchResponseBuilder::new_with_limit(usize::MAX);
-            for response in responses.into_iter().flatten() {
+            for request in requests {
+                let response = service.call(request).await;
                 if let Err(err) = batch_response.append(response) {
                     return err;
                 }
