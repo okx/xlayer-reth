@@ -1,3 +1,5 @@
+use crate::args::FullLinkMonitorArgs;
+
 use std::sync::Arc;
 use tracing::debug;
 
@@ -7,12 +9,16 @@ use alloy_primitives::B256;
 /// XLayerMonitor holds monitoring hook logic for full link monitoring requirements.
 #[derive(Clone, Default)]
 pub struct XLayerMonitor {
+    /// XLayer arguments (reserved for future use)
+    #[allow(dead_code)]
+    pub args: FullLinkMonitorArgs,
+    /// Flashblocks enabled flag
     pub flashblocks_enabled: bool,
 }
 
 impl XLayerMonitor {
-    pub fn new(flashblocks_enabled: bool) -> Arc<Self> {
-        Arc::new(Self { flashblocks_enabled })
+    pub fn new(args: FullLinkMonitorArgs, flashblocks_enabled: bool) -> Arc<Self> {
+        Arc::new(Self { args, flashblocks_enabled })
     }
 
     /// Handle transaction received via RPC (eth_sendRawTransaction).
