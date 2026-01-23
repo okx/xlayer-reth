@@ -296,8 +296,6 @@ where
                 let _ = inner.notification(notif).await;
             }
 
-            // Build batch response using BatchResponseBuilder
-            let mut batch_response = BatchResponseBuilder::new_with_limit(usize::MAX);
             let mut responses: Vec<Option<MethodResponse>> =
                 (0..response_index).map(|_| None).collect();
 
@@ -359,7 +357,7 @@ where
                 responses[pos] = Some(response);
             }
 
-            // Append all responses in order to the batch response builder
+            let mut batch_response = BatchResponseBuilder::new_with_limit(usize::MAX);
             for response in responses.into_iter().flatten() {
                 if let Err(err) = batch_response.append(response) {
                     return err;
