@@ -14027,7 +14027,6 @@ dependencies = [
  "op-alloy-rpc-types-engine",
  "reth-chain-state",
  "reth-engine-primitives",
- "reth-node-api",
  "reth-payload-builder",
  "reth-payload-builder-primitives",
  "reth-payload-primitives",
