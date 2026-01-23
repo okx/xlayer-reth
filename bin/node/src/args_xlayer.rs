@@ -2,6 +2,8 @@ use clap::Args;
 use std::time::Duration;
 use url::Url;
 
+use crate::transaction_trace_args::TransactionTraceArgs;
+
 /// X Layer specific configuration flags
 #[derive(Debug, Clone, Args, PartialEq, Eq, Default)]
 #[command(next_help_heading = "X Layer")]
@@ -25,6 +27,10 @@ pub struct XLayerArgs {
         default_value = "1000"
     )]
     pub flashblocks_subscription_max_addresses: usize,
+
+    /// Transaction trace configuration
+    #[command(flatten)]
+    pub tx_trace: TransactionTraceArgs,
 }
 
 impl XLayerArgs {
@@ -256,16 +262,15 @@ mod tests {
             "https://mainnet.infura.io/v3/test",
             "--rpc.legacy-timeout",
             "45s",
+            "--xlayer.enable-innertx",
             "--xlayer.flashblocks-subscription",
-            "--xlayer.flashblocks-subscription-max-addresses",
-            "2000",
         ])
         .args;
 
+        assert!(args.enable_inner_tx);
         assert!(args.enable_flashblocks_subscription);
         assert!(args.legacy.legacy_rpc_url.is_some());
         assert_eq!(args.legacy.legacy_rpc_timeout, Duration::from_secs(45));
-        assert_eq!(args.flashblocks_subscription_max_addresses, 2000);
         assert!(args.validate().is_ok());
     }
 
@@ -276,8 +281,8 @@ mod tests {
                 legacy_rpc_url: Some("invalid-url".to_string()),
                 legacy_rpc_timeout: Duration::from_secs(30),
             },
+            enable_inner_tx: false,
             enable_flashblocks_subscription: false,
-            flashblocks_subscription_max_addresses: 1000,
         };
 
         let result = args.validate();

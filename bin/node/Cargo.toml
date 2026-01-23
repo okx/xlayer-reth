@@ -21,6 +21,9 @@ xlayer-version.workspace = true
 
 # reth
 reth.workspace = true
+# reth-monitor: 使用分支名（开发阶段）
+# TODO: 改为使用具体的 commit
+reth-monitor = { git = "https://github.com/okx/reth", branch = "leo/support-full-trace" }
 reth-optimism-node.workspace = true
 reth-optimism-cli.workspace = true
 reth-primitives.workspace = true

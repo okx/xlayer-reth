@@ -1,6 +1,7 @@
 #![allow(missing_docs, rustdoc::missing_crate_level_docs)]
 
 mod args_xlayer;
+mod transaction_trace_args;
 
 use std::sync::Arc;
 
@@ -65,6 +66,21 @@ fn main() {
             if let Err(e) = args.xlayer_args.validate() {
                 eprintln!("XLayer configuration error: {e}");
                 std::process::exit(1);
+            }
+
+            // X Layer: Initialize transaction tracer if enabled
+            if args.xlayer_args.tx_trace.enable {
+                use reth_monitor::{init_global_tracer, NodeType};
+                init_global_tracer(
+                    args.xlayer_args.tx_trace.enable,
+                    args.xlayer_args.tx_trace.output_path.clone(),
+                    NodeType::Unknown,
+                );
+                if let Some(ref path) = args.xlayer_args.tx_trace.output_path {
+                    tracing::info!(target: "reth::cli", ?path, "Transaction tracing enabled, output path configured");
+                } else {
+                    tracing::info!(target: "reth::cli", "Transaction tracing enabled, logging to console only");
+                }
             }
 
             let op_node = OpNode::new(args.node_args.rollup_args.clone());

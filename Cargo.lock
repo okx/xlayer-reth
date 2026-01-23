@@ -6297,7 +6297,7 @@ dependencies = [
 [[package]]
 name = "op-rbuilder"
 version = "0.2.13"
-source = "git+https://github.com/okx/op-rbuilder?tag=v0.2.1#e1fdbf3cdbfb43bf871782ef1715b7da550375f4"
+source = "git+https://github.com/okx/op-rbuilder?branch=leo%2Fsupporr-full-trace#e5a671085d74df04c2686782883a0891d7c502d3"
 dependencies = [
  "alloy-consensus",
  "alloy-contract",
@@ -6359,6 +6359,7 @@ dependencies = [
  "reth-execution-types",
  "reth-exex",
  "reth-metrics",
+ "reth-monitor",
  "reth-network-peers",
  "reth-node-api",
  "reth-node-builder",
@@ -6583,7 +6584,7 @@ dependencies = [
 [[package]]
 name = "p2p"
 version = "0.2.13"
-source = "git+https://github.com/okx/op-rbuilder?tag=v0.2.1#e1fdbf3cdbfb43bf871782ef1715b7da550375f4"
+source = "git+https://github.com/okx/op-rbuilder?branch=leo%2Fsupporr-full-trace#e5a671085d74df04c2686782883a0891d7c502d3"
 dependencies = [
  "derive_more",
  "eyre",
@@ -8764,6 +8765,15 @@ dependencies = [
  "metrics-derive",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "reth-monitor"
+version = "1.9.3"
+source = "git+https://github.com/okx/reth?branch=leo%2Fsupport-full-trace#d89a2dab8aec367fc7318e6d56a5b763404e219f"
+dependencies = [
+ "alloy-primitives",
+ "tracing",
 ]
 
 [[package]]
@@ -13897,6 +13907,7 @@ dependencies = [
  "reth",
  "reth-cli-util",
  "reth-exex",
+ "reth-monitor",
  "reth-node-api",
  "reth-optimism-chainspec",
  "reth-optimism-cli",
