@@ -338,4 +338,41 @@ mod tests {
             Some("0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890".into())
         );
     }
+
+    #[tokio::test]
+    #[should_panic(expected = "Valid JSON params")]
+    async fn test_parse_block_param_insufficient_validation_allows_json_injection() {
+        // This test demonstrates the vulnerability: parse_block_param uses is_block_hash
+        // which only checks length and "0x" prefix, but doesn't validate hexadecimal characters.
+        // An attacker can provide a 66-character string with JSON-reserved characters
+        // like quotes that will break JSON parsing when interpolated into call_eth_get_block_by_hash.
+
+        // Create a 66-character malicious string with a quote in the middle
+        let malicious_hash = "0x1234567890abcdef1234567890abcdef12345\"7890abcdef1234567890abcdef";
+
+        // Step 1: Attacker provides valid JSON params with the malicious hash
+        // (The JSON itself is valid because we properly escape it here)
+        let params_json = serde_json::to_string(&vec![malicious_hash]).unwrap();
+
+        // Step 2: parse_block_param extracts the malicious hash
+        // It accepts it because is_block_hash only checks length and "0x" prefix
+        let parsed_block = parse_block_param(&params_json, 0);
+        assert!(parsed_block.is_some());
+        let extracted_hash = parsed_block.unwrap();
+        assert_eq!(extracted_hash, malicious_hash);
+        assert_eq!(extracted_hash.len(), 66);
+        assert!(is_block_hash(&extracted_hash));
+
+        // Step 3: The extracted hash gets passed to call_eth_get_block_by_hash
+        // which uses format!() to interpolate it into JSON WITHOUT validation
+        let service = create_test_service(r#"{"jsonrpc":"2.0","id":1,"result":null}"#);
+
+        // This will panic because the malicious hash creates invalid JSON:
+        // format!(r#"["{block_hash}", false]"#) produces:
+        // ["0x1234...12345"7890...", false] - the quote breaks the JSON string
+        let _result = service.call_eth_get_block_by_hash(&extracted_hash, false).await;
+
+        // The panic occurs at RawValue::from_string().expect("Valid JSON params")
+        // in call_eth_get_block_by_hash at line 116
+    }
 }
