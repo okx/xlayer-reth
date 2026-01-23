@@ -886,4 +886,101 @@ mod tests {
         assert_eq!(out[0].call_type, "call");
         assert!(!out[0].is_error);
     }
+
+    #[test]
+    fn test_contract_creation_transaction_validation_and_frame_conversion() {
+        // Test complete flow: validation and call frame conversion for contract creation
+
+        // Part 1: Validate that contract creation transaction (to = None) passes validation
+        let from = Address::random();
+        let mut db = MockDatabase::new().with_account(from, U256::from(1_000_000), 0);
+
+        let mut tx = OpTransactionRequest::default();
+        tx.as_mut().from = Some(from);
+        tx.as_mut().to = None; // Contract creation - no 'to' address
+        tx.as_mut().nonce = Some(0);
+        tx.as_mut().gas = Some(5_000_000);
+        // Simulating contract bytecode
+        tx.as_mut().input = alloy_rpc_types_eth::TransactionInput::both(Bytes::from(vec![
+            0x60, 0x60, 0x60, 0x40, 0x52,
+        ]));
+
+        let result = helpers::validate_pre_args(&mut db, &tx, None, 0);
+        assert!(result.is_ok(), "Contract creation should pass validation");
+        assert_eq!(result.unwrap(), 5_000_000);
+
+        // Part 2: Verify call frame conversion handles contract creation (to = None in frame)
+        // In reality, REVM sets 'to' to the created contract address, but test edge case
+        let contract_creation_frame = GethCallFrame {
+            typ: "CREATE".to_string(),
+            from,
+            to: None, // Contract creation - no destination address initially
+            value: Some(U256::from(0)),
+            gas: U256::from(5_000_000),
+            gas_used: U256::from(100_000),
+            input: Bytes::from(vec![0x60, 0x60, 0x60, 0x40, 0x52]),
+            output: Some(Bytes::from(vec![0x60, 0x80, 0x60, 0x40])), // Deployed bytecode
+            error: None,
+            calls: vec![],
+            logs: vec![],
+            revert_reason: None,
+        };
+
+        let mut inner_txs = Vec::new();
+        helpers::convert_call_frame_recursive(
+            &contract_creation_frame,
+            &mut inner_txs,
+            0,
+            0,
+            String::new(),
+            false,
+            None,
+        );
+
+        assert_eq!(inner_txs.len(), 1);
+        assert_eq!(inner_txs[0].call_type, "create");
+        assert_eq!(inner_txs[0].to, ""); // Empty string for contract creation
+        assert!(!inner_txs[0].is_error);
+
+        // Part 3: Test nested call within contract creation
+        let nested_call = GethCallFrame {
+            typ: "CALL".to_string(),
+            from: Address::random(),
+            to: Some(Address::random()),
+            value: Some(U256::from(100)),
+            gas: U256::from(50_000),
+            gas_used: U256::from(21_000),
+            input: Bytes::default(),
+            output: Some(Bytes::default()),
+            error: None,
+            calls: vec![],
+            logs: vec![],
+            revert_reason: None,
+        };
+
+        let contract_creation_with_calls = GethCallFrame {
+            typ: "CREATE".to_string(),
+            from,
+            to: None, // Contract creation
+            value: Some(U256::from(0)),
+            gas: U256::from(5_000_000),
+            gas_used: U256::from(150_000),
+            input: Bytes::from(vec![0x60, 0x60, 0x60, 0x40, 0x52]),
+            output: Some(Bytes::from(vec![0x60, 0x80, 0x60, 0x40])),
+            error: None,
+            calls: vec![nested_call], // Contract constructor makes a call
+            logs: vec![],
+            revert_reason: None,
+        };
+
+        let result = helpers::convert_call_tracer_to_inner_txs(&contract_creation_with_calls);
+        assert!(result.is_ok(), "Should handle contract creation with nested calls");
+        let inner = result.unwrap();
+        assert_eq!(inner.len(), 2, "Should have parent CREATE and nested CALL");
+        assert_eq!(inner[0].call_type, "create");
+        assert_eq!(inner[0].dept, 0);
+        assert_eq!(inner[0].to, "");
+        assert_eq!(inner[1].call_type, "call");
+        assert_eq!(inner[1].dept, 1);
+    }
 }
