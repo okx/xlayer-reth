@@ -11,22 +11,6 @@ use tracing::debug;
 
 use crate::LegacyRpcRouterService;
 
-/// Indicates where a request should be routed
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-enum RouteDestination {
-    /// Route to local node
-    Local,
-    /// Route to legacy endpoint
-    Legacy,
-    /// Special handling for eth_getLogs
-    EthGetLogs,
-    /// Try local first, then legacy if empty/error
-    TryLocalThenLegacy,
-    /// Parse block parameter to determine routing
-    BlockParamMethod,
-}
-
 /// Only these methods should be considered for legacy routing.
 #[inline]
 pub fn is_legacy_routable(method: &str) -> bool {
@@ -209,17 +193,15 @@ where
             return Either::Left(self.inner.batch(req));
         }
 
-        let client = self.client.clone();
         let config = self.config.clone();
-        let inner = self.inner.clone();
+        let service = self.clone();
 
         Either::Right(Box::pin(async move {
             let cutoff_block = config.cutoff_block;
 
             // Categorize requests and track their positions
             let mut legacy_batch_requests = Vec::new(); // Requests that go directly to legacy as a batch
-            let mut individual_requests = Vec::new(); // Requests needing individual processing
-            let mut notifications = Vec::new();
+            let mut individual_requests = Vec::new(); // Requests processed via call() method
             let mut response_index = 0;
 
             for entry in req {
@@ -227,32 +209,12 @@ where
                     Ok(BatchEntry::Call(request)) => {
                         let method = request.method_name();
 
-                        if !is_legacy_routable(method) {
-                            // Not routable - process locally
-                            individual_requests.push((
-                                request,
-                                response_index,
-                                RouteDestination::Local,
-                            ));
-                            response_index += 1;
-                        } else if method == "eth_getLogs" {
-                            // Special hybrid handling needed
-                            individual_requests.push((
-                                request,
-                                response_index,
-                                RouteDestination::EthGetLogs,
-                            ));
-                            response_index += 1;
-                        } else if need_try_local_then_legacy(method) {
-                            // Try local first, then legacy
-                            individual_requests.push((
-                                request,
-                                response_index,
-                                RouteDestination::TryLocalThenLegacy,
-                            ));
-                            response_index += 1;
-                        } else if need_parse_block(method) {
-                            // Parse block parameter to determine if it goes to legacy
+                        // Check if this request can be batched to legacy
+                        if is_legacy_routable(method)
+                            && need_parse_block(method)
+                            && !matches!(method, "eth_getLogs")
+                        {
+                            // Parse block parameter to determine if it goes to legacy batch
                             let _p = request.params();
                             let params = _p.as_str().unwrap_or("[]");
                             let block_param =
@@ -262,27 +224,17 @@ where
                                 // Can batch this to legacy
                                 legacy_batch_requests.push((request, response_index));
                                 response_index += 1;
-                            } else {
-                                // Needs individual processing (block hash resolution or local)
-                                individual_requests.push((
-                                    request,
-                                    response_index,
-                                    RouteDestination::BlockParamMethod,
-                                ));
-                                response_index += 1;
+                                continue;
                             }
-                        } else {
-                            // Unexpected - process locally
-                            individual_requests.push((
-                                request,
-                                response_index,
-                                RouteDestination::Local,
-                            ));
-                            response_index += 1;
                         }
+
+                        // All other requests are processed individually via call()
+                        individual_requests.push((request, response_index));
+                        response_index += 1;
                     }
                     Ok(BatchEntry::Notification(notif)) => {
-                        notifications.push(notif);
+                        // Process notification immediately (no response needed)
+                        let _ = service.inner.notification(notif).await;
                     }
                     Err(_) => {
                         // Skip malformed entries
@@ -291,19 +243,9 @@ where
                 }
             }
 
-            // Process notifications (no responses)
-            for notif in notifications {
-                let _ = inner.notification(notif).await;
-            }
-
+            // Responses must return in the same order as requests.
             let mut responses: Vec<Option<MethodResponse>> =
                 (0..response_index).map(|_| None).collect();
-
-            let service = LegacyRpcRouterService {
-                inner: inner.clone(),
-                config: config.clone(),
-                client: client.clone(),
-            };
 
             // Process legacy batch requests as a single batch
             if !legacy_batch_requests.is_empty() {
@@ -318,42 +260,10 @@ where
                 }
             }
 
-            // Process individual requests with their specific routing logic
-            for (request, pos, route_dest) in individual_requests {
-                let response = match route_dest {
-                    RouteDestination::EthGetLogs => {
-                        crate::get_logs::handle_eth_get_logs(
-                            request,
-                            client.clone(),
-                            config.clone(),
-                            inner.clone(),
-                        )
-                        .await
-                    }
-                    RouteDestination::TryLocalThenLegacy => {
-                        handle_try_local_then_legacy(
-                            request,
-                            client.clone(),
-                            config.clone(),
-                            inner.clone(),
-                        )
-                        .await
-                    }
-                    RouteDestination::BlockParamMethod => {
-                        handle_block_param_methods(
-                            request,
-                            client.clone(),
-                            config.clone(),
-                            inner.clone(),
-                        )
-                        .await
-                    }
-                    RouteDestination::Local => inner.call(request).await,
-                    RouteDestination::Legacy => {
-                        // Shouldn't reach here, but handle it
-                        service.forward_to_legacy(request).await
-                    }
-                };
+            // Process individual requests using the call() method
+            // This ensures consistent routing logic between single and batch requests
+            for (request, pos) in individual_requests {
+                let response = service.call(request).await;
                 responses[pos] = Some(response);
             }
 
