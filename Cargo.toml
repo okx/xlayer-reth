@@ -69,6 +69,8 @@ xlayer-reth-node = { path = "bin/node" }
 xlayer-rpc = { path = "crates/rpc" }
 xlayer-version = { path = "crates/version" }
 
+# For X layer
+xlayer-trace-monitor = { git = "https://github.com/okx/xlayer-toolkit", rev = "0004d202181bb772821797cd54983e29f32cae07" }
 # ==============================================================================
 # Reth Dependencies (points to our fork)
 # ==============================================================================

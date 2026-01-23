@@ -19,6 +19,7 @@ xlayer-legacy-rpc.workspace = true
 xlayer-monitor.workspace = true
 xlayer-rpc.workspace = true
 xlayer-version.workspace = true
+xlayer-trace-monitor.workspace = true
 
 # reth
 reth.workspace = true

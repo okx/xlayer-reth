@@ -23,6 +23,8 @@ reth-storage-api.workspace = true
 reth-tasks.workspace = true
 reth-tokio-util.workspace = true
 
+xlayer-trace-monitor.workspace = true
+
 # Alloy dependencies
 alloy-consensus.workspace = true
 alloy-eips.workspace = true

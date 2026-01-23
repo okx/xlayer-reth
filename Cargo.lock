@@ -14040,6 +14040,7 @@ dependencies = [
  "tokio-stream",
  "tower",
  "tracing",
+ "xlayer-trace-monitor",
 ]
 
 [[package]]
@@ -14103,6 +14104,7 @@ dependencies = [
  "xlayer-legacy-rpc",
  "xlayer-monitor",
  "xlayer-rpc",
+ "xlayer-trace-monitor",
  "xlayer-version",
 ]
 
@@ -14159,6 +14161,15 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "xlayer-trace-monitor"
+version = "0.1.0"
+source = "git+https://github.com/okx/xlayer-toolkit?rev=0004d202181bb772821797cd54983e29f32cae07#0004d202181bb772821797cd54983e29f32cae07"
+dependencies = [
+ "hex",
  "tracing",
 ]
 

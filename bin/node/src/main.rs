@@ -67,6 +67,15 @@ fn main() {
                 std::process::exit(1);
             }
 
+            // Initialize global tracer if transaction trace is enabled
+            if args.xlayer_args.monitor.tx_trace_enable {
+                use std::path::PathBuf;
+                use xlayer_trace_monitor::init_global_tracer;
+                let output_path = PathBuf::from(&args.xlayer_args.monitor.tx_trace_output_path);
+                init_global_tracer(true, Some(output_path));
+                info!(target: "xlayer::monitor", "Global tracer initialized with output path: {}", args.xlayer_args.monitor.tx_trace_output_path);
+            }
+
             let op_node = OpNode::new(args.node_args.rollup_args.clone());
 
             let genesis_block = builder.config().chain.genesis().number.unwrap_or_default();
