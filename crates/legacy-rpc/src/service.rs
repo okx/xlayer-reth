@@ -257,7 +257,7 @@ where
                     }
                 }
                 Err(err) => {
-                    debug!(target:"xlayer_legacy_rpc", "Error getting block by hash = {err:?}");
+                    debug!(target:"xlayer_legacy_rpc", "Error getting block by hash = {err:?}")
                 }
             }
         } else {
