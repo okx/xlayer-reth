@@ -105,15 +105,22 @@ impl<S> LegacyRpcRouterService<S> {
         &self,
         block_hash: &str,
         full_transactions: bool,
-    ) -> Result<Option<u64>, serde_json::Error>
+    ) -> Result<Option<u64>, String>
     where
         S: RpcServiceT<MethodResponse = MethodResponse> + Send + Sync + Clone + 'static,
     {
-        // Construct the parameters JSON string
+        // Validate the block hash before using it to prevent JSON injection
+        if !is_valid_32_bytes_string(block_hash) {
+            return Err(format!("Invalid block hash format: {block_hash}"));
+        }
+
+        // Construct the parameters JSON string - now safe because we validated the hash
         let params_str = format!(r#"["{block_hash}", {full_transactions}]"#);
 
         let method = "eth_getBlockByHash";
-        let params_raw = RawValue::from_string(params_str).expect("Valid JSON params");
+        // Replace expect() with proper error propagation using ?
+        let params_raw = RawValue::from_string(params_str)
+            .map_err(|e| format!("Failed to create JSON params: {e}"))?;
         let id = Id::Number(1);
 
         // Create request using borrowed data
@@ -122,7 +129,8 @@ impl<S> LegacyRpcRouterService<S> {
         // Call inner service
         let res = self.inner.call(request).await;
 
-        let response = serde_json::from_str::<serde_json::Value>(res.as_json().get())?;
+        let response = serde_json::from_str::<serde_json::Value>(res.as_json().get())
+            .map_err(|e| e.to_string())?;
         let block_num = response
             .get("result")
             .and_then(|result| result.get("number"))
@@ -164,7 +172,28 @@ impl<S> LegacyRpcRouterService<S> {
     }
 }
 
+/// Validates that a string is a valid 32-byte hexadecimal string (block hash or similar).
+/// Checks that the string:
+/// - Has the "0x" prefix
+/// - Is exactly 66 characters long (0x + 64 hex chars = 32 bytes)
+/// - Contains only valid hexadecimal digits after the prefix
+///
+/// This function prevents JSON injection attacks by ensuring all characters are valid hex.
 #[inline]
+pub fn is_valid_32_bytes_string(hex: &str) -> bool {
+    // Must start with 0x and be exactly 66 characters
+    if !hex.starts_with("0x") || hex.len() != 66 {
+        return false;
+    }
+
+    // Check if all characters after 0x are valid hex - this prevents JSON injection
+    hex[2..].chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Deprecated: Use is_valid_32_bytes_string instead.
+/// This function only checks length and prefix, not hex validity.
+#[inline]
+#[deprecated(since = "0.1.0", note = "Use is_valid_32_bytes_string for proper validation")]
 pub fn is_block_hash(hex: &str) -> bool {
     if hex.starts_with("0x") {
         // Check if it's a block hash (66 chars) or block number
@@ -200,9 +229,13 @@ pub(crate) fn parse_block_param(params: &str, index: usize) -> Option<String> {
                 hex if hex.starts_with("0x") => {
                     // Check if it's a block hash (66 chars) or block number
                     if hex.len() == 66 {
-                        // This is a block hash, not a number
-                        // Return None to indicate can't extract number
-                        Some(hex.into())
+                        // Validate it's a proper 32-byte hex string to prevent JSON injection
+                        if is_valid_32_bytes_string(hex) {
+                            Some(hex.into())
+                        } else {
+                            // Invalid hex characters - reject it
+                            None
+                        }
                     } else {
                         // Parse as block number
                         u64::from_str_radix(&hex[2..], 16).ok().map(|n| n.to_string())
@@ -215,7 +248,12 @@ pub(crate) fn parse_block_param(params: &str, index: usize) -> Option<String> {
         // Handle object format: {"blockHash": "0x..."} or {"blockNumber": "0x..."}
         serde_json::Value::Object(obj) => {
             if let Some(serde_json::Value::String(hash)) = obj.get("blockHash") {
-                Some(hash.clone())
+                // Validate block hash to prevent JSON injection
+                if is_valid_32_bytes_string(hash) {
+                    Some(hash.clone())
+                } else {
+                    None
+                }
             } else if let Some(serde_json::Value::String(num)) = obj.get("blockNumber") {
                 // Handle blockNumber in object format
                 if let Some(stripped) = num.strip_prefix("0x") {
@@ -340,39 +378,73 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "Valid JSON params")]
-    async fn test_parse_block_param_insufficient_validation_allows_json_injection() {
-        // This test demonstrates the vulnerability: parse_block_param uses is_block_hash
-        // which only checks length and "0x" prefix, but doesn't validate hexadecimal characters.
-        // An attacker can provide a 66-character string with JSON-reserved characters
-        // like quotes that will break JSON parsing when interpolated into call_eth_get_block_by_hash.
+    async fn test_parse_block_param_rejects_json_injection_after_fix() {
+        // This test verifies that the fix prevents JSON injection attacks.
+        // After the fix, parse_block_param uses is_valid_32_bytes_string which
+        // validates that all characters are valid hexadecimal digits.
 
         // Create a 66-character malicious string with a quote in the middle
         let malicious_hash = "0x1234567890abcdef1234567890abcdef12345\"7890abcdef1234567890abcdef";
 
-        // Step 1: Attacker provides valid JSON params with the malicious hash
-        // (The JSON itself is valid because we properly escape it here)
+        // Attacker provides valid JSON params with the malicious hash
         let params_json = serde_json::to_string(&vec![malicious_hash]).unwrap();
 
-        // Step 2: parse_block_param extracts the malicious hash
-        // It accepts it because is_block_hash only checks length and "0x" prefix
+        // After fix: parse_block_param now rejects the malicious hash
         let parsed_block = parse_block_param(&params_json, 0);
-        assert!(parsed_block.is_some());
-        let extracted_hash = parsed_block.unwrap();
-        assert_eq!(extracted_hash, malicious_hash);
-        assert_eq!(extracted_hash.len(), 66);
-        assert!(is_block_hash(&extracted_hash));
+        assert!(parsed_block.is_none(), "parse_block_param should reject invalid hex");
 
-        // Step 3: The extracted hash gets passed to call_eth_get_block_by_hash
-        // which uses format!() to interpolate it into JSON WITHOUT validation
+        // Verify is_valid_32_bytes_string correctly rejects it
+        assert!(!is_valid_32_bytes_string(malicious_hash));
+
+        // If somehow a malicious hash gets through, call_eth_get_block_by_hash
+        // now validates the input and returns an error instead of panicking
         let service = create_test_service(r#"{"jsonrpc":"2.0","id":1,"result":null}"#);
+        let result = service.call_eth_get_block_by_hash(malicious_hash, false).await;
 
-        // This will panic because the malicious hash creates invalid JSON:
-        // format!(r#"["{block_hash}", false]"#) produces:
-        // ["0x1234...12345"7890...", false] - the quote breaks the JSON string
-        let _result = service.call_eth_get_block_by_hash(&extracted_hash, false).await;
+        // Should return an error, not panic
+        assert!(result.is_err(), "call_eth_get_block_by_hash should return error for invalid hash");
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Invalid block hash format"));
+    }
 
-        // The panic occurs at RawValue::from_string().expect("Valid JSON params")
-        // in call_eth_get_block_by_hash at line 116
+    #[test]
+    fn test_is_valid_32_bytes_string_security_validation() {
+        // Valid block hash - should accept
+        let valid_hash = "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+        assert!(is_valid_32_bytes_string(valid_hash));
+
+        // Test various attack vectors that should be rejected
+
+        // 1. JSON injection with quote
+        let with_quote = "0x1234567890abcdef1234567890abcdef12345\"7890abcdef1234567890abcdef";
+        assert!(!is_valid_32_bytes_string(with_quote));
+
+        // 2. JSON injection with backslash
+        let with_backslash = "0x1234567890abcdef1234567890abcdef1234567\\90abcdef1234567890abcdef";
+        assert!(!is_valid_32_bytes_string(with_backslash));
+
+        // 3. Non-hex characters
+        let with_non_hex = "0xGGGG567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+        assert!(!is_valid_32_bytes_string(with_non_hex));
+
+        // 4. SQL injection attempt
+        let with_sql = "0x1234567890abcdef1234567890abcdef12345';DROP TABLE users;--cdef";
+        assert!(!is_valid_32_bytes_string(with_sql));
+
+        // 5. Wrong length
+        let too_short = "0x1234567890abcdef";
+        assert!(!is_valid_32_bytes_string(too_short));
+
+        let too_long = "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef00";
+        assert!(!is_valid_32_bytes_string(too_long));
+
+        // 6. Missing 0x prefix
+        let no_prefix = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+        assert!(!is_valid_32_bytes_string(no_prefix));
+
+        // 7. Unicode characters
+        let with_unicode = "0x1234567890abcdef1234567890abcdef12345→7890abcdef1234567890abcdef";
+        assert!(!is_valid_32_bytes_string(with_unicode));
     }
 }
+
