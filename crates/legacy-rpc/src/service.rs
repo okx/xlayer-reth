@@ -263,7 +263,7 @@ where
                             let block_param =
                                 crate::parse_block_param(params, block_param_pos(method));
 
-                            if route_legacy_if_below_cutoff(method, block_param, cutoff_block) {
+                            if block_below_cutoff(method, block_param, cutoff_block) {
                                 // Can batch this to legacy
                                 legacy_batch_requests.push((request, response_index));
                                 response_index += 1;
@@ -378,7 +378,7 @@ where
 }
 
 #[inline]
-pub(crate) fn route_legacy_if_below_cutoff(
+pub(crate) fn block_below_cutoff(
     method: &str,
     block_param: Option<String>,
     cutoff_block: u64,
@@ -463,7 +463,7 @@ where
                     debug!(target:"xlayer_legacy_rpc", "Error getting block by hash = {err:?}")
                 }
             }
-        } else if route_legacy_if_below_cutoff(method, Some(block_param), cutoff_block) {
+        } else if block_below_cutoff(method, Some(block_param), cutoff_block) {
             debug!(target:"xlayer_legacy_rpc", "Route to legacy for method (below cuttoff) = {}", method);
             return service.forward_to_legacy(req).await;
         }
