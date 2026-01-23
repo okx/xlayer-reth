@@ -80,7 +80,8 @@ pub fn start_monitor_handle<N, T, Provider>(
                             }
                         }
                         Ok(Events::BuiltPayload(payload)) => {
-                            monitor.on_block_send_start(payload.block().number());
+                            let num_hash = BlockNumHash::new(payload.block().number(), payload.block().hash());
+                            monitor.on_block_send_start(num_hash);
                         }
                         _ => {}
                     }

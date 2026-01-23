@@ -36,8 +36,8 @@ impl XLayerMonitor {
 
     /// Handle block send start event (when payload is built and ready to send).
     /// This is triggered when CL calls getPayload and the block is built.
-    pub fn on_block_send_start(&self, block_number: u64) {
-        debug!(target: "xlayer::monitor", block_number = block_number, "block sending started");
+    pub fn on_block_send_start(&self, num_hash: BlockNumHash) {
+        debug!(target: "xlayer::monitor", block_number = num_hash.number, block_hash = %num_hash.hash, "block sending started");
         // TODO: add SeqBlockSendStart here based on xlayer_args
     }
 
