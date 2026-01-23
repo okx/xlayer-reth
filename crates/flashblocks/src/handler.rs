@@ -1,6 +1,7 @@
 use op_rbuilder::args::OpRbuilderArgs;
 use op_rbuilder::builders::WebSocketPublisher;
 use op_rbuilder::metrics::OpRBuilderMetrics;
+use op_rbuilder::tokio_metrics::FlashblocksTaskMetrics;
 use reth_node_api::FullNodeComponents;
 use reth_optimism_flashblocks::FlashBlockRx;
 use std::net::SocketAddr;
@@ -32,9 +33,15 @@ where
         );
 
         let metrics = Arc::new(OpRBuilderMetrics::default());
+        let task_metrics = Arc::new(FlashblocksTaskMetrics::new());
         let ws_pub = Arc::new(
-            WebSocketPublisher::new(ws_addr, metrics)
-                .map_err(|e| eyre::eyre!("Failed to create WebSocket publisher: {e}"))?,
+            WebSocketPublisher::new(
+                ws_addr,
+                metrics,
+                &task_metrics.websocket_publisher,
+                op_args.flashblocks.ws_subscriber_limit,
+            )
+            .map_err(|e| eyre::eyre!("Failed to create WebSocket publisher: {e}"))?,
         );
 
         info!(target: "flashblocks", "WebSocket publisher initialized at {}", ws_addr);
