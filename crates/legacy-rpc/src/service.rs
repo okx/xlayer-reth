@@ -263,24 +263,7 @@ where
                             let block_param =
                                 crate::parse_block_param(params, block_param_pos(method));
 
-                            let goes_to_legacy = if let Some(block_param) = block_param {
-                                // Check if it's a block hash (always needs individual processing)
-                                if can_use_block_hash_as_param(method)
-                                    && crate::is_block_hash(&block_param)
-                                {
-                                    false // Needs individual processing to resolve hash
-                                } else {
-                                    // Check if block number is below cutoff
-                                    match block_param.parse::<u64>() {
-                                        Ok(block_num) => block_num < cutoff_block,
-                                        Err(_) => false,
-                                    }
-                                }
-                            } else {
-                                false
-                            };
-
-                            if goes_to_legacy {
+                            if route_legacy_if_below_cutoff(method, block_param, cutoff_block) {
                                 // Can batch this to legacy
                                 legacy_batch_requests.push((request, response_index));
                                 response_index += 1;
@@ -394,6 +377,28 @@ where
     }
 }
 
+#[inline]
+pub(crate) fn route_legacy_if_below_cutoff(
+    method: &str,
+    block_param: Option<String>,
+    cutoff_block: u64,
+) -> bool {
+    if let Some(block_param) = block_param {
+        // Check if it's a block hash (always needs individual processing)
+        if can_use_block_hash_as_param(method) && crate::is_block_hash(&block_param) {
+            false // Needs individual processing to resolve hash
+        } else {
+            // Check if block number is below cutoff
+            match block_param.parse::<u64>() {
+                Ok(block_num) => block_num < cutoff_block,
+                Err(_) => false,
+            }
+        }
+    } else {
+        false
+    }
+}
+
 async fn handle_try_local_then_legacy<S>(
     req: Request<'_>,
     client: reqwest::Client,
@@ -458,19 +463,9 @@ where
                     debug!(target:"xlayer_legacy_rpc", "Error getting block by hash = {err:?}")
                 }
             }
-        } else {
-            match block_param.parse::<u64>() {
-                Ok(block_num) => {
-                    debug!(target:"xlayer_legacy_rpc", "block_num = {}", block_num);
-                    if block_num < cutoff_block {
-                        debug!(target:"xlayer_legacy_rpc", "Route to legacy for method (below cuttoff) = {}", method);
-                        return service.forward_to_legacy(req).await;
-                    }
-                }
-                Err(err) => {
-                    debug!(target:"xlayer_legacy_rpc", "Failed to parse block num, err = {err:?}")
-                }
-            }
+        } else if route_legacy_if_below_cutoff(method, Some(block_param), cutoff_block) {
+            debug!(target:"xlayer_legacy_rpc", "Route to legacy for method (below cuttoff) = {}", method);
+            return service.forward_to_legacy(req).await;
         }
     } else {
         debug!(target:"xlayer_legacy_rpc", "Failed to parse block param, got None");
