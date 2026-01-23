@@ -6383,8 +6383,8 @@ dependencies = [
 
 [[package]]
 name = "op-rbuilder"
-version = "0.2.14"
-source = "git+https://github.com/okx/op-rbuilder?tag=v0.2.3#d35d855fc25458b846d0d80aabf47325eed4028e"
+version = "0.3.0"
+source = "git+https://github.com/okx/op-rbuilder?tag=v0.2.5#79e67d4f895b01423f051da5c71d22be7025f7f6"
 dependencies = [
  "alloy-consensus",
  "alloy-contract",
@@ -6491,6 +6491,7 @@ dependencies = [
  "tikv-jemallocator",
  "time",
  "tokio",
+ "tokio-metrics",
  "tokio-tungstenite",
  "tokio-util",
  "tower",
@@ -6500,6 +6501,7 @@ dependencies = [
  "uuid",
  "vergen",
  "vergen-git2",
+ "xlayer-trace-monitor",
 ]
 
 [[package]]
@@ -6681,8 +6683,8 @@ dependencies = [
 
 [[package]]
 name = "p2p"
-version = "0.2.14"
-source = "git+https://github.com/okx/op-rbuilder?tag=v0.2.3#d35d855fc25458b846d0d80aabf47325eed4028e"
+version = "0.3.0"
+source = "git+https://github.com/okx/op-rbuilder?tag=v0.2.5#79e67d4f895b01423f051da5c71d22be7025f7f6"
 dependencies = [
  "derive_more",
  "eyre",
@@ -12362,6 +12364,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-metrics"
+version = "0.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f4c2ca6283a34abc77cb58ea83d4a3c40e0162b0095d7a674172a2eed5415197"
+dependencies = [
+ "futures-util",
+ "pin-project-lite",
+ "tokio",
+ "tokio-stream",
+]
+
+[[package]]
 name = "tokio-native-tls"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14159,6 +14173,15 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "xlayer-trace-monitor"
+version = "0.1.0"
+source = "git+https://github.com/okx/xlayer-toolkit?rev=0004d202181bb772821797cd54983e29f32cae07#0004d202181bb772821797cd54983e29f32cae07"
+dependencies = [
+ "hex",
  "tracing",
 ]
 
