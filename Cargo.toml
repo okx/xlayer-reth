@@ -15,10 +15,10 @@ resolver = "2"
 members = [
     "crates/chainspec",
     "crates/flashblocks",
-    "crates/full-trace",
+    "crates/legacy-rpc",
+    "crates/monitor",
     "crates/rpc",
     "crates/tests",
-    "crates/legacy-rpc",
     "crates/version",
     "crates/node",
 
@@ -64,10 +64,10 @@ codegen-units = 1
 
 xlayer-chainspec = { path = "crates/chainspec" }
 xlayer-flashblocks = { path = "crates/flashblocks" }
-xlayer-full-trace = { path = "crates/full-trace" }
+xlayer-legacy-rpc = { path = "crates/legacy-rpc" }
+xlayer-monitor = { path = "crates/monitor" }
 xlayer-reth-node = { path = "bin/node" }
 xlayer-rpc = { path = "crates/rpc" }
-xlayer-legacy-rpc = { path = "crates/legacy-rpc" }
 xlayer-version = { path = "crates/version" }
 xlayer-node-lib = { path = "crates/node" }
 
@@ -82,6 +82,7 @@ reth-cli-commands = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bc
 reth-cli-util = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
 reth-db = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
 reth-db-api = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
+reth-engine-primitives = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
 reth-errors = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
 reth-ethereum-forks = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
 reth-evm = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
@@ -102,6 +103,8 @@ reth-optimism-primitives = { git = "https://github.com/okx/reth", rev = "1ae6a8b
 reth-optimism-rpc = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
 reth-optimism-txpool = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
 reth-payload-builder = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
+reth-payload-builder-primitives = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
+reth-payload-primitives = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
 reth-primitives = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
 reth-primitives-traits = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
 reth-provider = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
@@ -114,6 +117,7 @@ reth-rpc-eth-api = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bca
 reth-rpc-eth-types = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
 reth-storage-api = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
 reth-tasks = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
+reth-tokio-util = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
 reth-tracing = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
 reth-transaction-pool = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }
 reth-optimism-flashblocks = { git = "https://github.com/okx/reth", rev = "1ae6a8b15fe9bcaffbe730040118762f7a676f13" }

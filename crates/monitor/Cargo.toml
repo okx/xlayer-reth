@@ -1,5 +1,5 @@
 [package]
-name = "xlayer-full-trace"
+name = "xlayer-monitor"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,48 +13,37 @@ default = []
 [dependencies]
 # Reth dependencies
 reth-chain-state.workspace = true
-reth-chainspec.workspace = true
+reth-engine-primitives.workspace = true
 reth-node-api.workspace = true
-reth-node-builder.workspace = true
-reth-node-core.workspace = true
-reth-optimism-node.workspace = true
-reth-optimism-rpc.workspace = true
 reth-payload-builder.workspace = true
+reth-payload-builder-primitives.workspace = true
+reth-payload-primitives.workspace = true
 reth-primitives-traits.workspace = true
 reth-provider.workspace = true
-reth-rpc-api.workspace = true
-reth-rpc-engine-api.workspace = true
 reth-storage-api.workspace = true
-reth-transaction-pool.workspace = true
+reth-tasks.workspace = true
+reth-tokio-util.workspace = true
 
 # Alloy dependencies
 alloy-consensus.workspace = true
+alloy-eips.workspace = true
 alloy-primitives.workspace = true
 alloy-rpc-types-engine.workspace = true
-alloy-eips.workspace = true
 
 # OP Stack dependencies
 op-alloy-rpc-types-engine.workspace = true
 
-# JSON-RPC dependencies
-jsonrpsee.workspace = true
-
-# Async dependencies
-async-trait.workspace = true
-futures.workspace = true
-futures-util.workspace = true
-
-# Logging
-tracing.workspace = true
-
-# Error handling
+# Misc dependencies
+clap.workspace = true
 eyre.workspace = true
-
-# Tower middleware
-tower.workspace = true
-
-# Serialization
+futures.workspace = true
+jsonrpsee = { workspace = true, features = ["server", "client-core"] }
+jsonrpsee-types.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tracing.workspace = true
+tower.workspace = true
 
 [lints]
 workspace = true

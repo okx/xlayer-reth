@@ -2,6 +2,8 @@ use clap::Args;
 use std::time::Duration;
 use url::Url;
 
+use xlayer_monitor::FullLinkMonitorArgs;
+
 /// X Layer specific configuration flags
 #[derive(Debug, Clone, Args, PartialEq, Eq, Default)]
 #[command(next_help_heading = "X Layer")]
@@ -10,9 +12,9 @@ pub struct XLayerArgs {
     #[command(flatten)]
     pub legacy: LegacyRpcArgs,
 
-    /// Enable full trace
+    /// Full link monitor configuration
     #[command(flatten)]
-    pub full_trace: FullTraceArgs,
+    pub monitor: FullLinkMonitorArgs,
 
     /// Enable custom flashblocks subscription
     #[arg(
@@ -35,7 +37,7 @@ impl XLayerArgs {
     /// Validate all X Layer configurations
     pub fn validate(&self) -> Result<(), String> {
         self.legacy.validate()?;
-        self.full_trace.validate()?;
+        self.monitor.validate()?;
         Ok(())
     }
 
@@ -117,27 +119,6 @@ impl LegacyRpcArgs {
             }
         }
 
-        Ok(())
-    }
-}
-
-/// X Layer full trace arguments
-#[derive(Debug, Clone, Args, PartialEq, Eq, Default)]
-pub struct FullTraceArgs {
-    /// Enable full trace functionality
-    #[arg(
-        long = "xlayer.full-trace",
-        help = "Enable full trace functionality (disabled by default)",
-        default_value = "false"
-    )]
-    pub enable: bool,
-    // TODO: add more full trace configuration here
-}
-
-impl FullTraceArgs {
-    /// Validate full trace configuration
-    pub fn validate(&self) -> Result<(), String> {
-        // No validation needed for now, just a simple enable flag
         Ok(())
     }
 }
@@ -303,7 +284,7 @@ mod tests {
                 legacy_rpc_url: Some("invalid-url".to_string()),
                 legacy_rpc_timeout: Duration::from_secs(30),
             },
-            full_trace: FullTraceArgs::default(),
+            monitor: FullLinkMonitorArgs::default(),
             enable_flashblocks_subscription: false,
             flashblocks_subscription_max_addresses: 1000,
         };
