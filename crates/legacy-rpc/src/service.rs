@@ -301,7 +301,6 @@ where
                 }
             }
         } else {
-            debug!(target:"xlayer_legacy_rpc", "Route to legacy for method (below cuttoff) = {}", method);
             match block_param.parse::<u64>() {
                 Ok(block_num) => {
                     debug!(target:"xlayer_legacy_rpc", "block_num = {}", block_num);
