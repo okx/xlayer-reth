@@ -15,25 +15,33 @@ pub struct XLayerMonitor {
     pub args: FullLinkMonitorArgs,
     /// Flashblocks enabled flag
     pub flashblocks_enabled: bool,
+    /// Whether this node is running in sequencer mode (true) or RPC mode (false)
+    pub is_sequencer_mode: bool,
 }
 
 impl XLayerMonitor {
-    pub fn new(args: FullLinkMonitorArgs, flashblocks_enabled: bool) -> Arc<Self> {
-        Arc::new(Self { args, flashblocks_enabled })
+    pub fn new(args: FullLinkMonitorArgs, flashblocks_enabled: bool, is_sequencer_mode: bool) -> Arc<Self> {
+        Arc::new(Self { args, flashblocks_enabled, is_sequencer_mode })
+    }
+
+    /// Check if this node is running in sequencer mode
+    pub fn is_sequencer(&self) -> bool {
+        self.is_sequencer_mode
     }
 
     /// Handle transaction received via RPC (eth_sendRawTransaction).
     pub fn on_recv_transaction(&self, _method: &str, tx_hash: B256) {
         debug!(target: "xlayer::monitor", tx_hash = %tx_hash, "transaction received via RPC");
 
-        // RpcReceiveTxEnd: eth_sendRawTransaction (RPC handler)
         if let Some(tracer) = get_global_tracer() {
-            tracer.log_transaction(from_b256(tx_hash), TransactionProcessId::RpcReceiveTxEnd, None);
-        }
+            if self.is_sequencer() {
+                // RpcReceiveTxEnd: eth_sendRawTransaction (RPC handler)
+                tracer.log_transaction(from_b256(tx_hash), TransactionProcessId::RpcReceiveTxEnd, None);
+            } else {
+                // SeqReceiveTxEnd: eth_sendRawTransaction (seq handler)
+                tracer.log_transaction(from_b256(tx_hash), TransactionProcessId::SeqReceiveTxEnd, None);
 
-        // SeqReceiveTxEnd: eth_sendRawTransaction (seq handler)
-        if let Some(tracer) = get_global_tracer() {
-            tracer.log_transaction(from_b256(tx_hash), TransactionProcessId::SeqReceiveTxEnd, None);
+            }
         }
     }
 
@@ -91,11 +99,13 @@ impl XLayerMonitor {
         debug!(target: "xlayer::monitor", block_number = num_hash.number, block_hash = %num_hash.hash, "block committed to canonical chain");
 
         if let Some(tracer) = get_global_tracer() {
-            // SeqBlockBuildEnd: canon stream update (seq)
-            tracer.log_block(from_b256(num_hash.hash), num_hash.number, TransactionProcessId::SeqBlockBuildEnd);
-
-            // RpcBlockInsertEnd: canon stream update (RPC)
-            tracer.log_block(from_b256(num_hash.hash), num_hash.number, TransactionProcessId::RpcBlockInsertEnd);
+            if self.is_sequencer() {
+                // SeqBlockBuildEnd: canon stream update (seq)
+                tracer.log_block(from_b256(num_hash.hash), num_hash.number, TransactionProcessId::SeqBlockBuildEnd);
+            } else {
+                // RpcBlockInsertEnd: canon stream update (RPC)
+                tracer.log_block(from_b256(num_hash.hash), num_hash.number, TransactionProcessId::RpcBlockInsertEnd);
+            }
         }
     }
 }

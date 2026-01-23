@@ -31,6 +31,15 @@ pub struct XLayerArgs {
         default_value = "1000"
     )]
     pub flashblocks_subscription_max_addresses: usize,
+
+    /// Enable sequencer mode for transaction tracing
+    /// Default: false (RPC mode)
+    #[arg(
+        long = "xlayer.sequencer-mode",
+        help = "Enable sequencer mode for transaction tracing (default: false, i.e., RPC mode)",
+        default_value = "false"
+    )]
+    pub sequencer_mode: bool,
 }
 
 impl XLayerArgs {

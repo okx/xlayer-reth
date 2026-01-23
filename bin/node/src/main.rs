@@ -92,8 +92,11 @@ fn main() {
             };
 
             // For X Layer full link monitor
-            let monitor =
-                XLayerMonitor::new(xlayer_args.monitor, args.node_args.flashblocks.enabled);
+            let monitor = XLayerMonitor::new(
+                xlayer_args.monitor,
+                args.node_args.flashblocks.enabled,
+                xlayer_args.sequencer_mode,
+            );
 
             let add_ons = op_node.add_ons().with_rpc_middleware((
                 RpcMonitorLayer::new(monitor.clone()),    // Execute first
