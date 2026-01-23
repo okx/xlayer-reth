@@ -20,7 +20,11 @@ pub struct XLayerMonitor {
 }
 
 impl XLayerMonitor {
-    pub fn new(args: FullLinkMonitorArgs, flashblocks_enabled: bool, is_sequencer_mode: bool) -> Arc<Self> {
+    pub fn new(
+        args: FullLinkMonitorArgs,
+        flashblocks_enabled: bool,
+        is_sequencer_mode: bool,
+    ) -> Arc<Self> {
         Arc::new(Self { args, flashblocks_enabled, is_sequencer_mode })
     }
 
@@ -36,11 +40,18 @@ impl XLayerMonitor {
         if let Some(tracer) = get_global_tracer() {
             if self.is_sequencer() {
                 // RpcReceiveTxEnd: eth_sendRawTransaction (RPC handler)
-                tracer.log_transaction(from_b256(tx_hash), TransactionProcessId::RpcReceiveTxEnd, None);
+                tracer.log_transaction(
+                    from_b256(tx_hash),
+                    TransactionProcessId::RpcReceiveTxEnd,
+                    None,
+                );
             } else {
                 // SeqReceiveTxEnd: eth_sendRawTransaction (seq handler)
-                tracer.log_transaction(from_b256(tx_hash), TransactionProcessId::SeqReceiveTxEnd, None);
-
+                tracer.log_transaction(
+                    from_b256(tx_hash),
+                    TransactionProcessId::SeqReceiveTxEnd,
+                    None,
+                );
             }
         }
     }
@@ -55,7 +66,11 @@ impl XLayerMonitor {
             // Note: We don't have the block hash here, so we use a zero hash
             // The block_number is the key identifier
             let block_hash = B256::ZERO; // Will be updated when block is built
-            tracer.log_block(from_b256(block_hash), block_number, TransactionProcessId::SeqBlockBuildStart);
+            tracer.log_block(
+                from_b256(block_hash),
+                block_number,
+                TransactionProcessId::SeqBlockBuildStart,
+            );
         }
     }
 
@@ -65,7 +80,11 @@ impl XLayerMonitor {
         debug!(target: "xlayer::monitor", block_number = num_hash.number, block_hash = %num_hash.hash, "block sending started");
 
         if let Some(tracer) = get_global_tracer() {
-            tracer.log_block(from_b256(num_hash.hash), num_hash.number, TransactionProcessId::SeqBlockSendStart);
+            tracer.log_block(
+                from_b256(num_hash.hash),
+                num_hash.number,
+                TransactionProcessId::SeqBlockSendStart,
+            );
         }
     }
 
@@ -80,7 +99,11 @@ impl XLayerMonitor {
         );
 
         if let Some(tracer) = get_global_tracer() {
-            tracer.log_block(from_b256(num_hash.hash), num_hash.number, TransactionProcessId::RpcBlockReceiveEnd);
+            tracer.log_block(
+                from_b256(num_hash.hash),
+                num_hash.number,
+                TransactionProcessId::RpcBlockReceiveEnd,
+            );
         }
     }
 
@@ -89,7 +112,11 @@ impl XLayerMonitor {
         if !self.flashblocks_enabled {
             debug!(target: "xlayer::monitor", tx_hash = %tx_hash, "transaction committed to canonical chain");
             if let Some(tracer) = get_global_tracer() {
-                tracer.log_transaction(from_b256(tx_hash), TransactionProcessId::SeqTxExecutionEnd, Some(_num_hash.number));
+                tracer.log_transaction(
+                    from_b256(tx_hash),
+                    TransactionProcessId::SeqTxExecutionEnd,
+                    Some(_num_hash.number),
+                );
             }
         }
     }
@@ -101,10 +128,18 @@ impl XLayerMonitor {
         if let Some(tracer) = get_global_tracer() {
             if self.is_sequencer() {
                 // SeqBlockBuildEnd: canon stream update (seq)
-                tracer.log_block(from_b256(num_hash.hash), num_hash.number, TransactionProcessId::SeqBlockBuildEnd);
+                tracer.log_block(
+                    from_b256(num_hash.hash),
+                    num_hash.number,
+                    TransactionProcessId::SeqBlockBuildEnd,
+                );
             } else {
                 // RpcBlockInsertEnd: canon stream update (RPC)
-                tracer.log_block(from_b256(num_hash.hash), num_hash.number, TransactionProcessId::RpcBlockInsertEnd);
+                tracer.log_block(
+                    from_b256(num_hash.hash),
+                    num_hash.number,
+                    TransactionProcessId::RpcBlockInsertEnd,
+                );
             }
         }
     }
