@@ -1,5 +1,3 @@
-use crate::args::FullLinkMonitorArgs;
-
 use std::sync::Arc;
 use tracing::debug;
 
@@ -9,14 +7,12 @@ use alloy_primitives::B256;
 /// XLayerMonitor holds monitoring hook logic for full link monitoring requirements.
 #[derive(Clone, Default)]
 pub struct XLayerMonitor {
-    /// XLayer arguments (reserved for future use)
-    #[allow(dead_code)]
-    pub args: FullLinkMonitorArgs,
+    pub flashblocks_enabled: bool,
 }
 
 impl XLayerMonitor {
-    pub fn new(args: FullLinkMonitorArgs) -> Arc<Self> {
-        Arc::new(Self { args })
+    pub fn new(flashblocks_enabled: bool) -> Arc<Self> {
+        Arc::new(Self { flashblocks_enabled })
     }
 
     /// Handle transaction received via RPC (eth_sendRawTransaction).
@@ -53,8 +49,10 @@ impl XLayerMonitor {
 
     /// Handle transaction commits to the canonical chain.
     pub fn on_tx_commit(&self, _num_hash: BlockNumHash, tx_hash: B256) {
-        debug!(target: "xlayer::monitor", tx_hash = %tx_hash, "transaction committed to canonical chain");
-        // TODO: add SeqTxExecutionEnd here if flashblocks is disabled, you can use xlayer_args if you want
+        if !self.flashblocks_enabled {
+            debug!(target: "xlayer::monitor", tx_hash = %tx_hash, "transaction committed to canonical chain");
+            // TODO: add SeqTxExecutionEnd here if flashblocks is disabled, you can use xlayer_args if you want
+        }
     }
 
     /// Handle block commits to the canonical chain.

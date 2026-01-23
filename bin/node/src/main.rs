@@ -59,18 +59,18 @@ fn main() {
 
     Cli::<XLayerChainSpecParser, Args>::parse()
         .run(|builder, args| async move {
-            info!(message = "starting custom XLayer node");
+            info!(message = "starting custom X Layer node");
 
-            // Validate XLayer configuration
+            // Validate X Layer configuration
             if let Err(e) = args.xlayer_args.validate() {
-                eprintln!("XLayer configuration error: {e}");
+                eprintln!("X Layer configuration error: {e}");
                 std::process::exit(1);
             }
 
             let op_node = OpNode::new(args.node_args.rollup_args.clone());
 
             let genesis_block = builder.config().chain.genesis().number.unwrap_or_default();
-            info!("XLayer genesis block = {}", genesis_block);
+            info!("X Layer genesis block = {}", genesis_block);
 
             // Clone xlayer_args early to avoid partial move issues
             let xlayer_args = args.xlayer_args.clone();
@@ -83,7 +83,7 @@ fn main() {
             };
 
             // For X Layer full link monitor
-            let monitor = XLayerMonitor::new(xlayer_args.monitor);
+            let monitor = XLayerMonitor::new(args.node_args.flashblocks.enabled);
 
             let add_ons = op_node.add_ons().with_rpc_middleware((
                 RpcMonitorLayer::new(monitor.clone()),    // Execute first
@@ -99,7 +99,7 @@ fn main() {
                 .with_components(op_node.components().payload(payload_builder))
                 .with_add_ons(add_ons)
                 .on_component_initialized(move |_ctx| {
-                    // TODO: Initialize XLayer components here
+                    // TODO: Initialize X Layer components here
                     Ok(())
                 })
                 .extend_rpc_modules(move |ctx| {
@@ -138,14 +138,14 @@ fn main() {
                         }
                     }
 
-                    // Register XLayer RPC
+                    // Register X Layer RPC
                     let xlayer_rpc = XlayerRpcExt { backend: new_op_eth_api };
                     ctx.modules.merge_configured(XlayerRpcExtApiServer::<Optimism>::into_rpc(
                         xlayer_rpc,
                     ))?;
                     info!(target: "reth::cli", "xlayer rpc extension enabled");
 
-                    info!(message = "XLayer RPC modules initialized");
+                    info!(message = "X Layer RPC modules initialized");
                     Ok(())
                 })
                 .launch_with_fn(|builder| {
