@@ -93,9 +93,11 @@ reth-optimism-consensus = { git = "https://github.com/okx/reth", rev = "3ba1e5d3
 reth-optimism-evm = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
 reth-optimism-forks = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
 reth-optimism-node = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
+reth-optimism-payload-builder = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
 reth-optimism-primitives = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
 reth-optimism-rpc = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
 reth-optimism-txpool = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
+reth-payload-builder = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
 reth-primitives = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
 reth-primitives-traits = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
 reth-provider = { git = "https://github.com/okx/reth", rev = "3ba1e5d3820fff48ade7962769cb367ac183ba92" }
