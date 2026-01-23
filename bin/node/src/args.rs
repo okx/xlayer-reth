@@ -296,6 +296,7 @@ mod tests {
             monitor: FullLinkMonitorArgs::default(),
             enable_flashblocks_subscription: false,
             flashblocks_subscription_max_addresses: 1000,
+            sequencer_mode: false,
         };
 
         let result = args.validate();
