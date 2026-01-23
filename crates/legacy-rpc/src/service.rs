@@ -214,11 +214,6 @@ where
         let inner = self.inner.clone();
 
         Either::Right(Box::pin(async move {
-            let service = LegacyRpcRouterService {
-                inner: inner.clone(),
-                config: config.clone(),
-                client: client.clone(),
-            };
             let cutoff_block = config.cutoff_block;
 
             // Categorize requests and track their positions
@@ -305,6 +300,12 @@ where
             let mut batch_response = BatchResponseBuilder::new_with_limit(usize::MAX);
             let mut responses: Vec<Option<MethodResponse>> =
                 (0..response_index).map(|_| None).collect();
+
+            let service = LegacyRpcRouterService {
+                inner: inner.clone(),
+                config: config.clone(),
+                client: client.clone(),
+            };
 
             // Process legacy batch requests as a single batch
             if !legacy_batch_requests.is_empty() {
