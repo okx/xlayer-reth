@@ -89,6 +89,14 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> ExportCommand<C> {
         }
         let start_block = self.start_block;
 
+        if start_block > end_block {
+            return Err(eyre!(
+                "Start block ({}) is greater than end block ({})",
+                start_block,
+                end_block
+            ));
+        }
+
         let total_blocks = end_block - start_block + 1;
         info!(
             target: "reth::cli",
