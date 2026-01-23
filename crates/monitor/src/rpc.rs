@@ -67,12 +67,12 @@ where
                 && let Ok(tx_hash) = tx_hash_str.parse::<B256>()
             {
                 monitor.on_recv_transaction(&method_owned, tx_hash);
+                trace!(
+                    target: "xlayer::monitor::rpc",
+                    "Transaction submission intercepted: method={}",
+                    method_owned
+                );
             }
-            trace!(
-                target: "xlayer::monitor::rpc",
-                "Transaction submission intercepted: method={}",
-                method_owned
-            );
 
             response
         })
