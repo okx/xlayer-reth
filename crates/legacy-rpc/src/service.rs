@@ -186,7 +186,21 @@ where
         let config = self.config.clone();
         let inner = self.inner.clone();
 
-        Either::Right(Box::pin(route_single_request(req, client, config, inner)))
+        Either::Right(Box::pin(async move {
+            let method = req.method_name();
+
+            if method == "eth_getLogs" {
+                return crate::get_logs::handle_eth_get_logs(req, client, config, inner).await;
+            } else if need_try_local_then_legacy(method) {
+                return handle_try_local_then_legacy(req, client, config, inner).await;
+            } else if need_parse_block(method) {
+                return handle_block_param_methods(req, client, config, inner).await;
+            }
+
+            debug!(target:"xlayer_legacy_rpc", "No legacy routing for method = {}", method);
+            // Default resorts to normal rpc calls.
+            inner.call(req).await
+        }))
     }
 
     fn batch<'a>(&self, req: Batch<'a>) -> impl Future<Output = Self::BatchResponse> + Send + 'a {
@@ -378,38 +392,6 @@ where
     ) -> impl Future<Output = Self::NotificationResponse> + Send + 'a {
         self.inner.notification(n)
     }
-}
-
-/// Routes a single request using the same logic as the call method.
-/// This is used for both individual calls and batch requests.
-async fn route_single_request<S>(
-    req: Request<'_>,
-    client: reqwest::Client,
-    config: std::sync::Arc<crate::LegacyRpcRouterConfig>,
-    inner: S,
-) -> MethodResponse
-where
-    S: RpcServiceT<MethodResponse = MethodResponse> + Send + Sync + Clone + 'static,
-{
-    let method = req.method_name();
-
-    // Check if this method should be routed
-    if !is_legacy_routable(method) {
-        return inner.call(req).await;
-    }
-
-    // Apply the same routing logic as the call method
-    if method == "eth_getLogs" {
-        return crate::get_logs::handle_eth_get_logs(req, client, config, inner).await;
-    } else if need_try_local_then_legacy(method) {
-        return handle_try_local_then_legacy(req, client, config, inner).await;
-    } else if need_parse_block(method) {
-        return handle_block_param_methods(req, client, config, inner).await;
-    }
-
-    debug!(target:"xlayer_legacy_rpc", "No legacy routing for method = {}", method);
-    // Default resorts to normal rpc calls.
-    inner.call(req).await
 }
 
 async fn handle_try_local_then_legacy<S>(
