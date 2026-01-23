@@ -131,7 +131,7 @@ where
                     return Err(invalid_params_rpc_err("invalid params for flashblocks"));
                 };
 
-                let fb_stream = self.new_flashblocks_stream(filter.clone());
+                let fb_stream = self.new_flashblocks_stream(filter);
                 pipe_from_flashblocks_stream::<N, Eth, _>(accepted_sink, fb_stream).await
             }
             FlashblockSubscriptionKind::Standard(alloy_kind) => {

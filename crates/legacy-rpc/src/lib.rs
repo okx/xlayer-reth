@@ -298,11 +298,24 @@ mod tests {
             let response = self.response.clone();
             Box::pin(async move {
                 // Parse the response JSON and create a MethodResponse
-                let json: serde_json::Value = serde_json::from_str(&response).unwrap();
-                let result = json.get("result").cloned().unwrap_or(serde_json::Value::Null);
-
-                let payload = jsonrpsee_types::ResponsePayload::success(&result).into();
-                MethodResponse::response(Id::Number(1), payload, usize::MAX)
+                match serde_json::from_str::<serde_json::Value>(&response) {
+                    Ok(json) => {
+                        let result = json.get("result").cloned().unwrap_or(serde_json::Value::Null);
+                        let payload = jsonrpsee_types::ResponsePayload::success(&result).into();
+                        MethodResponse::response(Id::Number(1), payload, usize::MAX)
+                    }
+                    Err(_) => {
+                        // Return error response for invalid JSON
+                        MethodResponse::error(
+                            Id::Number(1),
+                            jsonrpsee::types::ErrorObjectOwned::owned(
+                                jsonrpsee::types::error::PARSE_ERROR_CODE,
+                                "Parse error",
+                                None::<()>,
+                            ),
+                        )
+                    }
+                }
             })
         }
 
@@ -445,6 +458,76 @@ mod tests {
         // 7. Unicode characters
         let with_unicode = "0x1234567890abcdef1234567890abcdef12345→7890abcdef1234567890abcdef";
         assert!(!is_valid_32_bytes_string(with_unicode));
+    async fn test_call_eth_get_block_by_hash_success() {
+        let response = r#"{
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "number": "0xf4240",
+                "hash": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+                "parentHash": "0x0000000000000000000000000000000000000000000000000000000000000000"
+            }
+        }"#;
+
+        let service = create_test_service(response);
+        let result = service
+            .call_eth_get_block_by_hash(
+                "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+                false,
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let block_num = result.unwrap();
+        assert!(block_num.is_some());
+        assert_eq!(block_num, Some(1_000_000));
+    }
+
+    #[tokio::test]
+    async fn test_call_eth_get_block_by_hash_not_found() {
+        let response = r#"{
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": null
+        }"#;
+
+        let service = create_test_service(response);
+        let result = service
+            .call_eth_get_block_by_hash(
+                "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                false,
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let block_num = result.unwrap();
+        assert!(block_num.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_call_eth_get_block_by_hash_malformed_number() {
+        // Test with response that has a malformed block number
+        let response = r#"{
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "number": "invalid_hex",
+                "hash": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+                "parentHash": "0x0000000000000000000000000000000000000000000000000000000000000000"
+            }
+        }"#;
+
+        let service = create_test_service(response);
+        let result = service
+            .call_eth_get_block_by_hash(
+                "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+                false,
+            )
+            .await;
+
+        // This should succeed but return None because the hex parsing fails
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
     }
 }
 
