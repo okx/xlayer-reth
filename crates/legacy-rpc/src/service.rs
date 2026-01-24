@@ -1,6 +1,6 @@
 use std::future::Future;
 
-use futures::{future::Either, FutureExt};
+use futures::{future::Either, stream::FuturesOrdered, StreamExt};
 use jsonrpsee::{
     core::middleware::{Batch, BatchEntry, Notification},
     server::middleware::rpc::RpcServiceT,
@@ -216,21 +216,11 @@ where
 
             // Process all requests concurrently using futures::future::join_all
             // This significantly improves latency for batch requests with multiple calls
-            let futures: Vec<_> = requests
-                .into_iter()
-                .map(|request| {
-                    let service_clone = service.clone();
-                    async move { service_clone.call(request).await }.boxed()
-                })
-                .collect();
+            let mut futures: FuturesOrdered<_> =
+                requests.into_iter().map(|request| service.call(request)).collect();
 
-            // Wait for all futures to complete. The timeout should be handled
-            // inside call().
-            let responses = futures::future::join_all(futures).await;
-
-            // Build batch response from all responses
             let mut batch_response = BatchResponseBuilder::new_with_limit(usize::MAX);
-            for response in responses {
+            while let Some(response) = futures.next().await {
                 if let Err(err) = batch_response.append(response) {
                     return err;
                 }
