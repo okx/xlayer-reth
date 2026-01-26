@@ -100,7 +100,7 @@ fn need_try_local_then_legacy(method: &str) -> bool {
 
 /// Check if the response has a non-empty result.
 /// Returns true if the result is null, an empty object {}, or an empty array [].
-fn is_result_empty(response: &MethodResponse) -> bool {
+pub(crate) fn is_result_empty(response: &MethodResponse) -> bool {
     // Parse the JSON response
     let json_str = response.as_ref();
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str)

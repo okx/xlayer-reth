@@ -24,7 +24,7 @@
 //!     These get converted to 0
 //! to_block: latest/pending/finalized/safe
 //!     These get converted to u64::MAX
-use crate::LegacyRpcRouterService;
+use crate::{service::is_result_empty, LegacyRpcRouterService};
 use jsonrpsee::MethodResponse;
 use jsonrpsee_types::{Id, Request};
 use serde_json::value::RawValue;
@@ -299,11 +299,11 @@ where
         Some(GetLogsParams::BlockHash(_block_hash)) => {
             debug!(target:"xlayer_legacy_rpc", "method = eth_getLogs, testing locally first...");
             let res = inner.call(req.clone()).await;
-            if res.is_success() {
+            if res.is_success() && !is_result_empty(&res) {
                 debug!(target:"xlayer_legacy_rpc", "method = eth_getLogs, success response = {res:?}");
                 res
             } else {
-                debug!(target:"xlayer_legacy_rpc", "method = eth_getLogs, forward to legacy");
+                debug!(target:"xlayer_legacy_rpc", "method = eth_getLogs, forward to legacy (empty or error)");
                 service.forward_to_legacy(req).await
             }
         }
