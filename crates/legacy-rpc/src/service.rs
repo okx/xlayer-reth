@@ -1,11 +1,11 @@
 use std::future::Future;
 
-use futures::future::Either;
+use futures::{future::Either, stream::FuturesOrdered, StreamExt};
 use jsonrpsee::{
-    core::middleware::{Batch, Notification},
+    core::middleware::{Batch, BatchEntry, Notification},
     server::middleware::rpc::RpcServiceT,
-    types::{error::INVALID_PARAMS_CODE, ErrorObject, Request},
-    MethodResponse,
+    types::{error::INVALID_PARAMS_CODE, ErrorCode, ErrorObject, Id, Request},
+    BatchResponseBuilder, MethodResponse,
 };
 use tracing::debug;
 
@@ -148,11 +148,15 @@ fn block_param_pos(method: &str) -> usize {
 
 impl<S> RpcServiceT for LegacyRpcRouterService<S>
 where
-    S: RpcServiceT<MethodResponse = MethodResponse> + Send + Sync + Clone + 'static,
+    S: RpcServiceT<MethodResponse = MethodResponse, BatchResponse = MethodResponse>
+        + Send
+        + Sync
+        + Clone
+        + 'static,
 {
     type MethodResponse = MethodResponse;
     type NotificationResponse = S::NotificationResponse;
-    type BatchResponse = S::BatchResponse;
+    type BatchResponse = MethodResponse;
 
     fn call<'a>(&self, req: Request<'a>) -> impl Future<Output = Self::MethodResponse> + Send + 'a {
         let method = req.method_name();
@@ -184,8 +188,49 @@ where
     }
 
     fn batch<'a>(&self, req: Batch<'a>) -> impl Future<Output = Self::BatchResponse> + Send + 'a {
-        // For batches, could implement per-request routing or route entire batch
-        self.inner.batch(req)
+        // Early return if legacy routing is disabled
+        if !self.config.enabled {
+            return Either::Left(self.inner.batch(req));
+        }
+
+        let service = self.clone();
+
+        Either::Right(Box::pin(async move {
+            // Collect all entries first to avoid lifetime issues
+            let entries: Vec<_> = req.into_iter().collect();
+
+            // Process all requests concurrently using FuturesOrdered
+            // This significantly improves latency for batch requests with multiple calls
+            let mut futures: FuturesOrdered<_> = entries
+                .into_iter()
+                .filter_map(|entry| match entry {
+                    Ok(BatchEntry::Call(request)) => Some(Either::Right(service.call(request))),
+                    Ok(BatchEntry::Notification(_notif)) => {
+                        // Notifications should not be answered
+                        // Note: we don't process notifications in batch context
+                        None
+                    }
+                    Err(_) => {
+                        // Return error response for malformed entries
+                        Some(Either::Left(async {
+                            MethodResponse::error(
+                                Id::Null,
+                                ErrorObject::from(ErrorCode::InvalidRequest),
+                            )
+                        }))
+                    }
+                })
+                .collect();
+
+            let mut batch_response = BatchResponseBuilder::new_with_limit(usize::MAX);
+            while let Some(response) = futures.next().await {
+                if let Err(err) = batch_response.append(response) {
+                    return err;
+                }
+            }
+
+            MethodResponse::from_batch(batch_response.finish())
+        }))
     }
 
     fn notification<'a>(
