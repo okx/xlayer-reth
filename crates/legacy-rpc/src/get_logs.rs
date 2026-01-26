@@ -25,7 +25,10 @@
 //! to_block: latest/pending/finalized/safe
 //!     These get converted to u64::MAX
 use crate::LegacyRpcRouterService;
-use jsonrpsee::MethodResponse;
+use jsonrpsee::{
+    types::{error::INVALID_PARAMS_CODE, ErrorObject},
+    MethodResponse,
+};
 use jsonrpsee_types::{Id, Request};
 use serde_json::value::RawValue;
 use tracing::debug;
@@ -236,8 +239,13 @@ where
         + 'static,
 {
     let service = LegacyRpcRouterService { inner: inner.clone(), config, client };
-    let _p = req.params(); // keeps compiler quiet
-    let params = _p.as_str().unwrap();
+    let params_ref = req.params();
+    let Some(params) = params_ref.as_str() else {
+        return MethodResponse::error(
+            req.id(),
+            ErrorObject::owned(INVALID_PARAMS_CODE, "Missing required params", None::<()>),
+        );
+    };
 
     let cutoff_block = service.config.cutoff_block;
 

@@ -4,7 +4,7 @@ use futures::future::Either;
 use jsonrpsee::{
     core::middleware::{Batch, Notification},
     server::middleware::rpc::RpcServiceT,
-    types::Request,
+    types::{error::INVALID_PARAMS_CODE, ErrorObject, Request},
     MethodResponse,
 };
 use tracing::debug;
@@ -231,8 +231,13 @@ async fn handle_block_param_methods<S>(
 where
     S: RpcServiceT<MethodResponse = MethodResponse> + Send + Sync + Clone + 'static,
 {
-    let _p = req.params(); // keeps compiler quiet
-    let params = _p.as_str().unwrap();
+    let params_ref = req.params();
+    let Some(params) = params_ref.as_str() else {
+        return MethodResponse::error(
+            req.id(),
+            ErrorObject::owned(INVALID_PARAMS_CODE, "Missing required params", None::<()>),
+        );
+    };
     let method = req.method_name();
     let block_param = crate::parse_block_param(params, block_param_pos(method));
 
