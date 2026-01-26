@@ -4,7 +4,7 @@ use futures::{future::Either, stream::FuturesOrdered, StreamExt};
 use jsonrpsee::{
     core::middleware::{Batch, BatchEntry, Notification},
     server::middleware::rpc::RpcServiceT,
-    types::Request,
+    types::{ErrorCode, ErrorObject, Id, Request},
     BatchResponseBuilder, MethodResponse,
 };
 use tracing::debug;
@@ -196,28 +196,31 @@ where
         let service = self.clone();
 
         Either::Right(Box::pin(async move {
-            let mut requests = Vec::new();
+            // Collect all entries first to avoid lifetime issues
+            let entries: Vec<_> = req.into_iter().collect();
 
-            for entry in req {
-                match entry {
-                    Ok(BatchEntry::Call(request)) => {
-                        requests.push(request);
-                    }
-                    Ok(BatchEntry::Notification(notif)) => {
-                        // Process notification immediately (no response needed)
-                        let _ = service.inner.notification(notif).await;
+            // Process all requests concurrently using FuturesOrdered
+            // This significantly improves latency for batch requests with multiple calls
+            let mut futures: FuturesOrdered<_> = entries
+                .into_iter()
+                .filter_map(|entry| match entry {
+                    Ok(BatchEntry::Call(request)) => Some(Either::Right(service.call(request))),
+                    Ok(BatchEntry::Notification(_notif)) => {
+                        // Notifications should not be answered
+                        // Note: we don't process notifications in batch context
+                        None
                     }
                     Err(_) => {
-                        // Skip malformed entries
-                        continue;
+                        // Return error response for malformed entries
+                        Some(Either::Left(async {
+                            MethodResponse::error(
+                                Id::Null,
+                                ErrorObject::from(ErrorCode::InvalidRequest),
+                            )
+                        }))
                     }
-                }
-            }
-
-            // Process all requests concurrently using futures::future::join_all
-            // This significantly improves latency for batch requests with multiple calls
-            let mut futures: FuturesOrdered<_> =
-                requests.into_iter().map(|request| service.call(request)).collect();
+                })
+                .collect();
 
             let mut batch_response = BatchResponseBuilder::new_with_limit(usize::MAX);
             while let Some(response) = futures.next().await {
