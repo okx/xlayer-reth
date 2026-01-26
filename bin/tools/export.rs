@@ -130,76 +130,89 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> ExportCommand<C> {
             Box::new(output_file)
         };
 
-        // Export blocks in batches
-        let mut current_block = start_block;
-        let mut exported_blocks = 0u64;
+        // Export blocks in batches - wrap in closure to handle cleanup on error
+        let export_result = (|| -> Result<()> {
+            let mut current_block = start_block;
+            let mut exported_blocks = 0u64;
 
-        while current_block <= end_block && !shutdown.load(Ordering::SeqCst) {
-            let batch_end = std::cmp::min(current_block + self.batch_size - 1, end_block);
+            while current_block <= end_block && !shutdown.load(Ordering::SeqCst) {
+                let batch_end = std::cmp::min(current_block + self.batch_size - 1, end_block);
 
-            match provider.block_range(current_block..=batch_end) {
-                Ok(blocks) => {
-                    let blocks_rlp: Vec<Vec<u8>> = blocks
-                        .into_par_iter()
-                        .map(|block| {
-                            let mut rlp_buf = Vec::new();
-                            block.encode(&mut rlp_buf);
-                            rlp_buf
-                        })
-                        .collect();
-                    let blocks_rlp_concat = blocks_rlp.concat();
+                match provider.block_range(current_block..=batch_end) {
+                    Ok(blocks) => {
+                        let blocks_rlp: Vec<Vec<u8>> = blocks
+                            .into_par_iter()
+                            .map(|block| {
+                                let mut rlp_buf = Vec::new();
+                                block.encode(&mut rlp_buf);
+                                rlp_buf
+                            })
+                            .collect();
+                        let blocks_rlp_concat = blocks_rlp.concat();
 
-                    writer.write_all(&blocks_rlp_concat).wrap_err_with(|| {
-                        format!(
-                            "Failed to write block range {current_block} to {batch_end} to file"
-                        )
-                    })?;
+                        writer.write_all(&blocks_rlp_concat).wrap_err_with(|| {
+                            format!(
+                                "Failed to write block range {current_block} to {batch_end} to file"
+                            )
+                        })?;
+                    }
+                    Err(e) => {
+                        error!(target: "reth::cli", "Error: {:#?}", e);
+                        return Err(eyre!(e));
+                    }
                 }
-                Err(e) => {
-                    error!(target: "reth::cli", "Error: {:#?}", e);
-                    return Err(eyre!(e));
+
+                exported_blocks += batch_end - current_block + 1;
+
+                // Log progress periodically
+                if exported_blocks.is_multiple_of(self.batch_size) {
+                    let progress = (exported_blocks as f64 / total_blocks as f64) * 100.0;
+                    info!(
+                        target: "reth::cli",
+                        "Exported {} blocks ({:.2}%)",
+                        exported_blocks,
+                        progress
+                    );
                 }
+
+                current_block = batch_end + 1;
             }
 
-            exported_blocks += batch_end - current_block + 1;
+            // Flush and close the writer
+            writer.flush().wrap_err("Failed to flush output file")?;
 
-            // Log progress periodically
-            if exported_blocks.is_multiple_of(self.batch_size) {
-                let progress = (exported_blocks as f64 / total_blocks as f64) * 100.0;
-                info!(
+            if shutdown.load(Ordering::SeqCst) {
+                warn!(
                     target: "reth::cli",
-                    "Exported {} blocks ({:.2}%)",
+                    "Export interrupted! Exported {}/{} blocks",
                     exported_blocks,
-                    progress
+                    total_blocks
                 );
+                return Err(eyre!(
+                    "Export was interrupted. Exported {}/{} blocks",
+                    exported_blocks,
+                    total_blocks
+                ));
             }
 
-            current_block = batch_end + 1;
-        }
-
-        // Flush and close the writer
-        writer.flush().wrap_err("Failed to flush output file")?;
-
-        if shutdown.load(Ordering::SeqCst) {
-            warn!(
+            info!(
                 target: "reth::cli",
-                "Export interrupted! Exported {}/{} blocks",
+                "Export complete! Exported {} blocks to {}",
                 exported_blocks,
-                total_blocks
+                self.output_path.display()
             );
-            return Err(eyre!(
-                "Export was interrupted. Exported {}/{} blocks",
-                exported_blocks,
-                total_blocks
-            ));
-        }
 
-        info!(
-            target: "reth::cli",
-            "Export complete! Exported {} blocks to {}",
-            exported_blocks,
-            self.output_path.display()
-        );
+            Ok(())
+        })();
+
+        // If an error occurred, remove the output file
+        if let Err(e) = export_result {
+            warn!(target: "reth::cli", "Removing incomplete output file: {}", self.output_path.display());
+            if let Err(remove_err) = std::fs::remove_file(&self.output_path) {
+                warn!(target: "reth::cli", "Failed to remove output file: {}", remove_err);
+            }
+            return Err(e);
+        }
 
         Ok(())
     }
