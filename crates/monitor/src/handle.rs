@@ -36,6 +36,11 @@ pub fn start_monitor_handle<N, T, Provider>(
     T::PayloadBuilderAttributes: PayloadBuilderAttributes,
     Provider: BlockNumReader + Clone + Send + Sync + 'static,
 {
+    // Check if monitor is enabled, if not, return early
+    if !monitor.args.enable {
+        return;
+    }
+
     info!(target: "xlayer::monitor", "starting monitor handle");
 
     let monitor_handle = async move {
