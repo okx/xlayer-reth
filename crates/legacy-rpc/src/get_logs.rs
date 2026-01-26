@@ -24,7 +24,7 @@
 //!     These get converted to 0
 //! to_block: latest/pending/finalized/safe
 //!     These get converted to u64::MAX
-use crate::LegacyRpcRouterService;
+use crate::{service::is_result_empty, LegacyRpcRouterService};
 use jsonrpsee::{
     types::{error::INVALID_PARAMS_CODE, ErrorObject},
     MethodResponse,
@@ -33,19 +33,7 @@ use jsonrpsee_types::{Id, Request};
 use serde_json::value::RawValue;
 use tracing::debug;
 
-// Basic validation - check if it's a valid 32-byte hex string
-fn is_valid_blockhash(hash: &str) -> bool {
-    // Remove 0x prefix if present
-    let hash = hash.strip_prefix("0x").unwrap_or(hash);
-
-    // Check length (64 hex chars = 32 bytes)
-    if hash.len() != 64 {
-        return false;
-    }
-
-    // Check if all characters are valid hex
-    hash.chars().all(|c| c.is_ascii_hexdigit())
-}
+use crate::is_valid_32_bytes_string;
 
 /// Parse a block number string to u64
 /// Returns None for "latest", "pending", "safe", "finalized"
@@ -91,7 +79,7 @@ fn parse_eth_get_logs_params(params: &str) -> Option<GetLogsParams> {
     let filter_obj = filter.as_object()?;
 
     if let Some(block_hash) = filter_obj.get("blockHash").and_then(|v| v.as_str()) {
-        if is_valid_blockhash(block_hash) {
+        if is_valid_32_bytes_string(block_hash) {
             return Some(GetLogsParams::BlockHash(block_hash.into()));
         } else {
             return None;
@@ -307,11 +295,11 @@ where
         Some(GetLogsParams::BlockHash(_block_hash)) => {
             debug!(target:"xlayer_legacy_rpc", "method = eth_getLogs, testing locally first...");
             let res = inner.call(req.clone()).await;
-            if res.is_success() {
+            if res.is_success() && !is_result_empty(&res) {
                 debug!(target:"xlayer_legacy_rpc", "method = eth_getLogs, success response = {res:?}");
                 res
             } else {
-                debug!(target:"xlayer_legacy_rpc", "method = eth_getLogs, forward to legacy");
+                debug!(target:"xlayer_legacy_rpc", "method = eth_getLogs, forward to legacy (empty or error)");
                 service.forward_to_legacy(req).await
             }
         }

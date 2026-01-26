@@ -100,7 +100,7 @@ fn need_try_local_then_legacy(method: &str) -> bool {
 
 /// Check if the response has a non-empty result.
 /// Returns true if the result is null, an empty object {}, or an empty array [].
-fn is_result_empty(response: &MethodResponse) -> bool {
+pub(crate) fn is_result_empty(response: &MethodResponse) -> bool {
     // Parse the JSON response
     let json_str = response.as_ref();
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str)
@@ -244,7 +244,7 @@ where
     let cutoff_block = config.cutoff_block;
     if let Some(block_param) = block_param {
         let service = LegacyRpcRouterService { inner: inner.clone(), config, client };
-        if can_use_block_hash_as_param(method) && crate::is_block_hash(&block_param) {
+        if can_use_block_hash_as_param(method) && crate::is_valid_32_bytes_string(&block_param) {
             let res = service.call_eth_get_block_by_hash(&block_param, false).await;
             match res {
                 Ok(n) => {
