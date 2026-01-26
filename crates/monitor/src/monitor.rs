@@ -58,15 +58,17 @@ impl XLayerMonitor {
     /// This is triggered when the consensus layer sends payload attributes via engine_forkchoiceUpdatedV*.
     pub fn on_block_build_start(&self, block_number: u64) {
         if let Some(tracer) = get_global_tracer() {
-            // Use block_number as the hash for block-level events
-            // Note: We don't have the block hash here, so we use a zero hash
-            // The block_number is the key identifier
-            let block_hash = B256::ZERO; // Will be updated when block is built
-            tracer.log_block(
-                from_b256(block_hash),
-                block_number,
-                TransactionProcessId::SeqBlockBuildStart,
-            );
+            if self.is_sequencer() {
+                // Use block_number as the hash for block-level events
+                // Note: We don't have the block hash here, so we use a zero hash
+                // The block_number is the key identifier
+                let block_hash = B256::ZERO; // Will be updated when block is built
+                tracer.log_block(
+                    from_b256(block_hash),
+                    block_number,
+                    TransactionProcessId::SeqBlockBuildStart,
+                );
+            }
         }
     }
 
@@ -103,7 +105,7 @@ impl XLayerMonitor {
     pub fn on_tx_commit(&self, _num_hash: BlockNumHash, tx_hash: B256) {
         if !self.flashblocks_enabled {
             if let Some(tracer) = get_global_tracer() {
-                if !self.is_sequencer() {
+                if self.is_sequencer() {
                     tracer.log_transaction(
                         from_b256(tx_hash),
                         TransactionProcessId::SeqTxExecutionEnd,
