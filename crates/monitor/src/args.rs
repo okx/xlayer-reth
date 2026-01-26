@@ -2,21 +2,21 @@ use clap::Args;
 
 #[derive(Debug, Clone, Args, PartialEq, Eq, Default)]
 pub struct FullLinkMonitorArgs {
-    /// Enable transaction trace functionality
+    /// Enable full link monitor functionality
     #[arg(
-        long = "tx-trace.enable",
-        help = "Enable transaction trace functionality (disabled by default)",
+        long = "xlayer.full-link-monitor.enable",
+        help = "Enable full link monitor functionality (disabled by default)",
         default_value = "false"
     )]
-    pub tx_trace_enable: bool,
+    pub enable: bool,
 
-    /// Output path for transaction trace logs
+    /// Output path for full link monitor logs
     #[arg(
-        long = "tx-trace.output-path",
-        help = "Output path for transaction trace logs",
+        long = "xlayer.full-link-monitor.output-path",
+        help = "Output path for full link monitor logs",
         default_value = "/data/logs/trace.log"
     )]
-    pub tx_trace_output_path: String,
+    pub output_path: String,
 }
 
 impl FullLinkMonitorArgs {
