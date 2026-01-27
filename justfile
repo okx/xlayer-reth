@@ -325,6 +325,9 @@ build-tools:
 build-tools-maxperf:
     RUSTFLAGS="-C target-cpu=native" cargo build --package xlayer-reth-tools --profile maxperf --features jemalloc,asm-keccak
 
+build-rocksdb:
+    RUSTFLAGS="-C target-cpu=native" cargo build --profile maxperf --features jemalloc,asm-keccak,edge
+
 install:
     cargo install --path bin/node --bin xlayer-reth-node --force --locked --profile release
 
@@ -340,7 +343,7 @@ install-tools-maxperf:
 clean:
     cargo clean
 
-build-docker suffix="" git_sha="" git_timestamp="":
+build-docker suffix="" git_sha="" git_timestamp="" edge="false":
     #!/usr/bin/env bash
     set -e
     # Only clean .cargo in production mode, preserve it for dev builds
@@ -363,6 +366,10 @@ build-docker suffix="" git_sha="" git_timestamp="":
     fi
     if [ -n "{{git_timestamp}}" ]; then
         BUILD_ARGS="$BUILD_ARGS --build-arg VERGEN_GIT_COMMIT_TIMESTAMP={{git_timestamp}}"
+    fi
+    if [ "{{edge}}" = "true" ]; then
+        BUILD_ARGS="$BUILD_ARGS --build-arg FEATURES=edge"
+        echo "🔧 Building with edge feature enabled"
     fi
 
     docker build $BUILD_ARGS -t $TAG -f DockerfileOp .
