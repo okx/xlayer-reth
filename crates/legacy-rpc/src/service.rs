@@ -38,7 +38,6 @@ pub fn is_legacy_routable(method: &str) -> bool {
             | "eth_estimateGas"
             | "eth_createAccessList"
             | "eth_getLogs"
-            | "eth_transactionPreExec"
             | "debug_traceTransaction"
     )
 }
@@ -61,7 +60,6 @@ fn need_parse_block(method: &str) -> bool {
             | "eth_call"
             | "eth_estimateGas"
             | "eth_createAccessList"
-            | "eth_transactionPreExec"
     )
 }
 
@@ -78,7 +76,6 @@ fn can_use_block_hash_as_param(method: &str) -> bool {
             | "eth_call"
             | "eth_estimateGas"
             | "eth_createAccessList"
-            | "eth_transactionPreExec"
     )
 }
 
@@ -133,7 +130,6 @@ fn block_param_pos(method: &str) -> usize {
             | "eth_call"
             | "eth_estimateGas"
             | "eth_createAccessList"
-            | "eth_transactionPreExec"
     ) {
         return 1;
     }
