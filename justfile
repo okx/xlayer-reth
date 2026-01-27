@@ -377,7 +377,7 @@ build-docker suffix="" git_sha="" git_timestamp="" edge="false":
     echo "🔖 Tagged $TAG as op-reth:latest"
 
 [no-exit-message]
-build-docker-dev reth_path="":
+build-docker-dev reth_path="" edge="false":
     #!/usr/bin/env bash
     set -e
     PATH_FILE=".cargo/.reth_source_path"
@@ -413,7 +413,7 @@ build-docker-dev reth_path="":
     sed "s|RETH_PATH_PLACEHOLDER|/reth|g" .reth-dev.toml > .cargo/config.toml
 
     # Build Docker image with reth git info
-    just build-docker dev "$RETH_GIT_SHA" "$RETH_GIT_TIMESTAMP"
+    just build-docker dev "$RETH_GIT_SHA" "$RETH_GIT_TIMESTAMP" {{edge}}
 
     # Clean up synced reth source (will be re-synced on next build)
     rm -rf .cargo/reth
