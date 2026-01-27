@@ -5,6 +5,7 @@ use alloy_primitives::U256;
 use jsonrpsee::{
     core::{async_trait, RpcResult},
     proc_macros::rpc,
+    types::error::INTERNAL_ERROR_CODE,
 };
 use tracing::{debug, warn};
 
@@ -85,7 +86,7 @@ where
         // Local calculation (sequencer mode or fallback)
         let header = self.backend.provider().latest_header().map_err(|err| {
             jsonrpsee::types::ErrorObjectOwned::owned(
-                -32603,
+                INTERNAL_ERROR_CODE,
                 format!("Failed to get latest header: {err}"),
                 None::<()>,
             )
