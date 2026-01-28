@@ -97,7 +97,6 @@ impl XLayerMonitor {
                     TransactionProcessId::RpcBlockReceiveEnd,
                 );
             }
-
         }
     }
 
