@@ -49,7 +49,9 @@ where
 
     fn call<'a>(&self, req: Request<'a>) -> impl Future<Output = Self::MethodResponse> + Send + 'a {
         let method = req.method_name();
-        if !self.monitor.args.enable || !matches!(method, "eth_sendRawTransaction" | "eth_sendTransaction") {
+        if !self.monitor.args.enable
+            || !matches!(method, "eth_sendRawTransaction" | "eth_sendTransaction")
+        {
             return Either::Left(self.inner.call(req));
         }
 

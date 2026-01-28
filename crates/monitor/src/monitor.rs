@@ -1,7 +1,6 @@
 use crate::args::FullLinkMonitorArgs;
 
 use std::sync::Arc;
-use tracing::debug;
 
 use alloy_eips::BlockNumHash;
 use alloy_primitives::B256;
@@ -57,62 +56,60 @@ impl XLayerMonitor {
     /// Handle block build start event (when payload attributes are received from CL).
     /// This is triggered when the consensus layer sends payload attributes via engine_forkchoiceUpdatedV*.
     pub fn on_block_build_start(&self, block_number: u64) {
-        if let Some(tracer) = get_global_tracer() {
-            if self.is_sequencer() {
-                // Use block_number as the hash for block-level events
-                // Note: We don't have the block hash here, so we use a zero hash
-                // The block_number is the key identifier
-                let block_hash = B256::ZERO; // Will be updated when block is built
-                tracer.log_block(
-                    from_b256(block_hash),
-                    block_number,
-                    TransactionProcessId::SeqBlockBuildStart,
-                );
-            }
+        if let Some(tracer) = get_global_tracer()
+            && self.is_sequencer()
+        {
+            // Use block_number as the hash for block-level events
+            // Note: We don't have the block hash here, so we use a zero hash
+            // The block_number is the key identifier
+            let block_hash = B256::ZERO; // Will be updated when block is built
+            tracer.log_block(
+                from_b256(block_hash),
+                block_number,
+                TransactionProcessId::SeqBlockBuildStart,
+            );
         }
     }
 
     /// Handle block send start event (when payload is built and ready to send).
     /// This is triggered when CL calls getPayload and the block is built.
     pub fn on_block_send_start(&self, num_hash: BlockNumHash) {
-        if let Some(tracer) = get_global_tracer() {
-            if self.is_sequencer() {
-                tracer.log_block(
-                    from_b256(num_hash.hash),
-                    num_hash.number,
-                    TransactionProcessId::SeqBlockSendStart,
-                );
-            }
+        if let Some(tracer) = get_global_tracer()
+            && self.is_sequencer()
+        {
+            tracer.log_block(
+                from_b256(num_hash.hash),
+                num_hash.number,
+                TransactionProcessId::SeqBlockSendStart,
+            );
         }
     }
 
     /// Handle block received event (when newPayload is called).
     /// This is triggered by ConsensusEngineEvent::BlockReceived.
     pub fn on_block_received(&self, num_hash: BlockNumHash) {
-        if let Some(tracer) = get_global_tracer() {
-            if !self.is_sequencer() {
-                tracer.log_block(
-                    from_b256(num_hash.hash),
-                    num_hash.number,
-                    TransactionProcessId::RpcBlockReceiveEnd,
-                );
-            }
-
+        if let Some(tracer) = get_global_tracer()
+            && !self.is_sequencer()
+        {
+            tracer.log_block(
+                from_b256(num_hash.hash),
+                num_hash.number,
+                TransactionProcessId::RpcBlockReceiveEnd,
+            );
         }
     }
 
     /// Handle transaction commits to the canonical chain.
     pub fn on_tx_commit(&self, _num_hash: BlockNumHash, tx_hash: B256) {
-        if !self.flashblocks_enabled {
-            if let Some(tracer) = get_global_tracer() {
-                if self.is_sequencer() {
-                    tracer.log_transaction(
-                        from_b256(tx_hash),
-                        TransactionProcessId::SeqTxExecutionEnd,
-                        Some(_num_hash.number),
-                    );
-                }
-            }
+        if !self.flashblocks_enabled
+            && let Some(tracer) = get_global_tracer()
+            && self.is_sequencer()
+        {
+            tracer.log_transaction(
+                from_b256(tx_hash),
+                TransactionProcessId::SeqTxExecutionEnd,
+                Some(_num_hash.number),
+            );
         }
     }
 
