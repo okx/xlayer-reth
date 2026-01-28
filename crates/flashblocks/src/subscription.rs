@@ -24,7 +24,7 @@ use reth_rpc_eth_types::utils::calculate_gas_used_and_next_log_index;
 use reth_rpc_server_types::result::{internal_rpc_err, invalid_params_rpc_err};
 use reth_storage_api::BlockNumReader;
 use reth_tasks::TaskSpawner;
-use reth_tracing::tracing::warn;
+use reth_tracing::tracing::{trace, warn};
 use std::{collections::HashSet, future::ready, sync::Arc};
 use tokio_stream::{wrappers::WatchStream, Stream};
 
@@ -286,6 +286,7 @@ where
             .filter_map(|(idx, (sender, tx))| {
                 let tx_hash = *tx.tx_hash();
                 if txhash_cache.get(&tx_hash).is_some() {
+                    trace!(target: "xlayer::flashblocks", "skipping transaction idx: {idx}, already processed");
                     return None;
                 }
                 let Some(receipt) = receipts.get(idx) else {

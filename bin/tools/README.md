@@ -270,7 +270,7 @@ xlayer-reth-tools export --datadir <DATA_DIR> --chain <CHAIN_SPEC> --exported-da
 
 - `--start-block <NUM>`: Starting block number (inclusive, default: 0)
 - `--end-block <NUM>`: Ending block number (inclusive, default: latest block)
-- `--batch-size <NUM>`: Batch size for reading blocks (default: 1000)
+- `--batch-size <NUM>`: Batch size for reading blocks (default: 100000)
 - `--config <FILE>`: Path to a configuration file
 
 ### Database Options
