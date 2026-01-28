@@ -89,10 +89,10 @@ impl FlashblocksFilter {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields, default)]
 pub struct SubTxFilter {
-    /// Subscribe addresses matches a transaction if any of these addresses appears in:
+    /// Subscribe addresses match a transaction if any of these addresses appears in:
     /// 1. the sender `from` address
     /// 2. the recipient `to` address
-    /// 3. the addresses in the transaction logs emitted by the transaction
+    /// 3. the addresses that emitted logs
     pub subscribe_addresses: HashSet<Address>,
 
     /// Flag to include full transaction information.
