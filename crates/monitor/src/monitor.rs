@@ -1,7 +1,6 @@
 use crate::args::FullLinkMonitorArgs;
 
 use std::sync::Arc;
-use tracing::debug;
 
 use alloy_eips::BlockNumHash;
 use alloy_primitives::B256;
