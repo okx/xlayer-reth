@@ -24,6 +24,12 @@ pub trait SequencerClientProvider {
     fn sequencer_client(&self) -> Option<&SequencerClient>;
 }
 
+/// Trait for checking if pending block (flashblocks) is enabled
+pub trait PendingFlashBlockProvider {
+    /// Returns true if pending block receiver is available and has actual pending block data (flashblocks enabled)
+    fn has_pending_flashblock(&self) -> bool;
+}
+
 /// XLayer-specific RPC API trait
 #[rpc(server, namespace = "eth", server_bounds(
     Net: 'static + RpcTypes,
@@ -36,6 +42,10 @@ pub trait XlayerRpcExtApi<Net: RpcTypes> {
     /// This is an XLayer-specific extension to the standard Ethereum RPC API.
     #[method(name = "minGasPrice")]
     async fn min_gas_price(&self) -> RpcResult<U256>;
+
+    /// Returns boolean indicating if the node has flashblocks enabled.
+    #[method(name = "flashblocksEnabled")]
+    async fn flashblocks_enabled(&self) -> RpcResult<bool>;
 }
 
 /// XLayer RPC extension implementation
@@ -52,6 +62,7 @@ where
         + LoadBlock
         + EthApiTypes<NetworkTypes = Net>
         + SequencerClientProvider
+        + PendingFlashBlockProvider
         + Clone
         + Send
         + Sync
@@ -106,6 +117,10 @@ where
         );
 
         Ok(min_gas_price)
+    }
+
+    async fn flashblocks_enabled(&self) -> RpcResult<bool> {
+        Ok(self.backend.has_pending_flashblock())
     }
 }
 
