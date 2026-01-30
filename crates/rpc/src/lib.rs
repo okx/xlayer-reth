@@ -29,7 +29,7 @@ where
     Rpc: RpcConvert,
 {
     fn has_pending_flashblock(&self) -> bool {
-        self.pending_block_rx().map_or(false, |rx| {
+        self.pending_block_rx().is_some_and(|rx| {
             rx.borrow()
                 .as_ref()
                 .is_some_and(|pending_flashblock| Instant::now() < pending_flashblock.expires_at)
