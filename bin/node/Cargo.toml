@@ -15,9 +15,11 @@ workspace = true
 # internal
 xlayer-flashblocks.workspace = true
 xlayer-chainspec.workspace = true
-xlayer-rpc.workspace = true
 xlayer-legacy-rpc.workspace = true
+xlayer-monitor.workspace = true
+xlayer-rpc.workspace = true
 xlayer-version.workspace = true
+xlayer-trace-monitor.workspace = true
 
 # reth
 reth.workspace = true
@@ -26,6 +28,7 @@ reth-optimism-cli.workspace = true
 reth-primitives.workspace = true
 reth-node-api.workspace = true
 reth-node-builder.workspace = true
+reth-node-core.workspace = true
 reth-rpc-eth-api.workspace = true
 reth-optimism-primitives.workspace = true
 reth-rpc-convert.workspace = true
@@ -37,6 +40,11 @@ reth-payload-builder.workspace = true
 reth-cli-util.workspace = true
 reth-exex.workspace = true
 reth-rpc-server-types.workspace = true
+reth-rpc-api.workspace = true
+reth-rpc-engine-api.workspace = true
+reth-chainspec.workspace = true
+reth-storage-api.workspace = true
+reth-transaction-pool.workspace = true
 
 # flashblocks
 op-rbuilder.workspace = true
@@ -53,9 +61,13 @@ reqwest.workspace = true
 
 # rpc
 jsonrpsee.workspace = true
+op-alloy-network.workspace = true
 
 # alloy
 alloy-primitives.workspace = true
+alloy-rpc-types-engine.workspace = true
+alloy-eips.workspace = true
+op-alloy-rpc-types-engine.workspace = true
 
 # misc
 clap.workspace = true
@@ -72,6 +84,8 @@ time.workspace = true
 chrono.workspace = true
 once_cell.workspace = true
 humantime.workspace = true
+derive_more.workspace = true
+async-trait.workspace = true
 
 [features]
 default = []
