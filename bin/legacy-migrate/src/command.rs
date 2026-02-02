@@ -78,10 +78,6 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> Command<C> {
                 None
             };
 
-            if !self.skip_rocksdb {
-                warn!(target: "reth::cli", "Skipping RocksDB migration (requires 'edge' feature)");
-            }
-
             // Wait for static files migration
             if let Some(handle) = static_files_handle {
                 handle.join().expect("static files thread panicked")?;
