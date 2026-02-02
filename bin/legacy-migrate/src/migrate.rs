@@ -49,3 +49,12 @@ pub(crate) fn migrate_segment<N: CliNodeTypes>(
 
     Ok(())
 }
+
+pub(crate) fn migrate_to_rocksdb<N: CliNodeTypes>(
+        provider_factory: &ProviderFactory<
+            reth_node_builder::NodeTypesWithDBAdapter<N, DatabaseEnv>,
+        >,
+        batch_size: u64,
+    ) -> Result<()> {
+    Ok(())
+}

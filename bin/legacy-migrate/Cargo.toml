@@ -8,7 +8,6 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
-# xlayer-chainspec.workspace = true
 
 # Designate to upstream main
 reth-db = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }

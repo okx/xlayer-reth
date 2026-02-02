@@ -7,7 +7,7 @@ use reth_cli_commands::common::{AccessRights, Environment, EnvironmentArgs};
 use reth_optimism_chainspec::OpChainSpec;
 use reth_storage_api::{BlockNumReader, DBProvider};
 
-use crate::migrate::migrate_to_static_files;
+use crate::migrate::{migrate_to_static_files, migrate_to_rocksdb};
 
 /// Migrate from legacy MDBX storage to new RocksDB + static files.
 #[derive(Debug, Parser)]
@@ -60,7 +60,7 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> Command<C> {
 
         // Run static files and RocksDB migrations in parallel
         std::thread::scope(|s| {
-            let _static_files_handle = if !self.skip_static_files {
+            let static_files_handle = if !self.skip_static_files {
                 Some(s.spawn(|| {
                     info!(target: "reth::cli", "Starting static files migration");
                     migrate_to_static_files::<N>(
@@ -72,6 +72,28 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> Command<C> {
             } else {
                 None
             };
+
+            let rocksdb_handle = if !self.skip_rocksdb {
+                Some(s.spawn(|| {
+                    info!(target: "reth::cli", "Starting RocksDB migration");
+                    migrate_to_rocksdb::<N>(&provider_factory, self.batch_size)
+                }))
+            } else {
+                None
+            };
+
+            if !self.skip_rocksdb {
+                warn!(target: "reth::cli", "Skipping RocksDB migration (requires 'edge' feature)");
+            }
+
+            // Wait for static files migration
+            if let Some(handle) = static_files_handle {
+                handle.join().expect("static files thread panicked")?;
+            }
+
+            if let Some(handle) = rocksdb_handle {
+                handle.join().expect("rocksdb thread panicked")?;
+            }
 
             Ok::<_, eyre::Error>(())
         })?;
