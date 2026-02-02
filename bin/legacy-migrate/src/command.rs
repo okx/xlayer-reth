@@ -7,7 +7,7 @@ use reth_cli_commands::common::{AccessRights, Environment, EnvironmentArgs};
 use reth_optimism_chainspec::OpChainSpec;
 use reth_storage_api::{BlockNumReader, DBProvider};
 
-use crate::migrate::{migrate_to_static_files, migrate_to_rocksdb};
+use crate::migrate::{migrate_to_rocksdb, migrate_to_static_files};
 
 /// Migrate from legacy MDBX storage to new RocksDB + static files.
 #[derive(Debug, Parser)]
@@ -63,11 +63,7 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> Command<C> {
             let static_files_handle = if !self.skip_static_files {
                 Some(s.spawn(|| {
                     info!(target: "reth::cli", "Starting static files migration");
-                    migrate_to_static_files::<N>(
-                        &provider_factory,
-                        to_block,
-                        can_migrate_receipts,
-                    )
+                    migrate_to_static_files::<N>(&provider_factory, to_block, can_migrate_receipts)
                 }))
             } else {
                 None

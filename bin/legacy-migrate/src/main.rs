@@ -1,9 +1,10 @@
 mod command;
 mod migrate;
+mod progress;
 
 use clap::Parser;
 
-use reth_optimism_cli::{chainspec::OpChainSpecParser};
+use reth_optimism_cli::chainspec::OpChainSpecParser;
 use reth_optimism_node::OpNode;
 use reth_tracing::{RethTracer, Tracer};
 
