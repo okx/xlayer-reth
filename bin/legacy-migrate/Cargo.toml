@@ -15,9 +15,11 @@ reth-cli.workspace = true
 reth-cli-commands.workspace = true
 reth-optimism-chainspec.workspace = true
 reth-optimism-node.workspace = true
+reth-storage-api.workspace = true
 
 anyhow = "1.0"
 clap =  { workspace = true, features = ["derive"] }
+eyre.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
