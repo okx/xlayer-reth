@@ -9,7 +9,7 @@ use eyre::Result;
 use rayon::prelude::*;
 use tracing::info;
 
-use crate::progress::{log_progress, PROGRESS_LOG_INTERVAL};
+use crate::progress::{log_progress, log_rocksdb_progress, PROGRESS_LOG_INTERVAL};
 use reth_cli_commands::common::CliNodeTypes;
 use reth_db::{cursor::DbCursorRO, tables, transaction::DbTx, DatabaseEnv};
 use reth_db_api::models::{AccountBeforeTx, StorageBeforeTx};
@@ -235,5 +235,115 @@ pub(crate) fn migrate_to_rocksdb<N: CliNodeTypes>(
     provider_factory: &ProviderFactory<reth_node_builder::NodeTypesWithDBAdapter<N, DatabaseEnv>>,
     batch_size: u64,
 ) -> Result<()> {
+    use reth_db_api::table::Table;
+
+    [
+        tables::TransactionHashNumbers::NAME,
+        tables::AccountsHistory::NAME,
+        tables::StoragesHistory::NAME,
+    ]
+    .into_par_iter()
+    .try_for_each(|table| migrate_rocksdb_table::<N>(provider_factory, table, batch_size))?;
+
+    Ok(())
+}
+
+pub(crate) fn migrate_rocksdb_table<N: CliNodeTypes>(
+    provider_factory: &ProviderFactory<reth_node_builder::NodeTypesWithDBAdapter<N, DatabaseEnv>>,
+    table: &'static str,
+    batch_size: u64,
+) -> Result<()> {
+    use reth_db_api::table::Table;
+    use reth_provider::{providers::RocksDBProvider, RocksDBProviderFactory};
+
+    let provider = provider_factory.provider()?.disable_long_read_transaction_safety();
+    let rocksdb = provider_factory.rocksdb_provider();
+    let tx = provider.tx_ref();
+
+    info!(target: "reth::cli", table, "Migrating");
+
+    let table_start = Instant::now();
+    let mut last_log = Instant::now();
+
+    let count = match table {
+        tables::TransactionHashNumbers::NAME => {
+            let mut cursor = tx.cursor_read::<tables::TransactionHashNumbers>()?;
+            let mut batch = rocksdb.batch_with_auto_commit();
+            let mut count = 0u64;
+
+            for result in cursor.walk(None)? {
+                let (hash, tx_num) = result?;
+                batch.put::<tables::TransactionHashNumbers>(hash, &tx_num)?;
+                count += 1;
+
+                if count.is_multiple_of(batch_size) && last_log.elapsed() >= PROGRESS_LOG_INTERVAL {
+                    log_rocksdb_progress(table, count, table_start.elapsed());
+                    last_log = Instant::now();
+                }
+            }
+
+            batch.commit()?;
+            count
+        }
+        tables::AccountsHistory::NAME => {
+            let mut cursor = tx.cursor_read::<tables::AccountsHistory>()?;
+            let mut batch = rocksdb.batch_with_auto_commit();
+            let mut count = 0u64;
+
+            for result in cursor.walk(None)? {
+                let (key, value) = result?;
+                batch.put::<tables::AccountsHistory>(key, &value)?;
+                count += 1;
+                if count.is_multiple_of(batch_size) {
+                    batch.commit()?;
+                    batch = rocksdb.batch_with_auto_commit();
+
+                    if last_log.elapsed() >= PROGRESS_LOG_INTERVAL {
+                        log_rocksdb_progress(table, count, table_start.elapsed());
+                        last_log = Instant::now();
+                    }
+                }
+            }
+
+            batch.commit()?;
+            count
+        }
+        tables::StoragesHistory::NAME => {
+            let mut cursor = tx.cursor_read::<tables::StoragesHistory>()?;
+            let mut batch = rocksdb.batch_with_auto_commit();
+            let mut count = 0u64;
+
+            for result in cursor.walk(None)? {
+                let (key, value) = result?;
+                batch.put::<tables::StoragesHistory>(key, &value)?;
+                count += 1;
+                if count.is_multiple_of(batch_size) {
+                    batch.commit()?;
+                    batch = rocksdb.batch_with_auto_commit();
+
+                    if last_log.elapsed() >= PROGRESS_LOG_INTERVAL {
+                        log_rocksdb_progress(table, count, table_start.elapsed());
+                        last_log = Instant::now();
+                    }
+                }
+            }
+
+            batch.commit()?;
+            count
+        }
+        _ => 0,
+    };
+
+    let elapsed = table_start.elapsed();
+    let rate = if elapsed.as_secs() > 0 { count / elapsed.as_secs() } else { count };
+    info!(
+        target: "reth::cli",
+        table,
+        entries = count,
+        elapsed_secs = elapsed.as_secs(),
+        rate_per_sec = rate,
+        "Done"
+    );
+
     Ok(())
 }
