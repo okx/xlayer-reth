@@ -43,7 +43,7 @@ pub trait XlayerRpcExtApi<Net: RpcTypes> {
     #[method(name = "minGasPrice")]
     async fn min_gas_price(&self) -> RpcResult<U256>;
 
-    /// Returns boolean indicating if the node has flashblocks enabled.
+    /// Returns boolean indicating if the node's flashblocks functionality is enabled and working.
     #[method(name = "flashblocksEnabled")]
     async fn flashblocks_enabled(&self) -> RpcResult<bool>;
 }
