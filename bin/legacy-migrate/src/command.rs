@@ -38,7 +38,7 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> Command<C> {
     where
         N: reth_cli_commands::common::CliNodeTypes<ChainSpec = C::ChainSpec>,
     {
-        let Environment { provider_factory, .. } = self.env.init::<N>(AccessRights::RO)?;
+        let Environment { provider_factory, .. } = self.env.init::<N>(AccessRights::RW)?;
 
         let provider = provider_factory.provider()?.disable_long_read_transaction_safety();
         let to_block = provider.best_block_number()?;

@@ -23,7 +23,7 @@ members = [
 
     "bin/tools",
     "bin/node", 
-    # "bin/legacy-migrate",
+    "bin/legacy-migrate",
 ]
 default-members = ["bin/node"]
 
@@ -69,7 +69,7 @@ xlayer-monitor = { path = "crates/monitor" }
 xlayer-reth-node = { path = "bin/node" }
 xlayer-rpc = { path = "crates/rpc" }
 xlayer-version = { path = "crates/version" }
-# xlayer-legacy-migrate = { path = "bin/legacy-migrate" }
+xlayer-legacy-migrate = { path = "bin/legacy-migrate" }
 
 # For X layer
 xlayer-trace-monitor = { git = "https://github.com/okx/xlayer-toolkit", rev = "0004d202181bb772821797cd54983e29f32cae07" }
@@ -150,7 +150,7 @@ alloy-evm = { version = "0.26.3", default-features = false }
 alloy-genesis = { version = "1.4.3", default-features = false }
 alloy-json-rpc = { version = "1.4.3" }
 alloy-network = { version = "1.4.3", default-features = false }
-alloy-primitives = { version = "1.5.2", default-features = false, features = [
+alloy-primitives = { version = "1.5.4", default-features = false, features = [
     "map-foldhash",
 ] }
 alloy-provider = { version = "1.4.3" }
@@ -209,6 +209,7 @@ tracing = { version = "0.1.41" }
 url = "2.5"
 uuid = { version = "1.6.1", features = ["serde", "v5", "v4"] }
 moka = { version = "0.12.11", features = ["sync"] }
+rayon = "1.7"
 
 # ==============================================================================
 # Dependency Patches

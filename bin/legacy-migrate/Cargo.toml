@@ -8,23 +8,25 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
-xlayer-chainspec.workspace = true
+# xlayer-chainspec.workspace = true
 
-reth-tracing.workspace = true
-reth-db.workspace = true
-reth-db-api.workspace = true
-reth-cli.workspace = true
-reth-cli-commands.workspace = true
-reth-node-builder.workspace = true
-reth-optimism-chainspec.workspace = true
-reth-optimism-node.workspace = true
-reth-provider.workspace = true
-reth-static-file-types.workspace = true
-reth-storage-api.workspace = true
+# Designate to upstream main
+reth-db = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
+reth-db-api = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
+reth-cli = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
+reth-cli-commands = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" } 
+reth-node-builder = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
+reth-optimism-chainspec = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
+reth-optimism-cli = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
+reth-optimism-node = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
+reth-provider = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
+reth-static-file-types = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
+reth-storage-api = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
+reth-tracing = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
 
 alloy-primitives.workspace = true
 
-clap =  { workspace = true, features = ["derive"] }
+clap = { workspace = true, features = ["derive"] }
 eyre.workspace = true
 tokio.workspace = true
 tracing.workspace = true

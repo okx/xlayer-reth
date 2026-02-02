@@ -15,12 +15,10 @@ use reth_provider::{
     StaticFileProviderFactory, StaticFileWriter, TransactionsProvider,
 };
 use reth_static_file_types::StaticFileSegment;
-use tracing::{info, warn};
-
 
 pub(crate) fn migrate_to_static_files<N: CliNodeTypes>(
     provider_factory: &ProviderFactory<
-        reth_node_builder::NodeTypesWithDBAdapter<N, Arc<DatabaseEnv>>,
+        reth_node_builder::NodeTypesWithDBAdapter<N, DatabaseEnv>,
     >,
     to_block: BlockNumber,
     can_migrate_receipts: bool,
@@ -35,7 +33,7 @@ pub(crate) fn migrate_to_static_files<N: CliNodeTypes>(
     }
 
     segments.into_par_iter().try_for_each(|segment| {
-        self.migrate_segment::<N>(provider_factory, segment, to_block)
+        migrate_segment::<N>(provider_factory, segment, to_block)
     })?;
 
     Ok(())
@@ -43,7 +41,7 @@ pub(crate) fn migrate_to_static_files<N: CliNodeTypes>(
 
 pub(crate) fn migrate_segment<N: CliNodeTypes>(
         provider_factory: &ProviderFactory<
-            reth_node_builder::NodeTypesWithDBAdapter<N, Arc<DatabaseEnv>>,
+            reth_node_builder::NodeTypesWithDBAdapter<N, DatabaseEnv>,
         >,
         segment: StaticFileSegment,
         to_block: BlockNumber,
