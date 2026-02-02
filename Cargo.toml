@@ -22,7 +22,8 @@ members = [
     "crates/version",
 
     "bin/tools",
-    "bin/node",
+    "bin/node", 
+    "bin/legacy-migrate",
 ]
 default-members = ["bin/node"]
 
@@ -68,6 +69,7 @@ xlayer-monitor = { path = "crates/monitor" }
 xlayer-reth-node = { path = "bin/node" }
 xlayer-rpc = { path = "crates/rpc" }
 xlayer-version = { path = "crates/version" }
+xlayer-legacy-migrate = { path = "bin/legacy-migrate" }
 
 # For X layer
 xlayer-trace-monitor = { git = "https://github.com/okx/xlayer-toolkit", rev = "0004d202181bb772821797cd54983e29f32cae07" }

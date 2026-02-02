@@ -1,0 +1,25 @@
+[package]
+name = "xlayer-legacy-migrate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+xlayer-chainspec.workspace = true
+
+reth-tracing.workspace = true
+reth-cli.workspace = true
+reth-cli-commands.workspace = true
+reth-optimism-chainspec.workspace = true
+reth-optimism-node.workspace = true
+
+anyhow = "1.0"
+clap =  { workspace = true, features = ["derive"] }
+tokio.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
