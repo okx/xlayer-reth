@@ -1,3 +1,4 @@
+mod command;
 mod migrate;
 
 use clap::Parser;
@@ -10,7 +11,7 @@ use xlayer_chainspec::XLayerChainSpecParser;
 async fn main() {
     let _ = RethTracer::new().init().expect("Failed to initialize tracing");
 
-    if let Err(err) = migrate::Command::<XLayerChainSpecParser>::parse().execute::<OpNode>().await {
+    if let Err(err) = command::Command::<XLayerChainSpecParser>::parse().execute::<OpNode>().await {
         eprintln!("Migration failed: {}", err);
         std::process::exit(1);
     }

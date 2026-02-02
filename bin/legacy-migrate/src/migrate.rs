@@ -1,79 +1,53 @@
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use alloy_primitives::{Address, BlockNumber};
 use clap::Parser;
 use eyre::Result;
+use rayon::prelude::*;
+use reth_cli_commands::common::CliNodeTypes;
+use reth_db::{cursor::DbCursorRO, tables, transaction::DbTx, DatabaseEnv};
+use reth_db_api::models::{AccountBeforeTx};
+use reth_provider::{
+    BlockBodyIndicesProvider, BlockNumReader, DBProvider, MetadataWriter, ProviderFactory,
+    StaticFileProviderFactory, StaticFileWriter, TransactionsProvider,
+};
+use reth_static_file_types::StaticFileSegment;
 use tracing::{info, warn};
 
-use reth_cli::chainspec::ChainSpecParser;
-use reth_cli_commands::common::{AccessRights, Environment, EnvironmentArgs};
-use reth_optimism_chainspec::OpChainSpec;
-use reth_storage_api::{BlockNumReader, DBProvider};
 
-/// Migrate from legacy MDBX storage to new RocksDB + static files.
-#[derive(Debug, Parser)]
-pub struct Command<C: ChainSpecParser> {
-    #[command(flatten)]
-    env: EnvironmentArgs<C>,
+pub(crate) fn migrate_to_static_files<N: CliNodeTypes>(
+    provider_factory: &ProviderFactory<
+        reth_node_builder::NodeTypesWithDBAdapter<N, Arc<DatabaseEnv>>,
+    >,
+    to_block: BlockNumber,
+    can_migrate_receipts: bool,
+) -> Result<()> {
+    let mut segments = vec![
+        StaticFileSegment::TransactionSenders,
+        StaticFileSegment::AccountChangeSets,
+        StaticFileSegment::StorageChangeSets,
+    ];
+    if can_migrate_receipts {
+        segments.push(StaticFileSegment::Receipts);
+    }
 
-    /// Block batch size for processing.
-    #[arg(long, default_value = "10000")]
-    batch_size: u64,
+    segments.into_par_iter().try_for_each(|segment| {
+        self.migrate_segment::<N>(provider_factory, segment, to_block)
+    })?;
 
-    /// Skip static file migration.
-    #[arg(long)]
-    skip_static_files: bool,
-
-    /// Skip RocksDB migration.
-    #[arg(long)]
-    skip_rocksdb: bool,
-
-    /// Keep migrated MDBX tables (don't drop them after migration).
-    #[arg(long)]
-    keep_mdbx: bool,
+    Ok(())
 }
 
-impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> Command<C> {
-    /// Execute the migration.
-    pub async fn execute<N>(&self) -> Result<()>
-    where
-        N: reth_cli_commands::common::CliNodeTypes<ChainSpec = C::ChainSpec>,
-    {
-        let Environment { provider_factory, .. } = self.env.init::<N>(AccessRights::RO)?;
+pub(crate) fn migrate_segment<N: CliNodeTypes>(
+        provider_factory: &ProviderFactory<
+            reth_node_builder::NodeTypesWithDBAdapter<N, Arc<DatabaseEnv>>,
+        >,
+        segment: StaticFileSegment,
+        to_block: BlockNumber,
+) -> Result<()> {
 
-        let provider = provider_factory.provider()?.disable_long_read_transaction_safety();
-        let to_block = provider.best_block_number()?;
-        let prune_modes = provider.prune_modes_ref().clone();
-        drop(provider);
-
-        info!(
-            target: "reth::cli",
-            to_block,
-            batch_size = self.batch_size,
-            "Migration parameters"
-        );
-
-        // Check if receipts can be migrated (no contract log pruning)
-        let can_migrate_receipts = prune_modes.receipts_log_filter.is_empty();
-        if !can_migrate_receipts {
-            warn!(target: "reth::cli", "Receipts will NOT be migrated due to contract log pruning");
-        }
-
-        // Run static files and RocksDB migrations in parallel
-        std::thread::scope(|s| {
-            let _static_files_handle = if !self.skip_static_files {
-                Some(s.spawn(|| {
-                    info!(target: "reth::cli", "Starting static files migration");
-                    // self.migrate_to_static_files::<N>(
-                    //     &provider_factory,
-                    //     to_block,
-                    //     can_migrate_receipts,
-                    // )
-                }))
-            } else {
-                None
-            };
-
-            Ok::<_, eyre::Error>(())
-        })?;
-
-        Ok(())
-    }
+    Ok(())
 }

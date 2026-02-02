@@ -11,16 +11,24 @@ repository.workspace = true
 xlayer-chainspec.workspace = true
 
 reth-tracing.workspace = true
+reth-db.workspace = true
+reth-db-api.workspace = true
 reth-cli.workspace = true
 reth-cli-commands.workspace = true
+reth-node-builder.workspace = true
 reth-optimism-chainspec.workspace = true
 reth-optimism-node.workspace = true
+reth-provider.workspace = true
+reth-static-file-types.workspace = true
 reth-storage-api.workspace = true
+
+alloy-primitives.workspace = true
 
 clap =  { workspace = true, features = ["derive"] }
 eyre.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+rayon.workspace = true
 
 [lints]
 workspace = true
