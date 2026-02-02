@@ -1,6 +1,4 @@
-use std::{
-    time::{Instant},
-};
+use std::time::Instant;
 
 use alloy_primitives::{Address, BlockNumber};
 use eyre::Result;
@@ -12,8 +10,8 @@ use reth_cli_commands::common::CliNodeTypes;
 use reth_db::{cursor::DbCursorRO, tables, transaction::DbTx, DatabaseEnv};
 use reth_db_api::models::{AccountBeforeTx, StorageBeforeTx};
 use reth_provider::{
-    BlockBodyIndicesProvider, DBProvider, ProviderFactory,
-    StaticFileProviderFactory, StaticFileWriter, TransactionsProvider,
+    BlockBodyIndicesProvider, DBProvider, ProviderFactory, StaticFileProviderFactory,
+    StaticFileWriter, TransactionsProvider,
 };
 use reth_static_file_types::StaticFileSegment;
 
@@ -252,7 +250,7 @@ pub(crate) fn migrate_rocksdb_table<N: CliNodeTypes>(
     batch_size: u64,
 ) -> Result<()> {
     use reth_db_api::table::Table;
-    use reth_provider::{RocksDBProviderFactory};
+    use reth_provider::RocksDBProviderFactory;
 
     let provider = provider_factory.provider()?.disable_long_read_transaction_safety();
     let rocksdb = provider_factory.rocksdb_provider();

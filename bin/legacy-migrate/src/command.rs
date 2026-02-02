@@ -4,11 +4,11 @@ use clap::Parser;
 use eyre::Result;
 use tracing::{info, warn};
 
-use reth_db::{tables, DatabaseEnv};
 use reth_cli::chainspec::ChainSpecParser;
-use reth_cli_commands::common::{AccessRights, Environment, EnvironmentArgs, CliNodeTypes};
+use reth_cli_commands::common::{AccessRights, CliNodeTypes, Environment, EnvironmentArgs};
+use reth_db::{tables, DatabaseEnv};
 use reth_optimism_chainspec::OpChainSpec;
-use reth_provider::{ProviderFactory, StaticFileProviderFactory, MetadataWriter};
+use reth_provider::{MetadataWriter, ProviderFactory, StaticFileProviderFactory};
 use reth_static_file_types::StaticFileSegment;
 use reth_storage_api::{BlockNumReader, DBProvider};
 
