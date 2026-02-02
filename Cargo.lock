@@ -17181,6 +17181,7 @@ dependencies = [
  "reth-optimism-chainspec 1.10.2 (git+https://github.com/okx/reth?rev=e7d4a05e36d44c3570136d69b950ed787db334b2)",
  "reth-optimism-cli 1.10.2 (git+https://github.com/okx/reth?rev=e7d4a05e36d44c3570136d69b950ed787db334b2)",
  "reth-optimism-node 1.10.2 (git+https://github.com/okx/reth?rev=e7d4a05e36d44c3570136d69b950ed787db334b2)",
+ "reth-primitives-traits 1.10.2 (git+https://github.com/okx/reth?rev=e7d4a05e36d44c3570136d69b950ed787db334b2)",
  "reth-provider 1.10.2 (git+https://github.com/okx/reth?rev=e7d4a05e36d44c3570136d69b950ed787db334b2)",
  "reth-static-file-types 1.10.2 (git+https://github.com/okx/reth?rev=e7d4a05e36d44c3570136d69b950ed787db334b2)",
  "reth-storage-api 1.10.2 (git+https://github.com/okx/reth?rev=e7d4a05e36d44c3570136d69b950ed787db334b2)",

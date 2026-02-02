@@ -18,6 +18,7 @@ reth-node-builder = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c
 reth-optimism-chainspec = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
 reth-optimism-cli = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
 reth-optimism-node = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
+reth-primitives-traits = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
 reth-provider = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2", features = ["rocksdb"] }
 reth-static-file-types = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
 reth-storage-api = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
