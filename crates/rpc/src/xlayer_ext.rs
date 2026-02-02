@@ -126,8 +126,11 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::PendingFlashBlockProvider;
     use alloy_consensus::Header;
     use alloy_primitives::U256;
+    use std::time::{Duration, Instant};
+    use tokio::sync::watch;
 
     // Mock backend for testing
     struct MockBackend {
@@ -176,6 +179,24 @@ mod tests {
 
     struct MockGasOracleConfig {
         default_suggested_fee: Option<U256>,
+    }
+
+    struct MockPendingFlashBlock {
+        expires_at: Instant,
+    }
+
+    struct MockPendingFlashBlockProvider {
+        rx: Option<watch::Receiver<Option<MockPendingFlashBlock>>>,
+    }
+
+    impl PendingFlashBlockProvider for MockPendingFlashBlockProvider {
+        fn has_pending_flashblock(&self) -> bool {
+            self.rx.as_ref().is_some_and(|rx| {
+                rx.borrow().as_ref().is_some_and(|pending_flashblock| {
+                    Instant::now() < pending_flashblock.expires_at
+                })
+            })
+        }
     }
 
     #[test]
@@ -247,5 +268,35 @@ mod tests {
 
         // Expected: 32 gwei
         assert_eq!(result, U256::from(32_000_000_000_u64));
+    }
+
+    #[test]
+    fn test_no_receiver_returns_false() {
+        let provider = MockPendingFlashBlockProvider { rx: None };
+        assert!(!provider.has_pending_flashblock());
+    }
+
+    #[test]
+    fn test_empty_receiver_returns_false() {
+        let (_tx, rx) = watch::channel(None);
+        let provider = MockPendingFlashBlockProvider { rx: Some(rx) };
+        assert!(!provider.has_pending_flashblock());
+    }
+
+    #[test]
+    fn test_expired_flashblock_returns_false() {
+        let expired =
+            MockPendingFlashBlock { expires_at: Instant::now() - Duration::from_secs(60) };
+        let (_tx, rx) = watch::channel(Some(expired));
+        let provider = MockPendingFlashBlockProvider { rx: Some(rx) };
+        assert!(!provider.has_pending_flashblock());
+    }
+
+    #[test]
+    fn test_valid_flashblock_returns_true() {
+        let valid = MockPendingFlashBlock { expires_at: Instant::now() + Duration::from_secs(60) };
+        let (_tx, rx) = watch::channel(Some(valid));
+        let provider = MockPendingFlashBlockProvider { rx: Some(rx) };
+        assert!(provider.has_pending_flashblock());
     }
 }
