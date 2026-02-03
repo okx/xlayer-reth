@@ -73,8 +73,6 @@ pub(crate) fn migrate_segment<N: CliNodeTypes>(
         static_file_provider.latest_writer(segment)?
     };
 
-    // info!("CURR = {:?}, NEXT = {}", writer.current_block_number(), writer.next_block_number());
-    
     let segment_start = Instant::now();
     let mut last_log = Instant::now();
     let mut blocks_processed = 0u64;
