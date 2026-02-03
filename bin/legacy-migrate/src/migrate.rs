@@ -17,6 +17,7 @@ use reth_static_file_types::StaticFileSegment;
 
 pub(crate) fn migrate_to_static_files<N: CliNodeTypes>(
     provider_factory: &ProviderFactory<reth_node_builder::NodeTypesWithDBAdapter<N, DatabaseEnv>>,
+    genesis_block: BlockNumber,
     to_block: BlockNumber,
     can_migrate_receipts: bool,
 ) -> Result<()> {
@@ -29,9 +30,9 @@ pub(crate) fn migrate_to_static_files<N: CliNodeTypes>(
         segments.push(StaticFileSegment::Receipts);
     }
 
-    segments
-        .into_par_iter()
-        .try_for_each(|segment| migrate_segment::<N>(provider_factory, segment, to_block))?;
+    segments.into_par_iter().try_for_each(|segment| {
+        migrate_segment::<N>(provider_factory, segment, genesis_block, to_block)
+    })?;
 
     Ok(())
 }
@@ -39,18 +40,23 @@ pub(crate) fn migrate_to_static_files<N: CliNodeTypes>(
 pub(crate) fn migrate_segment<N: CliNodeTypes>(
     provider_factory: &ProviderFactory<reth_node_builder::NodeTypesWithDBAdapter<N, DatabaseEnv>>,
     segment: StaticFileSegment,
+    genesis_block: BlockNumber,
     to_block: BlockNumber,
 ) -> Result<()> {
     let static_file_provider = provider_factory.static_file_provider();
     let provider = provider_factory.provider()?.disable_long_read_transaction_safety();
 
     let highest = static_file_provider.get_highest_static_file_block(segment).unwrap_or(0);
-    if highest >= to_block {
-        info!(target: "reth::cli", ?segment, "Already up to date");
+
+    // Calculate start block, ensuring it's >= genesis
+    let start = std::cmp::max(highest.saturating_add(1), genesis_block);
+
+    // Check if already up to date or start is beyond end
+    if start > to_block {
+        info!(target: "reth::cli", ?segment, highest, genesis_block, to_block, "Already up to date or beyond range");
         return Ok(());
     }
 
-    let start = highest.saturating_add(1);
     let total_blocks = to_block.saturating_sub(start) + 1;
     info!(target: "reth::cli", ?segment, from = start, to = to_block, total_blocks, "Migrating");
 

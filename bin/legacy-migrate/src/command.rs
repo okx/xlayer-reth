@@ -4,6 +4,7 @@ use clap::Parser;
 use eyre::Result;
 use tracing::{info, warn};
 
+use reth_chainspec::ChainSpecProvider;
 use reth_cli::chainspec::ChainSpecParser;
 use reth_cli_commands::common::{AccessRights, CliNodeTypes, Environment, EnvironmentArgs};
 use reth_db::{tables, DatabaseEnv};
@@ -45,13 +46,26 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> Command<C> {
     {
         let Environment { provider_factory, .. } = self.env.init::<N>(AccessRights::RW)?;
 
+        // Get genesis block number from chain spec
+        let genesis_block = provider_factory.chain_spec().genesis_header().number;
+
         let provider = provider_factory.provider()?.disable_long_read_transaction_safety();
         let to_block = provider.best_block_number()?;
         let prune_modes = provider.prune_modes_ref().clone();
         drop(provider);
 
+        // Validate chain state
+        if to_block < genesis_block {
+            eyre::bail!(
+                "Invalid chain state: best block {} is before genesis block {}",
+                to_block,
+                genesis_block
+            );
+        }
+
         info!(
             target: "reth::cli",
+            genesis_block,
             to_block,
             batch_size = self.batch_size,
             "Migration parameters"
@@ -71,7 +85,7 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> Command<C> {
             let static_files_handle = if !self.skip_static_files {
                 Some(s.spawn(|| {
                     info!(target: "reth::cli", "Starting static files migration");
-                    migrate_to_static_files::<N>(&provider_factory, to_block, can_migrate_receipts)
+                    migrate_to_static_files::<N>(&provider_factory, genesis_block, to_block, can_migrate_receipts)
                 }))
             } else {
                 None
