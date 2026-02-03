@@ -44,6 +44,7 @@ pub(crate) fn migrate_segment<N: CliNodeTypes>(
     to_block: BlockNumber,
 ) -> Result<()> {
     let static_file_provider = provider_factory.static_file_provider();
+
     let provider = provider_factory.provider()?.disable_long_read_transaction_safety();
 
     let highest = static_file_provider.get_highest_static_file_block(segment).unwrap_or(0);
@@ -60,7 +61,20 @@ pub(crate) fn migrate_segment<N: CliNodeTypes>(
     let total_blocks = to_block.saturating_sub(start) + 1;
     info!(target: "reth::cli", ?segment, from = start, to = to_block, total_blocks, "Migrating");
 
-    let mut writer = static_file_provider.latest_writer(segment)?;
+    // Get writer for the segment, starting at genesis block if it's empty
+    let mut writer = if highest == 0 && genesis_block > 0 {
+        info!(target: "reth::cli", ?segment, "Initializing static file with genesis block");
+        // If no data exists yet and genesis is not 0, initialize writer with genesis block
+        let mut w = static_file_provider.get_writer(genesis_block, segment)?;
+        w.user_header_mut().set_expected_block_start(genesis_block);
+        w
+    } else {
+        info!(target: "reth::cli", ?segment, "Continuing static file from block {}", highest + 1);
+        static_file_provider.latest_writer(segment)?
+    };
+
+    // info!("CURR = {:?}, NEXT = {}", writer.current_block_number(), writer.next_block_number());
+    
     let segment_start = Instant::now();
     let mut last_log = Instant::now();
     let mut blocks_processed = 0u64;
@@ -110,7 +124,11 @@ pub(crate) fn migrate_segment<N: CliNodeTypes>(
                         )?;
                     }
                     // Advance writer to handle gaps in changeset data
-                    writer.ensure_at_block(block.saturating_sub(1))?;
+                    // Only call ensure_at_block if the writer has already written blocks
+                    // to avoid panic when current_block_number() is None
+                    if writer.current_block_number().is_some() {
+                        writer.ensure_at_block(block.saturating_sub(1))?;
+                    }
                     blocks_processed += block - current_block;
                     current_block = block;
 
@@ -156,7 +174,11 @@ pub(crate) fn migrate_segment<N: CliNodeTypes>(
                         )?;
                     }
                     // Advance writer to handle gaps in changeset data
-                    writer.ensure_at_block(block.saturating_sub(1))?;
+                    // Only call ensure_at_block if the writer has already written blocks
+                    // to avoid panic when current_block_number() is None
+                    if writer.current_block_number().is_some() {
+                        writer.ensure_at_block(block.saturating_sub(1))?;
+                    }
                     blocks_processed += block - current_block;
                     current_block = block;
 
