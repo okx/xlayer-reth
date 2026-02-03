@@ -9,7 +9,7 @@ repository.workspace = true
 
 [dependencies]
 
-# Designate to upstream main
+# Use workspace reth dependencies to ensure consistent versions
 reth-db = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
 reth-db-api = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
 reth-cli = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
@@ -31,6 +31,27 @@ eyre.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 rayon.workspace = true
+
+# Chainspec deps
+
+# reth
+reth-chainspec = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
+reth-optimism-forks = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
+reth-ethereum-forks = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
+
+# ethereum
+alloy-genesis = { version = "1.5.2", default-features = false }
+alloy-consensus =  { version = "1.5.2", default-features = false }
+alloy-eips = { version = "1.5.2", default-features = false }
+alloy-chains = { version = "0.2.5", default-features = false }
+
+# op
+op-alloy-rpc-types = { workspace = true }
+
+# misc
+serde = { workspace = true }
+serde_json = { workspace = true }
+once_cell = { workspace = true }
 
 [lints]
 workspace = true
