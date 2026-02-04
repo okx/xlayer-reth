@@ -1,4 +1,5 @@
 use crate::xlayer_mainnet::XLAYER_MAINNET;
+use crate::xlayer_testnet::XLAYER_TESTNET;
 use alloy_genesis::Genesis;
 use reth_cli::chainspec::ChainSpecParser;
 use reth_optimism_chainspec::{generated_chain_value_parser, OpChainSpec};
@@ -31,7 +32,7 @@ impl ChainSpecParser for XLayerChainSpecParser {
         "base-sepolia",
         // XLayer chains
         "xlayer-mainnet",
-        // "xlayer-testnet",
+        "xlayer-testnet",
     ];
 
     fn parse(s: &str) -> eyre::Result<Arc<Self::ChainSpec>> {
@@ -72,13 +73,13 @@ fn xlayer_chain_value_parser(s: &str) -> eyre::Result<Arc<OpChainSpec>> {
             }
             Ok(XLAYER_MAINNET.clone())
         }
-        // "xlayer-testnet" => {
-        //     // Support environment variable override for genesis path
-        //     if let Ok(genesis_path) = std::env::var("XLAYER_TESTNET_GENESIS") {
-        //         return Ok(Arc::new(parse_genesis(&genesis_path)?.into()));
-        //     }
-        //     Ok(XLAYER_TESTNET.clone())
-        // }
+        "xlayer-testnet" => {
+            // Support environment variable override for genesis path
+            if let Ok(genesis_path) = std::env::var("XLAYER_TESTNET_GENESIS") {
+                return Ok(Arc::new(parse_genesis(&genesis_path)?.into()));
+            }
+            Ok(XLAYER_TESTNET.clone())
+        }
         // For other inputs, try known OP chains first, then parse as genesis
         _ => {
             // Try to match known OP chains (optimism, base, etc.)

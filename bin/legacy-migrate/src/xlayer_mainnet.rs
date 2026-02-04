@@ -15,14 +15,14 @@ use xlayer_legacy_migrate::XLAYER_MAINNET_HARDFORKS;
 ///
 /// Computed from the genesis block header.
 /// This value is hardcoded to avoid expensive computation on every startup.
-pub(crate) const XLAYER_MAINNET_GENESIS_HASH: B256 =
+const XLAYER_MAINNET_GENESIS_HASH: B256 =
     b256!("dc33d8c0ec9de14fc2c21bd6077309a0a856df22821bd092a2513426e096a789");
 
 /// X Layer Mainnet genesis state root
 ///
 /// The Merkle Patricia Trie root of all 1,866,483 accounts in the genesis alloc.
 /// This value is hardcoded to avoid expensive computation on every startup.
-pub(crate) const XLAYER_MAINNET_STATE_ROOT: B256 =
+const XLAYER_MAINNET_STATE_ROOT: B256 =
     b256!("5d335834cb1c1c20a1f44f964b16cd409aa5d10891d5c6cf26f1f2c26726efcf");
 
 /// X Layer mainnet chain id as specified in the published `genesis.json`.
