@@ -340,7 +340,7 @@ install-tools-maxperf:
 clean:
     cargo clean
 
-build-docker suffix="" git_sha="" git_timestamp="":
+build-docker suffix="" git_sha="" git_timestamp="" edge="false":
     #!/usr/bin/env bash
     set -e
     # Only clean .cargo in production mode, preserve it for dev builds
@@ -363,6 +363,10 @@ build-docker suffix="" git_sha="" git_timestamp="":
     fi
     if [ -n "{{git_timestamp}}" ]; then
         BUILD_ARGS="$BUILD_ARGS --build-arg VERGEN_GIT_COMMIT_TIMESTAMP={{git_timestamp}}"
+    fi
+    if [ "{{edge}}" = "true" ]; then
+        echo "Building with Rocksdb!!!"
+        BUILD_ARGS="$BUILD_ARGS --build-arg FEATURES=edge,jemalloc,asm-keccak"
     fi
 
     docker build $BUILD_ARGS -t $TAG -f DockerfileOp .
