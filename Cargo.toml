@@ -22,7 +22,8 @@ members = [
     "crates/version",
 
     "bin/tools",
-    "bin/node",
+    "bin/node", 
+    "bin/legacy-migrate",
 ]
 default-members = ["bin/node"]
 
@@ -68,6 +69,7 @@ xlayer-monitor = { path = "crates/monitor" }
 xlayer-reth-node = { path = "bin/node" }
 xlayer-rpc = { path = "crates/rpc" }
 xlayer-version = { path = "crates/version" }
+xlayer-legacy-migrate = { path = "bin/legacy-migrate" }
 
 # For X layer
 xlayer-trace-monitor = { git = "https://github.com/okx/xlayer-toolkit", rev = "0004d202181bb772821797cd54983e29f32cae07" }
@@ -122,6 +124,7 @@ reth-tracing = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb4
 reth-transaction-pool = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-optimism-flashblocks = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-rpc-server-types = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
+reth-static-file-types = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 
 # ==============================================================================
 # Revm Dependencies (follows upstream reth)
@@ -148,7 +151,7 @@ alloy-evm = { version = "0.26.3", default-features = false }
 alloy-genesis = { version = "1.4.3", default-features = false }
 alloy-json-rpc = { version = "1.4.3" }
 alloy-network = { version = "1.4.3", default-features = false }
-alloy-primitives = { version = "1.5.2", default-features = false, features = [
+alloy-primitives = { version = "1.5.4", default-features = false, features = [
     "map-foldhash",
 ] }
 alloy-provider = { version = "1.4.3" }
@@ -207,6 +210,7 @@ tracing = { version = "0.1.41" }
 url = "2.5"
 uuid = { version = "1.6.1", features = ["serde", "v5", "v4"] }
 moka = { version = "0.12.11", features = ["sync"] }
+rayon = "1.7"
 
 # ==============================================================================
 # Dependency Patches
@@ -257,6 +261,7 @@ reth-rpc-api = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb4
 reth-rpc-engine-api = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-rpc-eth-types = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-rpc-layer = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
+reth-static-file-types = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-storage-api = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-tasks = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-testing-utils = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
