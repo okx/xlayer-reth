@@ -14152,8 +14152,6 @@ dependencies = [
 name = "xlayer-rpc"
 version = "0.1.0"
 dependencies = [
- "alloy-consensus",
- "alloy-primitives",
  "jsonrpsee",
  "reth-chainspec",
  "reth-optimism-rpc",
@@ -14162,7 +14160,6 @@ dependencies = [
  "reth-storage-api",
  "serde",
  "tokio",
- "tracing",
 ]
 
 [[package]]
