@@ -1,6 +1,5 @@
 //! XLayer Mainnet chain specification
 
-use xlayer_legacy_migrate::XLAYER_MAINNET_HARDFORKS;
 use alloy_chains::Chain;
 use alloy_primitives::{b256, B256, U256};
 use once_cell::sync::Lazy;
@@ -10,6 +9,7 @@ use reth_optimism_chainspec::{make_op_genesis_header, OpChainSpec};
 use reth_optimism_forks::OpHardfork;
 use reth_primitives_traits::SealedHeader;
 use std::sync::Arc;
+use xlayer_legacy_migrate::XLAYER_MAINNET_HARDFORKS;
 
 /// X Layer Mainnet genesis hash
 ///
@@ -45,8 +45,10 @@ const XLAYER_MAINNET_BASE_FEE_PARAMS: BaseFeeParams =
 /// The X Layer mainnet spec
 pub static XLAYER_MAINNET: Lazy<Arc<OpChainSpec>> = Lazy::new(|| {
     // Minimal genesis contains empty alloc field for fast loading
-    let genesis = serde_json::from_str(include_str!("../../../crates/chainspec/res/genesis/xlayer-mainnet.json"))
-        .expect("Can't deserialize X Layer Mainnet genesis json");
+    let genesis = serde_json::from_str(include_str!(
+        "../../../crates/chainspec/res/genesis/xlayer-mainnet.json"
+    ))
+    .expect("Can't deserialize X Layer Mainnet genesis json");
     let hardforks = XLAYER_MAINNET_HARDFORKS.clone();
 
     // Build genesis header using standard helper, then override state_root with pre-computed value

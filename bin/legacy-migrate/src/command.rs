@@ -85,7 +85,12 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> Command<C> {
             let static_files_handle = if !self.skip_static_files {
                 Some(s.spawn(|| {
                     info!(target: "reth::cli", "Starting static files migration");
-                    migrate_to_static_files::<N>(&provider_factory, genesis_block, to_block, can_migrate_receipts)
+                    migrate_to_static_files::<N>(
+                        &provider_factory,
+                        genesis_block,
+                        to_block,
+                        can_migrate_receipts,
+                    )
                 }))
             } else {
                 None
@@ -170,24 +175,24 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> Command<C> {
                 target: "reth::cli",
                 "Clearing MDBX tables. This may take a long time (potentially hours) for large databases. Use --keep-mdbx to skip this step."
             );
-            
+
             let tx = provider.tx_ref();
 
             if !self.skip_static_files {
                 info!(target: "reth::cli", "Dropping migrated static file tables from MDBX");
-                
+
                 info!(target: "reth::cli", "Clearing TransactionSenders table...");
                 tx.clear::<tables::TransactionSenders>()?;
                 info!(target: "reth::cli", "TransactionSenders table cleared");
-                
+
                 info!(target: "reth::cli", "Clearing AccountChangeSets table...");
                 tx.clear::<tables::AccountChangeSets>()?;
                 info!(target: "reth::cli", "AccountChangeSets table cleared");
-                
+
                 info!(target: "reth::cli", "Clearing StorageChangeSets table...");
                 tx.clear::<tables::StorageChangeSets>()?;
                 info!(target: "reth::cli", "StorageChangeSets table cleared");
-                
+
                 if can_migrate_receipts {
                     info!(target: "reth::cli", "Clearing Receipts table...");
                     tx.clear::<tables::Receipts<<<N as reth_node_builder::NodeTypes>::Primitives as reth_primitives_traits::NodePrimitives>::Receipt>>()?;
@@ -197,15 +202,15 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> Command<C> {
 
             if !self.skip_rocksdb {
                 info!(target: "reth::cli", "Dropping migrated RocksDB tables from MDBX");
-                
+
                 info!(target: "reth::cli", "Clearing TransactionHashNumbers table...");
                 tx.clear::<tables::TransactionHashNumbers>()?;
                 info!(target: "reth::cli", "TransactionHashNumbers table cleared");
-                
+
                 info!(target: "reth::cli", "Clearing AccountsHistory table...");
                 tx.clear::<tables::AccountsHistory>()?;
                 info!(target: "reth::cli", "AccountsHistory table cleared");
-                
+
                 info!(target: "reth::cli", "Clearing StoragesHistory table...");
                 tx.clear::<tables::StoragesHistory>()?;
                 info!(target: "reth::cli", "StoragesHistory table cleared");

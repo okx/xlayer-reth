@@ -1,7 +1,7 @@
+mod chainspec_parser;
 mod command;
 mod migrate;
 mod progress;
-mod chainspec_parser;
 mod xlayer_mainnet;
 
 use clap::Parser;
