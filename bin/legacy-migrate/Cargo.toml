@@ -10,19 +10,19 @@ repository.workspace = true
 [dependencies]
 
 # Use workspace reth dependencies to ensure consistent versions
-reth-db = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
-reth-db-api = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
-reth-cli = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
-reth-cli-commands = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2", features = ["edge"] } 
-reth-node-builder = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
-reth-optimism-chainspec = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
-reth-optimism-cli = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
-reth-optimism-node = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
-reth-primitives-traits = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
-reth-provider = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2", features = ["rocksdb"] }
-reth-static-file-types = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
-reth-storage-api = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
-reth-tracing = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
+reth-db = { git = "https://github.com/okx/reth", rev = "9359e21f943108972b2e4c4da7ffea80266a37e9" }
+reth-db-api = { git = "https://github.com/okx/reth", rev = "9359e21f943108972b2e4c4da7ffea80266a37e9" }
+reth-cli = { git = "https://github.com/okx/reth", rev = "9359e21f943108972b2e4c4da7ffea80266a37e9" }
+reth-cli-commands = { git = "https://github.com/okx/reth", rev = "9359e21f943108972b2e4c4da7ffea80266a37e9", features = ["edge"] } 
+reth-node-builder = { git = "https://github.com/okx/reth", rev = "9359e21f943108972b2e4c4da7ffea80266a37e9" }
+reth-optimism-chainspec = { git = "https://github.com/okx/reth", rev = "9359e21f943108972b2e4c4da7ffea80266a37e9" }
+reth-optimism-cli = { git = "https://github.com/okx/reth", rev = "9359e21f943108972b2e4c4da7ffea80266a37e9" }
+reth-optimism-node = { git = "https://github.com/okx/reth", rev = "9359e21f943108972b2e4c4da7ffea80266a37e9" }
+reth-primitives-traits = { git = "https://github.com/okx/reth", rev = "9359e21f943108972b2e4c4da7ffea80266a37e9" }
+reth-provider = { git = "https://github.com/okx/reth", rev = "9359e21f943108972b2e4c4da7ffea80266a37e9", features = ["rocksdb"] }
+reth-static-file-types = { git = "https://github.com/okx/reth", rev = "9359e21f943108972b2e4c4da7ffea80266a37e9" }
+reth-storage-api = { git = "https://github.com/okx/reth", rev = "9359e21f943108972b2e4c4da7ffea80266a37e9" }
+reth-tracing = { git = "https://github.com/okx/reth", rev = "9359e21f943108972b2e4c4da7ffea80266a37e9" }
 
 alloy-primitives.workspace = true
 
@@ -35,14 +35,14 @@ rayon.workspace = true
 # Chainspec deps
 
 # reth
-reth-chainspec = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
-reth-optimism-forks = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
-reth-ethereum-forks = { git = "https://github.com/okx/reth", rev = "e7d4a05e36d44c3570136d69b950ed787db334b2" }
+reth-chainspec = { git = "https://github.com/okx/reth", rev = "9359e21f943108972b2e4c4da7ffea80266a37e9" }
+reth-optimism-forks = { git = "https://github.com/okx/reth", rev = "9359e21f943108972b2e4c4da7ffea80266a37e9" }
+reth-ethereum-forks = { git = "https://github.com/okx/reth", rev = "9359e21f943108972b2e4c4da7ffea80266a37e9" }
 
 # ethereum
-alloy-genesis = { version = "1.5.2", default-features = false }
-alloy-consensus =  { version = "1.5.2", default-features = false }
-alloy-eips = { version = "1.5.2", default-features = false }
+alloy-genesis = { version = "1.6.1", default-features = false }
+alloy-consensus =  { version = "1.6.1", default-features = false }
+alloy-eips = { version = "1.6.1", default-features = false }
 alloy-chains = { version = "0.2.5", default-features = false }
 
 # op
