@@ -13932,6 +13932,8 @@ name = "xlayer-reth-tools"
 version = "0.1.0"
 dependencies = [
  "alloy-consensus",
+ "alloy-genesis",
+ "alloy-primitives",
  "alloy-rlp",
  "clap",
  "ctrlc",
@@ -13942,7 +13944,9 @@ dependencies = [
  "reth-cli",
  "reth-cli-commands",
  "reth-cli-util",
+ "reth-db-api",
  "reth-node-core",
+ "reth-node-types",
  "reth-optimism-chainspec",
  "reth-optimism-consensus",
  "reth-optimism-evm",
@@ -13950,6 +13954,7 @@ dependencies = [
  "reth-provider",
  "reth-storage-api",
  "reth-tracing",
+ "serde_json",
  "tokio",
  "tracing",
  "xlayer-chainspec",

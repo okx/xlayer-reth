@@ -4,10 +4,11 @@ A unified command-line tool for importing and exporting blockchain data with XLa
 
 ## Overview
 
-The `xlayer-reth-tools` provides two main utilities:
+The `xlayer-reth-tools` provides three main utilities:
 
 - **Import**: Import blockchain data from RLP-encoded block files into your XLayer Reth node
 - **Export**: Export blockchain data from your XLayer Reth node to RLP-encoded files
+- **Gen-Genesis**: Generate a genesis file from an existing database, including all accounts, balances, storage, and bytecode
 
 These tools are useful for:
 
@@ -17,6 +18,7 @@ These tools are useful for:
 - Bootstrapping a new node with historical data
 - Creating backups of blockchain data
 - Sharing blockchain data for testing purposes
+- Creating genesis files for chain forks or migrations
 
 ## Features
 
@@ -35,6 +37,14 @@ These tools are useful for:
 - **Batch Processing**: Efficiently reads blocks in configurable batches
 - **Progress Reporting**: Shows real-time export progress
 - **Read-Only Access**: Only requires read access to the database
+
+### Gen-Genesis Features
+- **Full State Export**: Exports all accounts with balances, nonces, storage, and bytecode
+- **Template-Based**: Uses a template genesis file for config and header fields
+- **Template Alloc Priority**: Accounts in the template's "alloc" field are preserved and override database accounts
+- **Progress Reporting**: Shows real-time progress for large databases
+- **Read-Only Access**: Only requires read access to the database
+- **Graceful Interruption**: Handles Ctrl+C gracefully
 
 ## Building
 
@@ -484,6 +494,176 @@ Each block is encoded according to the Ethereum RLP specification, including:
 
 ---
 
+## Gen-Genesis Command
+
+The gen-genesis command generates a genesis file from an existing op-reth data directory. It exports all accounts with their balances, nonces, storage slots, and bytecode to create a complete genesis file suitable for chain forks or migrations.
+
+### Basic Command
+
+```bash
+xlayer-reth-tools gen-genesis --datadir <DATA_DIR> --chain <CHAIN_SPEC> --template-genesis <TEMPLATE_FILE> --output <OUTPUT_FILE>
+```
+
+### Required Arguments
+
+- `--template-genesis <TEMPLATE_FILE>`: Path to a template genesis JSON file. The "config" field and header fields (nonce, timestamp, extraData, gasLimit, difficulty, mixHash, coinbase) will be copied from this file. If the template contains an "alloc" field, those accounts will be preserved and take priority over accounts read from the database.
+- `--output <OUTPUT_FILE>`: Path to write the generated genesis file.
+
+### Important Options
+
+- `--datadir <DIR>`: Directory containing the reth database (default: OS-specific)
+- `--chain <CHAIN_SPEC>`: Chain specification - either a built-in chain name or path to genesis JSON file
+
+### Optional Parameters
+
+- `--batch-size <NUM>`: Progress reporting interval (default: 100000)
+- `--config <FILE>`: Path to a configuration file
+
+### Database Options
+
+- `--db.log-level <LEVEL>`: Database logging level
+- `--db.max-size <SIZE>`: Maximum database size
+- `--db.max-readers <NUM>`: Maximum number of concurrent readers
+
+### Gen-Genesis Examples
+
+#### Example 1: Generate Genesis from XLayer Testnet Data
+
+Generate a genesis file from an existing XLayer testnet database:
+
+```bash
+xlayer-reth-tools gen-genesis \
+    --datadir /data/xlayer-reth \
+    --chain xlayer-testnet \
+    --template-genesis /path/to/template-genesis.json \
+    --output /output/new-genesis.json
+```
+
+#### Example 2: Generate Genesis with Custom Chain Spec
+
+Generate a genesis file using a custom chain specification:
+
+```bash
+xlayer-reth-tools gen-genesis \
+    --datadir /data/xlayer-reth \
+    --chain /path/to/custom-genesis.json \
+    --template-genesis /path/to/template-genesis.json \
+    --output /output/new-genesis.json
+```
+
+#### Example 3: Generate Genesis with Progress Reporting
+
+Generate a genesis file with more frequent progress updates:
+
+```bash
+xlayer-reth-tools gen-genesis \
+    --datadir /data/xlayer-reth \
+    --chain xlayer-testnet \
+    --template-genesis /path/to/template-genesis.json \
+    --output /output/new-genesis.json \
+    --batch-size 10000
+```
+
+#### Example 4: Generate Genesis with Template Alloc Override
+
+If your template genesis contains accounts in the "alloc" field, those will take priority over accounts from the database. This is useful for:
+- Overriding specific contract addresses with new code
+- Setting specific account balances for testing
+- Preserving pre-configured system contracts
+
+```bash
+# Template with pre-configured accounts:
+# {
+#   "config": { ... },
+#   "alloc": {
+#     "0x4200000000000000000000000000000000000011": {
+#       "balance": "0x0",
+#       "code": "0x..."
+#     }
+#   }
+# }
+
+xlayer-reth-tools gen-genesis \
+    --datadir /data/xlayer-reth \
+    --chain xlayer-testnet \
+    --template-genesis /path/to/template-with-alloc.json \
+    --output /output/new-genesis.json
+```
+
+### Genesis File Structure
+
+The generated genesis file follows the standard Ethereum/Optimism genesis format:
+
+```json
+{
+  "config": { ... },  // Copied from template genesis
+  "nonce": "0x0",     // Copied from template genesis
+  "timestamp": "...", // Copied from template genesis
+  "extraData": "...", // Copied from template genesis
+  "gasLimit": "...",  // Copied from template genesis
+  "difficulty": "0x0",// Copied from template genesis
+  "mixHash": "...",   // Copied from template genesis
+  "coinbase": "...",  // Copied from template genesis
+  "alloc": {          // Generated from database
+    "0x...": {
+      "balance": "0x...",
+      "nonce": 123,
+      "code": "0x...",
+      "storage": {
+        "0x...": "0x..."
+      }
+    }
+  }
+}
+```
+
+### Gen-Genesis Output
+
+During genesis generation, the tool displays:
+
+- Progress updates showing number of accounts processed
+- Final count of accounts exported
+
+Example output:
+
+```
+INFO xlayer::gen_genesis: XLayer Reth Genesis Generation starting
+INFO reth::cli: reth v1.9.2 starting
+INFO reth::cli: Generating genesis from database
+INFO reth::cli: Template genesis: /path/to/template-genesis.json
+INFO reth::cli: Output: /output/new-genesis.json
+INFO reth::cli: Loaded template genesis with chain ID: 1952
+INFO reth::cli: Template genesis contains 5 accounts (these will take priority)
+INFO reth::cli: Reading accounts from database...
+INFO reth::cli: Processed 100000 accounts
+INFO reth::cli: Processed 200000 accounts
+INFO reth::cli: Read 250000 accounts from database
+INFO reth::cli: Template alloc overrode 3 accounts from database
+INFO reth::cli: Genesis generation complete! Wrote 250002 accounts to /output/new-genesis.json
+```
+
+### Gen-Genesis Troubleshooting
+
+#### Database Lock Issues
+
+If you get database lock errors:
+- Ensure no other processes are writing to the database
+- Stop the node before generating genesis (if acceptable)
+
+#### Out of Memory Errors
+
+For databases with many accounts:
+- Ensure sufficient RAM is available
+- Monitor memory usage during generation
+
+#### Large Output Files
+
+The generated genesis file can be large for chains with many accounts:
+- Ensure sufficient disk space for the output file
+- Consider compressing the output file after generation
+
+---
+
 ## Use Cases
 
 ### 1. Node Migration
@@ -558,6 +738,26 @@ xlayer-reth-tools export \
     --exported-data /analysis/sample-blocks.rlp
 ```
 
+### 5. Chain Fork / Migration
+
+Generate a genesis file for a chain fork or migration:
+
+```bash
+# Create a template genesis with desired config settings
+# Then generate a full genesis with all current state
+
+xlayer-reth-tools gen-genesis \
+    --datadir /data/xlayer-reth \
+    --chain xlayer-testnet \
+    --template-genesis /config/new-chain-config.json \
+    --output /genesis/new-chain-genesis.json
+
+# Use the generated genesis to initialize a new chain
+xlayer-reth-node init \
+    --chain /genesis/new-chain-genesis.json \
+    --datadir /data/new-chain
+```
+
 ---
 
 ## Best Practices
@@ -580,15 +780,24 @@ xlayer-reth-tools export \
 6. **Schedule During Off-Peak**: Run large exports during low-traffic periods
 7. **Keep Multiple Backups**: Maintain multiple backup copies in different locations
 
+### Gen-Genesis Best Practices
+
+1. **Prepare Template Genesis**: Create a complete template genesis file with all desired config settings
+2. **Stop Node First**: For consistency, stop the node before generating genesis
+3. **Verify Chain Config**: Double-check that the template genesis has the correct chain ID and fork configurations
+4. **Monitor Memory**: Large databases may require significant RAM during generation
+5. **Validate Output**: Review the generated genesis file before using it
+
 ---
 
 ## Security Considerations
 
-- **Read-Only Export**: Export only reads from the database, no writes
+- **Read-Only Export/Gen-Genesis**: Export and gen-genesis only read from the database, no writes
 - **Import Validation**: Import validates blocks and transactions before storing
-- **No Network Access**: Neither command requires network connectivity
-- **File Permissions**: Ensure exported files have appropriate permissions
-- **Sensitive Data**: Exported files contain full blockchain data (transactions visible)
+- **No Network Access**: None of the commands require network connectivity
+- **File Permissions**: Ensure exported/generated files have appropriate permissions
+- **Sensitive Data**: Exported files and genesis files contain full blockchain data (transactions and account balances visible)
+- **Genesis Files**: Generated genesis files contain all account balances and contract code - handle with care
 
 ---
 
