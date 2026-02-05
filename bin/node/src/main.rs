@@ -14,7 +14,7 @@ use op_alloy_network::Optimism;
 use op_rbuilder::args::OpRbuilderArgs;
 use reth::rpc::eth::EthApiTypes;
 use reth::{
-    builder::{EngineNodeLauncher, Node, NodeHandle, TreeConfig},
+    builder::{DebugNodeLauncher, EngineNodeLauncher, Node, NodeHandle, TreeConfig},
     providers::providers::BlockchainProvider,
 };
 use reth_node_api::FullNodeComponents;
@@ -168,11 +168,11 @@ fn main() {
                             builder.config().engine.memory_block_buffer_target,
                         );
 
-                    let launcher = EngineNodeLauncher::new(
+                    let launcher = DebugNodeLauncher::new(EngineNodeLauncher::new(
                         builder.task_executor().clone(),
                         builder.config().datadir(),
                         engine_tree_config,
-                    );
+                    ));
 
                     builder.launch_with(launcher)
                 })
