@@ -7,6 +7,7 @@ use payload::XLayerPayloadServiceBuilder;
 
 use args::XLayerArgs;
 use clap::Parser;
+use either::Either;
 use std::sync::Arc;
 use tracing::info;
 
@@ -168,13 +169,25 @@ fn main() {
                             builder.config().engine.memory_block_buffer_target,
                         );
 
-                    let launcher = DebugNodeLauncher::new(EngineNodeLauncher::new(
-                        builder.task_executor().clone(),
-                        builder.config().datadir(),
-                        engine_tree_config,
-                    ));
+                    let dev_mode = builder.config().dev.dev;
+                    if dev_mode {
+                        tracing::warn!("Running in debug mode");
+                        let launcher = DebugNodeLauncher::new(EngineNodeLauncher::new(
+                            builder.task_executor().clone(),
+                            builder.config().datadir(),
+                            engine_tree_config,
+                        ));
 
-                    builder.launch_with(launcher)
+                        Either::Left(builder.launch_with(launcher))
+                    } else {
+                        let launcher = EngineNodeLauncher::new(
+                            builder.task_executor().clone(),
+                            builder.config().datadir(),
+                            engine_tree_config,
+                        );
+
+                        Either::Right(builder.launch_with(launcher))
+                    }
                 })
                 .await?;
 
