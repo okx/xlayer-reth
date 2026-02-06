@@ -6383,7 +6383,7 @@ dependencies = [
 [[package]]
 name = "op-rbuilder"
 version = "0.3.1"
-source = "git+https://github.com/okx/op-rbuilder?tag=v0.3.1#b07123db2a08a9a8afa2608fedfb4c487c6b026c"
+source = "git+https://github.com/okx/op-rbuilder?tag=v0.3.2#a57ce2bdd721c8cbad50e82fedb9e12f616f4861"
 dependencies = [
  "alloy-consensus",
  "alloy-contract",
@@ -6683,7 +6683,7 @@ dependencies = [
 [[package]]
 name = "p2p"
 version = "0.3.1"
-source = "git+https://github.com/okx/op-rbuilder?tag=v0.3.1#b07123db2a08a9a8afa2608fedfb4c487c6b026c"
+source = "git+https://github.com/okx/op-rbuilder?tag=v0.3.2#a57ce2bdd721c8cbad50e82fedb9e12f616f4861"
 dependencies = [
  "derive_more",
  "eyre",
@@ -14166,8 +14166,9 @@ dependencies = [
 [[package]]
 name = "xlayer-trace-monitor"
 version = "0.1.0"
-source = "git+https://github.com/okx/xlayer-toolkit?rev=0004d202181bb772821797cd54983e29f32cae07#0004d202181bb772821797cd54983e29f32cae07"
+source = "git+https://github.com/okx/xlayer-toolkit?rev=d6af8edac7cf179241af1688f7741e260ba48b79#d6af8edac7cf179241af1688f7741e260ba48b79"
 dependencies = [
+ "crossbeam-channel",
  "hex",
  "tracing",
 ]
