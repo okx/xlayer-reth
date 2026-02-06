@@ -5,6 +5,7 @@
 //! - Iterates over all accounts in the database
 //! - Exports account balances, nonces, storage, and bytecode
 //! - Merges with any existing "alloc" entries from the template (template takes priority)
+//! - Sets "legacyXLayerBlock" in config to the latest block number from the database
 //! - Writes the complete genesis file with the "alloc" field populated
 
 use alloy_genesis::{Genesis, GenesisAccount};
@@ -20,6 +21,7 @@ use reth_db_api::{
 };
 use reth_node_core::version::version_metadata;
 use reth_optimism_chainspec::OpChainSpec;
+use reth_provider::BlockNumReader;
 use std::{
     collections::BTreeMap,
     fs::File,
@@ -92,6 +94,18 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
         // Initialize the environment (opens the database in read-only mode)
         let Environment { provider_factory, .. } = self.env.init::<N>(AccessRights::RO)?;
 
+        // Get the latest block number from the database
+        let provider = provider_factory.provider()?;
+        let latest_block = provider
+            .last_block_number()
+            .wrap_err("Failed to get latest block number")?;
+
+        info!(
+            target: "reth::cli",
+            "Latest block number in database: {}",
+            latest_block
+        );
+
         // Setup interrupt handler
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_clone = Arc::clone(&shutdown);
@@ -102,7 +116,6 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
         .wrap_err("Failed to set interrupt handler")?;
 
         // Read all accounts from the database
-        let provider = provider_factory.provider()?;
         let tx = provider.tx_ref();
 
         let mut alloc = self.read_all_accounts(tx, &shutdown)?;
@@ -130,9 +143,22 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
             );
         }
 
+        // Update the config with legacyXLayerBlock set to the latest block number
+        let mut config = template_genesis.config;
+        config.extra_fields.insert(
+            "legacyXLayerBlock".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(latest_block)),
+        );
+
+        info!(
+            target: "reth::cli",
+            "Set legacyXLayerBlock to {} in genesis config",
+            latest_block
+        );
+
         // Create the new genesis with the template config and the accounts from the database
         let new_genesis = Genesis {
-            config: template_genesis.config,
+            config,
             nonce: template_genesis.nonce,
             timestamp: template_genesis.timestamp,
             extra_data: template_genesis.extra_data,
@@ -141,7 +167,7 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
             mix_hash: template_genesis.mix_hash,
             coinbase: template_genesis.coinbase,
             alloc,
-            // Copy other optional fields from template
+            // Preserve the number field from template
             number: template_genesis.number,
             parent_hash: template_genesis.parent_hash,
             base_fee_per_gas: template_genesis.base_fee_per_gas,
