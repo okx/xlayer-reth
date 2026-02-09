@@ -42,7 +42,7 @@ These tools are useful for:
 - **Full State Export**: Exports all accounts with balances, nonces, storage, and bytecode
 - **Template-Based**: Uses a template genesis file for config and header fields
 - **Template Alloc Priority**: Accounts in the template's "alloc" field are preserved and override database accounts
-- **Legacy Block Number**: Automatically sets `legacyXLayerBlock` in config to the latest block number from the database
+- **Legacy Block Number**: Automatically sets `legacyXLayerBlock` and `number` to (latest block + 1) from the database
 - **Progress Reporting**: Shows real-time progress for large databases
 - **Read-Only Access**: Only requires read access to the database
 - **Graceful Interruption**: Handles Ctrl+C gracefully
@@ -599,7 +599,7 @@ The generated genesis file follows the standard Ethereum/Optimism genesis format
 {
   "config": {
     ...              // Copied from template genesis
-    "legacyXLayerBlock": 12345678  // Set to latest block number from database
+    "legacyXLayerBlock": 12345679  // Set to (latest block + 1) from database
   },
   "nonce": "0x0",     // Copied from template genesis
   "timestamp": "...", // Copied from template genesis
@@ -608,6 +608,7 @@ The generated genesis file follows the standard Ethereum/Optimism genesis format
   "difficulty": "0x0",// Copied from template genesis
   "mixHash": "...",   // Copied from template genesis
   "coinbase": "...",  // Copied from template genesis
+  "number": 12345679, // Set to (latest block + 1) from database
   "alloc": {          // Generated from database
     "0x...": {
       "balance": "0x...",
@@ -639,12 +640,13 @@ INFO reth::cli: Output: /output/new-genesis.json
 INFO reth::cli: Loaded template genesis with chain ID: 1952
 INFO reth::cli: Template genesis contains 5 accounts (these will take priority)
 INFO reth::cli: Latest block number in database: 12345678
+INFO reth::cli: Genesis block number (latest + 1): 12345679
 INFO reth::cli: Reading accounts from database...
 INFO reth::cli: Processed 100000 accounts
 INFO reth::cli: Processed 200000 accounts
 INFO reth::cli: Read 250000 accounts from database
 INFO reth::cli: Template alloc overrode 3 accounts from database
-INFO reth::cli: Set legacyXLayerBlock to 12345678 in genesis config
+INFO reth::cli: Set legacyXLayerBlock to 12345679 in genesis config
 INFO reth::cli: Genesis generation complete! Wrote 250002 accounts to /output/new-genesis.json
 ```
 

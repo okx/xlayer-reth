@@ -5,7 +5,7 @@
 //! - Iterates over all accounts in the database
 //! - Exports account balances, nonces, storage, and bytecode
 //! - Merges with any existing "alloc" entries from the template (template takes priority)
-//! - Sets "legacyXLayerBlock" in config to the latest block number from the database
+//! - Sets "legacyXLayerBlock" and "number" to (latest block + 1) from the database
 //! - Writes the complete genesis file with the "alloc" field populated
 
 use alloy_genesis::{Genesis, GenesisAccount};
@@ -100,10 +100,18 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
             .last_block_number()
             .wrap_err("Failed to get latest block number")?;
 
+        // Genesis block number is latest + 1 (the next block after the exported state)
+        let genesis_block_number = latest_block + 1;
+
         info!(
             target: "reth::cli",
             "Latest block number in database: {}",
             latest_block
+        );
+        info!(
+            target: "reth::cli",
+            "Genesis block number (latest + 1): {}",
+            genesis_block_number
         );
 
         // Setup interrupt handler
@@ -143,17 +151,17 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
             );
         }
 
-        // Update the config with legacyXLayerBlock set to the latest block number
+        // Update the config with legacyXLayerBlock set to genesis block number (latest + 1)
         let mut config = template_genesis.config;
         config.extra_fields.insert(
             "legacyXLayerBlock".to_string(),
-            serde_json::Value::Number(serde_json::Number::from(latest_block)),
+            serde_json::Value::Number(serde_json::Number::from(genesis_block_number)),
         );
 
         info!(
             target: "reth::cli",
             "Set legacyXLayerBlock to {} in genesis config",
-            latest_block
+            genesis_block_number
         );
 
         // Create the new genesis with the template config and the accounts from the database
@@ -167,8 +175,8 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
             mix_hash: template_genesis.mix_hash,
             coinbase: template_genesis.coinbase,
             alloc,
-            // Preserve the number field from template
-            number: template_genesis.number,
+            // Set number to genesis block number (latest + 1)
+            number: Some(genesis_block_number),
             parent_hash: template_genesis.parent_hash,
             base_fee_per_gas: template_genesis.base_fee_per_gas,
             excess_blob_gas: template_genesis.excess_blob_gas,
