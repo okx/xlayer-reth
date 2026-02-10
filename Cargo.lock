@@ -2865,7 +2865,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ab67060fc6b8ef687992d439ca0fa36e7ed17e9a0b16b25b601e8757df720de"
 dependencies = [
  "data-encoding",
- "syn 1.0.109",
+ "syn 2.0.114",
 ]
 
 [[package]]
@@ -6383,7 +6383,7 @@ dependencies = [
 [[package]]
 name = "op-rbuilder"
 version = "0.3.1"
-source = "git+https://github.com/okx/op-rbuilder?tag=v0.3.2#46696568eea2b0b9da93d182540b55e4922bf003"
+source = "git+https://github.com/okx/op-rbuilder?tag=v0.3.3#644b4527ab79bf1545ba9527e7ebdfb564de53c3"
 dependencies = [
  "alloy-consensus",
  "alloy-contract",
@@ -6683,7 +6683,7 @@ dependencies = [
 [[package]]
 name = "p2p"
 version = "0.3.1"
-source = "git+https://github.com/okx/op-rbuilder?tag=v0.3.2#46696568eea2b0b9da93d182540b55e4922bf003"
+source = "git+https://github.com/okx/op-rbuilder?tag=v0.3.3#644b4527ab79bf1545ba9527e7ebdfb564de53c3"
 dependencies = [
  "derive_more",
  "eyre",

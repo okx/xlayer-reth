@@ -137,7 +137,7 @@ revm-inspectors = { version = "0.34.1", default-features = false, features = [
 # ============================================================================== 
 # Flashblocks Dependencies
 # ============================================================================== 
-op-rbuilder = { git = "https://github.com/okx/op-rbuilder", tag = "v0.3.2" }
+op-rbuilder = { git = "https://github.com/okx/op-rbuilder", tag = "v0.3.3" }
 
 # ==============================================================================
 # Alloy Dependencies
