@@ -42,10 +42,10 @@ sweep-check *crates="":
         # Get all local crates
         all_crates=$(cargo metadata --no-deps --format-version 1 | \
             jq -r '.packages[] | select(.source == null) | .name')
-        
+
         # Convert skip list to array
         skip_crates=({{crates}})
-        
+
         # Check each crate unless it's in the skip list
         for crate in $all_crates; do
             skip=false
@@ -63,12 +63,12 @@ sweep-check *crates="":
         done
     fi
 
-check: 
+check:
     # Upstream flashblocks inner dependency reth-optimism-primitives does not
     # specify feats reth-codec and serde-bincode-compat. So we skip.
     just sweep-check
-    just check-format 
-    just check-clippy 
+    just check-format
+    just check-clippy
     just test
 
 fix: fix-format fix-clippy
@@ -415,6 +415,35 @@ build-docker-dev reth_path="":
     # Restore local config for development (point to actual local path, not /reth)
     sed "s|RETH_PATH_PLACEHOLDER|$RETH_SRC|g" .reth-dev.toml > .cargo/config.toml
     echo "✅ Restored local development config"
+
+build-docker-tools suffix="" git_sha="" git_timestamp="":
+    #!/usr/bin/env bash
+    set -e
+    # Only clean .cargo in production mode, preserve it for dev builds
+    if [ "{{suffix}}" != "dev" ]; then
+        rm -rf .cargo
+    fi
+    GITHASH=$(git rev-parse --short HEAD)
+    SUFFIX=""
+    if [ -n "{{suffix}}" ]; then
+        SUFFIX="-{{suffix}}"
+    fi
+    TAG="xlayer-reth-tools:$GITHASH$SUFFIX"
+    echo "🐳 Building XLayer Reth Tools Docker image: $TAG ..."
+
+    # Build with optional git info for version metadata
+    BUILD_ARGS=""
+    if [ -n "{{git_sha}}" ]; then
+        BUILD_ARGS="--build-arg VERGEN_GIT_SHA={{git_sha}}"
+        echo "📋 Using git SHA: {{git_sha}}"
+    fi
+    if [ -n "{{git_timestamp}}" ]; then
+        BUILD_ARGS="$BUILD_ARGS --build-arg VERGEN_GIT_COMMIT_TIMESTAMP={{git_timestamp}}"
+    fi
+
+    docker build $BUILD_ARGS -t $TAG -f DockerfileTools .
+    docker tag $TAG xlayer-reth-tools:latest
+    echo "🔖 Tagged $TAG as xlayer-reth-tools:latest"
 
 watch-test:
     @command -v bacon >/dev/null 2>&1 || cargo install bacon
