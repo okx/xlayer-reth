@@ -6383,7 +6383,7 @@ dependencies = [
 [[package]]
 name = "op-rbuilder"
 version = "0.3.1"
-source = "git+https://github.com/okx/op-rbuilder?tag=v0.3.3#644b4527ab79bf1545ba9527e7ebdfb564de53c3"
+source = "git+https://github.com/okx/op-rbuilder?tag=v0.3.4#69a6e698fa0319add8e7c71f3db4a27c0ad292c3"
 dependencies = [
  "alloy-consensus",
  "alloy-contract",
@@ -6683,7 +6683,7 @@ dependencies = [
 [[package]]
 name = "p2p"
 version = "0.3.1"
-source = "git+https://github.com/okx/op-rbuilder?tag=v0.3.3#644b4527ab79bf1545ba9527e7ebdfb564de53c3"
+source = "git+https://github.com/okx/op-rbuilder?tag=v0.3.4#69a6e698fa0319add8e7c71f3db4a27c0ad292c3"
 dependencies = [
  "derive_more",
  "eyre",
