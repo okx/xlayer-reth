@@ -1,0 +1,8 @@
+crates/op-rbuilder/src/builders/flashblocks/config.rs
+---
+{
+  "metadata": {
+    "base_commit_sha": "c2b2470290dfc03ac2f79484552f21b3a8fd287b",
+    "prompts": {}
+  }
+}
