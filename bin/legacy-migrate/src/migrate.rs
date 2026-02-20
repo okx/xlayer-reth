@@ -298,9 +298,14 @@ pub(crate) fn migrate_rocksdb_table<N: CliNodeTypes>(
                 batch.put::<tables::TransactionHashNumbers>(hash, &tx_num)?;
                 count += 1;
 
-                if count.is_multiple_of(batch_size) && last_log.elapsed() >= PROGRESS_LOG_INTERVAL {
-                    log_rocksdb_progress(table, count, table_start.elapsed());
-                    last_log = Instant::now();
+                if count.is_multiple_of(batch_size) {
+                    batch.commit()?;
+                    batch = rocksdb.batch_with_auto_commit();
+
+                    if last_log.elapsed() >= PROGRESS_LOG_INTERVAL {
+                        log_rocksdb_progress(table, count, table_start.elapsed());
+                        last_log = Instant::now();
+                    }
                 }
             }
 
