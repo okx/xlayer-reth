@@ -141,7 +141,7 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> Command<C> {
         use reth_db_api::transaction::DbTxMut;
         use reth_provider::StorageSettings;
 
-        let provider = provider_factory.provider_rw()?;
+        let mut provider = provider_factory.provider_rw()?;
 
         // Check if TransactionSenders actually has data in static files
         // If not, don't enable that setting to avoid consistency check failures
@@ -176,7 +176,7 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> Command<C> {
                 "Clearing MDBX tables. This may take a long time (potentially hours) for large databases. Use --keep-mdbx to skip this step."
             );
 
-            let tx = provider.tx_ref();
+            let tx = provider.tx_mut();
 
             if !self.skip_static_files {
                 info!(target: "reth::cli", "Dropping migrated static file tables from MDBX");
