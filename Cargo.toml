@@ -113,18 +113,9 @@ reth-tracing = { git = "https://github.com/okx/reth", rev = "c1015022f5a46d58261
 reth-transaction-pool = { git = "https://github.com/okx/reth", rev = "c1015022f5a46d58261cffc4c28ef8160c564e29" }
 reth-rpc-server-types = { git = "https://github.com/okx/reth", rev = "c1015022f5a46d58261cffc4c28ef8160c564e29" }
 
-# reth-optimism-chainspec = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
-# reth-optimism-cli = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
-# reth-optimism-consensus = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
-# reth-optimism-evm = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
-# reth-optimism-forks = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
-# reth-optimism-node = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
-# reth-optimism-payload-builder = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
-# reth-optimism-primitives = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
-# reth-optimism-rpc = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
-# reth-optimism-txpool = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
-# reth-optimism-flashblocks = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
-
+# ==============================================================================
+# optimism Dependencies (follows upstream optimism)
+# ==============================================================================
 reth-optimism-chainspec = { git = "https://github.com/okx/optimism", rev = "7f450c4d8adaad6e6a5f95288673776e9076a028" }
 reth-optimism-cli = { git = "https://github.com/okx/optimism", rev = "7f450c4d8adaad6e6a5f95288673776e9076a028" }
 reth-optimism-consensus = { git = "https://github.com/okx/optimism", rev = "7f450c4d8adaad6e6a5f95288673776e9076a028" }
@@ -289,17 +280,6 @@ reth-network = { git = "https://github.com/okx/reth", rev = "c1015022f5a46d58261
 reth-network-api = { git = "https://github.com/okx/reth", rev = "c1015022f5a46d58261cffc4c28ef8160c564e29" }
 reth-node-events = { git = "https://github.com/okx/reth", rev = "c1015022f5a46d58261cffc4c28ef8160c564e29" }
 reth-node-types = { git = "https://github.com/okx/reth", rev = "c1015022f5a46d58261cffc4c28ef8160c564e29" }
-reth-optimism-chainspec = { git = "https://github.com/okx/optimism", rev = "7f450c4d8adaad6e6a5f95288673776e9076a028" }
-reth-optimism-cli = { git = "https://github.com/okx/optimism", rev = "7f450c4d8adaad6e6a5f95288673776e9076a028" }
-reth-optimism-consensus = { git = "https://github.com/okx/optimism", rev = "7f450c4d8adaad6e6a5f95288673776e9076a028" }
-reth-optimism-evm = { git = "https://github.com/okx/optimism", rev = "7f450c4d8adaad6e6a5f95288673776e9076a028" }
-reth-optimism-flashblocks = { git = "https://github.com/okx/optimism", rev = "7f450c4d8adaad6e6a5f95288673776e9076a028" }
-reth-optimism-forks = { git = "https://github.com/okx/optimism", rev = "7f450c4d8adaad6e6a5f95288673776e9076a028" }
-reth-optimism-node = { git = "https://github.com/okx/optimism", rev = "7f450c4d8adaad6e6a5f95288673776e9076a028" }
-reth-optimism-payload-builder = { git = "https://github.com/okx/optimism", rev = "7f450c4d8adaad6e6a5f95288673776e9076a028" }
-reth-optimism-primitives = { git = "https://github.com/okx/optimism", rev = "7f450c4d8adaad6e6a5f95288673776e9076a028" }
-reth-optimism-rpc = { git = "https://github.com/okx/optimism", rev = "7f450c4d8adaad6e6a5f95288673776e9076a028" }
-reth-optimism-txpool = { git = "https://github.com/okx/optimism", rev = "7f450c4d8adaad6e6a5f95288673776e9076a028" }
 reth-prune = { git = "https://github.com/okx/reth", rev = "c1015022f5a46d58261cffc4c28ef8160c564e29" }
 reth-prune-types = { git = "https://github.com/okx/reth", rev = "c1015022f5a46d58261cffc4c28ef8160c564e29" }
 reth-rpc = { git = "https://github.com/okx/reth", rev = "c1015022f5a46d58261cffc4c28ef8160c564e29" }
@@ -329,6 +309,19 @@ reth-payload-validator = { git = "https://github.com/okx/reth", rev = "c1015022f
 reth-rpc-builder = { git = "https://github.com/okx/reth", rev = "c1015022f5a46d58261cffc4c28ef8160c564e29" }
 reth-storage-errors = { git = "https://github.com/okx/reth", rev = "c1015022f5a46d58261cffc4c28ef8160c564e29" }
 reth-zstd-compressors = { git = "https://github.com/okx/reth", rev = "c1015022f5a46d58261cffc4c28ef8160c564e29" }
+
+# Optimism dependencies (follows upstream optimism)
+reth-optimism-chainspec = { git = "https://github.com/okx/optimism", rev = "7f450c4d8adaad6e6a5f95288673776e9076a028" }
+reth-optimism-cli = { git = "https://github.com/okx/optimism", rev = "7f450c4d8adaad6e6a5f95288673776e9076a028" }
+reth-optimism-consensus = { git = "https://github.com/okx/optimism", rev = "7f450c4d8adaad6e6a5f95288673776e9076a028" }
+reth-optimism-evm = { git = "https://github.com/okx/optimism", rev = "7f450c4d8adaad6e6a5f95288673776e9076a028" }
+reth-optimism-flashblocks = { git = "https://github.com/okx/optimism", rev = "7f450c4d8adaad6e6a5f95288673776e9076a028" }
+reth-optimism-forks = { git = "https://github.com/okx/optimism", rev = "7f450c4d8adaad6e6a5f95288673776e9076a028" }
+reth-optimism-node = { git = "https://github.com/okx/optimism", rev = "7f450c4d8adaad6e6a5f95288673776e9076a028" }
+reth-optimism-payload-builder = { git = "https://github.com/okx/optimism", rev = "7f450c4d8adaad6e6a5f95288673776e9076a028" }
+reth-optimism-primitives = { git = "https://github.com/okx/optimism", rev = "7f450c4d8adaad6e6a5f95288673776e9076a028" }
+reth-optimism-rpc = { git = "https://github.com/okx/optimism", rev = "7f450c4d8adaad6e6a5f95288673776e9076a028" }
+reth-optimism-txpool = { git = "https://github.com/okx/optimism", rev = "7f450c4d8adaad6e6a5f95288673776e9076a028" }
 
 [patch.crates-io]
 # Duplicated by: reth-payload-primitives, reth-engine-local (reth git), rollup-boost,
