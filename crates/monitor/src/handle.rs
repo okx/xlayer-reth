@@ -23,7 +23,7 @@ use reth_provider::BlockNumReader;
 /// - Attributes event from engine_forkchoiceUpdated
 /// - BuiltPayload events from engine_getPayload
 pub fn start_monitor_handle<N, T, Provider>(
-    task_executor: &dyn reth_tasks::TaskSpawner,
+    task_executor: &reth_tasks::TaskExecutor,
     monitor: Arc<XLayerMonitor>,
     provider: Provider,
     payload_builder: PayloadBuilderHandle<T>,
@@ -97,5 +97,5 @@ pub fn start_monitor_handle<N, T, Provider>(
         info!(target: "xlayer::monitor", "monitor handle stopped");
     };
 
-    task_executor.spawn_critical("xlayer monitor handle", Box::pin(monitor_handle));
+    task_executor.spawn_critical_task("xlayer monitor handle", Box::pin(monitor_handle));
 }
