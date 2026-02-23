@@ -65,10 +65,6 @@ where
     async fn flashblocks_enabled(&self) -> RpcResult<bool> {
         Ok(self.backend.has_pending_flashblock())
     }
-
-    async fn flashblocks_enabled(&self) -> RpcResult<bool> {
-        Ok(self.backend.has_pending_flashblock())
-    }
 }
 
 #[cfg(test)]
