@@ -80,7 +80,6 @@ metrics-derive.workspace = true
 itertools.workspace = true
 eyre.workspace = true
 uuid.workspace = true
-time.workspace = true
 chrono.workspace = true
 once_cell.workspace = true
 humantime.workspace = true
