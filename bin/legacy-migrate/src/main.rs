@@ -1,0 +1,23 @@
+mod chainspec_parser;
+mod command;
+mod migrate;
+mod progress;
+mod xlayer_mainnet;
+mod xlayer_testnet;
+
+use clap::Parser;
+
+use reth_optimism_node::OpNode;
+use reth_tracing::{RethTracer, Tracer};
+
+use crate::chainspec_parser::XLayerChainSpecParser;
+
+#[tokio::main]
+async fn main() {
+    let _ = RethTracer::new().init().expect("Failed to initialize tracing");
+
+    if let Err(err) = command::Command::<XLayerChainSpecParser>::parse().execute::<OpNode>().await {
+        eprintln!("Migration failed: {}", err);
+        std::process::exit(1);
+    }
+}
