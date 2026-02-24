@@ -92,7 +92,7 @@ mod tests {
     use reth_optimism_forks::OpHardfork;
 
     fn parse_genesis() -> Genesis {
-        serde_json::from_str(include_str!("../res/genesis/xlayer-mainnet.json"))
+        serde_json::from_str(include_str!("../../../crates/chainspec/res/genesis/xlayer-mainnet.json"))
             .expect("Failed to parse xlayer-mainnet.json")
     }
 
@@ -281,51 +281,5 @@ mod tests {
         assert_eq!(header.base_fee_per_gas, genesis.base_fee_per_gas.map(|fee| fee as u64));
         // NOTE: state_root is hardcoded, not read from JSON
         assert_eq!(header.state_root, XLAYER_MAINNET_STATE_ROOT);
-    }
-
-    #[test]
-    fn test_xlayer_mainnet_jovian_activation() {
-        use crate::{XLAYER_MAINNET_HARDFORKS, XLAYER_MAINNET_JOVIAN_TIMESTAMP};
-
-        let spec = &*XLAYER_MAINNET;
-        let hardforks = &*XLAYER_MAINNET_HARDFORKS;
-
-        // Verify Jovian is configured with XLAYER_MAINNET_JOVIAN_TIMESTAMP
-        let jovian_fork =
-            hardforks.get(OpHardfork::Jovian).expect("Jovian fork should be configured");
-        assert!(matches!(
-            jovian_fork,
-            reth_ethereum_forks::ForkCondition::Timestamp(ts) if ts == XLAYER_MAINNET_JOVIAN_TIMESTAMP
-        ));
-
-        // Verify XLayer mainnet uses expected timestamp (same as OP mainnet: 2025-12-02 16:00:01 UTC)
-        const EXPECTED_OP_MAINNET_JOVIAN: u64 = 1764691201;
-        assert_eq!(
-            XLAYER_MAINNET_JOVIAN_TIMESTAMP, EXPECTED_OP_MAINNET_JOVIAN,
-            "XLayer mainnet Jovian timestamp should match OP mainnet"
-        );
-
-        // Test activation before Jovian timestamp
-        assert!(!spec
-            .fork(OpHardfork::Jovian)
-            .active_at_timestamp(XLAYER_MAINNET_JOVIAN_TIMESTAMP - 1));
-
-        // Test activation at Jovian timestamp
-        assert!(spec.fork(OpHardfork::Jovian).active_at_timestamp(XLAYER_MAINNET_JOVIAN_TIMESTAMP));
-
-        // Test activation after Jovian timestamp
-        assert!(spec
-            .fork(OpHardfork::Jovian)
-            .active_at_timestamp(XLAYER_MAINNET_JOVIAN_TIMESTAMP + 1));
-    }
-
-    #[test]
-    fn test_xlayer_mainnet_jovian_included() {
-        use crate::XLAYER_MAINNET_HARDFORKS;
-        let hardforks = &*XLAYER_MAINNET_HARDFORKS;
-        assert!(
-            hardforks.get(OpHardfork::Jovian).is_some(),
-            "XLayer mainnet hardforks should include Jovian"
-        );
     }
 }

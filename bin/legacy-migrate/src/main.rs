@@ -4,6 +4,7 @@ mod migrate;
 mod progress;
 mod xlayer_mainnet;
 mod xlayer_testnet;
+mod xlayer_devnet;
 
 use clap::Parser;
 
