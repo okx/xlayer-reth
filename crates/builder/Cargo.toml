@@ -95,6 +95,7 @@ async-trait = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }
 reqwest.workspace = true
+tower.workspace = true
 
 # tokio
 tokio.workspace = true
@@ -149,13 +150,15 @@ testcontainers = "0.24.0"
 alloy-provider = { workspace = true, default-features = true, features = [
     "txpool-api",
 ] }
-macros = { path = "src/tests/framework/macros" }
-nanoid = { version = "0.4" }
 ctor = "0.4.2"
-rlimit = { version = "0.10" }
 hyper = { version = "1.7.0", features = ["http1"] }
 hyper-util = { version = "0.1.11" }
 http-body-util = { version = "0.1.3" }
+macros = { path = "src/tests/framework/macros" }
+nanoid = { version = "0.4" }
+reth-ipc.workspace = true
+reth-optimism-rpc = { workspace = true, features = ["client"] }
+rlimit = { version = "0.10" }
 
 [features]
 default = []

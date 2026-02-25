@@ -14085,6 +14085,7 @@ dependencies = [
  "tokio-metrics",
  "tokio-tungstenite",
  "tokio-util",
+ "tower",
  "tracing",
  "tracing-subscriber 0.3.22",
  "url",
