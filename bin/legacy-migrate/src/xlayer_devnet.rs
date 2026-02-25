@@ -14,16 +14,22 @@ use xlayer_legacy_migrate::XLAYER_DEVNET_HARDFORKS;
 /// X Layer Devnet genesis hash
 ///
 /// Computed from the genesis block header.
-/// This value is hardcoded to avoid expensive computation on every startup.
-pub(crate) const XLAYER_DEVNET_GENESIS_HASH: B256 =
-    b256!("a8e6bc8a65093614612138cccd568b9dd8a7ab79db9097092e639945a437f0c7");
+pub(crate) static XLAYER_DEVNET_GENESIS_HASH: Lazy<B256> = Lazy::new(|| {
+    include_str!("../../../crates/chainspec/res/genesis/xlayer-devnet-genesis-hash.txt")
+        .trim()
+        .parse::<B256>()
+        .expect("Can't parse X Layer Devnet genesis hash")
+});
 
 /// X Layer Devnet genesis state root
 ///
 /// The Merkle Patricia Trie root of all 1,866,483 accounts in the genesis alloc.
-/// This value is hardcoded to avoid expensive computation on every startup.
-pub(crate) const XLAYER_DEVNET_STATE_ROOT: B256 =
-    b256!("5d335834cb1c1c20a1f44f964b16cd409aa5d10891d5c6cf26f1f2c26726efcf");
+pub(crate) static XLAYER_DEVNET_STATE_ROOT: Lazy<B256> = Lazy::new(|| {
+    include_str!("../../../crates/chainspec/res/genesis/xlayer-devnet-state-root.txt")
+        .trim()
+        .parse::<B256>()
+        .expect("Can't parse X Layer Devnet state root")
+});
 
 /// X Layer devnet chain id as specified in the published `genesis.json`.
 const XLAYER_DEVNET_CHAIN_ID: u64 = 195;
@@ -45,9 +51,10 @@ pub static XLAYER_DEVNET: Lazy<Arc<OpChainSpec>> = Lazy::new(|| {
         .expect("Can't deserialize X Layer Devnet genesis json");
     let hardforks = XLAYER_DEVNET_HARDFORKS.clone();
 
+    
     // Build genesis header using standard helper, then override state_root with pre-computed value
     let mut genesis_header = make_op_genesis_header(&genesis, &hardforks);
-    genesis_header.state_root = XLAYER_DEVNET_STATE_ROOT;
+    genesis_header.state_root = *XLAYER_DEVNET_STATE_ROOT;
     // Set block number and parent hash from genesis JSON (not a standard genesis block 0)
     if let Some(number) = genesis.number {
         genesis_header.number = number;
@@ -55,7 +62,7 @@ pub static XLAYER_DEVNET: Lazy<Arc<OpChainSpec>> = Lazy::new(|| {
     if let Some(parent_hash) = genesis.parent_hash {
         genesis_header.parent_hash = parent_hash;
     }
-    let genesis_header = SealedHeader::new(genesis_header, XLAYER_DEVNET_GENESIS_HASH);
+    let genesis_header = SealedHeader::new(genesis_header, *XLAYER_DEVNET_GENESIS_HASH);
 
     OpChainSpec {
         inner: ChainSpec {
@@ -99,12 +106,12 @@ mod tests {
 
     #[test]
     fn test_xlayer_devnet_genesis_hash() {
-        assert_eq!(XLAYER_DEVNET.genesis_hash(), XLAYER_DEVNET_GENESIS_HASH);
+        assert_eq!(XLAYER_DEVNET.genesis_hash(), *XLAYER_DEVNET_GENESIS_HASH);
     }
 
     #[test]
     fn test_xlayer_devnet_state_root() {
-        assert_eq!(XLAYER_DEVNET.genesis_header().state_root, XLAYER_DEVNET_STATE_ROOT);
+        assert_eq!(XLAYER_DEVNET.genesis_header().state_root, *XLAYER_DEVNET_STATE_ROOT);
     }
 
     #[test]
@@ -259,7 +266,7 @@ mod tests {
         assert_eq!(header.parent_hash, genesis.parent_hash.unwrap_or_default());
         assert_eq!(header.base_fee_per_gas, genesis.base_fee_per_gas.map(|fee| fee as u64));
         // NOTE: state_root is hardcoded, not read from JSON
-        assert_eq!(header.state_root, XLAYER_DEVNET_STATE_ROOT);
+        assert_eq!(header.state_root, *XLAYER_DEVNET_STATE_ROOT);
     }
 
     #[test]
