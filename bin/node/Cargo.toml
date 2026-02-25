@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 # internal
+xlayer-builder.workspace = true
 xlayer-flashblocks.workspace = true
 xlayer-chainspec.workspace = true
 xlayer-legacy-rpc.workspace = true
@@ -33,12 +34,9 @@ reth-payload-builder.workspace = true
 reth-cli-util.workspace = true
 reth-rpc-server-types.workspace = true
 
-# flashblocks
-op-rbuilder.workspace = true
-op-alloy-network.workspace = true
-
 # alloy
 alloy-primitives.workspace = true
+op-alloy-network.workspace = true
 
 # misc
 clap.workspace = true

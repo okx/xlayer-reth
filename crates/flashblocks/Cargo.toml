@@ -11,7 +11,7 @@ repository.workspace = true
 default = []
 
 [dependencies]
-op-rbuilder.workspace = true
+xlayer-builder.workspace = true
 reth-node-api.workspace = true
 reth-primitives-traits.workspace = true
 reth-tracing.workspace = true

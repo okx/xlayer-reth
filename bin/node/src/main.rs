@@ -12,7 +12,6 @@ use std::sync::Arc;
 use tracing::info;
 
 use op_alloy_network::Optimism;
-use op_rbuilder::args::OpRbuilderArgs;
 use reth::rpc::eth::EthApiTypes;
 use reth::{
     builder::{DebugNodeLauncher, EngineNodeLauncher, Node, NodeHandle, TreeConfig},
@@ -22,6 +21,7 @@ use reth_node_api::FullNodeComponents;
 use reth_optimism_cli::Cli;
 use reth_optimism_node::OpNode;
 use reth_rpc_server_types::RethRpcModule;
+use xlayer_builder::args::OpRbuilderArgs;
 
 use xlayer_chainspec::XLayerChainSpecParser;
 use xlayer_flashblocks::handler::FlashblocksService;

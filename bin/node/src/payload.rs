@@ -1,12 +1,14 @@
-use op_rbuilder::args::OpRbuilderArgs;
-use op_rbuilder::builders::{BuilderConfig, FlashblocksServiceBuilder};
-use op_rbuilder::traits::{NodeBounds, PoolBounds};
 use reth::builder::components::PayloadServiceBuilder;
 use reth_node_api::NodeTypes;
 use reth_node_builder::{components::BasicPayloadServiceBuilder, BuilderContext};
 use reth_optimism_evm::OpEvmConfig;
 use reth_optimism_node::node::OpPayloadBuilder;
 use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
+use xlayer_builder::{
+    args::OpRbuilderArgs,
+    builders::{BuilderConfig, FlashblocksServiceBuilder},
+    traits::{NodeBounds, PoolBounds},
+};
 
 /// Payload builder strategy for X Layer.
 enum XLayerPayloadServiceBuilderInner {
@@ -23,23 +25,23 @@ pub struct XLayerPayloadServiceBuilder {
 }
 
 impl XLayerPayloadServiceBuilder {
-    pub fn new(op_rbuilder_args: OpRbuilderArgs) -> eyre::Result<Self> {
-        Self::with_config(op_rbuilder_args, OpDAConfig::default(), OpGasLimitConfig::default())
+    pub fn new(xlayer_builder_args: OpRbuilderArgs) -> eyre::Result<Self> {
+        Self::with_config(xlayer_builder_args, OpDAConfig::default(), OpGasLimitConfig::default())
     }
 
     pub fn with_config(
-        op_rbuilder_args: OpRbuilderArgs,
+        xlayer_builder_args: OpRbuilderArgs,
         da_config: OpDAConfig,
         gas_limit_config: OpGasLimitConfig,
     ) -> eyre::Result<Self> {
-        let builder = if op_rbuilder_args.flashblocks.enabled {
-            let builder_config = BuilderConfig::try_from(op_rbuilder_args)?;
+        let builder = if xlayer_builder_args.flashblocks.enabled {
+            let builder_config = BuilderConfig::try_from(xlayer_builder_args)?;
             XLayerPayloadServiceBuilderInner::Flashblocks(Box::new(FlashblocksServiceBuilder(
                 builder_config,
             )))
         } else {
             let payload_builder =
-                OpPayloadBuilder::new(op_rbuilder_args.rollup_args.compute_pending_block)
+                OpPayloadBuilder::new(xlayer_builder_args.rollup_args.compute_pending_block)
                     .with_da_config(da_config)
                     .with_gas_limit_config(gas_limit_config);
             XLayerPayloadServiceBuilderInner::Default(BasicPayloadServiceBuilder::new(
