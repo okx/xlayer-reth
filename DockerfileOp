@@ -13,16 +13,11 @@ COPY bin/node/Cargo.toml bin/node/Cargo.toml
 COPY bin/tools/Cargo.toml bin/tools/Cargo.toml
 COPY --parents crates/*/Cargo.toml ./
 COPY crates/builder/src/tests/framework/macros/Cargo.toml crates/builder/src/tests/framework/macros/Cargo.toml
-RUN find crates -name Cargo.toml -print0 | while IFS= read -r -d '' manifest; do \
-        dir=$(dirname "$manifest"); \
-        mkdir -p "$dir/src"; \
-        touch "$dir/src/lib.rs" "$dir/src/main.rs"; \
-    done
-RUN find bin -name Cargo.toml -print0 | while IFS= read -r -d '' manifest; do \
-        dir=$(dirname "$manifest"); \
-        mkdir -p "$dir/src"; \
-        touch "$dir/src/main.rs"; \
-    done
+COPY --parents crates/*/src/lib.rs ./
+COPY crates/tests/lib.rs crates/tests/lib.rs
+COPY crates/builder/src/tests/framework/macros/src/lib.rs crates/builder/src/tests/framework/macros/src/lib.rs
+COPY bin/node/src/main.rs bin/node/src/main.rs
+COPY bin/tools/main.rs bin/tools/main.rs
 RUN cargo chef prepare --recipe-path recipe.json --bin xlayer-reth-node
 
 FROM chef AS builder
