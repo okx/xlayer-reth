@@ -66,11 +66,6 @@ pub struct FlashblocksConfig {
 
     /// Maximum number of concurrent WebSocket subscribers
     pub ws_subscriber_limit: Option<u16>,
-
-    /// Enable incremental trie caching for state root calculation
-    /// When enabled, subsequent flashblocks reuse trie nodes from previous flashblocks
-    /// for faster state root calculation
-    pub enable_incremental_trie_cache: bool,
 }
 
 impl Default for FlashblocksConfig {
@@ -93,7 +88,6 @@ impl Default for FlashblocksConfig {
             p2p_send_full_payload: false,
             p2p_process_full_payload: false,
             ws_subscriber_limit: None,
-            enable_incremental_trie_cache: false,
         }
     }
 }
@@ -138,9 +132,6 @@ impl TryFrom<OpRbuilderArgs> for FlashblocksConfig {
             p2p_send_full_payload: args.flashblocks.p2p.p2p_send_full_payload,
             p2p_process_full_payload: args.flashblocks.p2p.p2p_process_full_payload,
             ws_subscriber_limit: args.flashblocks.ws_subscriber_limit,
-            enable_incremental_trie_cache: args
-                .flashblocks
-                .flashblocks_enable_incremental_trie_cache,
         })
     }
 }

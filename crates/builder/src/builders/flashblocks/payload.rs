@@ -92,7 +92,8 @@ pub(super) struct FlashblocksExecutionInfo {
     /// Index of the last consumed flashblock
     last_flashblock_index: usize,
 
-    /// Cached trie updates from previous flashblock for incremental state root calculation
+    /// Cached trie updates from previous flashblock for incremental state root calculation.
+    /// None only for the first flashblock; populated after each subsequent state root calculation.
     prev_trie_updates: Option<Arc<TrieUpdates>>,
 }
 
@@ -987,6 +988,8 @@ where
         let state_provider = state.database.as_ref();
 
         // Check if we can use incremental trie caching (use cached trie from previous flashblock if available)
+        // prev_trie_updates is None only for the first flashblock; all subsequent flashblocks
+        // reuse the trie nodes cached from the previous flashblock for faster state root calculation.
         let use_incremental = if let Some(prev_trie) = &info.extra.prev_trie_updates {
             // Incremental path: Use cached trie from previous flashblock
             debug!(
