@@ -54,10 +54,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
     if [ -n "$VERGEN_GIT_SHA" ]; then export VERGEN_GIT_SHA="$VERGEN_GIT_SHA"; fi && \
     if [ -n "$VERGEN_GIT_COMMIT_TIMESTAMP" ]; then export VERGEN_GIT_COMMIT_TIMESTAMP="$VERGEN_GIT_COMMIT_TIMESTAMP"; fi && \
-    cargo build --profile $BUILD_PROFILE --features "$FEATURES" --bin xlayer-reth-node --manifest-path /app/bin/node/Cargo.toml
-
-# Copy binary to a fixed location
-RUN OUTPUT_DIR=$(if [ "$BUILD_PROFILE" = "dev" ] || [ "$BUILD_PROFILE" = "test" ]; then echo debug; else echo "$BUILD_PROFILE"; fi) && \
+    cargo build --profile $BUILD_PROFILE --features "$FEATURES" --bin xlayer-reth-node --manifest-path /app/bin/node/Cargo.toml && \
+    OUTPUT_DIR=$(if [ "$BUILD_PROFILE" = "dev" ] || [ "$BUILD_PROFILE" = "test" ]; then echo debug; else echo "$BUILD_PROFILE"; fi) && \
     cp /app/target/$OUTPUT_DIR/xlayer-reth-node /app/op-reth
 
 FROM ubuntu:24.04 AS runtime
