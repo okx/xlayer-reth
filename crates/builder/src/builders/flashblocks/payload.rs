@@ -55,7 +55,7 @@ use revm::Database;
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, metadata::Level, span, warn};
+use tracing::{debug, error, info, warn};
 
 /// Converts a reth OpReceipt to an op-alloy OpReceipt
 /// TODO: remove this once reth updates to use the op-alloy defined type as well.
@@ -329,17 +329,6 @@ where
         let block_build_start_time = Instant::now();
         let BuildArguments { mut cached_reads, config, cancel: block_cancel } = args;
 
-        // We log only every 100th block to reduce usage
-        let span = if cfg!(feature = "telemetry")
-            && config.parent_header.number.is_multiple_of(self.config.sampling_ratio)
-        {
-            span!(Level::INFO, "build_payload")
-        } else {
-            tracing::Span::none()
-        };
-        let _entered = span.enter();
-        span.record("payload_id", config.attributes.payload_attributes.id.to_string());
-
         let disable_state_root = self.config.specific.disable_state_root;
         let ctx = self
             .get_op_payload_builder_ctx(
@@ -534,20 +523,9 @@ where
             } else {
                 // Channel closed - block building cancelled
                 self.resolve_best_payload(&ctx, best_payload, fallback_payload, &resolve_payload);
-                self.record_flashblocks_metrics(&ctx, &info, target_flashblocks, &span);
+                self.record_flashblocks_metrics(&ctx, &info, target_flashblocks);
                 return Ok(());
             }
-
-            let fb_span = if span.is_none() {
-                tracing::Span::none()
-            } else {
-                span!(
-                    parent: &span,
-                    Level::INFO,
-                    "build_flashblock",
-                )
-            };
-            let _entered = fb_span.enter();
 
             // Build flashblock after receiving signal
             let next_flashblocks_ctx = match self.build_next_flashblock(
@@ -567,7 +545,7 @@ where
                         fallback_payload,
                         &resolve_payload,
                     );
-                    self.record_flashblocks_metrics(&ctx, &info, target_flashblocks, &span);
+                    self.record_flashblocks_metrics(&ctx, &info, target_flashblocks);
                     return Ok(());
                 }
                 Err(err) => {
@@ -861,7 +839,6 @@ where
         ctx: &OpPayloadBuilderCtx<FlashblocksExtraCtx>,
         info: &ExecutionInfo<FlashblocksExecutionInfo>,
         flashblocks_per_block: u64,
-        span: &tracing::Span,
     ) {
         ctx.metrics.block_built_success.increment(1);
         ctx.metrics.flashblock_count.record(ctx.flashblock_index() as f64);
@@ -879,8 +856,6 @@ where
             flashblock_index = ctx.flashblock_index(),
             "Flashblocks building complete"
         );
-
-        span.record("flashblock_count", ctx.flashblock_index());
     }
 }
 

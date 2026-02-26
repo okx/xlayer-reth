@@ -57,7 +57,6 @@ reth-rpc-eth-types.workspace = true
 reth-optimism-rpc.workspace = true
 reth-tasks.workspace = true
 reth-ipc = { workspace = true, optional = true }
-reth-tracing-otlp = { workspace = true, optional = true }
 
 # alloy
 alloy-primitives.workspace = true
@@ -119,7 +118,6 @@ hex = { workspace = true }
 tracing.workspace = true
 metrics.workspace = true
 moka = { workspace = true, features = ["future"] }
-opentelemetry = { workspace = true, optional = true }
 parking_lot.workspace = true
 secp256k1.workspace = true
 serde.workspace = true
@@ -127,7 +125,6 @@ serde_json.workspace = true
 serde_with.workspace = true
 shellexpand.workspace = true
 thiserror.workspace = true
-url.workspace = true
 
 chrono = "0.4"
 ctor = { version = "0.4.2", optional = true }
@@ -176,5 +173,3 @@ testing = [
 ]
 
 interop = []
-
-telemetry = ["reth-tracing-otlp", "opentelemetry"]

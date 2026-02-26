@@ -91,9 +91,6 @@ pub struct BuilderConfig<Specific: Clone> {
     // (not just 0.5s) because of that.
     pub block_time_leeway: Duration,
 
-    /// Inverted sampling frequency in blocks. 1 - each block, 100 - every 100th block.
-    pub sampling_ratio: u64,
-
     /// Configuration values that are specific to the block builder implementation used.
     pub specific: Specific,
 
@@ -116,7 +113,6 @@ impl<S: Debug + Clone> core::fmt::Debug for BuilderConfig<S> {
             .field("block_time_leeway", &self.block_time_leeway)
             .field("da_config", &self.da_config)
             .field("gas_limit_config", &self.gas_limit_config)
-            .field("sampling_ratio", &self.sampling_ratio)
             .field("specific", &self.specific)
             .field("max_gas_per_txn", &self.max_gas_per_txn)
             .finish()
@@ -133,7 +129,6 @@ impl<S: Default + Clone> Default for BuilderConfig<S> {
             da_config: OpDAConfig::default(),
             gas_limit_config: OpGasLimitConfig::default(),
             specific: S::default(),
-            sampling_ratio: 100,
             max_gas_per_txn: None,
         }
     }
@@ -153,7 +148,6 @@ where
             block_time_leeway: Duration::from_secs(args.extra_block_deadline_secs),
             da_config: Default::default(),
             gas_limit_config: Default::default(),
-            sampling_ratio: args.telemetry.sampling_ratio,
             max_gas_per_txn: args.max_gas_per_txn,
             specific: S::try_from(args)?,
         })

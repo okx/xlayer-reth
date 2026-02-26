@@ -53,8 +53,6 @@ pub struct OpRbuilderArgs {
     pub playground: Option<PathBuf>,
     #[command(flatten)]
     pub flashblocks: FlashblocksArgs,
-    #[command(flatten)]
-    pub telemetry: TelemetryArgs,
 }
 
 impl Default for OpRbuilderArgs {
@@ -228,20 +226,4 @@ pub struct FlashblocksP2pArgs {
         default_value = "false"
     )]
     pub p2p_process_full_payload: bool,
-}
-
-/// Parameters for telemetry configuration
-#[derive(Debug, Clone, Default, PartialEq, Eq, clap::Args)]
-pub struct TelemetryArgs {
-    /// OpenTelemetry endpoint for traces
-    #[arg(long = "telemetry.otlp-endpoint", env = "OTEL_EXPORTER_OTLP_ENDPOINT")]
-    pub otlp_endpoint: Option<String>,
-
-    /// OpenTelemetry headers for authentication
-    #[arg(long = "telemetry.otlp-headers", env = "OTEL_EXPORTER_OTLP_HEADERS")]
-    pub otlp_headers: Option<String>,
-
-    /// Inverted sampling frequency in blocks. 1 - each block, 100 - every 100th block.
-    #[arg(long = "telemetry.sampling-ratio", env = "SAMPLING_RATIO", default_value = "100")]
-    pub sampling_ratio: u64,
 }

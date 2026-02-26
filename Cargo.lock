@@ -14021,7 +14021,6 @@ dependencies = [
  "op-alloy-rpc-types",
  "op-alloy-rpc-types-engine",
  "op-revm",
- "opentelemetry",
  "parking_lot",
  "rand 0.9.2",
  "reqwest",
@@ -14065,7 +14064,6 @@ dependencies = [
  "reth-storage-api",
  "reth-tasks",
  "reth-testing-utils",
- "reth-tracing-otlp",
  "reth-transaction-pool",
  "reth-trie",
  "revm",
@@ -14087,7 +14085,6 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber 0.3.22",
- "url",
  "xlayer-builder-p2p",
  "xlayer-trace-monitor",
 ]
