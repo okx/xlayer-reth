@@ -1,0 +1,49 @@
+crates/builder/src/tests/forks.rs
+  2f72642 50
+crates/builder/src/tests/smoke.rs
+crates/builder/src/tests/txpool.rs
+crates/builder/src/tests/miner_gas_limit.rs
+  2f72642 77
+crates/builder/src/tests/flashtestations.rs
+crates/builder/src/tests/data_availability.rs
+crates/builder/src/tests/framework/macros/src/lib.rs
+  2f72642 6-8,13,19,21-22,26-28,31,40-43,46,54,66-67,70-72,74-81,86-90,92,97-103,121-122,131-132
+crates/builder/src/tests/flashblocks.rs
+crates/builder/src/builders/mod.rs
+crates/builder/src/tests/framework/instance.rs
+---
+{
+  "metadata": {
+    "base_commit_sha": "6aea49fb07cce81af767241115e24d24851ef30d",
+    "prompts": {}
+  },
+  "agent_line_stats": {
+    "crates/builder/src/tests/forks.rs": {
+      "Human": {
+        "file_path": "crates/builder/src/tests/forks.rs",
+        "agent_type": "Human",
+        "additions": 6,
+        "deletions": 30,
+        "ai_accepted": 0
+      }
+    },
+    "crates/builder/src/tests/framework/macros/src/lib.rs": {
+      "Human": {
+        "file_path": "crates/builder/src/tests/framework/macros/src/lib.rs",
+        "agent_type": "Human",
+        "additions": 34,
+        "deletions": 209,
+        "ai_accepted": 0
+      }
+    },
+    "crates/builder/src/tests/miner_gas_limit.rs": {
+      "Human": {
+        "file_path": "crates/builder/src/tests/miner_gas_limit.rs",
+        "agent_type": "Human",
+        "additions": 6,
+        "deletions": 18,
+        "ai_accepted": 0
+      }
+    }
+  }
+}
