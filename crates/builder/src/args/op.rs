@@ -4,7 +4,7 @@
 
 //! clap [Args](clap::Args) for optimism rollup configuration
 
-use crate::{gas_limiter::args::GasLimiterArgs, tx_signer::Signer};
+use crate::tx_signer::Signer;
 use alloy_primitives::Address;
 use anyhow::{anyhow, Result};
 use clap::Parser;
@@ -55,8 +55,6 @@ pub struct OpRbuilderArgs {
     pub flashblocks: FlashblocksArgs,
     #[command(flatten)]
     pub telemetry: TelemetryArgs,
-    #[command(flatten)]
-    pub gas_limiter: GasLimiterArgs,
 }
 
 impl Default for OpRbuilderArgs {

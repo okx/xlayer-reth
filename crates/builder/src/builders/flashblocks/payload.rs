@@ -10,7 +10,6 @@ use crate::{
         generator::{BlockCell, BuildArguments, PayloadBuilder},
         BuilderConfig,
     },
-    gas_limiter::AddressGasLimiter,
     metrics::OpRBuilderMetrics,
     primitives::reth::ExecutionInfo,
     tokio_metrics::FlashblocksTaskMetrics,
@@ -184,8 +183,6 @@ pub(super) struct OpPayloadBuilder<Pool, Client, BuilderTx, Tasks> {
     pub metrics: Arc<OpRBuilderMetrics>,
     /// The end of builder transaction type
     pub builder_tx: BuilderTx,
-    /// Rate limiting based on gas. This is an optional feature.
-    pub address_gas_limiter: AddressGasLimiter,
     /// Tokio task metrics for monitoring spawned tasks
     pub task_metrics: Arc<FlashblocksTaskMetrics>,
 }
@@ -207,7 +204,6 @@ impl<Pool, Client, BuilderTx, Tasks> OpPayloadBuilder<Pool, Client, BuilderTx, T
         metrics: Arc<OpRBuilderMetrics>,
         task_metrics: Arc<FlashblocksTaskMetrics>,
     ) -> Self {
-        let address_gas_limiter = AddressGasLimiter::new(config.gas_limiter_config.clone());
         Self {
             evm_config,
             pool,
@@ -220,7 +216,6 @@ impl<Pool, Client, BuilderTx, Tasks> OpPayloadBuilder<Pool, Client, BuilderTx, T
             config,
             metrics,
             builder_tx,
-            address_gas_limiter,
             task_metrics,
         }
     }
@@ -315,7 +310,6 @@ where
             metrics: self.metrics.clone(),
             extra_ctx,
             max_gas_per_txn: self.config.max_gas_per_txn,
-            address_gas_limiter: self.address_gas_limiter.clone(),
         })
     }
 
@@ -361,8 +355,6 @@ where
 
         let state_provider = self.client.state_by_block_hash(ctx.parent().hash())?;
         let db = StateProviderDatabase::new(&state_provider);
-        self.address_gas_limiter.refresh(ctx.block_number());
-
         // 1. execute the pre steps and seal an early block with that
         let sequencer_tx_start_time = Instant::now();
         let mut state =

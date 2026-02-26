@@ -1,6 +1,5 @@
 use crate::{
     builders::{flashblocks::FlashblocksConfig, BuilderConfig, OpPayloadBuilderCtx},
-    gas_limiter::{args::GasLimiterArgs, AddressGasLimiter},
     metrics::OpRBuilderMetrics,
     traits::ClientBounds,
 };
@@ -90,7 +89,6 @@ impl OpPayloadSyncerCtx {
             metrics: self.metrics,
             extra_ctx: (),
             max_gas_per_txn: self.max_gas_per_txn,
-            address_gas_limiter: AddressGasLimiter::new(GasLimiterArgs::default()),
         }
     }
 }

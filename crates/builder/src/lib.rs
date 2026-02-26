@@ -1,6 +1,5 @@
 pub mod args;
 pub mod builders;
-pub mod gas_limiter;
 pub mod metrics;
 pub mod primitives;
 pub mod revert_protection;
