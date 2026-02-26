@@ -235,24 +235,24 @@ where
     Builder: PayloadBuilder,
 {
     /// The configuration for how the payload will be created.
-    pub(crate) config: PayloadConfig<Builder::Attributes, HeaderForPayload<Builder::BuiltPayload>>,
+    pub(super) config: PayloadConfig<Builder::Attributes, HeaderForPayload<Builder::BuiltPayload>>,
     /// How to spawn building tasks
-    pub(crate) executor: Tasks,
+    pub(super) executor: Tasks,
     /// The type responsible for building payloads.
     ///
     /// See [PayloadBuilder]
-    pub(crate) builder: Builder,
+    pub(super) builder: Builder,
     /// The cell that holds the built payload.
-    pub(crate) cell: BlockCell<Builder::BuiltPayload>,
+    pub(super) cell: BlockCell<Builder::BuiltPayload>,
     /// Cancellation token for the running job
-    pub(crate) cancel: CancellationToken,
-    pub(crate) deadline: Pin<Box<Sleep>>, // Add deadline
-    pub(crate) build_complete: Option<oneshot::Receiver<Result<(), PayloadBuilderError>>>,
+    pub(super) cancel: CancellationToken,
+    pub(super) deadline: Pin<Box<Sleep>>, // Add deadline
+    pub(super) build_complete: Option<oneshot::Receiver<Result<(), PayloadBuilderError>>>,
     /// Caches all disk reads for the state the new payloads builds on
     ///
     /// This is used to avoid reading the same state over and over again when new attempts are
     /// triggered, because during the building process we'll repeatedly execute the transactions.
-    pub(crate) cached_reads: Option<CachedReads>,
+    pub(super) cached_reads: Option<CachedReads>,
 }
 
 impl<Tasks, Builder> PayloadJob for BlockPayloadJob<Tasks, Builder>

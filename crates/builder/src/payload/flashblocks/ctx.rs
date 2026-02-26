@@ -1,6 +1,6 @@
 use crate::{
-    builders::{flashblocks::FlashblocksConfig, BuilderConfig, OpPayloadBuilderCtx},
     metrics::OpRBuilderMetrics,
+    payload::{flashblocks::FlashblocksConfig, BuilderConfig, OpPayloadBuilderCtx},
     traits::ClientBounds,
 };
 use op_revm::OpSpecId;

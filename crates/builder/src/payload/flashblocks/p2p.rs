@@ -24,13 +24,13 @@ impl xlayer_builder_p2p::Message for Message {
 /// Internal type analogous to [`reth_optimism_payload_builder::OpBuiltPayload`]
 /// which additionally implements `Serialize` and `Deserialize` for p2p transmission.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
-pub(crate) struct OpBuiltPayload {
+pub(super) struct OpBuiltPayload {
     /// Identifier of the payload
-    pub(crate) id: PayloadId,
+    pub(super) id: PayloadId,
     /// Sealed block
-    pub(crate) block: SealedBlock<OpBlock>,
+    pub(super) block: SealedBlock<OpBlock>,
     /// The fees of the block
-    pub(crate) fees: U256,
+    pub(super) fees: U256,
 }
 
 impl Message {

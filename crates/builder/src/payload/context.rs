@@ -39,12 +39,8 @@ use std::{sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace};
 
-use crate::{
-    builders::flashblocks::execution::{ExecutionInfo, TxnExecutionResult},
-    metrics::OpRBuilderMetrics,
-    traits::PayloadTxsBounds,
-    tx_signer::Signer,
-};
+use super::utils::execution::{ExecutionInfo, TxnExecutionResult};
+use crate::{metrics::OpRBuilderMetrics, traits::PayloadTxsBounds, tx_signer::Signer};
 use alloy_eips::eip2718::WithEncoded;
 
 /// Container type that holds all necessities to build a new payload.

@@ -13,6 +13,7 @@ mod builder_tx;
 mod context;
 mod flashblocks;
 mod generator;
+pub(crate) mod utils;
 
 pub use builder_tx::{
     get_balance, get_nonce, BuilderTransactionCtx, BuilderTransactionError, BuilderTransactions,

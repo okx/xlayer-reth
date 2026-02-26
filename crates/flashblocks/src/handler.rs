@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{debug, info, trace, warn};
 use xlayer_builder::{
-    args::OpRbuilderArgs, builders::WebSocketPublisher, metrics::OpRBuilderMetrics,
+    args::OpRbuilderArgs, metrics::OpRBuilderMetrics, payload::WebSocketPublisher,
     tokio_metrics::FlashblocksTaskMetrics,
 };
 

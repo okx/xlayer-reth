@@ -1,19 +1,19 @@
 use crate::{
-    builders::{
+    metrics::OpRBuilderMetrics,
+    payload::{
         builder_tx::BuilderTransactions,
         context::OpPayloadBuilderCtx,
         flashblocks::{
             best_txs::BestFlashblocksTxs,
             cache::FlashblockPayloadsCache,
             config::{FlashBlocksConfigExt, FlashblocksConfig},
-            execution::ExecutionInfo,
             timing::FlashblockScheduler,
             wspub::WebSocketPublisher,
         },
         generator::{BlockCell, BuildArguments, PayloadBuilder},
+        utils::execution::ExecutionInfo,
         BuilderConfig,
     },
-    metrics::OpRBuilderMetrics,
     tokio_metrics::FlashblocksTaskMetrics,
     traits::{ClientBounds, PoolBounds},
 };
@@ -415,7 +415,7 @@ where
             ctx.metrics.flashblock_byte_size_histogram.record(flashblock_byte_size as f64);
 
             // For X Layer, full link monitoring support
-            crate::builders::flashblocks::monitor::monitor(
+            crate::payload::utils::monitor::monitor(
                 best_payload.0.block().header().number,
                 new_tx_hashes,
             );
@@ -723,7 +723,7 @@ where
                     .record(info.executed_transactions.len() as f64);
 
                 // For X Layer, full link monitoring support
-                crate::builders::flashblocks::monitor::monitor(
+                crate::payload::utils::monitor::monitor(
                     best_payload.0.block().header().number,
                     new_tx_hashes,
                 );

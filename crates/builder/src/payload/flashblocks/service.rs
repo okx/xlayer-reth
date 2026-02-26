@@ -1,19 +1,17 @@
-use super::{payload::OpPayloadBuilder, FlashblocksConfig};
+use super::{
+    builder_tx::{FlashblocksBuilderTx, FlashblocksNumberBuilderTx},
+    cache::FlashblockPayloadsCache,
+    handler::PayloadHandler,
+    p2p::{Message, AGENT_VERSION, FLASHBLOCKS_STREAM_PROTOCOL},
+    payload::{FlashblocksExecutionInfo, FlashblocksExtraCtx, OpPayloadBuilder},
+    wspub::WebSocketPublisher,
+    FlashblocksConfig,
+};
 use crate::{
-    builders::{
-        builder_tx::BuilderTransactions,
-        flashblocks::{
-            builder_tx::{FlashblocksBuilderTx, FlashblocksNumberBuilderTx},
-            cache::FlashblockPayloadsCache,
-            handler::PayloadHandler,
-            p2p::{Message, AGENT_VERSION, FLASHBLOCKS_STREAM_PROTOCOL},
-            payload::{FlashblocksExecutionInfo, FlashblocksExtraCtx},
-            wspub::WebSocketPublisher,
-        },
-        generator::BlockPayloadJobGenerator,
-        BuilderConfig,
-    },
     metrics::OpRBuilderMetrics,
+    payload::{
+        builder_tx::BuilderTransactions, generator::BlockPayloadJobGenerator, BuilderConfig,
+    },
     tokio_metrics::FlashblocksTaskMetrics,
     traits::{NodeBounds, PoolBounds},
 };
@@ -152,7 +150,7 @@ impl FlashblocksServiceBuilder {
         let (payload_service, payload_builder_handle) =
             PayloadBuilderService::new(payload_generator, ctx.provider().canonical_state_stream());
 
-        let syncer_ctx = crate::builders::flashblocks::ctx::OpPayloadSyncerCtx::new(
+        let syncer_ctx = super::ctx::OpPayloadSyncerCtx::new(
             &ctx.provider().clone(),
             self.0.clone(),
             OpEvmConfig::optimism(ctx.chain_spec()),

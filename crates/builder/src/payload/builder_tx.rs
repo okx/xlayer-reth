@@ -29,10 +29,8 @@ use revm::{
 };
 use tracing::{trace, warn};
 
-use crate::{
-    builders::{context::OpPayloadBuilderCtx, flashblocks::execution::ExecutionInfo},
-    tx_signer::Signer,
-};
+use super::{context::OpPayloadBuilderCtx, utils::execution::ExecutionInfo};
+use crate::tx_signer::Signer;
 
 #[derive(Debug, Default)]
 pub struct SimulationSuccessResult<T: SolCall> {

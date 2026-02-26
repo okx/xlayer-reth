@@ -1,6 +1,6 @@
 use alloy_primitives::Address;
 
-use crate::{args::OpRbuilderArgs, builders::BuilderConfig};
+use crate::{args::OpRbuilderArgs, payload::BuilderConfig};
 use core::{
     net::{Ipv4Addr, SocketAddr},
     time::Duration,
