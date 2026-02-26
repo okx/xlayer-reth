@@ -130,7 +130,7 @@ async fn test_flashblocks_number_contract_builder_tx(rbuilder: LocalInstance) ->
 
     // Other builder txs should call the contract
     // Verify builder txs
-    assert_eq!(count_txs_to(&txs, contract_address), 4, "Should have 4 contract builder txs");
+    assert_eq!(count_txs_to(txs, contract_address), 4, "Should have 4 contract builder txs");
 
     // Verify flashblock number incremented correctly
     let contract = FlashblocksNumber::new(contract_address, provider.clone());
@@ -152,7 +152,7 @@ async fn test_flashblocks_number_contract_builder_tx(rbuilder: LocalInstance) ->
             .diff
             .transactions
             .get(tx_index)
-            .expect(&format!("Flashblock {} should have tx at index {}", i, tx_index));
+            .unwrap_or_else(|| panic!("Flashblock {} should have tx at index {}", i, tx_index));
         let tx = OpTxEnvelope::decode_2718(&mut tx_bytes.as_ref())
             .expect("failed to decode transaction");
 

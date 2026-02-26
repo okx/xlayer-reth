@@ -140,7 +140,7 @@ async fn da_footprint_fills_to_limit(rbuilder: LocalInstance) -> eyre::Result<()
             .with_gas_limit(21000)
             .send()
             .await?;
-        tx_hashes.push(tx.tx_hash().clone());
+        tx_hashes.push(*tx.tx_hash());
     }
 
     let block = driver.build_new_block_with_current_timestamp(None).await?;
@@ -161,9 +161,9 @@ async fn da_footprint_fills_to_limit(rbuilder: LocalInstance) -> eyre::Result<()
     // Verify the block fills up to the DA footprint limit
     // accounting for builder tx DA contribution
     if_standard! {
-        for i in 0..8 {
+        for (i, tx_hash) in tx_hashes.iter().enumerate().take(8) {
             assert!(
-                block.includes(&tx_hashes[i]),
+                block.includes(tx_hash),
                 "tx {} should be included in the block",
                 i
             );
@@ -177,9 +177,9 @@ async fn da_footprint_fills_to_limit(rbuilder: LocalInstance) -> eyre::Result<()
     }
 
     if_flashblocks! {
-        for i in 0..7 {
+        for (i, tx_hash) in tx_hashes.iter().enumerate().take(7) {
             assert!(
-                block.includes(&tx_hashes[i]),
+                block.includes(tx_hash),
                 "tx {} should be included in the block",
                 i
             );
