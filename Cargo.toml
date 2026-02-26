@@ -79,7 +79,6 @@ xlayer-trace-monitor = { git = "https://github.com/okx/xlayer-toolkit", rev = "d
 # ==============================================================================
 reth = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-basic-payload-builder = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
-reth-chain-state = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-chainspec = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-cli = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-cli-commands = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
@@ -88,11 +87,9 @@ reth-db = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a
 reth-engine-primitives = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-ethereum-forks = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-evm = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
-reth-exex = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-execution-types = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-ipc = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-metrics = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
-reth-network-peers = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-node-api = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-node-builder = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-node-core = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
@@ -159,15 +156,10 @@ alloy-provider = { version = "1.4.3" }
 alloy-rlp = { version = "0.3.10", default-features = false, features = [
     "core-net",
 ] }
-alloy-rpc-client = { version = "1.4.3" }
-alloy-rpc-types-beacon = { version = "1.4.3", features = ["ssz"] }
 alloy-rpc-types-engine = { version = "1.4.3", default-features = false }
 alloy-rpc-types-eth = { version = "1.4.3" }
-alloy-serde = { version = "1.4.3" }
 alloy-signer-local = { version = "1.4.3", default-features = false }
 alloy-sol-types = { version = "1.5.0", default-features = false }
-alloy-transport-http = { version = "1.4.3" }
-alloy-transport = { version = "1.4.3" }
 
 # op-alloy
 alloy-op-evm = { version = "0.26.3", default-features = false }
@@ -212,7 +204,6 @@ parking_lot = { version = "0.12.3" }
 secp256k1 = { version = "0.30" }
 serde = "1"
 serde_json = "1.0"
-serde_with = { version = "3.8.1" }
 thiserror = { version = "1.0.64" }
 humantime = "2.1"
 tracing = { version = "0.1.41" }

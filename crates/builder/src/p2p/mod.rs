@@ -262,6 +262,7 @@ impl NodeBuilder {
         self
     }
 
+    #[allow(unused)]
     pub fn with_listen_addr(mut self, addr: libp2p::Multiaddr) -> Self {
         self.listen_addrs.push(addr);
         self
