@@ -131,7 +131,7 @@ async fn da_footprint_fills_to_limit(rbuilder: LocalInstance) -> eyre::Result<()
             .with_gas_limit(21000)
             .send()
             .await?;
-        tx_hashes.push(tx.tx_hash().clone());
+        tx_hashes.push(*tx.tx_hash());
     }
 
     let block = driver.build_new_block_with_current_timestamp(None).await?;
