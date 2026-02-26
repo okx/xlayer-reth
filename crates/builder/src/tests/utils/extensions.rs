@@ -1,29 +1,17 @@
+use super::signers::{builder_signer, flashblocks_number_signer};
 use crate::{
-    tests::{
-        flashblocks_number_contract::FlashblocksNumber, framework::driver::ChainDriver, Protocol,
-        BUILDER_PRIVATE_KEY, FLASHBLOCKS_DEPLOY_KEY,
-    },
+    tests::{flashblocks_number_contract::FlashblocksNumber, ChainDriver, Protocol},
     tx_signer::Signer,
 };
 use alloy_eips::Encodable2718;
-use alloy_network::TransactionResponse;
 use alloy_primitives::{hex, Address, BlockHash, TxHash, TxKind, B256, U256};
-use alloy_rpc_types_eth::{Block, BlockTransactionHashes};
+use alloy_rpc_types_eth::Block;
 use alloy_sol_types::SolCall;
 use core::future::Future;
 use op_alloy_consensus::{OpTypedTransaction, TxDeposit};
 use op_alloy_rpc_types::Transaction;
-use reth_db::{
-    init_db,
-    mdbx::{DatabaseArguments, MaxReadTransactionDuration, KILOBYTE, MEGABYTE},
-    test_utils::{TempDatabase, ERROR_DB_CREATION},
-    ClientVersion, DatabaseEnv,
-};
-use reth_node_core::{args::DatadirArgs, dirs::DataDirPath, node_config::NodeConfig};
-use reth_optimism_chainspec::OpChainSpec;
-use std::{net::TcpListener, sync::Arc};
 
-use super::{TransactionBuilder, FUNDED_PRIVATE_KEY};
+use crate::tests::TransactionBuilder;
 
 pub trait TransactionBuilderExt {
     fn random_valid_transfer(self) -> Self;
@@ -168,76 +156,6 @@ impl<P: Protocol> ChainDriverExt for ChainDriver<P> {
     }
 }
 
-/// Result of builder transaction validation in a block.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BuilderTxInfo {
-    /// Number of builder transactions found in the block.
-    pub count: usize,
-    /// Indices of builder transactions within the block.
-    pub indices: Vec<usize>,
-}
-
-impl BuilderTxInfo {
-    /// Returns true if the block contains at least one builder transaction.
-    pub fn has_builder_tx(&self) -> bool {
-        self.count > 0
-    }
-}
-
-pub trait BlockTransactionsExt {
-    fn includes(&self, txs: &impl AsTxs) -> bool;
-}
-
-/// Extension trait for validating builder transactions in blocks.
-pub trait BuilderTxValidation {
-    /// Checks if the block contains builder transactions from the configured builder address.
-    /// Returns information about builder transactions found in the block.
-    fn find_builder_txs(&self) -> BuilderTxInfo;
-
-    /// Returns true if the block contains at least one builder transaction.
-    fn has_builder_tx(&self) -> bool {
-        self.find_builder_txs().has_builder_tx()
-    }
-
-    /// Asserts that the block contains exactly the expected number of builder transactions.
-    fn assert_builder_tx_count(&self, expected: usize) {
-        let info = self.find_builder_txs();
-        assert_eq!(
-            info.count, expected,
-            "Expected {} builder transaction(s), found {} at indices {:?}",
-            expected, info.count, info.indices
-        );
-    }
-}
-
-impl BuilderTxValidation for Block<Transaction> {
-    fn find_builder_txs(&self) -> BuilderTxInfo {
-        let builder_address = builder_signer().address;
-        let mut indices = Vec::new();
-
-        for (idx, tx) in self.transactions.txns().enumerate() {
-            if tx.from() == builder_address {
-                indices.push(idx);
-            }
-        }
-
-        BuilderTxInfo { count: indices.len(), indices }
-    }
-}
-
-impl BlockTransactionsExt for Block<Transaction> {
-    fn includes(&self, txs: &impl AsTxs) -> bool {
-        txs.as_txs().into_iter().all(|tx| self.transactions.hashes().any(|included| included == tx))
-    }
-}
-
-impl BlockTransactionsExt for BlockTransactionHashes<'_, Transaction> {
-    fn includes(&self, txs: &impl AsTxs) -> bool {
-        let mut included_tx_iter = self.clone();
-        txs.as_txs().iter().all(|tx| included_tx_iter.any(|included| included == *tx))
-    }
-}
-
 pub trait OpRbuilderArgsTestExt {
     fn test_default() -> Self;
 }
@@ -248,79 +166,4 @@ impl OpRbuilderArgsTestExt for crate::args::OpRbuilderArgs {
         default.flashblocks.flashblocks_port = 0; // randomize port
         default
     }
-}
-
-pub trait AsTxs {
-    fn as_txs(&self) -> Vec<TxHash>;
-}
-
-impl AsTxs for TxHash {
-    fn as_txs(&self) -> Vec<TxHash> {
-        vec![*self]
-    }
-}
-
-impl AsTxs for Vec<TxHash> {
-    fn as_txs(&self) -> Vec<TxHash> {
-        self.clone()
-    }
-}
-
-/// Counts transactions with a given `to` address in a block's transaction list.
-pub fn count_txs_to(txs: &[Transaction], to: Address) -> usize {
-    use alloy_consensus::Transaction as _;
-    txs.iter().map(|tx| tx.to()).filter(|t| *t == Some(to)).count()
-}
-
-pub fn create_test_db(config: NodeConfig<OpChainSpec>) -> Arc<TempDatabase<DatabaseEnv>> {
-    let path = reth_node_core::dirs::MaybePlatformPath::<DataDirPath>::from(
-        reth_db::test_utils::tempdir_path(),
-    );
-    let db_config =
-        config.with_datadir_args(DatadirArgs { datadir: path.clone(), ..Default::default() });
-    let data_dir = path.unwrap_or_chain_default(db_config.chain.chain(), db_config.datadir.clone());
-    let path = data_dir.db();
-    let db = init_db(
-        path.as_path(),
-        DatabaseArguments::new(ClientVersion::default())
-            .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded))
-            .with_geometry_max_size(Some(4 * MEGABYTE))
-            .with_growth_step(Some(4 * KILOBYTE)),
-    )
-    .expect(ERROR_DB_CREATION);
-    Arc::new(TempDatabase::new(db, path))
-}
-
-/// Gets an available port by first binding to port 0 -- instructing the OS to
-/// find and assign one. Then the listener is dropped when this goes out of
-/// scope, freeing the port for the next time this function is called.
-pub fn get_available_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("Failed to bind to random port")
-        .local_addr()
-        .expect("Failed to get local address")
-        .port()
-}
-
-pub fn builder_signer() -> Signer {
-    Signer::try_from_secret(
-        BUILDER_PRIVATE_KEY.parse().expect("invalid hardcoded builder private key"),
-    )
-    .expect("Failed to create signer from hardcoded builder private key")
-}
-
-pub fn funded_signer() -> Signer {
-    Signer::try_from_secret(
-        FUNDED_PRIVATE_KEY.parse().expect("invalid hardcoded funded private key"),
-    )
-    .expect("Failed to create signer from hardcoded funded private key")
-}
-
-pub fn flashblocks_number_signer() -> Signer {
-    Signer::try_from_secret(
-        FLASHBLOCKS_DEPLOY_KEY
-            .parse()
-            .expect("invalid hardcoded flashblocks number deployer private key"),
-    )
-    .expect("Failed to create signer from hardcoded flashblocks number deployer private key")
 }

@@ -1,6 +1,9 @@
 // base
 mod framework;
+pub mod utils;
+
 pub use framework::*;
+pub use utils::*;
 
 #[cfg(test)]
 mod flashblocks;

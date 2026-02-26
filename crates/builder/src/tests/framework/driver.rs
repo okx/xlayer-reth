@@ -13,10 +13,7 @@ use reth_optimism_node::OpPayloadAttributes;
 use super::{EngineApi, Ipc, LocalInstance, TransactionBuilder};
 use crate::{
     args::OpRbuilderArgs,
-    tests::{
-        framework::DEFAULT_GAS_LIMIT, ExternalNode, Protocol, DEFAULT_DENOMINATOR,
-        DEFAULT_ELASTICITY,
-    },
+    tests::{ExternalNode, Protocol, DEFAULT_DENOMINATOR, DEFAULT_ELASTICITY, DEFAULT_GAS_LIMIT},
     tx_signer::Signer,
 };
 
