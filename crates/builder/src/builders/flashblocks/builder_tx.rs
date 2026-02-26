@@ -68,11 +68,8 @@ impl FlashblocksBuilderTx {
 impl BuilderTransactions<FlashblocksExtraCtx, FlashblocksExecutionInfo> for FlashblocksBuilderTx {
     fn simulate_builder_txs(
         &self,
-        _state_provider: impl StateProvider + Clone,
-        _info: &mut ExecutionInfo<FlashblocksExecutionInfo>,
         ctx: &OpPayloadBuilderCtx<FlashblocksExtraCtx>,
         db: &mut State<impl Database + DatabaseRef>,
-        _top_of_block: bool,
     ) -> Result<Vec<BuilderTransactionCtx>, BuilderTransactionError> {
         let mut builder_txs = Vec::<BuilderTransactionCtx>::new();
 
@@ -164,11 +161,8 @@ impl BuilderTransactions<FlashblocksExtraCtx, FlashblocksExecutionInfo>
 {
     fn simulate_builder_txs(
         &self,
-        _state_provider: impl StateProvider + Clone,
-        _info: &mut ExecutionInfo<FlashblocksExecutionInfo>,
         ctx: &OpPayloadBuilderCtx<FlashblocksExtraCtx>,
         db: &mut State<impl Database + DatabaseRef>,
-        _top_of_block: bool,
     ) -> Result<Vec<BuilderTransactionCtx>, BuilderTransactionError> {
         let mut builder_txs = Vec::<BuilderTransactionCtx>::new();
 
