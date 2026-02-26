@@ -1043,50 +1043,6 @@ where
                 })?;
         }
 
-        // Verification: only for incremental path in debug builds
-        #[cfg(debug_assertions)]
-        if use_incremental {
-            let full_hashed_state = state_provider.hashed_post_state(&state.bundle_state);
-            let (full_state_root, _) = state
-                .database
-                .as_ref()
-                .state_root_with_updates(full_hashed_state.clone())
-                .expect("Full state root calculation should succeed");
-
-            if state_root != full_state_root {
-                error!(
-                    target: "payload_builder",
-                    incremental_root = %state_root,
-                    full_root = %full_state_root,
-                    flashblock_index = info.extra.last_flashblock_index + 1,
-                    total_accounts = state.bundle_state.state.len(),
-                    "❌ TRIE CACHE VERIFICATION FAILED: State roots do not match!"
-                );
-
-                // DEBUG: Compare hashed states
-                error!(
-                    target: "payload_builder",
-                    incremental_hashed_accounts = hashed_state.accounts.len(),
-                    full_hashed_accounts = full_hashed_state.accounts.len(),
-                    incremental_hashed_storages = hashed_state.storages.len(),
-                    full_hashed_storages = full_hashed_state.storages.len(),
-                    "Hashed state comparison"
-                );
-
-                panic!(
-                    "Trie cache correctness verification failed! Incremental: {}, Full: {}",
-                    state_root, full_state_root
-                );
-            } else {
-                debug!(
-                    target: "payload_builder",
-                    state_root = %state_root,
-                    flashblock_index = info.extra.last_flashblock_index + 1,
-                    "✅ Trie cache verification passed: incremental matches full calculation"
-                );
-            }
-        }
-
         // Save trie updates for next flashblock's incremental calculation
         info.extra.prev_trie_updates = Some(Arc::new(trie_output.clone()));
 

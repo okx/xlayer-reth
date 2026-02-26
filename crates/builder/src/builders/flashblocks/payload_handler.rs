@@ -334,6 +334,7 @@ where
         &builder_ctx,
         &mut info,
         true,
+        false, // Disable incremental trie cache for external flashblock (no previous cache available)
     )
     .wrap_err("failed to build flashblock")?;
 
