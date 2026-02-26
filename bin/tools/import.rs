@@ -58,7 +58,7 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> ImportCommand<C> {
 
         let components = components(provider_factory.chain_spec());
 
-        let import_config = ImportConfig { no_state: self.no_state, chunk_len: self.chunk_len };
+        let import_config = ImportConfig { no_state: self.no_state, chunk_len: self.chunk_len, fail_on_invalid_block: false };
 
         let executor = components.evm_config().clone();
         let consensus = Arc::new(components.consensus().clone());
