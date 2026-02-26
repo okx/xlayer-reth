@@ -24,11 +24,9 @@ reth-optimism-evm.workspace = true
 reth-optimism-consensus.workspace = true
 reth-optimism-primitives.workspace = true
 reth-optimism-txpool.workspace = true
-reth-cli.workspace = true
 reth-db.workspace = true
 reth-payload-primitives.workspace = true
 reth-evm.workspace = true
-reth-exex.workspace = true
 reth-chainspec.workspace = true
 reth-primitives.workspace = true
 reth-primitives-traits.workspace = true
@@ -37,23 +35,19 @@ reth-rpc-engine-api.workspace = true
 reth-node-core.workspace = true
 reth-basic-payload-builder.workspace = true
 reth-payload-builder.workspace = true
-reth-chain-state.workspace = true
 reth-execution-types.workspace = true
 reth-metrics.workspace = true
 reth-provider.workspace = true
 reth-revm.workspace = true
 reth-trie.workspace = true
 reth-rpc-layer.workspace = true
-reth-payload-builder-primitives.workspace = true
 reth-payload-util.workspace = true
 reth-transaction-pool.workspace = true
-reth-network-peers.workspace = true
 reth-testing-utils.workspace = true
 reth-optimism-forks.workspace = true
 reth-node-builder = { workspace = true, features = ["test-utils"] }
 reth-storage-api.workspace = true
 reth-rpc-api.workspace = true
-reth-rpc-eth-types.workspace = true
 reth-optimism-rpc.workspace = true
 reth-tasks.workspace = true
 reth-ipc = { workspace = true, optional = true }
@@ -64,15 +58,10 @@ alloy-consensus.workspace = true
 alloy-contract.workspace = true
 alloy-eips.workspace = true
 alloy-evm.workspace = true
-alloy-rpc-types-beacon.workspace = true
 alloy-rpc-types-engine.workspace = true
-alloy-transport-http.workspace = true
 alloy-rpc-types-eth.workspace = true
-alloy-rpc-client.workspace = true
-alloy-transport.workspace = true
 alloy-network.workspace = true
 alloy-provider.workspace = true
-alloy-json-rpc.workspace = true
 alloy-signer-local.workspace = true
 alloy-sol-types = { workspace = true, features = ["json"] }
 
@@ -92,7 +81,6 @@ op-revm.workspace = true
 async-trait = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }
-reqwest.workspace = true
 tower.workspace = true
 
 # tokio
@@ -121,14 +109,12 @@ parking_lot.workspace = true
 secp256k1.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_with.workspace = true
 shellexpand.workspace = true
 thiserror.workspace = true
 url.workspace = true
 
 chrono = "0.4"
 ctor = { version = "0.4.2", optional = true }
-http = "1.0"
 http-body-util = { version = "0.1.3", optional = true }
 hyper = { version = "1.7.0", features = ["http1"], optional = true }
 hyper-util = { version = "0.1.11", optional = true }
@@ -137,7 +123,6 @@ macros = { path = "src/tests/framework/macros", optional = true }
 nanoid = { version = "0.4", optional = true }
 rand = "0.9.0"
 rlimit = { version = "0.10", optional = true }
-serde_yaml = { version = "0.9" }
 sha3 = "0.10"
 time = { version = "0.3.36", features = ["macros", "formatting", "parsing"] }
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "json"] }

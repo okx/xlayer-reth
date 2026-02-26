@@ -1,12 +1,14 @@
-use super::{config::FlashblocksConfig, wspub::WebSocketPublisher};
 use crate::{
-    builders::flashblocks::execution::ExecutionInfo,
     builders::{
         builder_tx::BuilderTransactions,
         context::OpPayloadBuilderCtx,
         flashblocks::{
-            best_txs::BestFlashblocksTxs, cache::FlashblockPayloadsCache,
-            config::FlashBlocksConfigExt, timing::FlashblockScheduler,
+            best_txs::BestFlashblocksTxs,
+            cache::FlashblockPayloadsCache,
+            config::{FlashBlocksConfigExt, FlashblocksConfig},
+            execution::ExecutionInfo,
+            timing::FlashblockScheduler,
+            wspub::WebSocketPublisher,
         },
         generator::{BlockCell, BuildArguments, PayloadBuilder},
         BuilderConfig,

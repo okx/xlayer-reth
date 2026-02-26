@@ -883,13 +883,10 @@ dependencies = [
  "alloy-json-rpc",
  "alloy-transport",
  "itertools 0.14.0",
- "opentelemetry",
- "opentelemetry-http",
  "reqwest",
  "serde_json",
  "tower",
  "tracing",
- "tracing-opentelemetry",
  "url",
 ]
 
@@ -11572,19 +11569,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_yaml"
-version = "0.9.34+deprecated"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
-dependencies = [
- "indexmap 2.13.0",
- "itoa",
- "ryu",
- "serde",
- "unsafe-libyaml",
-]
-
-[[package]]
 name = "serdect"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12886,12 +12870,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "unsafe-libyaml"
-version = "0.2.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
-
-[[package]]
 name = "unsigned-varint"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13977,19 +13955,14 @@ dependencies = [
  "alloy-contract",
  "alloy-eips",
  "alloy-evm",
- "alloy-json-rpc",
  "alloy-network",
  "alloy-op-evm",
  "alloy-primitives",
  "alloy-provider",
- "alloy-rpc-client",
- "alloy-rpc-types-beacon",
  "alloy-rpc-types-engine",
  "alloy-rpc-types-eth",
  "alloy-signer-local",
  "alloy-sol-types",
- "alloy-transport",
- "alloy-transport-http",
  "anyhow",
  "async-trait",
  "chrono",
@@ -14002,7 +13975,6 @@ dependencies = [
  "futures",
  "futures-util",
  "hex",
- "http",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -14022,19 +13994,14 @@ dependencies = [
  "op-revm",
  "parking_lot",
  "rand 0.9.2",
- "reqwest",
  "reth",
  "reth-basic-payload-builder",
- "reth-chain-state",
  "reth-chainspec",
- "reth-cli",
  "reth-db",
  "reth-evm",
  "reth-execution-types",
- "reth-exex",
  "reth-ipc",
  "reth-metrics",
- "reth-network-peers",
  "reth-node-api",
  "reth-node-builder",
  "reth-node-core",
@@ -14049,7 +14016,6 @@ dependencies = [
  "reth-optimism-rpc",
  "reth-optimism-txpool",
  "reth-payload-builder",
- "reth-payload-builder-primitives",
  "reth-payload-primitives",
  "reth-payload-util",
  "reth-primitives",
@@ -14058,7 +14024,6 @@ dependencies = [
  "reth-revm",
  "reth-rpc-api",
  "reth-rpc-engine-api",
- "reth-rpc-eth-types",
  "reth-rpc-layer",
  "reth-storage-api",
  "reth-tasks",
@@ -14070,8 +14035,6 @@ dependencies = [
  "secp256k1 0.30.0",
  "serde",
  "serde_json",
- "serde_with",
- "serde_yaml",
  "sha3",
  "shellexpand",
  "testcontainers",
