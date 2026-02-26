@@ -47,11 +47,7 @@ async fn chain_produces_blocks(rbuilder: LocalInstance) -> eyre::Result<()> {
         let transactions = block.transactions;
 
         // deposit + 2 builder txs (fallback + flashblock number)
-        assert_eq!(
-            transactions.len(),
-            3,
-            "Empty blocks should have exactly three transactions"
-        );
+        assert_eq!(transactions.len(), 3, "Empty blocks should have exactly three transactions");
     }
 
     // ensure that transactions are included in blocks and each block has all the transactions
@@ -78,12 +74,7 @@ async fn chain_produces_blocks(rbuilder: LocalInstance) -> eyre::Result<()> {
         let txs = block.transactions;
 
         // deposit + 2 builder txs + user txs
-        assert_eq!(
-            txs.len(),
-            3 + count,
-            "Block should have {} transactions",
-            3 + count
-        );
+        assert_eq!(txs.len(), 3 + count, "Block should have {} transactions", 3 + count);
 
         for tx_hash in tx_hashes {
             assert!(
@@ -212,11 +203,7 @@ async fn chain_produces_big_tx_with_gas_limit(rbuilder: LocalInstance) -> eyre::
     let txs = block.transactions;
 
     // deposit + 2 builder txs + 1 valid tx (high gas tx excluded)
-    assert_eq!(
-        txs.len(),
-        4,
-        "Should have 4 transactions"
-    );
+    assert_eq!(txs.len(), 4, "Should have 4 transactions");
 
     // assert we included the tx with gas under limit
     let inclusion_result = txs.hashes().find(|hash| hash == tx.tx_hash());
@@ -258,11 +245,7 @@ async fn chain_produces_big_tx_without_gas_limit(rbuilder: LocalInstance) -> eyr
     assert!(inclusion_result.is_some());
 
     // deposit + 2 builder txs + 1 user tx
-    assert_eq!(
-        txs.len(),
-        4,
-        "Should have 4 transactions"
-    );
+    assert_eq!(txs.len(), 4, "Should have 4 transactions");
 
     Ok(())
 }

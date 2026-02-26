@@ -1,8 +1,4 @@
-use core::{
-    convert::TryFrom,
-    fmt::Debug,
-    time::Duration,
-};
+use core::{convert::TryFrom, fmt::Debug, time::Duration};
 use reth_node_builder::components::PayloadServiceBuilder;
 use reth_optimism_evm::OpEvmConfig;
 use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
@@ -178,4 +174,3 @@ where
         })
     }
 }
-

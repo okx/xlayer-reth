@@ -44,12 +44,8 @@ async fn test_flashtestations_invalid_quote(rbuilder: LocalInstance) -> eyre::Re
     let txs = block.transactions.into_transactions_vec();
 
     assert_eq!(txs.len(), 4, "Expected 4 transactions in block"); // deposit + valid tx + 2 builder tx
-    // Check builder tx
-    assert_eq!(
-        txs[1].to(),
-        Some(Address::ZERO),
-        "builder tx should send to zero address"
-    );
+                                                                  // Check builder tx
+    assert_eq!(txs[1].to(), Some(Address::ZERO), "builder tx should send to zero address");
     let last_txs = &txs[txs.len() - 2..];
     // Check user transaction
     assert_eq!(last_txs[0].inner.tx_hash(), tx_hash, "tx hash for user transaction should match");
@@ -79,12 +75,8 @@ async fn test_flashtestations_unauthorized_workload(rbuilder: LocalInstance) -> 
     let (tx_hash, block) = driver.build_new_block_with_valid_transaction().await?;
     let txs = block.transactions.into_transactions_vec();
     assert_eq!(txs.len(), 4, "Expected 4 transactions in block"); // deposit + valid tx + 2 builder tx
-    // Check builder tx
-    assert_eq!(
-        txs[1].to(),
-        Some(Address::ZERO),
-        "builder tx should send to zero address"
-    );
+                                                                  // Check builder tx
+    assert_eq!(txs[1].to(), Some(Address::ZERO), "builder tx should send to zero address");
     let last_txs = &txs[txs.len() - 2..];
     // Check user transaction
     assert_eq!(last_txs[0].inner.tx_hash(), tx_hash, "tx hash for user transaction should match");
@@ -168,7 +160,7 @@ async fn test_flashtestations_permit_registration(rbuilder: LocalInstance) -> ey
     let block = driver.build_new_block_with_current_timestamp(None).await?;
     let num_txs = block.transactions.len();
     assert!(num_txs == 3, "Expected 3 transactions in block"); // deposit + 2 builder tx
-    // check that the tee signer did not send any transactions
+                                                               // check that the tee signer did not send any transactions
     let balance = provider.get_balance(TEE_DEBUG_ADDRESS).await?;
     assert!(balance.is_zero());
     let nonce = provider.get_transaction_count(TEE_DEBUG_ADDRESS).await?;

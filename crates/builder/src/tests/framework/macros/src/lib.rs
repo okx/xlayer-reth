@@ -16,8 +16,7 @@ impl syn::parse::Parse for TestConfig {
             return Ok(config);
         }
 
-        let metas: Punctuated<Meta, Token![,]> =
-            input.parse_terminated(Meta::parse, Token![,])?;
+        let metas: Punctuated<Meta, Token![,]> = input.parse_terminated(Meta::parse, Token![,])?;
 
         for meta in metas {
             match meta {
@@ -119,13 +118,10 @@ pub fn rb_test(args: TokenStream, input: TokenStream) -> TokenStream {
     validate_signature(&input_fn);
 
     let mut helper_fn = input_fn.clone();
-    helper_fn
-        .attrs
-        .retain(|attr| !attr.path().is_ident("test") && !attr.path().is_ident("tokio"));
+    helper_fn.attrs.retain(|attr| !attr.path().is_ident("test") && !attr.path().is_ident("tokio"));
 
     let original_name = &input_fn.sig.ident;
-    let test_name =
-        syn::Ident::new(&format!("{original_name}_flashblocks"), original_name.span());
+    let test_name = syn::Ident::new(&format!("{original_name}_flashblocks"), original_name.span());
     let instance_init = generate_instance_init(&config.args, &config.config);
 
     let test_attribute = if config.multi_threaded {
