@@ -843,7 +843,7 @@ where
                                     fallback_payload_for_resolve
                                 })
                         } else {
-                            self.task_executor.spawn_blocking(Box::pin(async move {
+                            self.task_executor.spawn_blocking_task(Box::pin(async move {
                                 let _ = resolve_zero_state_root(state_root_ctx, state_provider);
                             }));
                             fallback_payload_for_resolve
