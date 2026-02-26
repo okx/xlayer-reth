@@ -11,20 +11,14 @@ repository.workspace = true
 default = []
 
 [dependencies]
-op-rbuilder.workspace = true
+xlayer-builder.workspace = true
 reth-node-api.workspace = true
 reth-primitives-traits.workspace = true
 reth-tracing.workspace = true
 reth-optimism-flashblocks.workspace = true
 
-revm-context-interface.workspace = true
-revm-database.workspace = true
-
 alloy-primitives.workspace = true
-alloy-rlp.workspace = true
 alloy-consensus.workspace = true
-alloy-evm.workspace = true
-alloy-eips.workspace = true
 alloy-rpc-types-eth.workspace = true
 alloy-json-rpc.workspace = true
 
@@ -34,17 +28,13 @@ reth-rpc-eth-api.workspace = true
 reth-rpc-eth-types.workspace = true
 reth-rpc-server-types.workspace = true
 reth-storage-api.workspace = true
-reth-chain-state.workspace = true
-reth-execution-types.workspace = true
 reth-tasks = { workspace = true, features = ["rayon"] }
-reth-transaction-pool.workspace = true
 
 tokio.workspace = true
 tokio-stream.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-once_cell.workspace = true
 eyre.workspace = true
 jsonrpsee.workspace = true
 tracing.workspace = true

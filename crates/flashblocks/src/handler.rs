@@ -1,12 +1,12 @@
-use op_rbuilder::args::OpRbuilderArgs;
-use op_rbuilder::builders::WebSocketPublisher;
-use op_rbuilder::metrics::OpRBuilderMetrics;
-use op_rbuilder::tokio_metrics::FlashblocksTaskMetrics;
 use reth_node_api::FullNodeComponents;
 use reth_optimism_flashblocks::FlashBlockRx;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{debug, info, trace, warn};
+use xlayer_builder::{
+    args::OpRbuilderArgs, builders::WebSocketPublisher, metrics::OpRBuilderMetrics,
+    tokio_metrics::FlashblocksTaskMetrics,
+};
 
 pub struct FlashblocksService<Node>
 where
