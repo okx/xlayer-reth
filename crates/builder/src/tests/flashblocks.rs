@@ -14,7 +14,7 @@ use crate::{
     },
 };
 
-#[rb_test(flashblocks, args = OpRbuilderArgs {
+#[rb_test(args = OpRbuilderArgs {
     chain_block_time: 1000,
     flashblocks: FlashblocksArgs {
         enabled: true,
@@ -50,7 +50,7 @@ async fn test_flashblocks_no_state_root_calculation(rbuilder: LocalInstance) -> 
     Ok(())
 }
 
-#[rb_test(flashblocks, args = OpRbuilderArgs {
+#[rb_test(args = OpRbuilderArgs {
     chain_block_time: 1000,
     enable_revert_protection: true,
     flashblocks: FlashblocksArgs {
@@ -192,7 +192,7 @@ async fn create_flashblock_transactions(
 }
 
 /// Smoke test for flashblocks with end buffer.
-#[rb_test(flashblocks, args = OpRbuilderArgs {
+#[rb_test(args = OpRbuilderArgs {
     chain_block_time: 1000,
     flashblocks: FlashblocksArgs {
         enabled: true,
@@ -225,7 +225,7 @@ async fn smoke_basic(rbuilder: LocalInstance) -> eyre::Result<()> {
 }
 
 /// Smoke test with send_offset_ms
-#[rb_test(flashblocks, args = OpRbuilderArgs {
+#[rb_test(args = OpRbuilderArgs {
     chain_block_time: 1000,
     flashblocks: FlashblocksArgs {
         enabled: true,
@@ -260,7 +260,7 @@ async fn smoke_with_offset(rbuilder: LocalInstance) -> eyre::Result<()> {
 
 /// Test significant FCU delay (700ms into 1000ms block)
 /// Should produce fewer flashblocks due to less remaining time
-#[rb_test(flashblocks, args = OpRbuilderArgs {
+#[rb_test(args = OpRbuilderArgs {
     chain_block_time: 1000,
     flashblocks: FlashblocksArgs {
         enabled: true,
@@ -303,7 +303,7 @@ async fn late_fcu_reduces_flashblocks(rbuilder: LocalInstance) -> eyre::Result<(
 /// With 1000ms block time, 200ms flashblock interval, and 50ms end buffer:
 /// - Available time = 1000 - lag - 50 = 950 - lag
 /// - Flashblocks per block = ceil((available_time) / 200) + 1 (base flashblock)
-#[rb_test(flashblocks, args = OpRbuilderArgs {
+#[rb_test(args = OpRbuilderArgs {
       chain_block_time: 1000,
       flashblocks: FlashblocksArgs {
           enabled: true,

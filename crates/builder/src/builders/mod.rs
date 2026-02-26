@@ -1,5 +1,5 @@
 use core::{
-    convert::{Infallible, TryFrom},
+    convert::TryFrom,
     fmt::Debug,
     time::Duration,
 };
@@ -19,7 +19,6 @@ mod builder_tx;
 mod context;
 mod flashblocks;
 mod generator;
-mod standard;
 
 pub use builder_tx::{
     get_balance, get_nonce, BuilderTransactionCtx, BuilderTransactionError, BuilderTransactions,
@@ -27,19 +26,6 @@ pub use builder_tx::{
 };
 pub use context::OpPayloadBuilderCtx;
 pub use flashblocks::{FlashblocksBuilder, FlashblocksServiceBuilder, WebSocketPublisher};
-pub use standard::StandardBuilder;
-
-/// Defines the payload building mode for the OP builder.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum BuilderMode {
-    /// Uses the plain OP payload builder that produces blocks every chain blocktime.
-    #[default]
-    Standard,
-    /// Uses the flashblocks payload builder that progressively builds chunks of a
-    /// block every short interval and makes it available through a websocket update
-    /// then merges them into a full block every chain block time.
-    Flashblocks,
-}
 
 /// Defines the interface for any block builder implementation API entry point.
 ///
@@ -193,11 +179,3 @@ where
     }
 }
 
-#[expect(clippy::infallible_try_from)]
-impl TryFrom<OpRbuilderArgs> for () {
-    type Error = Infallible;
-
-    fn try_from(_: OpRbuilderArgs) -> Result<Self, Self::Error> {
-        Ok(())
-    }
-}

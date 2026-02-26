@@ -5708,7 +5708,6 @@ dependencies = [
 name = "macros"
 version = "0.1.0"
 dependencies = [
- "paste",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
