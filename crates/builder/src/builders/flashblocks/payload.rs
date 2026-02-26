@@ -628,7 +628,7 @@ where
             gas_used = info.cumulative_gas_used,
             target_da = target_da_for_batch,
             da_used = info.cumulative_da_bytes_used,
-            block_gas_used = ctx.block_gas_limit(),
+            block_gas_limit = ctx.block_gas_limit(),
             target_da_footprint = target_da_footprint_for_batch,
             "Building flashblock",
         );
