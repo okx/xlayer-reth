@@ -66,6 +66,14 @@ pub struct FlashblocksConfig {
 
     /// Maximum number of concurrent WebSocket subscribers
     pub ws_subscriber_limit: Option<u16>,
+
+    /// Enable async trie precalculation during flashblock building.
+    /// When enabled and disable_state_root is true, background trie calculations
+    /// are spawned after each flashblock to speed up final state root resolution.
+    pub enable_async_trie_precalc: bool,
+
+    /// Which flashblock index to start async trie precalculation from (0-indexed).
+    pub async_trie_precalc_start_flashblock: u64,
 }
 
 impl Default for FlashblocksConfig {
@@ -88,6 +96,8 @@ impl Default for FlashblocksConfig {
             p2p_send_full_payload: false,
             p2p_process_full_payload: false,
             ws_subscriber_limit: None,
+            enable_async_trie_precalc: false,
+            async_trie_precalc_start_flashblock: 0,
         }
     }
 }
@@ -132,6 +142,10 @@ impl TryFrom<OpRbuilderArgs> for FlashblocksConfig {
             p2p_send_full_payload: args.flashblocks.p2p.p2p_send_full_payload,
             p2p_process_full_payload: args.flashblocks.p2p.p2p_process_full_payload,
             ws_subscriber_limit: args.flashblocks.ws_subscriber_limit,
+            enable_async_trie_precalc: args.flashblocks.flashblocks_enable_async_trie_precalc,
+            async_trie_precalc_start_flashblock: args
+                .flashblocks
+                .flashblocks_async_trie_precalc_start_flashblock,
         })
     }
 }

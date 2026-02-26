@@ -51,7 +51,7 @@ use reth_revm::{
     State,
 };
 use reth_transaction_pool::TransactionPool;
-use reth_trie::{HashedPostState, TrieInput, updates::TrieUpdates};
+use reth_trie::{updates::TrieUpdates, HashedPostState, TrieInput};
 use revm::Database;
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use tokio::sync::mpsc;
@@ -136,6 +136,33 @@ impl FlashblocksExtraCtx {
             ..self
         }
     }
+}
+
+/// Result of an async trie precalculation for a single flashblock.
+struct TriePrecalcResult {
+    /// The flashblock index this result corresponds to.
+    flashblock_index: u64,
+    /// The computed trie updates that can seed the next incremental calculation.
+    trie_updates: Arc<TrieUpdates>,
+}
+
+/// Work item sent from the main flashblock loop to the background trie worker.
+struct TriePrecalcWorkItem {
+    flashblock_index: u64,
+    bundle_state: BundleState,
+}
+
+/// Manages the async trie precalculation pipeline.
+///
+/// A background worker computes incremental trie updates sequentially.
+/// Each computation uses the previous one's `TrieUpdates` to maintain
+/// an incremental chain. Results are collected here and used during
+/// final state root resolution.
+struct AsyncTriePrecalcPipeline {
+    /// Receiver for completed precalculation results from the background worker.
+    result_rx: std::sync::mpsc::Receiver<TriePrecalcResult>,
+    /// Sender for providing BundleState snapshots to the background worker.
+    work_tx: std::sync::mpsc::SyncSender<TriePrecalcWorkItem>,
 }
 
 impl OpPayloadBuilderCtx<FlashblocksExtraCtx> {
@@ -456,7 +483,7 @@ where
             ctx.metrics.payload_num_tx_gauge.set(info.executed_transactions.len() as f64);
 
             // return early since we don't need to build a block with transactions from the pool
-            self.resolve_best_payload(&ctx, best_payload, fallback_payload, &resolve_payload);
+            self.resolve_best_payload(&ctx, best_payload, fallback_payload, &resolve_payload, None);
             return Ok(());
         }
 
@@ -531,6 +558,38 @@ where
             fb_payload.payload_id,
         )));
 
+        // Initialize async trie precalculation pipeline if enabled
+        let mut precalc_pipeline: Option<AsyncTriePrecalcPipeline> = if disable_state_root
+            && self.config.specific.enable_async_trie_precalc
+        {
+            match self.client.state_by_block_hash(ctx.parent().hash()) {
+                Ok(worker_state_provider) => {
+                    let (work_tx, work_rx) = std::sync::mpsc::sync_channel(2);
+                    let (result_tx, result_rx) =
+                        std::sync::mpsc::sync_channel((expected_flashblocks + 1) as usize);
+                    let metrics = self.metrics.clone();
+                    self.task_executor.spawn_blocking(Box::pin(async move {
+                        run_trie_precalc_worker(work_rx, result_tx, worker_state_provider, metrics);
+                    }));
+                    info!(
+                        target: "payload_builder",
+                        "Async trie precalculation pipeline started"
+                    );
+                    Some(AsyncTriePrecalcPipeline { result_rx, work_tx })
+                }
+                Err(err) => {
+                    warn!(
+                        target: "payload_builder",
+                        error = %err,
+                        "Failed to create state provider for async trie precalc, disabling"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Process flashblocks - block on async channel receive
         loop {
             // Wait for signal before building flashblock.
@@ -545,7 +604,13 @@ where
                 ctx = ctx.with_cancel(new_fb_cancel);
             } else {
                 // Channel closed - block building cancelled
-                self.resolve_best_payload(&ctx, best_payload, fallback_payload, &resolve_payload);
+                self.resolve_best_payload(
+                    &ctx,
+                    best_payload,
+                    fallback_payload,
+                    &resolve_payload,
+                    precalc_pipeline.take(),
+                );
                 self.record_flashblocks_metrics(&ctx, &info, target_flashblocks, &span);
                 return Ok(());
             }
@@ -578,6 +643,7 @@ where
                         best_payload,
                         fallback_payload,
                         &resolve_payload,
+                        precalc_pipeline.take(),
                     );
                     self.record_flashblocks_metrics(&ctx, &info, target_flashblocks, &span);
                     return Ok(());
@@ -596,10 +662,44 @@ where
                         best_payload,
                         fallback_payload,
                         &resolve_payload,
+                        precalc_pipeline.take(),
                     );
                     return Err(PayloadBuilderError::Other(err.into()));
                 }
             };
+
+            // Feed work item to async trie precalc pipeline
+            if let Some(pipeline) = &precalc_pipeline {
+                let fb_index = ctx.flashblock_index();
+                if fb_index >= self.config.specific.async_trie_precalc_start_flashblock {
+                    match pipeline.work_tx.try_send(TriePrecalcWorkItem {
+                        flashblock_index: fb_index,
+                        bundle_state: best_payload.1.clone(),
+                    }) {
+                        Ok(()) => {
+                            debug!(
+                                target: "payload_builder",
+                                flashblock_index = fb_index,
+                                "Sent work item to async trie precalc pipeline"
+                            );
+                        }
+                        Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                            warn!(
+                                target: "payload_builder",
+                                flashblock_index = fb_index,
+                                "Async trie precalc pipeline full, skipping"
+                            );
+                        }
+                        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                            warn!(
+                                target: "payload_builder",
+                                flashblock_index = fb_index,
+                                "Async trie precalc worker disconnected"
+                            );
+                        }
+                    }
+                }
+            }
 
             ctx = ctx.with_extra_ctx(next_flashblocks_ctx);
         }
@@ -808,6 +908,7 @@ where
         best_payload: (OpBuiltPayload, BundleState),
         fallback_payload: OpBuiltPayload,
         resolve_payload: &BlockCell<OpBuiltPayload>,
+        precalc_pipeline: Option<AsyncTriePrecalcPipeline>,
     ) {
         if resolve_payload.get().is_some() {
             return;
@@ -815,6 +916,22 @@ where
 
         let payload = match best_payload.0.block().header().state_root {
             B256::ZERO => {
+                // Drain the async trie precalc pipeline for the latest result
+                let precalc_result = precalc_pipeline.and_then(|pipeline| {
+                    let mut latest = None;
+                    while let Ok(result) = pipeline.result_rx.try_recv() {
+                        latest = Some(result);
+                    }
+                    if let Some(ref result) = latest {
+                        info!(
+                            target: "payload_builder",
+                            flashblock_index = result.flashblock_index,
+                            "Using async trie precalc result for resolve"
+                        );
+                    }
+                    latest
+                });
+
                 // Get the fallback payload for payload resolution
                 let fallback_payload_for_resolve =
                     if self.config.specific.disable_async_calculate_state_root {
@@ -836,7 +953,7 @@ where
                 match self.client.state_by_block_hash(ctx.parent().hash()) {
                     Ok(state_provider) => {
                         if self.config.specific.disable_async_calculate_state_root {
-                            resolve_zero_state_root(state_root_ctx, state_provider)
+                            resolve_zero_state_root(state_root_ctx, state_provider, precalc_result)
                                 .unwrap_or_else(|err| {
                                     warn!(
                                         target: "payload_builder",
@@ -847,7 +964,11 @@ where
                                 })
                         } else {
                             self.task_executor.spawn_blocking(Box::pin(async move {
-                                let _ = resolve_zero_state_root(state_root_ctx, state_provider);
+                                let _ = resolve_zero_state_root(
+                                    state_root_ctx,
+                                    state_provider,
+                                    precalc_result,
+                                );
                             }));
                             fallback_payload_for_resolve
                         }
@@ -1016,7 +1137,6 @@ where
                 state_root = %state_root,
                 "Incremental state root calculation completed"
             );
-
         } else {
             debug!(
                 target: "payload_builder",
@@ -1026,18 +1146,17 @@ where
 
             hashed_state = state_provider.hashed_post_state(&state.bundle_state);
 
-            (state_root, trie_output) = state
-                .database
-                .as_ref()
-                .state_root_with_updates(hashed_state.clone())
-                .inspect_err(|err| {
-                    warn!(
-                        target: "payload_builder",
-                        parent_header=%ctx.parent().hash(),
-                        %err,
-                        "failed to calculate state root for payload"
-                    );
-                })?;
+            (state_root, trie_output) =
+                state.database.as_ref().state_root_with_updates(hashed_state.clone()).inspect_err(
+                    |err| {
+                        warn!(
+                            target: "payload_builder",
+                            parent_header=%ctx.parent().hash(),
+                            %err,
+                            "failed to calculate state root for payload"
+                        );
+                    },
+                )?;
         };
 
         // Save trie updates for next flashblock's incremental calculation
@@ -1231,6 +1350,79 @@ where
     ))
 }
 
+/// Runs the async trie precalculation worker in a blocking context.
+///
+/// Processes work items sequentially, maintaining an incremental trie update chain.
+/// The first item does a full `state_root_with_updates`, subsequent items use
+/// `state_root_from_nodes_with_updates` with the previous result's cached trie nodes.
+fn run_trie_precalc_worker(
+    work_rx: std::sync::mpsc::Receiver<TriePrecalcWorkItem>,
+    result_tx: std::sync::mpsc::SyncSender<TriePrecalcResult>,
+    state_provider: Box<dyn reth::providers::StateProvider>,
+    metrics: Arc<OpRBuilderMetrics>,
+) {
+    let mut prev_trie_updates: Option<Arc<TrieUpdates>> = None;
+
+    while let Ok(work_item) = work_rx.recv() {
+        let start_time = Instant::now();
+
+        let hashed_state = state_provider.hashed_post_state(&work_item.bundle_state);
+
+        let result = if let Some(prev_trie) = &prev_trie_updates {
+            // Incremental path: reuse cached trie nodes from previous flashblock
+            let trie_input = TrieInput::new(
+                prev_trie.as_ref().clone(),
+                hashed_state.clone(),
+                hashed_state.construct_prefix_sets(),
+            );
+            state_provider.state_root_from_nodes_with_updates(trie_input)
+        } else {
+            // First calculation: full trie computation
+            state_provider.state_root_with_updates(hashed_state)
+        };
+
+        match result {
+            Ok((state_root, trie_output)) => {
+                let trie_updates = Arc::new(trie_output);
+                prev_trie_updates = Some(trie_updates.clone());
+
+                let elapsed = start_time.elapsed();
+                info!(
+                    target: "payload_builder",
+                    flashblock_index = work_item.flashblock_index,
+                    state_root = %state_root,
+                    duration_ms = elapsed.as_millis(),
+                    "Async trie precalculation completed"
+                );
+                metrics.state_root_calculation_duration.record(elapsed);
+
+                if result_tx
+                    .send(TriePrecalcResult {
+                        flashblock_index: work_item.flashblock_index,
+                        trie_updates,
+                    })
+                    .is_err()
+                {
+                    // Main loop dropped the receiver — stop worker
+                    break;
+                }
+            }
+            Err(err) => {
+                warn!(
+                    target: "payload_builder",
+                    flashblock_index = work_item.flashblock_index,
+                    error = %err,
+                    "Async trie precalculation failed, resetting chain"
+                );
+                // Reset chain: next item will do a full calculation
+                prev_trie_updates = None;
+            }
+        }
+    }
+
+    debug!(target: "payload_builder", "Trie precalc worker exiting");
+}
+
 struct CalculateStateRootContext {
     best_payload: (OpBuiltPayload, BundleState),
     parent_hash: BlockHash,
@@ -1241,11 +1433,12 @@ struct CalculateStateRootContext {
 fn resolve_zero_state_root(
     ctx: CalculateStateRootContext,
     state_provider: Box<dyn reth::providers::StateProvider>,
+    precalc_result: Option<TriePrecalcResult>,
 ) -> Result<OpBuiltPayload, PayloadBuilderError> {
     let resolve_start_time = Instant::now();
 
     let (state_root, trie_updates, hashed_state) =
-        calculate_state_root_on_resolve(&ctx, state_provider)?;
+        calculate_state_root_on_resolve(&ctx, state_provider, precalc_result)?;
 
     let payload_id = ctx.best_payload.0.id();
     let fees = ctx.best_payload.0.fees();
@@ -1293,40 +1486,70 @@ fn resolve_zero_state_root(
     Ok(updated_payload)
 }
 
-/// Calculates only the state root for an existing payload
+/// Calculates only the state root for an existing payload.
+///
+/// If `precalc_result` is available, uses incremental `state_root_from_nodes_with_updates`
+/// seeded by the precalculated trie updates. Otherwise falls back to a cold full calculation.
 fn calculate_state_root_on_resolve(
     ctx: &CalculateStateRootContext,
     state_provider: Box<dyn reth::providers::StateProvider>,
+    precalc_result: Option<TriePrecalcResult>,
 ) -> Result<(B256, TrieUpdates, HashedPostState), PayloadBuilderError> {
     let total_start_time = Instant::now();
+    let used_precalc = precalc_result.is_some();
 
     let hashed_state_start = Instant::now();
     let hashed_state = state_provider.hashed_post_state(&ctx.best_payload.1);
     let hashed_state_time = hashed_state_start.elapsed();
 
     let state_root_start = Instant::now();
-    let state_root_updates =
+    let (state_root, trie_updates) = if let Some(precalc) = precalc_result {
+        // Incremental path: use precalculated trie from background worker
+        info!(
+            target: "payload_builder",
+            precalc_flashblock = precalc.flashblock_index,
+            "Using precalculated trie for resolve"
+        );
+
+        let trie_input = TrieInput::new(
+            precalc.trie_updates.as_ref().clone(),
+            hashed_state.clone(),
+            hashed_state.construct_prefix_sets(),
+        );
+
+        state_provider.state_root_from_nodes_with_updates(trie_input).inspect_err(|err| {
+            warn!(target: "payload_builder",
+                parent_header=%ctx.parent_hash,
+                %err,
+                "failed incremental state root on resolve"
+            );
+        })?
+    } else {
+        // Cold path: full trie calculation
         state_provider.state_root_with_updates(hashed_state.clone()).inspect_err(|err| {
             warn!(target: "payload_builder",
                 parent_header=%ctx.parent_hash,
                 %err,
                 "failed to calculate state root for payload"
             );
-        })?;
+        })?
+    };
     let state_root_time = state_root_start.elapsed();
 
     let total_time = total_start_time.elapsed();
+    let method = if used_precalc { "incremental" } else { "cold" };
     info!(
         target: "payload_builder",
         hashed_state_ms = hashed_state_time.as_millis(),
         state_root_ms = state_root_time.as_millis(),
         total_ms = total_time.as_millis(),
-        state_root = %state_root_updates.0,
-        "calculate_state_root_on_resolve timing (cold)"
+        state_root = %state_root,
+        method,
+        "calculate_state_root_on_resolve timing"
     );
 
     ctx.metrics.state_root_calculation_duration.record(total_time);
     ctx.metrics.state_root_calculation_gauge.set(total_time);
 
-    Ok((state_root_updates.0, state_root_updates.1, hashed_state))
+    Ok((state_root, trie_updates, hashed_state))
 }

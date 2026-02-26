@@ -136,6 +136,26 @@ pub struct FlashblocksArgs {
     )]
     pub flashblocks_disable_async_calculate_state_root: bool,
 
+    /// Enable async trie precalculation during flashblock building.
+    /// When enabled and disable_state_root is true, background trie calculations
+    /// are spawned after each flashblock to speed up final state root resolution.
+    #[arg(
+        long = "flashblocks.enable-async-trie-precalc",
+        default_value = "false",
+        env = "FLASHBLOCKS_ENABLE_ASYNC_TRIE_PRECALC"
+    )]
+    pub flashblocks_enable_async_trie_precalc: bool,
+
+    /// Which flashblock index to start async trie precalculation from (0-indexed).
+    /// For example, with 5 flashblocks and start=2, precalculation begins after
+    /// flashblock 2 (skipping 0 and 1).
+    #[arg(
+        long = "flashblocks.async-trie-precalc-start-flashblock",
+        default_value = "0",
+        env = "FLASHBLOCKS_ASYNC_TRIE_PRECALC_START_FLASHBLOCK"
+    )]
+    pub flashblocks_async_trie_precalc_start_flashblock: u64,
+
     /// Flashblocks number contract address
     ///
     /// This is the address of the contract that will be used to increment the flashblock number.
