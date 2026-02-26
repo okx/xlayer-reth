@@ -138,7 +138,9 @@ impl TryFrom<OpRbuilderArgs> for FlashblocksConfig {
             p2p_send_full_payload: args.flashblocks.p2p.p2p_send_full_payload,
             p2p_process_full_payload: args.flashblocks.p2p.p2p_process_full_payload,
             ws_subscriber_limit: args.flashblocks.ws_subscriber_limit,
-            enable_incremental_trie_cache: args.flashblocks.flashblocks_enable_incremental_trie_cache,
+            enable_incremental_trie_cache: args
+                .flashblocks
+                .flashblocks_enable_incremental_trie_cache,
         })
     }
 }
