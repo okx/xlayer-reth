@@ -16,6 +16,9 @@ workspace = true
 reth-chainspec = { workspace = true }
 reth-primitives-traits = { workspace = true }
 reth-cli = { workspace = true }
+
+# op-reth
+reth-optimism-primitives = { workspace = true }
 reth-optimism-chainspec = { workspace = true }
 reth-optimism-cli = { workspace = true }
 reth-optimism-forks = { workspace = true }
@@ -27,6 +30,12 @@ alloy-primitives = { workspace = true }
 alloy-consensus = { workspace = true }
 alloy-eips = { workspace = true }
 alloy-chains = { workspace = true }
+
+# op
+op-alloy-rpc-types = { workspace = true }
+
+# misc
+serde = { workspace = true }
 serde_json = { workspace = true }
 eyre = { workspace = true }
 once_cell = { workspace = true }

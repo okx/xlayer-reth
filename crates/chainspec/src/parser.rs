@@ -1,6 +1,6 @@
 //! XLayer chain specification parser
 
-use crate::{XLAYER_MAINNET, XLAYER_TESTNET};
+use crate::{XLAYER_MAINNET, XLAYER_TESTNET, XLAYER_DEVNET};
 use alloy_genesis::Genesis;
 use reth_cli::chainspec::ChainSpecParser;
 use reth_optimism_chainspec::{generated_chain_value_parser, OpChainSpec};
@@ -12,6 +12,7 @@ use tracing::debug;
 /// This parser extends the default OpChainSpecParser to support XLayer chains:
 /// - xlayer-mainnet (chain id 196)
 /// - xlayer-testnet (chain id 1952)
+/// - xlayer-devnet (chain id 195)
 ///
 /// It also supports all standard Optimism chains through delegation to the
 /// upstream OpChainSpecParser.
@@ -34,6 +35,7 @@ impl ChainSpecParser for XLayerChainSpecParser {
         // XLayer chains
         "xlayer-mainnet",
         "xlayer-testnet",
+        "xlayer-devnet",
     ];
 
     fn parse(s: &str) -> eyre::Result<Arc<Self::ChainSpec>> {
@@ -81,6 +83,13 @@ fn xlayer_chain_value_parser(s: &str) -> eyre::Result<Arc<OpChainSpec>> {
             }
             Ok(XLAYER_TESTNET.clone())
         }
+        "xlayer-devnet" => {
+            // Support environment variable override for genesis path
+            if let Ok(genesis_path) = std::env::var("XLAYER_DEVNET_GENESIS") {
+                return Ok(Arc::new(parse_genesis(&genesis_path)?.into()));
+            }
+            Ok(XLAYER_DEVNET.clone())
+        }
         // For other inputs, try known OP chains first, then parse as genesis
         _ => {
             // Try to match known OP chains (optimism, base, etc.)
@@ -108,6 +117,12 @@ mod tests {
     fn test_parse_xlayer_testnet() {
         let spec = XLayerChainSpecParser::parse("xlayer-testnet").unwrap();
         assert_eq!(spec.chain().id(), 1952);
+    }
+
+    #[test]
+    fn test_parse_xlayer_devnet() {
+        let spec = XLayerChainSpecParser::parse("xlayer-devnet").unwrap();
+        assert_eq!(spec.chain().id(), 195);
     }
 
     #[test]
