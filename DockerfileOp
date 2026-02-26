@@ -11,9 +11,9 @@ FROM chef AS planner
 COPY Cargo.toml Cargo.lock rust-toolchain* ./
 COPY bin/node/Cargo.toml bin/node/Cargo.toml
 COPY bin/tools/Cargo.toml bin/tools/Cargo.toml
-COPY crates/*/Cargo.toml crates/*/Cargo.toml
+COPY --parents crates/*/Cargo.toml ./
 COPY crates/builder/src/tests/framework/macros/Cargo.toml crates/builder/src/tests/framework/macros/Cargo.toml
-RUN cargo chef prepare --recipe-path recipe.json --manifest-path /app/bin/node/Cargo.toml
+RUN cargo chef prepare --recipe-path recipe.json --bin xlayer-reth-node
 
 FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
