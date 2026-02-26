@@ -1,9 +1,9 @@
 use crate::{
+    builders::flashblocks::execution::ExecutionInfo,
     builders::flashblocks::{
         cache::FlashblockPayloadsCache, ctx::OpPayloadSyncerCtx, p2p::Message,
         payload::FlashblocksExecutionInfo, wspub::WebSocketPublisher,
     },
-    builders::flashblocks::execution::ExecutionInfo,
     traits::ClientBounds,
 };
 use alloy_evm::eth::receipt_builder::ReceiptBuilderCtx;

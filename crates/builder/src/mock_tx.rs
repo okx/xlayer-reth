@@ -348,4 +348,3 @@ impl EthPoolTransaction for MockFbTransaction {
 
 pub type PooledTransactionVariant =
     alloy_consensus::EthereumTxEnvelope<TxEip4844WithSidecar<BlobTransactionSidecarVariant>>;
-

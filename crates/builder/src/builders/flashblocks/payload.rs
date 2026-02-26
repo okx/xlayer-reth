@@ -1,5 +1,6 @@
 use super::{config::FlashblocksConfig, wspub::WebSocketPublisher};
 use crate::{
+    builders::flashblocks::execution::ExecutionInfo,
     builders::{
         builder_tx::BuilderTransactions,
         context::OpPayloadBuilderCtx,
@@ -11,7 +12,6 @@ use crate::{
         BuilderConfig,
     },
     metrics::OpRBuilderMetrics,
-    builders::flashblocks::execution::ExecutionInfo,
     tokio_metrics::FlashblocksTaskMetrics,
     traits::{ClientBounds, PoolBounds},
 };

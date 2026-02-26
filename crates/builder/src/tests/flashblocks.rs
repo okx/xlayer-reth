@@ -64,11 +64,7 @@ async fn test_flashblocks_number_contract_builder_tx(rbuilder: LocalInstance) ->
     let provider = rbuilder.provider().await?;
 
     // Deploy flashblocks number contract which will be in flashblocks 1
-    let deploy_tx = driver
-        .create_transaction()
-        .deploy_flashblock_number_contract()
-        .send()
-        .await?;
+    let deploy_tx = driver.create_transaction().deploy_flashblock_number_contract().send().await?;
 
     // Create valid transactions
     let user_transactions = create_flashblock_transactions(&driver, 2..5).await?;

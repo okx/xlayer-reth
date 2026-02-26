@@ -40,8 +40,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace};
 
 use crate::{
-    metrics::OpRBuilderMetrics,
     builders::flashblocks::execution::{ExecutionInfo, TxnExecutionResult},
+    metrics::OpRBuilderMetrics,
     traits::PayloadTxsBounds,
     tx_signer::Signer,
 };
