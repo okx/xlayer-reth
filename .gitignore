@@ -1,6 +1,7 @@
 /target
 .claude
 .vscode
+.idea
 
 tests/data
 tests/op-reth-seq

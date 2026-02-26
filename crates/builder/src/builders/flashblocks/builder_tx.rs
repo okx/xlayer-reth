@@ -7,7 +7,6 @@ use alloy_sol_types::{sol, SolCall, SolEvent};
 use core::fmt::Debug;
 use op_alloy_rpc_types::OpTransactionRequest;
 use reth_evm::{precompiles::PrecompilesMap, ConfigureEvm};
-use reth_provider::StateProvider;
 use reth_revm::State;
 use revm::{inspector::NoOpInspector, DatabaseRef};
 use tracing::warn;
@@ -20,7 +19,6 @@ use crate::{
         get_nonce, BuilderTransactionCtx, BuilderTransactionError, BuilderTransactions,
         SimulationSuccessResult,
     },
-    primitives::reth::ExecutionInfo,
     tx_signer::Signer,
 };
 
