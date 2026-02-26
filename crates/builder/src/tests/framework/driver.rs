@@ -14,7 +14,7 @@ use super::{EngineApi, Ipc, LocalInstance, TransactionBuilder};
 use crate::{
     args::OpRbuilderArgs,
     tests::{ExternalNode, Protocol, DEFAULT_DENOMINATOR, DEFAULT_ELASTICITY, DEFAULT_GAS_LIMIT},
-    tx_signer::Signer,
+    tx::signer::Signer,
 };
 
 /// The ChainDriver is a type that allows driving the op builder node to build new blocks manually

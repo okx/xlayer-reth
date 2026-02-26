@@ -9,7 +9,7 @@ use crate::args::OpRbuilderArgs;
 /// op-rbuilder metrics
 #[derive(Metrics, Clone)]
 #[metrics(scope = "op_rbuilder")]
-pub struct OpRBuilderMetrics {
+pub struct BuilderMetrics {
     /// Block built success
     pub block_built_success: Counter,
     /// Block synced success
@@ -98,7 +98,7 @@ pub struct OpRBuilderMetrics {
     pub first_flashblock_time_offset: Histogram,
 }
 
-impl OpRBuilderMetrics {
+impl BuilderMetrics {
     pub fn set_payload_builder_metrics(
         &self,
         payload_transaction_simulation_time: impl IntoF64 + Copy,

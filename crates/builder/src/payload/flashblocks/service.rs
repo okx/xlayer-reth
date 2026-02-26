@@ -8,11 +8,11 @@ use super::{
     FlashblocksConfig,
 };
 use crate::{
-    metrics::OpRBuilderMetrics,
+    metrics::tokio::FlashblocksTaskMetrics,
+    metrics::BuilderMetrics,
     payload::{
         builder_tx::BuilderTransactions, generator::BlockPayloadJobGenerator, BuilderConfig,
     },
-    tokio_metrics::FlashblocksTaskMetrics,
     traits::{NodeBounds, PoolBounds},
 };
 use eyre::WrapErr as _;
@@ -104,7 +104,7 @@ impl FlashblocksServiceBuilder {
             (incoming_message_rx, outgoing_message_tx)
         };
 
-        let metrics = Arc::new(OpRBuilderMetrics::default());
+        let metrics = Arc::new(BuilderMetrics::default());
         let task_metrics = Arc::new(FlashblocksTaskMetrics::new());
 
         // Channels for built flashblock payloads

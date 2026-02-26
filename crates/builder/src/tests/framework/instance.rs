@@ -6,7 +6,7 @@ use crate::{
         framework::{driver::ChainDriver, engine_api_builder::OpEngineApiBuilder},
         EngineApi, Ipc, TransactionPoolObserver,
     },
-    tx_signer::Signer,
+    tx::signer::Signer,
 };
 use alloy_primitives::B256;
 use alloy_provider::{Identity, ProviderBuilder, RootProvider};

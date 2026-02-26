@@ -30,7 +30,7 @@ use revm::{
 use tracing::{trace, warn};
 
 use super::{context::OpPayloadBuilderCtx, utils::execution::ExecutionInfo};
-use crate::tx_signer::Signer;
+use crate::tx::signer::Signer;
 
 #[derive(Debug, Default)]
 pub struct SimulationSuccessResult<T: SolCall> {

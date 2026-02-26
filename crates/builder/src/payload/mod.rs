@@ -6,7 +6,7 @@ use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
 use crate::{
     args::OpRbuilderArgs,
     traits::{NodeBounds, PoolBounds},
-    tx_signer::Signer,
+    tx::signer::Signer,
 };
 
 mod builder_tx;

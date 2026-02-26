@@ -4,7 +4,7 @@
 
 //! clap [Args](clap::Args) for optimism rollup configuration
 
-use crate::tx_signer::Signer;
+use crate::tx::signer::Signer;
 use alloy_primitives::Address;
 use anyhow::{anyhow, Result};
 use clap::Parser;

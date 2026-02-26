@@ -1,5 +1,6 @@
 use crate::{
-    metrics::OpRBuilderMetrics,
+    metrics::tokio::FlashblocksTaskMetrics,
+    metrics::BuilderMetrics,
     payload::{
         builder_tx::BuilderTransactions,
         context::OpPayloadBuilderCtx,
@@ -14,7 +15,6 @@ use crate::{
         utils::execution::ExecutionInfo,
         BuilderConfig,
     },
-    tokio_metrics::FlashblocksTaskMetrics,
     traits::{ClientBounds, PoolBounds},
 };
 use alloy_consensus::{
@@ -182,7 +182,7 @@ pub(super) struct OpPayloadBuilder<Pool, Client, BuilderTx, Tasks> {
     /// System configuration for the builder
     pub config: BuilderConfig<FlashblocksConfig>,
     /// The metrics for the builder
-    pub metrics: Arc<OpRBuilderMetrics>,
+    pub metrics: Arc<BuilderMetrics>,
     /// The end of builder transaction type
     pub builder_tx: BuilderTx,
     /// Tokio task metrics for monitoring spawned tasks
@@ -203,7 +203,7 @@ impl<Pool, Client, BuilderTx, Tasks> OpPayloadBuilder<Pool, Client, BuilderTx, T
         built_payload_tx: mpsc::Sender<OpBuiltPayload>,
         p2p_cache: FlashblockPayloadsCache,
         ws_pub: Arc<WebSocketPublisher>,
-        metrics: Arc<OpRBuilderMetrics>,
+        metrics: Arc<BuilderMetrics>,
         task_metrics: Arc<FlashblocksTaskMetrics>,
     ) -> Self {
         Self {
@@ -1147,7 +1147,7 @@ struct CalculateStateRootContext {
     best_payload: (OpBuiltPayload, BundleState),
     parent_hash: BlockHash,
     built_payload_tx: mpsc::Sender<OpBuiltPayload>,
-    metrics: Arc<OpRBuilderMetrics>,
+    metrics: Arc<BuilderMetrics>,
 }
 
 fn resolve_zero_state_root(

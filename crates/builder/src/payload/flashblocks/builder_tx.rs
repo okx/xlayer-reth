@@ -19,7 +19,7 @@ use crate::{
         get_nonce, BuilderTransactionCtx, BuilderTransactionError, BuilderTransactions,
         SimulationSuccessResult,
     },
-    tx_signer::Signer,
+    tx::signer::Signer,
 };
 
 sol!(

@@ -40,7 +40,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace};
 
 use super::utils::execution::{ExecutionInfo, TxnExecutionResult};
-use crate::{metrics::OpRBuilderMetrics, traits::PayloadTxsBounds, tx_signer::Signer};
+use crate::{metrics::BuilderMetrics, traits::PayloadTxsBounds, tx::signer::Signer};
 use alloy_eips::eip2718::WithEncoded;
 
 /// Container type that holds all necessities to build a new payload.
@@ -65,7 +65,7 @@ pub struct OpPayloadBuilderCtx<ExtraCtx: Debug + Default = ()> {
     /// The builder signer
     pub builder_signer: Option<Signer>,
     /// The metrics for the builder
-    pub metrics: Arc<OpRBuilderMetrics>,
+    pub metrics: Arc<BuilderMetrics>,
     /// Extra context for the payload builder
     pub extra_ctx: ExtraCtx,
     /// Max gas that can be used by a transaction.

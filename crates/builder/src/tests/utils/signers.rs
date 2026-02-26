@@ -1,5 +1,5 @@
 use super::{BUILDER_PRIVATE_KEY, FLASHBLOCKS_DEPLOY_KEY, FUNDED_PRIVATE_KEY};
-use crate::tx_signer::Signer;
+use crate::tx::signer::Signer;
 
 pub fn builder_signer() -> Signer {
     Signer::try_from_secret(

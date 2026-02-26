@@ -1,5 +1,5 @@
 use crate::{
-    metrics::OpRBuilderMetrics,
+    metrics::BuilderMetrics,
     payload::{flashblocks::FlashblocksConfig, BuilderConfig, OpPayloadBuilderCtx},
     traits::ClientBounds,
 };
@@ -28,7 +28,7 @@ pub(super) struct OpPayloadSyncerCtx {
     /// Max gas that can be used by a transaction.
     max_gas_per_txn: Option<u64>,
     /// The metrics for the builder
-    metrics: Arc<OpRBuilderMetrics>,
+    metrics: Arc<BuilderMetrics>,
 }
 
 impl OpPayloadSyncerCtx {
@@ -36,7 +36,7 @@ impl OpPayloadSyncerCtx {
         client: &Client,
         builder_config: BuilderConfig<FlashblocksConfig>,
         evm_config: OpEvmConfig,
-        metrics: Arc<OpRBuilderMetrics>,
+        metrics: Arc<BuilderMetrics>,
     ) -> eyre::Result<Self>
     where
         Client: ClientBounds,
