@@ -11,7 +11,6 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-xlayer-builder-p2p = { path = "../builder-p2p" }
 xlayer-trace-monitor.workspace = true
 
 # reth
@@ -85,7 +84,7 @@ tower.workspace = true
 
 # tokio
 tokio.workspace = true
-tokio-util.workspace = true
+tokio-util = { workspace = true, features = ["compat"] }
 tokio-metrics.workspace = true
 tokio-tungstenite.workspace = true
 
@@ -93,6 +92,11 @@ tokio-tungstenite.workspace = true
 jsonrpsee = { workspace = true }
 jsonrpsee-core = { workspace = true }
 jsonrpsee-types = { workspace = true }
+
+# p2p
+libp2p = { workspace = true }
+libp2p-stream = { workspace = true }
+multiaddr = { workspace = true }
 
 # misc
 anyhow = "1"

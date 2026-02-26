@@ -13982,9 +13982,12 @@ dependencies = [
  "jsonrpsee-core",
  "jsonrpsee-types",
  "k256",
+ "libp2p",
+ "libp2p-stream",
  "macros",
  "metrics",
  "moka",
+ "multiaddr",
  "nanoid",
  "op-alloy-consensus",
  "op-alloy-flz",
@@ -14048,27 +14051,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber 0.3.22",
  "url",
- "xlayer-builder-p2p",
  "xlayer-trace-monitor",
-]
-
-[[package]]
-name = "xlayer-builder-p2p"
-version = "0.1.0"
-dependencies = [
- "derive_more",
- "eyre",
- "futures",
- "futures-util",
- "hex",
- "libp2p",
- "libp2p-stream",
- "multiaddr",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "tracing",
 ]
 
 [[package]]

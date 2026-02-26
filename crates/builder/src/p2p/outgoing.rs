@@ -1,4 +1,4 @@
-use crate::Message;
+use super::Message;
 use eyre::Context;
 use futures::stream::FuturesUnordered;
 use libp2p::{swarm::Stream, PeerId, StreamProtocol};

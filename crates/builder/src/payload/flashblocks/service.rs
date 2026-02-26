@@ -48,7 +48,7 @@ impl FlashblocksServiceBuilder {
         let cancel = tokio_util::sync::CancellationToken::new();
 
         let (incoming_message_rx, outgoing_message_tx) = if self.0.specific.p2p_enabled {
-            let mut builder = xlayer_builder_p2p::NodeBuilder::new();
+            let mut builder = crate::p2p::NodeBuilder::new();
 
             if let Some(ref private_key_file) = self.0.specific.p2p_private_key_file
                 && !private_key_file.is_empty()
@@ -62,7 +62,7 @@ impl FlashblocksServiceBuilder {
                 builder = builder.with_keypair_hex_string(private_key_hex);
             }
 
-            let known_peers: Vec<xlayer_builder_p2p::Multiaddr> =
+            let known_peers: Vec<crate::p2p::Multiaddr> =
                 if let Some(ref p2p_known_peers) = self.0.specific.p2p_known_peers {
                     p2p_known_peers
                         .split(',')
@@ -73,19 +73,16 @@ impl FlashblocksServiceBuilder {
                     vec![]
                 };
 
-            let xlayer_builder_p2p::NodeBuildResult {
-                node,
-                outgoing_message_tx,
-                mut incoming_message_rxs,
-            } = builder
-                .with_agent_version(AGENT_VERSION.to_string())
-                .with_protocol(FLASHBLOCKS_STREAM_PROTOCOL)
-                .with_known_peers(known_peers)
-                .with_port(self.0.specific.p2p_port)
-                .with_cancellation_token(cancel.clone())
-                .with_max_peer_count(self.0.specific.p2p_max_peer_count)
-                .try_build::<Message>()
-                .wrap_err("failed to build flashblocks p2p node")?;
+            let crate::p2p::NodeBuildResult { node, outgoing_message_tx, mut incoming_message_rxs } =
+                builder
+                    .with_agent_version(AGENT_VERSION.to_string())
+                    .with_protocol(FLASHBLOCKS_STREAM_PROTOCOL)
+                    .with_known_peers(known_peers)
+                    .with_port(self.0.specific.p2p_port)
+                    .with_cancellation_token(cancel.clone())
+                    .with_max_peer_count(self.0.specific.p2p_max_peer_count)
+                    .try_build::<Message>()
+                    .wrap_err("failed to build flashblocks p2p node")?;
             let multiaddrs = node.multiaddrs();
             ctx.task_executor().spawn(async move {
                 if let Err(e) = node.run().await {

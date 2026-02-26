@@ -121,7 +121,6 @@ impl LocalInstance {
                     .payload(P::new_service(builder_config)?),
             )
             .with_add_ons(addons)
-            .extend_rpc_modules(move |_ctx| Ok(()))
             .on_rpc_started(move |_, _| {
                 let _ = rpc_ready_tx.send(());
                 Ok(())

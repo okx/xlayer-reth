@@ -6,8 +6,8 @@ use reth_optimism_primitives::OpBlock;
 use serde::{Deserialize, Serialize};
 
 pub(super) const AGENT_VERSION: &str = "op-rbuilder/1.0.0";
-pub(super) const FLASHBLOCKS_STREAM_PROTOCOL: xlayer_builder_p2p::StreamProtocol =
-    xlayer_builder_p2p::StreamProtocol::new("/flashblocks/1.0.0");
+pub(super) const FLASHBLOCKS_STREAM_PROTOCOL: crate::p2p::StreamProtocol =
+    crate::p2p::StreamProtocol::new("/flashblocks/1.0.0");
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub(super) enum Message {
@@ -15,8 +15,8 @@ pub(super) enum Message {
     OpFlashblockPayload(OpFlashblockPayload),
 }
 
-impl xlayer_builder_p2p::Message for Message {
-    fn protocol(&self) -> xlayer_builder_p2p::StreamProtocol {
+impl crate::p2p::Message for Message {
+    fn protocol(&self) -> crate::p2p::StreamProtocol {
         FLASHBLOCKS_STREAM_PROTOCOL
     }
 }
