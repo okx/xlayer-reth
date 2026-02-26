@@ -5,9 +5,9 @@ use crate::{
         flashblocks::{
             builder_tx::{FlashblocksBuilderTx, FlashblocksNumberBuilderTx},
             cache::FlashblockPayloadsCache,
+            handler::PayloadHandler,
             p2p::{Message, AGENT_VERSION, FLASHBLOCKS_STREAM_PROTOCOL},
             payload::{FlashblocksExecutionInfo, FlashblocksExtraCtx},
-            payload_handler::PayloadHandler,
             wspub::WebSocketPublisher,
         },
         generator::BlockPayloadJobGenerator,

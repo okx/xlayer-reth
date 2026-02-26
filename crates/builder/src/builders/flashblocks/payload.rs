@@ -424,7 +424,7 @@ where
             ctx.metrics.flashblock_byte_size_histogram.record(flashblock_byte_size as f64);
 
             // For X Layer, full link monitoring support
-            crate::builders::flashblocks::monitor_xlayer::monitor(
+            crate::builders::flashblocks::monitor::monitor(
                 best_payload.0.block().header().number,
                 new_tx_hashes,
             );
@@ -743,7 +743,7 @@ where
                     .record(info.executed_transactions.len() as f64);
 
                 // For X Layer, full link monitoring support
-                crate::builders::flashblocks::monitor_xlayer::monitor(
+                crate::builders::flashblocks::monitor::monitor(
                     best_payload.0.block().header().number,
                     new_tx_hashes,
                 );
