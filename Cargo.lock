@@ -14137,6 +14137,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "clap",
+ "criterion",
  "ctor",
  "dashmap 6.1.0",
  "derive_more",

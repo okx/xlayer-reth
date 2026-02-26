@@ -1242,6 +1242,8 @@ fn resolve_zero_state_root(
     ctx: CalculateStateRootContext,
     state_provider: Box<dyn reth::providers::StateProvider>,
 ) -> Result<OpBuiltPayload, PayloadBuilderError> {
+    let resolve_start_time = Instant::now();
+
     let (state_root, trie_updates, hashed_state) =
         calculate_state_root_on_resolve(&ctx, state_provider)?;
 
@@ -1279,10 +1281,13 @@ fn resolve_zero_state_root(
             "Failed to send updated payload"
         );
     }
-    debug!(
+
+    let resolve_total_time = resolve_start_time.elapsed();
+    info!(
         target: "payload_builder",
         state_root = %state_root,
-        "Updated payload with calculated state root"
+        resolve_total_ms = resolve_total_time.as_millis(),
+        "resolve_zero_state_root completed"
     );
 
     Ok(updated_payload)
@@ -1293,8 +1298,13 @@ fn calculate_state_root_on_resolve(
     ctx: &CalculateStateRootContext,
     state_provider: Box<dyn reth::providers::StateProvider>,
 ) -> Result<(B256, TrieUpdates, HashedPostState), PayloadBuilderError> {
-    let state_root_start_time = Instant::now();
+    let total_start_time = Instant::now();
+
+    let hashed_state_start = Instant::now();
     let hashed_state = state_provider.hashed_post_state(&ctx.best_payload.1);
+    let hashed_state_time = hashed_state_start.elapsed();
+
+    let state_root_start = Instant::now();
     let state_root_updates =
         state_provider.state_root_with_updates(hashed_state.clone()).inspect_err(|err| {
             warn!(target: "payload_builder",
@@ -1303,10 +1313,20 @@ fn calculate_state_root_on_resolve(
                 "failed to calculate state root for payload"
             );
         })?;
+    let state_root_time = state_root_start.elapsed();
 
-    let state_root_calculation_time = state_root_start_time.elapsed();
-    ctx.metrics.state_root_calculation_duration.record(state_root_calculation_time);
-    ctx.metrics.state_root_calculation_gauge.set(state_root_calculation_time);
+    let total_time = total_start_time.elapsed();
+    info!(
+        target: "payload_builder",
+        hashed_state_ms = hashed_state_time.as_millis(),
+        state_root_ms = state_root_time.as_millis(),
+        total_ms = total_time.as_millis(),
+        state_root = %state_root_updates.0,
+        "calculate_state_root_on_resolve timing (cold)"
+    );
+
+    ctx.metrics.state_root_calculation_duration.record(total_time);
+    ctx.metrics.state_root_calculation_gauge.set(total_time);
 
     Ok((state_root_updates.0, state_root_updates.1, hashed_state))
 }

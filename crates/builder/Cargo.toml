@@ -159,7 +159,6 @@ macros = { path = "src/tests/framework/macros" }
 nanoid = { version = "0.4" }
 reth-ipc.workspace = true
 reth-optimism-rpc = { workspace = true, features = ["client"] }
-reth-trie-db = { workspace = true }
 rlimit = { version = "0.10" }
 
 [features]
