@@ -2,11 +2,10 @@ use std::str::FromStr;
 
 use alloy_consensus::SignableTransaction;
 use alloy_primitives::{Address, Signature, B256, U256};
-use k256::sha2::Sha256;
 use op_alloy_consensus::OpTypedTransaction;
 use reth_optimism_primitives::OpTransactionSigned;
 use reth_primitives::Recovered;
-use secp256k1::{rand::rngs::OsRng, Message, PublicKey, Secp256k1, SecretKey, SECP256K1};
+use secp256k1::{Message, PublicKey, SecretKey, SECP256K1};
 use sha3::{Digest, Keccak256};
 
 /// Simple struct to sign txs/messages.
@@ -70,21 +69,6 @@ impl FromStr for Signer {
     }
 }
 
-pub fn generate_signer() -> Signer {
-    let secp = Secp256k1::new();
-
-    // Generate cryptographically secure random private key
-    let private_key = SecretKey::new(&mut OsRng);
-
-    // Derive public key
-    let public_key = PublicKey::from_secret_key(&secp, &private_key);
-
-    // Derive Ethereum address
-    let address = public_key_to_address(&public_key);
-
-    Signer { address, pubkey: public_key, secret: private_key }
-}
-
 /// Converts a public key to an Ethereum address
 pub fn public_key_to_address(public_key: &PublicKey) -> Address {
     // Get uncompressed public key (65 bytes: 0x04 + 64 bytes)
@@ -97,28 +81,12 @@ pub fn public_key_to_address(public_key: &PublicKey) -> Address {
     Address::from_slice(&hash[12..32])
 }
 
-// Generate a key deterministically from a seed for debug and testing
-// Do not use in production
-pub fn generate_key_from_seed(seed: &str) -> Signer {
-    // Hash the seed
-    let mut hasher = Sha256::new();
-    hasher.update(seed.as_bytes());
-    let hash = hasher.finalize();
-
-    // Create signing key
-    let secp = Secp256k1::new();
-    let private_key = SecretKey::from_slice(&hash).expect("Failed to create private key");
-    let public_key = PublicKey::from_secret_key(&secp, &private_key);
-    let address = public_key_to_address(&public_key);
-
-    Signer { address, pubkey: public_key, secret: private_key }
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
     use alloy_consensus::{transaction::SignerRecoverable, TxEip1559};
     use alloy_primitives::{address, fixed_bytes, TxKind as TransactionKind};
+    use secp256k1::{rand::rngs::OsRng, Secp256k1};
     #[test]
     fn test_sign_transaction() {
         let secret =

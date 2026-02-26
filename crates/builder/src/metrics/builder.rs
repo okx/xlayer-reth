@@ -1,14 +1,12 @@
 use metrics::IntoF64;
 use reth_metrics::{
-    metrics::{gauge, Counter, Gauge, Histogram},
+    metrics::{Counter, Gauge, Histogram},
     Metrics,
 };
 
-use crate::args::OpRbuilderArgs;
-
-/// op-rbuilder metrics
+/// Builder metrics
 #[derive(Metrics, Clone)]
-#[metrics(scope = "op_rbuilder")]
+#[metrics(scope = "flashblock_builder")]
 pub struct BuilderMetrics {
     /// Block built success
     pub block_built_success: Counter,
@@ -120,10 +118,4 @@ impl BuilderMetrics {
         self.payload_num_tx_simulated_fail_gauge.set(num_txs_simulated_fail);
         self.payload_reverted_tx_gas_used.set(reverted_gas_used);
     }
-}
-
-/// Set gauge metrics for some flags so we can inspect which ones are set
-/// and which ones aren't.
-pub fn record_flag_gauge_metrics(builder_args: &OpRbuilderArgs) {
-    gauge!("op_rbuilder_flags_flashblocks_enabled").set(builder_args.flashblocks.enabled as i32);
 }

@@ -28,6 +28,7 @@ pub struct MockFbTransactionFactory {
 
 // === impl MockTransactionFactory ===
 
+#[allow(unused)]
 impl MockFbTransactionFactory {
     /// Generates a transaction ID for the given [`MockTransaction`].
     pub fn tx_id(&mut self, tx: &MockFbTransaction) -> TransactionId {
