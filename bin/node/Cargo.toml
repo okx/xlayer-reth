@@ -89,8 +89,8 @@ async-trait.workspace = true
 either.workspace = true
 
 [features]
-default = []
+default = ["edge"]
 jemalloc = ["reth-cli-util/jemalloc", "reth-optimism-cli/jemalloc"]
 jemalloc-prof = ["reth-cli-util/jemalloc-prof"]
 asm-keccak = ["alloy-primitives/asm-keccak"]
-edge = ["reth/edge"]
+edge = ["reth/edge", "reth-optimism-cli/edge"]
