@@ -151,8 +151,8 @@ async fn da_footprint_fills_to_limit(rbuilder: LocalInstance) -> eyre::Result<()
 
     // Verify the block fills up to the DA footprint limit
     // accounting for builder tx DA contribution
-    for i in 0..7 {
-        assert!(block.includes(&tx_hashes[i]), "tx {i} should be included in the block",);
+    for (i, tx_hash) in tx_hashes.iter().take(7).enumerate() {
+        assert!(block.includes(tx_hash), "tx {i} should be included in the block");
     }
 
     // Verify the last 2 txs don't fit due to DA footprint limit
