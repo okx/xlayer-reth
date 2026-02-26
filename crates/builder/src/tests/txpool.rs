@@ -11,6 +11,7 @@ use reth_optimism_chainspec::OpChainSpec;
     config = NodeConfig::<OpChainSpec> {
         txpool: TxPoolArgs {
             pending_max_count: 50,
+            max_account_slots: 50,
             ..Default::default()
         },
         ..default_node_config()
@@ -21,7 +22,7 @@ async fn pending_pool_limit(rbuilder: LocalInstance) -> eyre::Result<()> {
     let driver = rbuilder.driver().await?;
     let accounts = driver.fund_accounts(50, ONE_ETH).await?;
 
-    // Send 50 txs from different addrs
+    // Send 50 txs from a single account to fill the pool
     let acc_no_priority = accounts.first().unwrap();
     let acc_with_priority = accounts.last().unwrap();
 
