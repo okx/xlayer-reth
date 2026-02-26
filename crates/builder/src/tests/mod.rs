@@ -12,9 +12,6 @@ mod data_availability;
 mod miner_gas_limit;
 
 #[cfg(test)]
-mod revert;
-
-#[cfg(test)]
 mod smoke;
 
 #[cfg(test)]

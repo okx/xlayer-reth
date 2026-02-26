@@ -3,7 +3,7 @@ use crate::{
         cache::FlashblockPayloadsCache, ctx::OpPayloadSyncerCtx, p2p::Message,
         payload::FlashblocksExecutionInfo, wspub::WebSocketPublisher,
     },
-    primitives::reth::ExecutionInfo,
+    builders::flashblocks::execution::ExecutionInfo,
     traits::ClientBounds,
 };
 use alloy_evm::eth::receipt_builder::ReceiptBuilderCtx;

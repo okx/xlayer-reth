@@ -13986,7 +13986,6 @@ dependencies = [
  "alloy-rpc-types-beacon",
  "alloy-rpc-types-engine",
  "alloy-rpc-types-eth",
- "alloy-serde",
  "alloy-signer-local",
  "alloy-sol-types",
  "alloy-transport",
@@ -14085,6 +14084,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber 0.3.22",
+ "url",
  "xlayer-builder-p2p",
  "xlayer-trace-monitor",
 ]

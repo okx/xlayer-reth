@@ -41,7 +41,7 @@ use tracing::{debug, info, trace};
 
 use crate::{
     metrics::OpRBuilderMetrics,
-    primitives::reth::{ExecutionInfo, TxnExecutionResult},
+    builders::flashblocks::execution::{ExecutionInfo, TxnExecutionResult},
     traits::PayloadTxsBounds,
     tx_signer::Signer,
 };

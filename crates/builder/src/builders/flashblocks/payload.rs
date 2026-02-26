@@ -11,7 +11,7 @@ use crate::{
         BuilderConfig,
     },
     metrics::OpRBuilderMetrics,
-    primitives::reth::ExecutionInfo,
+    builders::flashblocks::execution::ExecutionInfo,
     tokio_metrics::FlashblocksTaskMetrics,
     traits::{ClientBounds, PoolBounds},
 };

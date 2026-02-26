@@ -30,7 +30,8 @@ use revm::{
 use tracing::{trace, warn};
 
 use crate::{
-    builders::context::OpPayloadBuilderCtx, primitives::reth::ExecutionInfo, tx_signer::Signer,
+    builders::{context::OpPayloadBuilderCtx, flashblocks::execution::ExecutionInfo},
+    tx_signer::Signer,
 };
 
 #[derive(Debug, Default)]

@@ -1,4 +1,3 @@
-use crate::tx::MaybeFlashblockFilter;
 use alloy_consensus::{
     error::ValueError, transaction::Recovered, EthereumTxEnvelope, TxEip4844, TxEip4844WithSidecar,
     TxType,
@@ -63,55 +62,23 @@ impl MockFbTransactionFactory {
 
     /// Creates a validated legacy [`MockTransaction`].
     pub fn create_legacy(&mut self) -> MockValidFbTx {
-        self.validated(MockFbTransaction {
-            inner: MockTransaction::legacy(),
-            reverted_hashes: None,
-            flashblock_number_max: None,
-            flashblock_number_min: None,
-        })
-    }
-
-    /// Creates a validated legacy [`MockTransaction`].
-    pub fn create_legacy_fb(&mut self, min: Option<u64>, max: Option<u64>) -> MockValidFbTx {
-        self.validated(MockFbTransaction {
-            inner: MockTransaction::legacy(),
-            reverted_hashes: None,
-            flashblock_number_max: max,
-            flashblock_number_min: min,
-        })
+        self.validated(MockFbTransaction { inner: MockTransaction::legacy() })
     }
 
     /// Creates a validated EIP-1559 [`MockTransaction`].
     pub fn create_eip1559(&mut self) -> MockValidFbTx {
-        self.validated(MockFbTransaction {
-            inner: MockTransaction::eip1559(),
-            reverted_hashes: None,
-            flashblock_number_max: None,
-            flashblock_number_min: None,
-        })
+        self.validated(MockFbTransaction { inner: MockTransaction::eip1559() })
     }
 
     /// Creates a validated EIP-4844 [`MockTransaction`].
     pub fn create_eip4844(&mut self) -> MockValidFbTx {
-        self.validated(MockFbTransaction {
-            inner: MockTransaction::eip4844(),
-            reverted_hashes: None,
-            flashblock_number_max: None,
-            flashblock_number_min: None,
-        })
+        self.validated(MockFbTransaction { inner: MockTransaction::eip4844() })
     }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct MockFbTransaction {
     pub inner: MockTransaction,
-    /// reverted hashes for the transaction. If the transaction is a bundle,
-    /// this is the list of hashes of the transactions that reverted. If the
-    /// transaction is not a bundle, this is `None`.
-    pub reverted_hashes: Option<Vec<B256>>,
-
-    pub flashblock_number_min: Option<u64>,
-    pub flashblock_number_max: Option<u64>,
 }
 
 /// A validated transaction in the transaction pool, using [`MockTransaction`] as the transaction
@@ -132,12 +99,7 @@ impl PoolTransaction for MockFbTransaction {
     }
 
     fn from_pooled(pooled: Recovered<Self::Pooled>) -> Self {
-        Self {
-            inner: pooled.into(),
-            reverted_hashes: None,
-            flashblock_number_min: None,
-            flashblock_number_max: None,
-        }
+        Self { inner: pooled.into() }
     }
 
     fn hash(&self) -> &TxHash {
@@ -387,22 +349,3 @@ impl EthPoolTransaction for MockFbTransaction {
 pub type PooledTransactionVariant =
     alloy_consensus::EthereumTxEnvelope<TxEip4844WithSidecar<BlobTransactionSidecarVariant>>;
 
-impl MaybeFlashblockFilter for MockFbTransaction {
-    fn with_flashblock_number_min(mut self, flashblock_number_min: Option<u64>) -> Self {
-        self.flashblock_number_min = flashblock_number_min;
-        self
-    }
-
-    fn with_flashblock_number_max(mut self, flashblock_number_max: Option<u64>) -> Self {
-        self.flashblock_number_max = flashblock_number_max;
-        self
-    }
-
-    fn flashblock_number_min(&self) -> Option<u64> {
-        self.flashblock_number_min
-    }
-
-    fn flashblock_number_max(&self) -> Option<u64> {
-        self.flashblock_number_max
-    }
-}

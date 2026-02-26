@@ -96,14 +96,6 @@ pub struct OpRBuilderMetrics {
     pub flashblocks_time_drift: Histogram,
     /// Time offset we used for first flashblock
     pub first_flashblock_time_offset: Histogram,
-    /// Number of requests sent to the eth_sendBundle endpoint
-    pub bundle_requests: Counter,
-    /// Number of valid bundles received at the eth_sendBundle endpoint
-    pub valid_bundles: Counter,
-    /// Number of bundles that failed to execute
-    pub failed_bundles: Counter,
-    /// Histogram of eth_sendBundle request duration
-    pub bundle_receive_duration: Histogram,
 }
 
 impl OpRBuilderMetrics {
@@ -134,6 +126,4 @@ impl OpRBuilderMetrics {
 /// and which ones aren't.
 pub fn record_flag_gauge_metrics(builder_args: &OpRbuilderArgs) {
     gauge!("op_rbuilder_flags_flashblocks_enabled").set(builder_args.flashblocks.enabled as i32);
-    gauge!("op_rbuilder_flags_enable_revert_protection")
-        .set(builder_args.enable_revert_protection as i32);
 }
