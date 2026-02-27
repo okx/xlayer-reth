@@ -101,14 +101,6 @@ pub struct FlashblocksArgs {
     )]
     pub flashblocks_disable_state_root: bool,
 
-    /// Whether to builder running with rollup boost
-    #[arg(
-        long = "flashblocks.disable-rollup-boost",
-        default_value = "false",
-        env = "FLASHBLOCK_DISABLE_ROLLUP_BOOST"
-    )]
-    pub flashblocks_disable_rollup_boost: bool,
-
     /// Whether to disable async state root calculation on full payload resolution
     #[arg(
         long = "flashblocks.disable-async-calculate-state-root",
