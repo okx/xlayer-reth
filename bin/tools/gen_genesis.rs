@@ -242,6 +242,7 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
             // Create the genesis account
             let genesis_account = GenesisAccount {
                 balance: account.balance,
+                // None omits the field from JSON, which is equivalent to nonce=0 for genesis parsers
                 nonce: if account.nonce > 0 { Some(account.nonce) } else { None },
                 code,
                 storage: if storage.is_empty() { None } else { Some(storage) },
