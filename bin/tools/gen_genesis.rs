@@ -34,6 +34,10 @@ use std::{
 };
 use tracing::{debug, info, warn};
 
+// The keccak256 of empty bytes is the well-known value 0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470.
+const EMPTY_CODE_HASH: B256 =
+    alloy_primitives::b256!("c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470");
+
 /// Generates a genesis file from an existing op-reth data directory.
 #[derive(Debug, Parser)]
 pub struct GenGenesisCommand<C: ChainSpecParser> {
@@ -302,8 +306,7 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
         };
 
         // Skip if it's the empty code hash (keccak256 of empty bytes)
-        let empty_code_hash: B256 = alloy_primitives::keccak256([]);
-        if hash == empty_code_hash {
+        if hash == EMPTY_CODE_HASH {
             return Ok(None);
         }
 
