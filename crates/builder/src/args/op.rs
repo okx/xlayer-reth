@@ -124,7 +124,7 @@ pub struct FlashblocksArgs {
     /// flashblock 2 (skipping 0 and 1).
     #[arg(
         long = "flashblocks.async-trie-precalc-start-flashblock",
-        default_value = "0",
+        default_value = "1",
         env = "FLASHBLOCKS_ASYNC_TRIE_PRECALC_START_FLASHBLOCK"
     )]
     pub flashblocks_async_trie_precalc_start_flashblock: u64,
@@ -172,21 +172,6 @@ pub struct FlashblocksArgs {
     )]
     pub ws_subscriber_limit: Option<u16>,
 
-    /// Whether to enable async trie precalculation for flashblocks
-    #[arg(
-        long = "flashblocks.enable-async-trie-precalc",
-        default_value = "false",
-        env = "FLASHBLOCKS_ENABLE_ASYNC_TRIE_PRECALC"
-    )]
-    pub enable_async_trie_precalc: bool,
-
-    /// The flashblock index at which to start async trie precalculation
-    #[arg(
-        long = "flashblocks.async-trie-precalc-start-flashblock",
-        default_value = "1",
-        env = "FLASHBLOCKS_ASYNC_TRIE_PRECALC_START_FLASHBLOCK"
-    )]
-    pub async_trie_precalc_start_flashblock: u64,
 }
 
 impl Default for FlashblocksArgs {

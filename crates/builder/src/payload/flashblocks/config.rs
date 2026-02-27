@@ -89,7 +89,7 @@ impl Default for FlashblocksConfig {
             p2p_process_full_payload: false,
             ws_subscriber_limit: None,
             enable_async_trie_precalc: false,
-            async_trie_precalc_start_flashblock: 0,
+            async_trie_precalc_start_flashblock: 1,
         }
     }
 }
