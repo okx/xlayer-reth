@@ -11,8 +11,10 @@ use tracing::{error, info};
 use xlayer_chainspec::XLayerChainSpecParser;
 
 mod export;
+mod gen_genesis;
 mod import;
 use export::ExportCommand;
+use gen_genesis::GenGenesisCommand;
 use import::ImportCommand;
 
 #[global_allocator]
@@ -33,6 +35,8 @@ enum Commands {
     Import(ImportCommand<XLayerChainSpecParser>),
     /// Export blocks to an RLP encoded file
     Export(ExportCommand<XLayerChainSpecParser>),
+    /// Generate a genesis file from an existing database
+    GenGenesis(GenGenesisCommand<XLayerChainSpecParser>),
 }
 
 #[tokio::main]
@@ -77,6 +81,17 @@ async fn main() -> ExitCode {
                 Ok(_) => ExitCode::SUCCESS,
                 Err(e) => {
                     error!(target: "xlayer::export", "Error: {:#?}", e);
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Commands::GenGenesis(cmd) => {
+            info!(target: "xlayer::gen_genesis", "XLayer Reth Genesis Generation starting");
+
+            match cmd.execute::<OpNode>().await {
+                Ok(_) => ExitCode::SUCCESS,
+                Err(e) => {
+                    error!(target: "xlayer::gen_genesis", "Error: {:#?}", e);
                     ExitCode::FAILURE
                 }
             }

@@ -84,6 +84,7 @@ reth-cli = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2
 reth-cli-commands = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-cli-util = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-db = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
+reth-db-api = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-engine-primitives = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-ethereum-forks = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-evm = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
@@ -93,6 +94,7 @@ reth-metrics = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb4
 reth-node-api = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-node-builder = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-node-core = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
+reth-node-types = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-optimism-chainspec = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-optimism-cli = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-optimism-consensus = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
