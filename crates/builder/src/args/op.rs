@@ -39,7 +39,7 @@ pub struct OpRbuilderArgs {
     #[arg(long = "builder.extra-block-deadline-secs", default_value = "20")]
     pub extra_block_deadline_secs: u64,
 
-    /// Path to builder playgorund to automatically start up the node connected to it
+    /// Path to builder playground to automatically start up the node connected to it
     #[arg(
         long = "builder.playground",
         num_args = 0..=1,
