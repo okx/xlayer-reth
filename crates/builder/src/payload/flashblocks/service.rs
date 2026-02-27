@@ -3,7 +3,7 @@ use super::{
     cache::FlashblockPayloadsCache,
     handler::PayloadHandler,
     p2p::{Message, AGENT_VERSION, FLASHBLOCKS_STREAM_PROTOCOL},
-    payload::{FlashblocksExecutionInfo, FlashblocksExtraCtx, OpPayloadBuilder},
+    payload::OpPayloadBuilder,
     wspub::WebSocketPublisher,
     FlashblocksConfig,
 };
@@ -36,12 +36,7 @@ impl FlashblocksServiceBuilder {
     where
         Node: NodeBounds,
         Pool: PoolBounds,
-        BuilderTx: BuilderTransactions<FlashblocksExtraCtx, FlashblocksExecutionInfo>
-            + Unpin
-            + Clone
-            + Send
-            + Sync
-            + 'static,
+        BuilderTx: BuilderTransactions + Unpin + Clone + Send + Sync + 'static,
     {
         // TODO: is there a different global token?
         // this is effectively unused right now due to the usage of reth's `task_executor`.
