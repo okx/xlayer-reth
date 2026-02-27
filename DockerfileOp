@@ -9,6 +9,8 @@ RUN apt-get update && apt-get -y upgrade && apt-get install -y libclang-dev pkg-
 # Builds a cargo-chef plan
 FROM chef AS planner
 COPY . .
+# Remove test-only workspace members that are excluded from the Docker context
+RUN sed -i '/"crates\/tests"/d' Cargo.toml
 RUN cargo chef prepare --recipe-path recipe.json --bin xlayer-reth-node
 
 FROM chef AS builder
@@ -35,6 +37,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo chef cook --profile $BUILD_PROFILE --features "$FEATURES" --recipe-path recipe.json --manifest-path /app/bin/node/Cargo.toml
 
 COPY . .
+# Remove test-only workspace members that are excluded from the Docker context
+RUN sed -i '/"crates\/tests"/d' Cargo.toml
 RUN if [ -d .cargo/reth ]; then \
         mv .cargo/reth /reth; \
     else \

@@ -2,7 +2,7 @@
 target/
 
 # Git
-.git/
+#.git/
 .gitignore
 
 # IDE & System
@@ -19,12 +19,8 @@ Dockerfile*
 docs/
 
 # Tests – exclude test sources but keep manifests/stubs needed by cargo
-crates/tests/e2e-tests/
-crates/tests/flashblocks-tests/
-crates/tests/operations/
-crates/builder/src/tests/
-!crates/builder/src/tests/framework/macros/Cargo.toml
-!crates/builder/src/tests/framework/macros/src/lib.rs
+crates/tests/
+tests/
 
 # Build outputs
 dist/
