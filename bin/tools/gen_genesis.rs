@@ -233,8 +233,8 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
             let storage = self.read_account_storage(tx, address)?;
 
             // Get bytecode if the account has code
-            let code = if account.bytecode_hash.is_some() {
-                self.read_account_bytecode(tx, account.bytecode_hash)?
+            let code = if let Some(hash) = account.bytecode_hash {
+                self.read_account_bytecode(tx, hash)?
             } else {
                 None
             };
@@ -299,12 +299,8 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
     fn read_account_bytecode<TX: DbTx>(
         &self,
         tx: &TX,
-        bytecode_hash: Option<B256>,
+        hash: B256,
     ) -> Result<Option<Bytes>> {
-        let Some(hash) = bytecode_hash else {
-            return Ok(None);
-        };
-
         // Skip if it's the empty code hash (keccak256 of empty bytes)
         if hash == EMPTY_CODE_HASH {
             return Ok(None);

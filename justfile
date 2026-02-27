@@ -420,7 +420,7 @@ build-docker-tools suffix="" git_sha="" git_timestamp="":
     #!/usr/bin/env bash
     set -e
     # Only clean .cargo in production mode, preserve it for dev builds
-    if [ "{{suffix}}" != "dev" ]; then
+    if [ "{{suffix}}" != "dev" ] && [ -d .cargo ]; then
         rm -rf .cargo
     fi
     GITHASH=$(git rev-parse --short HEAD)
