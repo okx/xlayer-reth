@@ -2,7 +2,7 @@ use crate::{
     payload::{
         flashblocks::{
             cache::FlashblockPayloadsCache, context::FlashblockHandlerContext, p2p::Message,
-            payload::FlashblocksExecutionInfo, wspub::WebSocketPublisher,
+            wspub::WebSocketPublisher,
         },
         utils::execution::ExecutionInfo,
     },
@@ -335,6 +335,7 @@ where
         &mut state,
         &builder_ctx,
         &mut info,
+        None,
         true,
     )
     .wrap_err("failed to build flashblock")?;
@@ -360,7 +361,7 @@ where
 #[allow(clippy::too_many_arguments)]
 fn execute_transactions(
     ctx: &FlashblockHandlerContext,
-    info: &mut ExecutionInfo<FlashblocksExecutionInfo>,
+    info: &mut ExecutionInfo,
     state: &mut State<impl alloy_evm::Database>,
     txs: Vec<op_alloy_consensus::OpTxEnvelope>,
     gas_limit: u64,

@@ -87,7 +87,6 @@ impl FlashblockHandlerContext {
             cancel,
             builder_signer: None,
             metrics: self.metrics,
-            extra_ctx: (),
             max_gas_per_txn: self.max_gas_per_txn,
         }
     }
