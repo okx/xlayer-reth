@@ -130,12 +130,7 @@ impl FlashblocksState {
             target_gas_for_batch,
             target_da_for_batch,
             target_da_footprint_for_batch,
-            target_flashblock_count: self.target_flashblock_count,
-            gas_per_batch: self.gas_per_batch,
-            da_per_batch: self.da_per_batch,
-            da_footprint_per_batch: self.da_footprint_per_batch,
-            disable_state_root: self.disable_state_root,
-            last_flashblock_tx_index: self.last_flashblock_tx_index,
+            ..*self
         }
     }
 
