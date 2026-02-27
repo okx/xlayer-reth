@@ -15,7 +15,7 @@ where
     node: Node,
     flashblock_rx: FlashBlockRx,
     ws_pub: Arc<WebSocketPublisher>,
-    has_flashblocks_url: bool,
+    relay_flashblocks: bool,
 }
 
 impl<Node> FlashblocksService<Node>
@@ -26,7 +26,7 @@ where
         node: Node,
         flashblock_rx: FlashBlockRx,
         args: FlashblocksArgs,
-        has_flashblocks_url: bool,
+        relay_flashblocks: bool,
     ) -> Result<Self, eyre::Report> {
         let ws_addr = SocketAddr::new(args.flashblocks_addr.parse()?, args.flashblocks_port);
 
@@ -44,14 +44,14 @@ where
 
         info!(target: "flashblocks", "WebSocket publisher initialized at {}", ws_addr);
 
-        Ok(Self { node, flashblock_rx, ws_pub, has_flashblocks_url })
+        Ok(Self { node, flashblock_rx, ws_pub, relay_flashblocks })
     }
 
     pub fn spawn(mut self) {
         debug!(target: "flashblocks", "Initializing flashblocks service");
 
         let task_executor = self.node.task_executor().clone();
-        if self.has_flashblocks_url {
+        if self.relay_flashblocks {
             task_executor.spawn_critical(
                 "xlayer-flashblocks-service",
                 Box::pin(async move {
