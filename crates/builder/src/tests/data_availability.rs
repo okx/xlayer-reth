@@ -81,8 +81,8 @@ async fn block_fill(rbuilder: LocalInstance) -> eyre::Result<()> {
 
     assert!(!block.includes(unfit_tx_4.tx_hash()), "unfit tx should not be in block");
     assert!(
-        driver.latest_full().await?.transactions.len() == 5,
-        "builder + deposit + 3 valid txs should be in the block"
+        driver.latest_full().await?.transactions.len() == 4,
+        "builder + deposit + 2 valid txs should be in the block"
     );
 
     Ok(())
