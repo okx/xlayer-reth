@@ -28,6 +28,8 @@ COPY --from=planner /app/recipe.json recipe.json
 COPY --from=planner /app/.cargo /app/.cargo
 # Copy /reth from planner (will be empty dir in prod mode, reth source in dev mode)
 COPY --from=planner /reth /reth
+# Copy path dependencies 
+COPY --from=planner /app/deps /app/deps
 
 ARG BUILD_PROFILE=release
 ENV BUILD_PROFILE=$BUILD_PROFILE
