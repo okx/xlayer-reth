@@ -1,15 +1,10 @@
-use core::{
-    convert::{Infallible, TryFrom},
-    fmt::Debug,
-    time::Duration,
-};
+use core::{convert::TryFrom, fmt::Debug, time::Duration};
 use reth_node_builder::components::PayloadServiceBuilder;
 use reth_optimism_evm::OpEvmConfig;
 use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
 
 use crate::{
     args::OpRbuilderArgs,
-    flashtestations::args::FlashtestationsArgs,
     gas_limiter::args::GasLimiterArgs,
     traits::{NodeBounds, PoolBounds},
     tx_signer::Signer,
@@ -19,7 +14,6 @@ mod builder_tx;
 mod context;
 mod flashblocks;
 mod generator;
-mod standard;
 
 pub use builder_tx::{
     get_balance, get_nonce, BuilderTransactionCtx, BuilderTransactionError, BuilderTransactions,
@@ -27,19 +21,6 @@ pub use builder_tx::{
 };
 pub use context::OpPayloadBuilderCtx;
 pub use flashblocks::{FlashblocksBuilder, FlashblocksServiceBuilder, WebSocketPublisher};
-pub use standard::StandardBuilder;
-
-/// Defines the payload building mode for the OP builder.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum BuilderMode {
-    /// Uses the plain OP payload builder that produces blocks every chain blocktime.
-    #[default]
-    Standard,
-    /// Uses the flashblocks payload builder that progressively builds chunks of a
-    /// block every short interval and makes it available through a websocket update
-    /// then merges them into a full block every chain block time.
-    Flashblocks,
-}
 
 /// Defines the interface for any block builder implementation API entry point.
 ///
@@ -80,10 +61,6 @@ pub struct BuilderConfig<Specific: Clone> {
     /// if they revert. They may still be included in the block if individual transactions
     /// opt-out of revert protection.
     pub revert_protection: bool,
-
-    /// When enabled, this will invoke the flashtestions workflow. This involves a
-    /// bootstrapping step that generates a new pubkey for the TEE service
-    pub flashtestations_config: FlashtestationsArgs,
 
     /// The interval at which blocks are added to the chain.
     /// This is also the frequency at which the builder will be receiving FCU requests from the
@@ -139,7 +116,6 @@ impl<S: Debug + Clone> core::fmt::Debug for BuilderConfig<S> {
                 },
             )
             .field("revert_protection", &self.revert_protection)
-            .field("flashtestations", &self.flashtestations_config)
             .field("block_time", &self.block_time)
             .field("block_time_leeway", &self.block_time_leeway)
             .field("da_config", &self.da_config)
@@ -157,7 +133,6 @@ impl<S: Default + Clone> Default for BuilderConfig<S> {
         Self {
             builder_signer: None,
             revert_protection: false,
-            flashtestations_config: FlashtestationsArgs::default(),
             block_time: Duration::from_secs(2),
             block_time_leeway: Duration::from_millis(500),
             da_config: OpDAConfig::default(),
@@ -180,7 +155,6 @@ where
         Ok(Self {
             builder_signer: args.builder_signer,
             revert_protection: args.enable_revert_protection,
-            flashtestations_config: args.flashtestations.clone(),
             block_time: Duration::from_millis(args.chain_block_time),
             block_time_leeway: Duration::from_secs(args.extra_block_deadline_secs),
             da_config: Default::default(),
@@ -190,14 +164,5 @@ where
             gas_limiter_config: args.gas_limiter.clone(),
             specific: S::try_from(args)?,
         })
-    }
-}
-
-#[expect(clippy::infallible_try_from)]
-impl TryFrom<OpRbuilderArgs> for () {
-    type Error = Infallible;
-
-    fn try_from(_: OpRbuilderArgs) -> Result<Self, Self::Error> {
-        Ok(())
     }
 }

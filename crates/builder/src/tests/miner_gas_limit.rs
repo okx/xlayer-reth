@@ -3,7 +3,7 @@ use crate::{
     tests::{BlockTransactionsExt, LocalInstance},
 };
 use alloy_provider::Provider;
-use macros::{if_flashblocks, if_standard, rb_test};
+use macros::rb_test;
 
 /// This test ensures that the miner gas limit is respected
 /// We will set the limit to 60,000 and see that the builder will not include any transactions
@@ -28,8 +28,7 @@ async fn miner_gas_limit(rbuilder: LocalInstance) -> eyre::Result<()> {
 /// We will set our limit to 1Mgas and ensure that throttling occurs
 /// There is a deposit transaction for 182,706 gas, and builder transactions are 21,600 gas
 ///
-/// Standard = (785,000 - 182,706 - 21,600) / 53,000 = 10.95 = 10 transactions can fit
-/// Flashblocks = (785,000 - 182,706 - 21,600 - 21,600) / 53,000 = 10.54 = 10 transactions can fit
+/// (785,000 - 182,706 - 21,600 - 21,600) / 53,000 = 10.54 = 10 transactions can fit
 #[rb_test(args = OpRbuilderArgs {
     flashblocks: FlashblocksArgs {
         enabled: true,
@@ -56,7 +55,7 @@ async fn block_fill(rbuilder: LocalInstance) -> eyre::Result<()> {
             .with_max_priority_fee_per_gas(100)
             .send()
             .await?;
-        tx_hashes.push(tx.tx_hash().clone());
+        tx_hashes.push(*tx.tx_hash());
     }
     let unfit_tx = driver
         .create_transaction()
@@ -72,21 +71,12 @@ async fn block_fill(rbuilder: LocalInstance) -> eyre::Result<()> {
     }
     assert!(!block.includes(unfit_tx.tx_hash()), "unfit tx should not be in block");
 
-    if_standard! {
-        assert_eq!(
-            block.transactions.len(),
-            12,
-            "deposit + builder + 15 valid txs should be in the block"
-        );
-    }
-
-    if_flashblocks! {
-        assert_eq!(
-            block.transactions.len(),
-            13,
-            "deposit + builder + 15 valid txs should be in the block"
-        );
-    }
+    // deposit + 2 builder txs + 10 user txs
+    assert_eq!(
+        block.transactions.len(),
+        13,
+        "deposit + 2 builder txs + 10 valid txs should be in the block"
+    );
 
     Ok(())
 }

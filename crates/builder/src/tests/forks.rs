@@ -4,7 +4,7 @@ use crate::{
 };
 use alloy_eips::{eip1559::MIN_PROTOCOL_BASE_FEE, BlockNumberOrTag::Latest, Encodable2718};
 use alloy_primitives::bytes;
-use macros::{if_flashblocks, if_standard, rb_test};
+use macros::rb_test;
 use std::time::Duration;
 
 #[rb_test(args = OpRbuilderArgs {
@@ -30,14 +30,7 @@ async fn jovian_block_parameters_set(rbuilder: LocalInstance) -> eyre::Result<()
     assert!(block.header.blob_gas_used.is_some());
 
     // Two user transactions + two builder transactions, all minimum size
-    if_flashblocks! {
-        assert_eq!(block.header.blob_gas_used.unwrap(), 160_000);
-    }
-
-    // Two user transactions + one builder transactions, all minimum size
-    if_standard! {
-        assert_eq!(block.header.blob_gas_used.unwrap(), 120_000);
-    }
+    assert_eq!(block.header.blob_gas_used.unwrap(), 160_000);
 
     // Version byte
     assert_eq!(block.header.extra_data.slice(0..1), bytes!("0x01"));
@@ -54,17 +47,9 @@ async fn jovian_no_tx_pool_sync(rbuilder: LocalInstance) -> eyre::Result<()> {
     let block =
         driver.build_new_block_with_txs_timestamp(vec![], Some(true), None, None, Some(0)).await?;
 
-    // Deposit transaction + user transaction
-    if_flashblocks! {
-        assert_eq!(block.transactions.len(), 1);
-        assert_eq!(block.header.blob_gas_used, Some(0));
-    }
-
-    // Standard includes a builder transaction when no-tx-pool is set
-    if_standard! {
-        assert_eq!(block.transactions.len(), 2);
-        assert_eq!(block.header.blob_gas_used, Some(40_000));
-    }
+    // Deposit transaction only (no builder tx in no-tx-pool mode for flashblocks)
+    assert_eq!(block.transactions.len(), 1);
+    assert_eq!(block.header.blob_gas_used, Some(0));
 
     let tx = driver.create_transaction().build().await;
     let block = driver
@@ -78,16 +63,8 @@ async fn jovian_no_tx_pool_sync(rbuilder: LocalInstance) -> eyre::Result<()> {
         .await?;
 
     // Deposit transaction + user transaction
-    if_flashblocks! {
-        assert_eq!(block.transactions.len(), 2);
-        assert_eq!(block.header.blob_gas_used, Some(40_000));
-    }
-
-    // Standard includes a builder transaction when no-tx-pool is set
-    if_standard! {
-        assert_eq!(block.transactions.len(), 3);
-        assert_eq!(block.header.blob_gas_used, Some(80_000));
-    }
+    assert_eq!(block.transactions.len(), 2);
+    assert_eq!(block.header.blob_gas_used, Some(40_000));
 
     Ok(())
 }

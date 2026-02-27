@@ -32,9 +32,6 @@ pub struct FlashblocksConfig {
     /// If set a builder tx will be added to the start of every flashblock instead of the regular builder tx.
     pub number_contract_address: Option<Address>,
 
-    /// whether to use permit signatures for the contract calls
-    pub number_contract_use_permit: bool,
-
     /// Offset in milliseconds for when to send flashblocks.
     /// Positive values send late, negative values send early.
     pub send_offset_ms: i64,
@@ -77,7 +74,6 @@ impl Default for FlashblocksConfig {
             disable_rollup_boost: false,
             disable_async_calculate_state_root: false,
             number_contract_address: None,
-            number_contract_use_permit: false,
             send_offset_ms: 0,
             end_buffer_ms: 0,
             p2p_enabled: false,
@@ -112,8 +108,6 @@ impl TryFrom<OpRbuilderArgs> for FlashblocksConfig {
 
         let number_contract_address = args.flashblocks.flashblocks_number_contract_address;
 
-        let number_contract_use_permit = args.flashblocks.flashblocks_number_contract_use_permit;
-
         Ok(Self {
             ws_addr,
             interval,
@@ -121,7 +115,6 @@ impl TryFrom<OpRbuilderArgs> for FlashblocksConfig {
             disable_rollup_boost,
             disable_async_calculate_state_root,
             number_contract_address,
-            number_contract_use_permit,
             send_offset_ms: args.flashblocks.flashblocks_send_offset_ms,
             end_buffer_ms: args.flashblocks.flashblocks_end_buffer_ms,
             p2p_enabled: args.flashblocks.p2p.p2p_enabled,

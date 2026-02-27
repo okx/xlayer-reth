@@ -17,7 +17,7 @@ use crate::{
     traits::{ClientBounds, PoolBounds},
 };
 use alloy_consensus::{
-    constants::EMPTY_WITHDRAWALS, proofs, BlockBody, Header, EMPTY_OMMER_ROOT_HASH,
+    constants::EMPTY_WITHDRAWALS, proofs, BlockBody, Header, TxReceipt, EMPTY_OMMER_ROOT_HASH,
 };
 use alloy_eips::{eip7685::EMPTY_REQUESTS_HASH, merge::BEACON_NONCE, Encodable2718};
 use alloy_evm::block::BlockExecutionResult;
@@ -43,8 +43,7 @@ use reth_payload_primitives::BuiltPayload;
 use reth_payload_util::BestPayloadTransactions;
 use reth_primitives_traits::RecoveredBlock;
 use reth_provider::{
-    ExecutionOutcome, HashedPostStateProvider, ProviderError, StateRootProvider,
-    StorageRootProvider,
+    HashedPostStateProvider, ProviderError, StateRootProvider, StorageRootProvider,
 };
 use reth_revm::{
     database::StateProviderDatabase,
@@ -629,7 +628,7 @@ where
             gas_used = info.cumulative_gas_used,
             target_da = target_da_for_batch,
             da_used = info.cumulative_da_bytes_used,
-            block_gas_used = ctx.block_gas_limit(),
+            block_gas_limit = ctx.block_gas_limit(),
             target_da_footprint = target_da_footprint_for_batch,
             "Building flashblock",
         );
@@ -967,36 +966,12 @@ where
         ));
     }
 
-    let execution_outcome = ExecutionOutcome::new(
-        state.bundle_state.clone(),
-        vec![info.receipts.clone()],
-        block_number,
-        vec![],
+    let receipts_root = calculate_receipt_root_no_memo_optimism(
+        &info.receipts,
+        &ctx.chain_spec,
+        ctx.attributes().timestamp(),
     );
-
-    let receipts_root = execution_outcome
-        .generic_receipts_root_slow(block_number, |receipts| {
-            calculate_receipt_root_no_memo_optimism(
-                receipts,
-                &ctx.chain_spec,
-                ctx.attributes().timestamp(),
-            )
-        })
-        .ok_or_else(|| {
-            PayloadBuilderError::Other(
-                eyre::eyre!(
-                    "receipts and block number not in range, block number {}",
-                    block_number
-                )
-                .into(),
-            )
-        })?;
-    let logs_bloom = execution_outcome.block_logs_bloom(block_number).ok_or_else(|| {
-        PayloadBuilderError::Other(
-            eyre::eyre!("logs bloom and block number not in range, block number {}", block_number)
-                .into(),
-        )
-    })?;
+    let logs_bloom = alloy_primitives::logs_bloom(info.receipts.iter().flat_map(|r| r.logs()));
 
     // TODO: maybe recreate state with bundle in here
     // calculate the state root
@@ -1007,7 +982,7 @@ where
 
     if calculate_state_root {
         let state_provider = state.database.as_ref();
-        hashed_state = state_provider.hashed_post_state(execution_outcome.state());
+        hashed_state = state_provider.hashed_post_state(&state.bundle_state);
         (state_root, trie_output) = {
             state.database.as_ref().state_root_with_updates(hashed_state.clone()).inspect_err(
                 |err| {
@@ -1033,7 +1008,7 @@ where
             // withdrawals root field in block header is used for storage root of L2 predeploy
             // `l2tol1-message-passer`
             Some(
-                isthmus::withdrawals_root(execution_outcome.state(), state.database.as_ref())
+                isthmus::withdrawals_root(&state.bundle_state, state.database.as_ref())
                     .map_err(PayloadBuilderError::other)?,
             )
         } else if ctx.chain_spec.is_canyon_active_at_timestamp(ctx.attributes().timestamp()) {
@@ -1048,9 +1023,17 @@ where
     let (excess_blob_gas, blob_gas_used) = ctx.blob_fields(info);
     let extra_data = ctx.extra_data()?;
 
-    // Create BlockExecutionOutput for BuiltPayloadExecutedBlock
+    // need to read balances before take_bundle() below
+    let new_account_balances = state
+        .bundle_state
+        .state
+        .iter()
+        .filter_map(|(address, account)| account.info.as_ref().map(|info| (*address, info.balance)))
+        .collect::<BTreeMap<Address, U256>>();
+
+    let bundle_state = state.take_bundle();
     let execution_output = BlockExecutionOutput {
-        state: state.bundle_state.clone(),
+        state: bundle_state.clone(),
         result: BlockExecutionResult {
             receipts: info.receipts.clone(),
             requests: Default::default(),
@@ -1123,7 +1106,7 @@ where
     let new_transactions = info.executed_transactions[info.extra.last_flashblock_index..].to_vec();
 
     let new_transactions_encoded =
-        new_transactions.clone().into_iter().map(|tx| tx.encoded_2718().into()).collect::<Vec<_>>();
+        new_transactions.iter().map(|tx| tx.encoded_2718().into()).collect::<Vec<_>>();
 
     // For X Layer, monitoring logs
     let new_tx_hashes = new_transactions.iter().map(|tx| tx.tx_hash()).collect::<Vec<_>>();
@@ -1135,13 +1118,6 @@ where
         .zip(new_receipts.iter())
         .map(|(tx, receipt)| (tx.tx_hash(), convert_receipt(receipt)))
         .collect::<BTreeMap<B256, op_alloy_consensus::OpReceipt>>();
-    let new_account_balances = state
-        .bundle_state
-        .state
-        .iter()
-        .filter_map(|(address, account)| account.info.as_ref().map(|info| (*address, info.balance)))
-        .collect::<BTreeMap<Address, U256>>();
-
     let metadata = OpFlashblockPayloadMetadata {
         receipts: receipts_with_hash,
         new_account_balances,
@@ -1187,8 +1163,7 @@ where
         metadata,
     };
 
-    // We clean bundle and place initial state transaction back
-    let bundle_state = state.take_bundle();
+    // Place initial state transaction back
     state.transition_state = untouched_transition_state;
 
     Ok((
