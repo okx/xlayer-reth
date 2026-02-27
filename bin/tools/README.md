@@ -201,7 +201,7 @@ Example output:
 
 ```
 INFO xlayer::import: XLayer Reth Import starting
-INFO reth::cli: reth v1.9.2 starting
+INFO reth::cli: xlayer-reth-tools (v0.1.0-abcdef1) starting
 INFO reth::cli: Importing blockchain from file: /path/to/blocks.rlp
 INFO reth::cli: Import complete! Imported 1000/1000 blocks, 50000/50000 transactions
 ```
@@ -407,7 +407,7 @@ Example output:
 
 ```
 INFO xlayer::export: XLayer Reth Export starting
-INFO reth::cli: reth v1.9.2 starting
+INFO reth::cli: xlayer-reth-tools (v0.1.0-abcdef1) starting
 INFO reth::cli: Exporting blockchain to file: /backups/blocks.rlp.gz
 INFO reth::cli: Exporting blocks 0 to 10000 (10001 blocks total)
 INFO reth::cli: Using gzip compression
@@ -633,7 +633,7 @@ Example output:
 
 ```
 INFO xlayer::gen_genesis: XLayer Reth Genesis Generation starting
-INFO reth::cli: reth v1.9.2 starting
+INFO reth::cli: xlayer-reth-tools (v0.1.0-abcdef1) starting
 INFO reth::cli: Generating genesis from database
 INFO reth::cli: Template genesis: /path/to/template-genesis.json
 INFO reth::cli: Output: /output/new-genesis.json

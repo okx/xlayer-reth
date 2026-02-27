@@ -95,6 +95,15 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
             );
         }
 
+        // Setup interrupt handler before opening the DB so Ctrl+C is caught immediately
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_clone = Arc::clone(&shutdown);
+        ctrlc::set_handler(move || {
+            warn!(target: "reth::cli", "Received interrupt signal, shutting down gracefully...");
+            shutdown_clone.store(true, Ordering::SeqCst);
+        })
+        .wrap_err("Failed to set interrupt handler")?;
+
         // Initialize the environment (opens the database in read-only mode)
         let Environment { provider_factory, .. } = self.env.init::<N>(AccessRights::RO)?;
 
@@ -116,15 +125,6 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
             "Genesis block number (latest + 1): {}",
             genesis_block_number
         );
-
-        // Setup interrupt handler
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let shutdown_clone = Arc::clone(&shutdown);
-        ctrlc::set_handler(move || {
-            warn!(target: "reth::cli", "Received interrupt signal, shutting down gracefully...");
-            shutdown_clone.store(true, Ordering::SeqCst);
-        })
-        .wrap_err("Failed to set interrupt handler")?;
 
         // Read all accounts from the database
         let tx = provider.tx_ref();
@@ -313,7 +313,7 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
         if let Some(bytecode) = tx.get::<tables::Bytecodes>(hash)? {
             Ok(Some(bytecode.original_bytes()))
         } else {
-            debug!(target: "reth::cli", "Bytecode not found for hash: {:?}", hash);
+            warn!(target: "reth::cli", "Bytecode not found for hash {:?} - database may be corrupted", hash);
             Ok(None)
         }
     }
