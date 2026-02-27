@@ -18,7 +18,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone)]
-pub(super) struct OpPayloadSyncerCtx {
+pub(super) struct FlashblockHandlerContext {
     /// The type that knows how to perform system calls and configure the evm.
     evm_config: OpEvmConfig,
     /// The DA config for the payload builder
@@ -31,7 +31,7 @@ pub(super) struct OpPayloadSyncerCtx {
     metrics: Arc<BuilderMetrics>,
 }
 
-impl OpPayloadSyncerCtx {
+impl FlashblockHandlerContext {
     pub(super) fn new<Client>(
         client: &Client,
         builder_config: BuilderConfig<FlashblocksConfig>,

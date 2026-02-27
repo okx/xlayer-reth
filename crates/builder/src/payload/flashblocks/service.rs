@@ -147,7 +147,7 @@ impl FlashblocksServiceBuilder {
         let (payload_service, payload_builder_handle) =
             PayloadBuilderService::new(payload_generator, ctx.provider().canonical_state_stream());
 
-        let syncer_ctx = super::ctx::OpPayloadSyncerCtx::new(
+        let handler_ctx = super::context::FlashblockHandlerContext::new(
             &ctx.provider().clone(),
             self.0.clone(),
             OpEvmConfig::optimism(ctx.chain_spec()),
@@ -156,6 +156,7 @@ impl FlashblocksServiceBuilder {
         .wrap_err("failed to create flashblocks payload builder context")?;
 
         let payload_handler = PayloadHandler::new(
+            handler_ctx,
             built_fb_payload_rx,
             built_payload_rx,
             incoming_message_rx,
@@ -163,7 +164,6 @@ impl FlashblocksServiceBuilder {
             payload_service.payload_events_handle(),
             p2p_cache.clone(),
             ws_pub.clone(),
-            syncer_ctx,
             ctx.provider().clone(),
             ctx.task_executor().clone(),
             cancel,

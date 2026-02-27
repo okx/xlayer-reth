@@ -1,7 +1,7 @@
 use crate::{
     payload::{
         flashblocks::{
-            cache::FlashblockPayloadsCache, ctx::OpPayloadSyncerCtx, p2p::Message,
+            cache::FlashblockPayloadsCache, context::FlashblockHandlerContext, p2p::Message,
             payload::FlashblocksExecutionInfo, wspub::WebSocketPublisher,
         },
         utils::execution::ExecutionInfo,
@@ -37,6 +37,8 @@ use tracing::warn;
 /// In the case of a payload built by this node, it is broadcast to peers and an event is sent to the payload builder.
 /// In the case of a payload received from a peer, it is executed and if successful, an event is sent to the payload builder.
 pub(crate) struct PayloadHandler<Client, Tasks> {
+    // handler context for external flashblock execution
+    ctx: FlashblockHandlerContext,
     // receives new flashblock payloads built by this builder.
     built_fb_payload_rx: mpsc::Receiver<OpFlashblockPayload>,
     // receives new full block payloads built by this builder.
@@ -51,8 +53,6 @@ pub(crate) struct PayloadHandler<Client, Tasks> {
     p2p_cache: FlashblockPayloadsCache,
     // websocket publisher for broadcasting flashblocks to all connected subscribers.
     ws_pub: Arc<WebSocketPublisher>,
-    // context required for execution of blocks during syncing
-    ctx: OpPayloadSyncerCtx,
     // chain client
     client: Client,
     // task executor
@@ -69,6 +69,7 @@ where
 {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
+        ctx: FlashblockHandlerContext,
         built_fb_payload_rx: mpsc::Receiver<OpFlashblockPayload>,
         built_payload_rx: mpsc::Receiver<OpBuiltPayload>,
         p2p_rx: mpsc::Receiver<Message>,
@@ -76,7 +77,6 @@ where
         payload_events_handle: tokio::sync::broadcast::Sender<Events<OpEngineTypes>>,
         p2p_cache: FlashblockPayloadsCache,
         ws_pub: Arc<WebSocketPublisher>,
-        ctx: OpPayloadSyncerCtx,
         client: Client,
         task_executor: Tasks,
         cancel: tokio_util::sync::CancellationToken,
@@ -202,7 +202,7 @@ where
 
 fn execute_built_payload<Client>(
     payload: OpBuiltPayload,
-    ctx: OpPayloadSyncerCtx,
+    ctx: FlashblockHandlerContext,
     client: Client,
     cancel: tokio_util::sync::CancellationToken,
 ) -> eyre::Result<(OpBuiltPayload, OpFlashblockPayload)>
@@ -359,7 +359,7 @@ where
 
 #[allow(clippy::too_many_arguments)]
 fn execute_transactions(
-    ctx: &OpPayloadSyncerCtx,
+    ctx: &FlashblockHandlerContext,
     info: &mut ExecutionInfo<FlashblocksExecutionInfo>,
     state: &mut State<impl alloy_evm::Database>,
     txs: Vec<op_alloy_consensus::OpTxEnvelope>,
@@ -440,7 +440,7 @@ fn execute_transactions(
 }
 
 fn build_receipt<E: alloy_evm::Evm>(
-    ctx: &OpPayloadSyncerCtx,
+    ctx: &FlashblockHandlerContext,
     receipt_ctx: ReceiptBuilderCtx<'_, OpTransactionSigned, E>,
     deposit_nonce: Option<u64>,
     timestamp: u64,
