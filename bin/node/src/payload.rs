@@ -6,7 +6,7 @@ use reth_optimism_node::node::OpPayloadBuilder;
 use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
 use xlayer_builder::{
     args::OpRbuilderArgs,
-    builders::{BuilderConfig, FlashblocksServiceBuilder},
+    payload::{BuilderConfig, FlashblocksServiceBuilder},
     traits::{NodeBounds, PoolBounds},
 };
 

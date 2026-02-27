@@ -1,14 +1,12 @@
 use crate::{
     args::OpRbuilderArgs,
-    builders::{BuilderConfig, FlashblocksBuilder, PayloadBuilder},
-    primitives::reth::engine_api_builder::OpEngineApiBuilder,
-    revert_protection::{EthApiExtServer, RevertProtectionExt},
+    payload::{BuilderConfig, FlashblocksBuilder, PayloadBuilder},
     tests::{
-        builder_signer, create_test_db, framework::driver::ChainDriver, EngineApi, Ipc,
-        TransactionPoolObserver,
+        builder_signer, create_test_db,
+        framework::{driver::ChainDriver, engine_api_builder::OpEngineApiBuilder},
+        EngineApi, Ipc, TransactionPoolObserver,
     },
-    tx::FBPooledTransaction,
-    tx_signer::Signer,
+    tx::signer::Signer,
 };
 use alloy_primitives::B256;
 use alloy_provider::{Identity, ProviderBuilder, RootProvider};
@@ -40,6 +38,7 @@ use reth_optimism_node::{
     OpNode,
 };
 use reth_optimism_rpc::OpEthApiBuilder;
+use reth_optimism_txpool::OpPooledTransaction;
 use reth_transaction_pool::{AllTransactionsEvents, TransactionPool};
 use std::{
     sync::{Arc, LazyLock},
@@ -88,7 +87,7 @@ impl LocalInstance {
 
         let (rpc_ready_tx, rpc_ready_rx) = oneshot::channel::<()>();
         let (txpool_ready_tx, txpool_ready_rx) =
-            oneshot::channel::<AllTransactionsEvents<FBPooledTransaction>>();
+            oneshot::channel::<AllTransactionsEvents<OpPooledTransaction>>();
 
         let signer = args.builder_signer.unwrap_or(builder_signer());
         args.builder_signer = Some(signer);
@@ -122,24 +121,6 @@ impl LocalInstance {
                     .payload(P::new_service(builder_config)?),
             )
             .with_add_ons(addons)
-            .extend_rpc_modules(move |ctx| {
-                if args.enable_revert_protection {
-                    tracing::info!("Revert protection enabled");
-
-                    let pool = ctx.pool().clone();
-                    let provider = ctx.provider().clone();
-                    let revert_protection_ext = RevertProtectionExt::new(
-                        pool,
-                        provider,
-                        ctx.registry.eth_api().clone(),
-                        reverted_cache,
-                    );
-
-                    ctx.modules.add_or_replace_configured(revert_protection_ext.into_rpc())?;
-                }
-
-                Ok(())
-            })
             .on_rpc_started(move |_, _| {
                 let _ = rpc_ready_tx.send(());
                 Ok(())
@@ -310,14 +291,10 @@ fn task_manager() -> Runtime {
     Runtime::test_with_handle(tokio::runtime::Handle::current())
 }
 
-fn pool_component(args: &OpRbuilderArgs) -> OpPoolBuilder<FBPooledTransaction> {
+fn pool_component(args: &OpRbuilderArgs) -> OpPoolBuilder {
     let rollup_args = &args.rollup_args;
-    OpPoolBuilder::<FBPooledTransaction>::default()
-        .with_enable_tx_conditional(
-            // Revert protection uses the same internal pool logic as conditional transactions
-            // to garbage collect transactions out of the bundle range.
-            rollup_args.enable_tx_conditional || args.enable_revert_protection,
-        )
+    OpPoolBuilder::default()
+        .with_enable_tx_conditional(rollup_args.enable_tx_conditional)
         .with_supervisor(rollup_args.supervisor_http.clone(), rollup_args.supervisor_safety_level)
 }
 

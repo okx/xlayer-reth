@@ -1,9 +1,4 @@
-use crate::{
-    primitives::bundle::{Bundle, BundleResult},
-    tests::funded_signer,
-    tx::FBPooledTransaction,
-    tx_signer::Signer,
-};
+use crate::{tests::funded_signer, tx::signer::Signer};
 use alloy_consensus::TxEip1559;
 use alloy_eips::{eip2718::Encodable2718, BlockNumberOrTag};
 use alloy_primitives::{hex, Address, Bytes, TxHash, TxKind, B256, U256};
@@ -14,6 +9,7 @@ use futures::StreamExt;
 use moka::future::Cache;
 use op_alloy_consensus::{OpTxEnvelope, OpTypedTransaction};
 use op_alloy_network::Optimism;
+use reth_optimism_txpool::OpPooledTransaction;
 use reth_primitives::Recovered;
 use reth_transaction_pool::{AllTransactionsEvents, FullTransactionEvent, TransactionEvent};
 use std::{collections::VecDeque, sync::Arc};
@@ -22,48 +18,6 @@ use tracing::debug;
 
 use alloy_eips::eip1559::MIN_PROTOCOL_BASE_FEE;
 
-#[derive(Clone, Copy, Default)]
-pub struct BundleOpts {
-    block_number_min: Option<u64>,
-    block_number_max: Option<u64>,
-    flashblock_number_min: Option<u64>,
-    flashblock_number_max: Option<u64>,
-    min_timestamp: Option<u64>,
-    max_timestamp: Option<u64>,
-}
-
-impl BundleOpts {
-    pub fn with_block_number_min(mut self, block_number_min: u64) -> Self {
-        self.block_number_min = Some(block_number_min);
-        self
-    }
-
-    pub fn with_block_number_max(mut self, block_number_max: u64) -> Self {
-        self.block_number_max = Some(block_number_max);
-        self
-    }
-
-    pub fn with_flashblock_number_min(mut self, flashblock_number_min: u64) -> Self {
-        self.flashblock_number_min = Some(flashblock_number_min);
-        self
-    }
-
-    pub fn with_flashblock_number_max(mut self, flashblock_number_max: u64) -> Self {
-        self.flashblock_number_max = Some(flashblock_number_max);
-        self
-    }
-
-    pub fn with_min_timestamp(mut self, min_timestamp: u64) -> Self {
-        self.min_timestamp = Some(min_timestamp);
-        self
-    }
-
-    pub fn with_max_timestamp(mut self, max_timestamp: u64) -> Self {
-        self.max_timestamp = Some(max_timestamp);
-        self
-    }
-}
-
 #[derive(Clone)]
 pub struct TransactionBuilder {
     provider: RootProvider<Optimism>,
@@ -71,8 +25,6 @@ pub struct TransactionBuilder {
     nonce: Option<u64>,
     base_fee: Option<u128>,
     tx: TxEip1559,
-    bundle_opts: Option<BundleOpts>,
-    with_reverted_hash: bool,
 }
 
 impl TransactionBuilder {
@@ -83,8 +35,6 @@ impl TransactionBuilder {
             nonce: None,
             base_fee: None,
             tx: TxEip1559 { chain_id: 901, gas_limit: 210000, ..Default::default() },
-            bundle_opts: None,
-            with_reverted_hash: false,
         }
     }
 
@@ -138,16 +88,6 @@ impl TransactionBuilder {
         self
     }
 
-    pub fn with_bundle(mut self, bundle_opts: BundleOpts) -> Self {
-        self.bundle_opts = Some(bundle_opts);
-        self
-    }
-
-    pub fn with_reverted_hash(mut self) -> Self {
-        self.with_reverted_hash = true;
-        self
-    }
-
     pub fn with_revert(mut self) -> Self {
         self.tx.input = hex!("60006000fd").into();
         self
@@ -193,32 +133,9 @@ impl TransactionBuilder {
     }
 
     pub async fn send(self) -> eyre::Result<PendingTransactionBuilder<Optimism>> {
-        let with_reverted_hash = self.with_reverted_hash;
-        let bundle_opts = self.bundle_opts;
         let provider = self.provider.clone();
         let transaction = self.build().await;
-        let txn_hash = transaction.tx_hash();
         let transaction_encoded = transaction.encoded_2718();
-
-        if let Some(bundle_opts) = bundle_opts {
-            // Send the transaction as a bundle with the bundle options
-            let bundle = Bundle {
-                transactions: vec![transaction_encoded.into()],
-                reverting_hashes: if with_reverted_hash { Some(vec![txn_hash]) } else { None },
-                block_number_min: bundle_opts.block_number_min,
-                block_number_max: bundle_opts.block_number_max,
-                flashblock_number_min: bundle_opts.flashblock_number_min,
-                flashblock_number_max: bundle_opts.flashblock_number_max,
-                min_timestamp: bundle_opts.min_timestamp,
-                max_timestamp: bundle_opts.max_timestamp,
-            };
-
-            let result: BundleResult =
-                provider.client().request("eth_sendBundle", (bundle,)).await?;
-
-            return Ok(PendingTransactionBuilder::new(provider.root().clone(), result.bundle_hash));
-        }
-
         Ok(provider.send_raw_transaction(transaction_encoded.as_slice()).await?)
     }
 }
@@ -245,7 +162,7 @@ impl Drop for TransactionPoolObserver {
 
 impl TransactionPoolObserver {
     pub fn new(
-        stream: AllTransactionsEvents<FBPooledTransaction>,
+        stream: AllTransactionsEvents<OpPooledTransaction>,
         reverts: Cache<B256, ()>,
     ) -> Self {
         let mut stream = stream;

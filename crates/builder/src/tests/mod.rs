@@ -1,6 +1,9 @@
 // base
 mod framework;
+pub mod utils;
+
 pub use framework::*;
+pub use utils::*;
 
 #[cfg(test)]
 mod flashblocks;
@@ -10,12 +13,6 @@ mod data_availability;
 
 #[cfg(test)]
 mod miner_gas_limit;
-
-#[cfg(test)]
-mod gas_limiter;
-
-#[cfg(test)]
-mod revert;
 
 #[cfg(test)]
 mod smoke;

@@ -9,25 +9,12 @@ RUN apt-get update && apt-get -y upgrade && apt-get install -y libclang-dev pkg-
 # Builds a cargo-chef plan
 FROM chef AS planner
 COPY . .
-# For dev builds: move .cargo/reth to /reth (same level as /app, not nested)
-# This avoids nested workspace issues. Create empty /reth if not dev mode.
-RUN if [ -d .cargo/reth ]; then \
-        mv .cargo/reth /reth; \
-    else \
-        mkdir -p /reth; \
-    fi
-# Temporarily disable .cargo/config.toml during cargo chef prepare
-# to avoid path conflicts (it will be restored and copied to builder stage)
-RUN if [ -f .cargo/config.toml ]; then mv .cargo/config.toml .cargo/config.toml.bak; fi
-RUN mkdir -p .cargo
-RUN cargo chef prepare --recipe-path recipe.json
-RUN if [ -f .cargo/config.toml.bak ]; then mv .cargo/config.toml.bak .cargo/config.toml; fi
+# Remove test-only workspace members that are excluded from the Docker context
+RUN sed -i '/"crates\/tests"/d' Cargo.toml
+RUN cargo chef prepare --recipe-path recipe.json --bin xlayer-reth-node
 
 FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
-COPY --from=planner /app/.cargo /app/.cargo
-# Copy /reth from planner (will be empty dir in prod mode, reth source in dev mode)
-COPY --from=planner /reth /reth
 
 ARG BUILD_PROFILE=release
 ENV BUILD_PROFILE=$BUILD_PROFILE
@@ -42,17 +29,28 @@ ENV FEATURES=$FEATURES
 ARG VERGEN_GIT_SHA
 ARG VERGEN_GIT_COMMIT_TIMESTAMP
 
-RUN if [ -n "$VERGEN_GIT_SHA" ]; then export VERGEN_GIT_SHA="$VERGEN_GIT_SHA"; fi && \
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    if [ -n "$VERGEN_GIT_SHA" ]; then export VERGEN_GIT_SHA="$VERGEN_GIT_SHA"; fi && \
     if [ -n "$VERGEN_GIT_COMMIT_TIMESTAMP" ]; then export VERGEN_GIT_COMMIT_TIMESTAMP="$VERGEN_GIT_COMMIT_TIMESTAMP"; fi && \
     cargo chef cook --profile $BUILD_PROFILE --features "$FEATURES" --recipe-path recipe.json --manifest-path /app/bin/node/Cargo.toml
 
 COPY . .
-RUN if [ -n "$VERGEN_GIT_SHA" ]; then export VERGEN_GIT_SHA="$VERGEN_GIT_SHA"; fi && \
+# Remove test-only workspace members that are excluded from the Docker context
+RUN sed -i '/"crates\/tests"/d' Cargo.toml
+RUN if [ -d .cargo/reth ]; then \
+        mv .cargo/reth /reth; \
+    else \
+        mkdir -p /reth; \
+    fi
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    if [ -n "$VERGEN_GIT_SHA" ]; then export VERGEN_GIT_SHA="$VERGEN_GIT_SHA"; fi && \
     if [ -n "$VERGEN_GIT_COMMIT_TIMESTAMP" ]; then export VERGEN_GIT_COMMIT_TIMESTAMP="$VERGEN_GIT_COMMIT_TIMESTAMP"; fi && \
-    cargo build --profile $BUILD_PROFILE --bin xlayer-reth-node --manifest-path /app/bin/node/Cargo.toml
-
-# Copy binary to a fixed location
-RUN OUTPUT_DIR=$(if [ "$BUILD_PROFILE" = "dev" ] || [ "$BUILD_PROFILE" = "test" ]; then echo debug; else echo "$BUILD_PROFILE"; fi) && \
+    cargo build --profile $BUILD_PROFILE --features "$FEATURES" --bin xlayer-reth-node --manifest-path /app/bin/node/Cargo.toml && \
+    OUTPUT_DIR=$(if [ "$BUILD_PROFILE" = "dev" ] || [ "$BUILD_PROFILE" = "test" ]; then echo debug; else echo "$BUILD_PROFILE"; fi) && \
     cp /app/target/$OUTPUT_DIR/xlayer-reth-node /app/op-reth
 
 FROM ubuntu:24.04 AS runtime

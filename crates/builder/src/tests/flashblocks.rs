@@ -10,7 +10,7 @@ use crate::{
     args::{FlashblocksArgs, OpRbuilderArgs},
     tests::{
         count_txs_to, flashblocks_number_contract::FlashblocksNumber, BlockTransactionsExt,
-        BundleOpts, ChainDriver, LocalInstance, TransactionBuilderExt, FLASHBLOCKS_NUMBER_ADDRESS,
+        ChainDriver, LocalInstance, TransactionBuilderExt, FLASHBLOCKS_NUMBER_ADDRESS,
     },
 };
 
@@ -52,7 +52,6 @@ async fn test_flashblocks_no_state_root_calculation(rbuilder: LocalInstance) -> 
 
 #[rb_test(args = OpRbuilderArgs {
     chain_block_time: 1000,
-    enable_revert_protection: true,
     flashblocks: FlashblocksArgs {
         flashblocks_number_contract_address: Some(FLASHBLOCKS_NUMBER_ADDRESS),
         ..Default::default()
@@ -65,12 +64,7 @@ async fn test_flashblocks_number_contract_builder_tx(rbuilder: LocalInstance) ->
     let provider = rbuilder.provider().await?;
 
     // Deploy flashblocks number contract which will be in flashblocks 1
-    let deploy_tx = driver
-        .create_transaction()
-        .deploy_flashblock_number_contract()
-        .with_bundle(BundleOpts::default())
-        .send()
-        .await?;
+    let deploy_tx = driver.create_transaction().deploy_flashblock_number_contract().send().await?;
 
     // Create valid transactions
     let user_transactions = create_flashblock_transactions(&driver, 2..5).await?;
@@ -108,7 +102,6 @@ async fn test_flashblocks_number_contract_builder_tx(rbuilder: LocalInstance) ->
         .create_transaction()
         .init_flashblock_number_contract(true)
         .with_to(FLASHBLOCKS_NUMBER_ADDRESS)
-        .with_bundle(BundleOpts::default())
         .send()
         .await?;
 
@@ -180,12 +173,7 @@ async fn create_flashblock_transactions(
 ) -> eyre::Result<Vec<TxHash>> {
     let mut txs = Vec::new();
     for _ in range {
-        let tx = driver
-            .create_transaction()
-            .random_valid_transfer()
-            .with_bundle(BundleOpts::default())
-            .send()
-            .await?;
+        let tx = driver.create_transaction().random_valid_transfer().send().await?;
         txs.push(*tx.tx_hash());
     }
     Ok(txs)

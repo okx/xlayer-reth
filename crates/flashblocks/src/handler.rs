@@ -4,8 +4,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{debug, info, trace, warn};
 use xlayer_builder::{
-    args::OpRbuilderArgs, builders::WebSocketPublisher, metrics::OpRBuilderMetrics,
-    tokio_metrics::FlashblocksTaskMetrics,
+    args::OpRbuilderArgs, metrics::tokio::FlashblocksTaskMetrics, metrics::BuilderMetrics,
+    payload::WebSocketPublisher,
 };
 
 pub struct FlashblocksService<Node>
@@ -32,7 +32,7 @@ where
             op_args.flashblocks.flashblocks_port,
         );
 
-        let metrics = Arc::new(OpRBuilderMetrics::default());
+        let metrics = Arc::new(BuilderMetrics::default());
         let task_metrics = Arc::new(FlashblocksTaskMetrics::new());
         let ws_pub = Arc::new(
             WebSocketPublisher::new(

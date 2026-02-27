@@ -1,0 +1,148 @@
+use core::{convert::TryFrom, fmt::Debug, time::Duration};
+use reth_node_builder::components::PayloadServiceBuilder;
+use reth_optimism_evm::OpEvmConfig;
+use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
+
+use crate::{
+    args::OpRbuilderArgs,
+    traits::{NodeBounds, PoolBounds},
+    tx::signer::Signer,
+};
+
+mod builder_tx;
+mod context;
+mod flashblocks;
+mod generator;
+pub(crate) mod utils;
+
+pub use builder_tx::{
+    get_balance, get_nonce, BuilderTransactionCtx, BuilderTransactionError, BuilderTransactions,
+    InvalidContractDataError, SimulationSuccessResult,
+};
+pub use context::OpPayloadBuilderCtx;
+pub use flashblocks::{FlashblocksBuilder, FlashblocksServiceBuilder, WebSocketPublisher};
+
+/// Defines the interface for any block builder implementation API entry point.
+///
+/// Instances of this trait are used during Reth node construction as an argument
+/// to the `NodeBuilder::with_components` method to construct the payload builder
+/// service that gets called whenver the current node is asked to build a block.
+pub trait PayloadBuilder: Send + Sync + 'static {
+    /// The type that has an implementation specific variant of the Config<T> struct.
+    /// This is used to configure the payload builder service during startup.
+    type Config: TryFrom<OpRbuilderArgs, Error: Debug> + Clone + Debug + Send + Sync + 'static;
+
+    /// The type that is used to instantiate the payload builder service
+    /// that will be used by reth to build blocks whenever the node is
+    /// asked to do so.
+    type ServiceBuilder<Node, Pool>: PayloadServiceBuilder<Node, Pool, OpEvmConfig>
+    where
+        Node: NodeBounds,
+        Pool: PoolBounds;
+
+    /// Called during node startup by reth. Returns a [`PayloadBuilderService`] instance
+    /// that is preloaded with a [`PayloadJobGenerator`] instance specific to the builder
+    /// type.
+    fn new_service<Node, Pool>(
+        config: BuilderConfig<Self::Config>,
+    ) -> eyre::Result<Self::ServiceBuilder<Node, Pool>>
+    where
+        Node: NodeBounds,
+        Pool: PoolBounds;
+}
+
+/// Configuration values that are applicable to any type of block builder.
+#[derive(Clone)]
+pub struct BuilderConfig<Specific: Clone> {
+    /// Secret key of the builder that is used to sign the end of block transaction.
+    pub builder_signer: Option<Signer>,
+
+    /// The interval at which blocks are added to the chain.
+    /// This is also the frequency at which the builder will be receiving FCU requests from the
+    /// sequencer.
+    pub block_time: Duration,
+
+    /// Data Availability configuration for the OP builder
+    /// Defines constraints for the maximum size of data availability transactions.
+    pub da_config: OpDAConfig,
+
+    /// Gas limit configuration for the payload builder
+    pub gas_limit_config: OpGasLimitConfig,
+
+    // The deadline is critical for payload availability. If we reach the deadline,
+    // the payload job stops and cannot be queried again. With tight deadlines close
+    // to the block number, we risk reaching the deadline before the node queries the payload.
+    //
+    // Adding 0.5 seconds as wiggle room since block times are shorter here.
+    // TODO: A better long-term solution would be to implement cancellation logic
+    // that cancels existing jobs when receiving new block building requests.
+    //
+    // When batcher's max channel duration is big enough (e.g. 10m), the
+    // sequencer would send an avalanche of FCUs/getBlockByNumber on
+    // each batcher update (with 10m channel it's ~800 FCUs at once).
+    // At such moment it can happen that the time b/w FCU and ensuing
+    // getPayload would be on the scale of ~2.5s. Therefore we should
+    // "remember" the payloads long enough to accommodate this corner-case
+    // (without it we are losing blocks). Postponing the deadline for 5s
+    // (not just 0.5s) because of that.
+    pub block_time_leeway: Duration,
+
+    /// Configuration values that are specific to the block builder implementation used.
+    pub specific: Specific,
+
+    /// Maximum gas a transaction can use before being excluded.
+    pub max_gas_per_txn: Option<u64>,
+}
+
+impl<S: Debug + Clone> core::fmt::Debug for BuilderConfig<S> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Config")
+            .field(
+                "builder_signer",
+                &match self.builder_signer.as_ref() {
+                    Some(signer) => signer.address.to_string(),
+                    None => "None".into(),
+                },
+            )
+            .field("block_time", &self.block_time)
+            .field("block_time_leeway", &self.block_time_leeway)
+            .field("da_config", &self.da_config)
+            .field("gas_limit_config", &self.gas_limit_config)
+            .field("specific", &self.specific)
+            .field("max_gas_per_txn", &self.max_gas_per_txn)
+            .finish()
+    }
+}
+
+impl<S: Default + Clone> Default for BuilderConfig<S> {
+    fn default() -> Self {
+        Self {
+            builder_signer: None,
+            block_time: Duration::from_secs(2),
+            block_time_leeway: Duration::from_millis(500),
+            da_config: OpDAConfig::default(),
+            gas_limit_config: OpGasLimitConfig::default(),
+            specific: S::default(),
+            max_gas_per_txn: None,
+        }
+    }
+}
+
+impl<S> TryFrom<OpRbuilderArgs> for BuilderConfig<S>
+where
+    S: TryFrom<OpRbuilderArgs, Error: Debug> + Clone,
+{
+    type Error = S::Error;
+
+    fn try_from(args: OpRbuilderArgs) -> Result<Self, Self::Error> {
+        Ok(Self {
+            builder_signer: args.builder_signer,
+            block_time: Duration::from_millis(args.chain_block_time),
+            block_time_leeway: Duration::from_secs(args.extra_block_deadline_secs),
+            da_config: Default::default(),
+            gas_limit_config: Default::default(),
+            max_gas_per_txn: args.max_gas_per_txn,
+            specific: S::try_from(args)?,
+        })
+    }
+}
