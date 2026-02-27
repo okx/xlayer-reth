@@ -6,18 +6,9 @@ LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
 
 RUN apt-get update && apt-get -y upgrade && apt-get install -y libclang-dev pkg-config
 
-# Builds a cargo-chef plan (manifest-only)
+# Builds a cargo-chef plan
 FROM chef AS planner
-COPY Cargo.toml Cargo.lock rust-toolchain* ./
-COPY bin/node/Cargo.toml bin/node/Cargo.toml
-COPY bin/tools/Cargo.toml bin/tools/Cargo.toml
-COPY --parents crates/*/Cargo.toml ./
-COPY crates/builder/src/tests/framework/macros/Cargo.toml crates/builder/src/tests/framework/macros/Cargo.toml
-COPY --parents crates/*/src/lib.rs ./
-COPY crates/tests/lib.rs crates/tests/lib.rs
-COPY crates/builder/src/tests/framework/macros/src/lib.rs crates/builder/src/tests/framework/macros/src/lib.rs
-COPY bin/node/src/main.rs bin/node/src/main.rs
-COPY bin/tools/main.rs bin/tools/main.rs
+COPY . .
 RUN cargo chef prepare --recipe-path recipe.json --bin xlayer-reth-node
 
 FROM chef AS builder

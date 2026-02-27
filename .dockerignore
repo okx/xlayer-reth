@@ -18,8 +18,13 @@ Dockerfile*
 *.md
 docs/
 
-# Tests
-tests/
+# Tests – exclude test sources but keep manifests/stubs needed by cargo
+crates/tests/e2e-tests/
+crates/tests/flashblocks-tests/
+crates/tests/operations/
+crates/builder/src/tests/
+!crates/builder/src/tests/framework/macros/Cargo.toml
+!crates/builder/src/tests/framework/macros/src/lib.rs
 
 # Build outputs
 dist/
