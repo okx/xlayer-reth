@@ -128,7 +128,7 @@ fn main() {
                             let service = FlashblocksService::new(
                                 ctx.node().clone(),
                                 flashblock_rx,
-                                args.xlayer_args.builder.clone(),
+                                args.xlayer_args.builder.flashblocks,
                                 args.rollup_args.flashblocks_url.is_some(),
                             )?;
                             service.spawn();

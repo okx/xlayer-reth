@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{debug, info, trace, warn};
 use xlayer_builder::{
-    args::BuilderArgs, metrics::tokio::FlashblocksTaskMetrics, metrics::BuilderMetrics,
+    args::FlashblocksArgs, metrics::tokio::FlashblocksTaskMetrics, metrics::BuilderMetrics,
     payload::WebSocketPublisher,
 };
 
@@ -25,13 +25,10 @@ where
     pub fn new(
         node: Node,
         flashblock_rx: FlashBlockRx,
-        op_args: BuilderArgs,
+        args: FlashblocksArgs,
         has_flashblocks_url: bool,
     ) -> Result<Self, eyre::Report> {
-        let ws_addr = SocketAddr::new(
-            op_args.flashblocks.flashblocks_addr.parse()?,
-            op_args.flashblocks.flashblocks_port,
-        );
+        let ws_addr = SocketAddr::new(args.flashblocks_addr.parse()?, args.flashblocks_port);
 
         let metrics = Arc::new(BuilderMetrics::default());
         let task_metrics = Arc::new(FlashblocksTaskMetrics::new());
@@ -40,7 +37,7 @@ where
                 ws_addr,
                 metrics,
                 &task_metrics.websocket_publisher,
-                op_args.flashblocks.ws_subscriber_limit,
+                args.ws_subscriber_limit,
             )
             .map_err(|e| eyre::eyre!("Failed to create WebSocket publisher: {e}"))?,
         );

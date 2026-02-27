@@ -509,7 +509,7 @@ where
         let da_footprint_per_batch =
             info.da_footprint_scalar.map(|_| ctx.block_gas_limit() / target_flashblocks);
 
-        fb_state = FlashblocksState::new(target_flashblocks, disable_state_root).with_batch_limits(
+        fb_state = fb_state.with_batch_limits(
             gas_per_batch,
             da_per_batch,
             da_footprint_per_batch,
@@ -517,8 +517,11 @@ where
             da_per_batch,
             da_footprint_per_batch,
         );
-        // Advance past the fallback block (index 0) to start the flashblock loop at index 1
-        fb_state = fb_state.next(gas_per_batch, da_per_batch, da_footprint_per_batch);
+        fb_state = FlashblocksState {
+            flashblock_index: 1,
+            target_flashblock_count: target_flashblocks,
+            ..fb_state
+        };
 
         let fb_cancel = block_cancel.child_token();
         let mut ctx = self
