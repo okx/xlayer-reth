@@ -51,7 +51,11 @@ use reth_revm::{
     State,
 };
 use reth_transaction_pool::TransactionPool;
-use reth_trie::{updates::TrieUpdates, HashedPostState, TrieInput};
+use reth_trie::{
+    prefix_set::{PrefixSetMut, TriePrefixSetsMut},
+    updates::TrieUpdates,
+    HashedPostState, Nibbles, TrieInput,
+};
 use revm::Database;
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use tokio::sync::mpsc;
@@ -144,6 +148,9 @@ struct TriePrecalcResult {
     flashblock_index: u64,
     /// The computed trie updates that can seed the next incremental calculation.
     trie_updates: Arc<TrieUpdates>,
+    /// The hashed post state at the time of precalculation, used to compute
+    /// delta prefix sets on resolve (only the diff since this state needs recomputation).
+    hashed_state: HashedPostState,
 }
 
 /// Work item sent from the main flashblock loop to the background trie worker.
@@ -696,6 +703,7 @@ where
                                 flashblock_index = fb_index,
                                 "Async trie precalc worker disconnected"
                             );
+                            precalc_pipeline = None;
                         }
                     }
                 }
@@ -1350,79 +1358,6 @@ where
     ))
 }
 
-/// Runs the async trie precalculation worker in a blocking context.
-///
-/// Processes work items sequentially, maintaining an incremental trie update chain.
-/// The first item does a full `state_root_with_updates`, subsequent items use
-/// `state_root_from_nodes_with_updates` with the previous result's cached trie nodes.
-fn run_trie_precalc_worker(
-    work_rx: std::sync::mpsc::Receiver<TriePrecalcWorkItem>,
-    result_tx: std::sync::mpsc::SyncSender<TriePrecalcResult>,
-    state_provider: Box<dyn reth::providers::StateProvider>,
-    metrics: Arc<OpRBuilderMetrics>,
-) {
-    let mut prev_trie_updates: Option<Arc<TrieUpdates>> = None;
-
-    while let Ok(work_item) = work_rx.recv() {
-        let start_time = Instant::now();
-
-        let hashed_state = state_provider.hashed_post_state(&work_item.bundle_state);
-
-        let result = if let Some(prev_trie) = &prev_trie_updates {
-            // Incremental path: reuse cached trie nodes from previous flashblock
-            let trie_input = TrieInput::new(
-                prev_trie.as_ref().clone(),
-                hashed_state.clone(),
-                hashed_state.construct_prefix_sets(),
-            );
-            state_provider.state_root_from_nodes_with_updates(trie_input)
-        } else {
-            // First calculation: full trie computation
-            state_provider.state_root_with_updates(hashed_state)
-        };
-
-        match result {
-            Ok((state_root, trie_output)) => {
-                let trie_updates = Arc::new(trie_output);
-                prev_trie_updates = Some(trie_updates.clone());
-
-                let elapsed = start_time.elapsed();
-                info!(
-                    target: "payload_builder",
-                    flashblock_index = work_item.flashblock_index,
-                    state_root = %state_root,
-                    duration_ms = elapsed.as_millis(),
-                    "Async trie precalculation completed"
-                );
-                metrics.state_root_calculation_duration.record(elapsed);
-
-                if result_tx
-                    .send(TriePrecalcResult {
-                        flashblock_index: work_item.flashblock_index,
-                        trie_updates,
-                    })
-                    .is_err()
-                {
-                    // Main loop dropped the receiver — stop worker
-                    break;
-                }
-            }
-            Err(err) => {
-                warn!(
-                    target: "payload_builder",
-                    flashblock_index = work_item.flashblock_index,
-                    error = %err,
-                    "Async trie precalculation failed, resetting chain"
-                );
-                // Reset chain: next item will do a full calculation
-                prev_trie_updates = None;
-            }
-        }
-    }
-
-    debug!(target: "payload_builder", "Trie precalc worker exiting");
-}
-
 struct CalculateStateRootContext {
     best_payload: (OpBuiltPayload, BundleState),
     parent_hash: BlockHash,
@@ -1489,7 +1424,8 @@ fn resolve_zero_state_root(
 /// Calculates only the state root for an existing payload.
 ///
 /// If `precalc_result` is available, uses incremental `state_root_from_nodes_with_updates`
-/// seeded by the precalculated trie updates. Otherwise falls back to a cold full calculation.
+/// seeded by the precalculated trie updates with delta prefix sets (only paths that changed
+/// since the precalc flashblock). Otherwise falls back to a cold full calculation.
 fn calculate_state_root_on_resolve(
     ctx: &CalculateStateRootContext,
     state_provider: Box<dyn reth::providers::StateProvider>,
@@ -1505,16 +1441,23 @@ fn calculate_state_root_on_resolve(
     let state_root_start = Instant::now();
     let (state_root, trie_updates) = if let Some(precalc) = precalc_result {
         // Incremental path: use precalculated trie from background worker
+        // with delta prefix sets — only recompute paths that changed since precalc
+        let delta_prefix_sets = compute_delta_prefix_sets(&precalc.hashed_state, &hashed_state);
+
         info!(
             target: "payload_builder",
             precalc_flashblock = precalc.flashblock_index,
-            "Using precalculated trie for resolve"
+            full_account_count = hashed_state.accounts.len(),
+            delta_account_count = delta_prefix_sets.account_prefix_set.len(),
+            full_storage_count = hashed_state.storages.len(),
+            delta_storage_count = delta_prefix_sets.storage_prefix_sets.len(),
+            "Using delta prefix sets for resolve"
         );
 
         let trie_input = TrieInput::new(
             precalc.trie_updates.as_ref().clone(),
             hashed_state.clone(),
-            hashed_state.construct_prefix_sets(),
+            delta_prefix_sets,
         );
 
         state_provider.state_root_from_nodes_with_updates(trie_input).inspect_err(|err| {
@@ -1552,4 +1495,192 @@ fn calculate_state_root_on_resolve(
     ctx.metrics.state_root_calculation_gauge.set(total_time);
 
     Ok((state_root, trie_updates, hashed_state))
+}
+
+/// Runs the async trie precalculation worker in a blocking context.
+///
+/// Processes work items sequentially, maintaining an incremental trie update chain.
+/// The first item does a full `state_root_with_updates`, subsequent items use
+/// `state_root_from_nodes_with_updates` with the previous result's cached trie nodes.
+fn run_trie_precalc_worker(
+    work_rx: std::sync::mpsc::Receiver<TriePrecalcWorkItem>,
+    result_tx: std::sync::mpsc::SyncSender<TriePrecalcResult>,
+    state_provider: Box<dyn reth::providers::StateProvider>,
+    metrics: Arc<OpRBuilderMetrics>,
+) {
+    let mut prev_trie_updates: Option<Arc<TrieUpdates>> = None;
+
+    while let Ok(work_item) = work_rx.recv() {
+        let start_time = Instant::now();
+
+        let hashed_state = state_provider.hashed_post_state(&work_item.bundle_state);
+
+        let result = if let Some(prev_trie) = &prev_trie_updates {
+            // Incremental path: reuse cached trie nodes from previous flashblock
+            let trie_input = TrieInput::new(
+                prev_trie.as_ref().clone(),
+                hashed_state.clone(),
+                hashed_state.construct_prefix_sets(),
+            );
+            state_provider.state_root_from_nodes_with_updates(trie_input)
+        } else {
+            // First calculation: full trie computation
+            state_provider.state_root_with_updates(hashed_state.clone())
+        };
+
+        match result {
+            Ok((state_root, trie_output)) => {
+                let trie_updates = Arc::new(trie_output);
+                prev_trie_updates = Some(trie_updates.clone());
+
+                let elapsed = start_time.elapsed();
+                info!(
+                    target: "payload_builder",
+                    flashblock_index = work_item.flashblock_index,
+                    state_root = %state_root,
+                    duration_ms = elapsed.as_millis(),
+                    "Async trie precalculation completed"
+                );
+                metrics.state_root_calculation_duration.record(elapsed);
+
+                if result_tx
+                    .send(TriePrecalcResult {
+                        flashblock_index: work_item.flashblock_index,
+                        trie_updates,
+                        hashed_state,
+                    })
+                    .is_err()
+                {
+                    // Main loop dropped the receiver — stop worker
+                    break;
+                }
+            }
+            Err(err) => {
+                warn!(
+                    target: "payload_builder",
+                    flashblock_index = work_item.flashblock_index,
+                    error = %err,
+                    "Async trie precalculation failed, resetting chain"
+                );
+                // Reset chain: next item will do a full calculation
+                prev_trie_updates = None;
+            }
+        }
+    }
+
+    debug!(target: "payload_builder", "Trie precalc worker exiting");
+}
+
+/// Computes delta prefix sets by diffing two `HashedPostState`s.
+///
+/// Returns a `TriePrefixSetsMut` containing only the account/storage paths that
+/// changed between `precalc_state` (from the background trie worker) and
+/// `final_state` (the full cumulative state at resolve time).
+///
+/// This allows the trie walker to skip paths already correctly computed by the
+/// precalc worker, dramatically reducing the work needed on resolve.
+fn compute_delta_prefix_sets(
+    precalc_state: &HashedPostState,
+    final_state: &HashedPostState,
+) -> TriePrefixSetsMut {
+    let mut account_prefix_set = PrefixSetMut::default();
+    let mut storage_prefix_sets = alloy_primitives::map::B256Map::<PrefixSetMut>::default();
+    let mut destroyed_accounts = alloy_primitives::map::B256Set::default();
+
+    // 1. Forward pass: iterate final_state accounts, compare against precalc_state
+    for (hashed_address, final_account) in &final_state.accounts {
+        let changed = match precalc_state.accounts.get(hashed_address) {
+            Some(precalc_account) => precalc_account != final_account,
+            None => true, // New account not in precalc
+        };
+        if changed {
+            account_prefix_set.insert(Nibbles::unpack(hashed_address));
+            // If account was destroyed (None) in final but existed in precalc, mark it
+            if final_account.is_none() {
+                destroyed_accounts.insert(*hashed_address);
+            }
+        }
+    }
+
+    // 2. Reverse pass: accounts in precalc_state but not in final_state
+    for hashed_address in precalc_state.accounts.keys() {
+        if !final_state.accounts.contains_key(hashed_address) {
+            account_prefix_set.insert(Nibbles::unpack(hashed_address));
+        }
+    }
+
+    // 3. Forward pass: iterate final_state storages, compare against precalc_state
+    for (hashed_address, final_storage) in &final_state.storages {
+        match precalc_state.storages.get(hashed_address) {
+            Some(precalc_storage) => {
+                // If wiped flag changed, include all slots for this account
+                if final_storage.wiped != precalc_storage.wiped {
+                    // Include account and all its storage slots
+                    account_prefix_set.insert(Nibbles::unpack(hashed_address));
+                    let storage_set = storage_prefix_sets.entry(*hashed_address).or_default();
+                    for slot_key in final_storage.storage.keys() {
+                        storage_set.insert(Nibbles::unpack(slot_key));
+                    }
+                    for slot_key in precalc_storage.storage.keys() {
+                        storage_set.insert(Nibbles::unpack(slot_key));
+                    }
+                    if final_storage.wiped {
+                        destroyed_accounts.insert(*hashed_address);
+                    }
+                } else {
+                    // Diff slot-by-slot
+                    let mut has_storage_diff = false;
+                    let storage_set = storage_prefix_sets.entry(*hashed_address).or_default();
+
+                    // Forward: slots in final that differ from precalc
+                    for (slot_key, final_value) in &final_storage.storage {
+                        let changed = match precalc_storage.storage.get(slot_key) {
+                            Some(precalc_value) => precalc_value != final_value,
+                            None => true,
+                        };
+                        if changed {
+                            storage_set.insert(Nibbles::unpack(slot_key));
+                            has_storage_diff = true;
+                        }
+                    }
+
+                    // Reverse: slots in precalc but not in final
+                    for slot_key in precalc_storage.storage.keys() {
+                        if !final_storage.storage.contains_key(slot_key) {
+                            storage_set.insert(Nibbles::unpack(slot_key));
+                            has_storage_diff = true;
+                        }
+                    }
+
+                    if has_storage_diff {
+                        account_prefix_set.insert(Nibbles::unpack(hashed_address));
+                    }
+                }
+            }
+            None => {
+                // Entirely new storage not in precalc — include all slots
+                account_prefix_set.insert(Nibbles::unpack(hashed_address));
+                let storage_set = storage_prefix_sets.entry(*hashed_address).or_default();
+                for slot_key in final_storage.storage.keys() {
+                    storage_set.insert(Nibbles::unpack(slot_key));
+                }
+            }
+        }
+    }
+
+    // 4. Reverse pass: storages in precalc_state but not in final_state
+    for (hashed_address, precalc_storage) in &precalc_state.storages {
+        if !final_state.storages.contains_key(hashed_address) {
+            account_prefix_set.insert(Nibbles::unpack(hashed_address));
+            let storage_set = storage_prefix_sets.entry(*hashed_address).or_default();
+            for slot_key in precalc_storage.storage.keys() {
+                storage_set.insert(Nibbles::unpack(slot_key));
+            }
+        }
+    }
+
+    // Remove empty storage prefix sets
+    storage_prefix_sets.retain(|_, v| !v.is_empty());
+
+    TriePrefixSetsMut { account_prefix_set, storage_prefix_sets, destroyed_accounts }
 }
