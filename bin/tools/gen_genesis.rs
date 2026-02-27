@@ -96,9 +96,8 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
 
         // Get the latest block number from the database
         let provider = provider_factory.provider()?;
-        let latest_block = provider
-            .last_block_number()
-            .wrap_err("Failed to get latest block number")?;
+        let latest_block =
+            provider.last_block_number().wrap_err("Failed to get latest block number")?;
 
         // Genesis block number is latest + 1 (the next block after the exported state)
         let genesis_block_number = latest_block + 1;
@@ -249,7 +248,7 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
             processed_accounts += 1;
 
             // Log progress periodically
-            if processed_accounts % self.batch_size == 0 {
+            if processed_accounts.is_multiple_of(self.batch_size) {
                 info!(
                     target: "reth::cli",
                     "Processed {} accounts",
