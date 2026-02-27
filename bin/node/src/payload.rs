@@ -5,7 +5,7 @@ use reth_optimism_evm::OpEvmConfig;
 use reth_optimism_node::node::OpPayloadBuilder;
 use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
 use xlayer_builder::{
-    args::OpRbuilderArgs,
+    args::BuilderArgs,
     payload::{BuilderConfig, FlashblocksServiceBuilder},
     traits::{NodeBounds, PoolBounds},
 };
@@ -25,12 +25,21 @@ pub struct XLayerPayloadServiceBuilder {
 }
 
 impl XLayerPayloadServiceBuilder {
-    pub fn new(xlayer_builder_args: OpRbuilderArgs) -> eyre::Result<Self> {
-        Self::with_config(xlayer_builder_args, OpDAConfig::default(), OpGasLimitConfig::default())
+    pub fn new(
+        xlayer_builder_args: BuilderArgs,
+        compute_pending_block: bool,
+    ) -> eyre::Result<Self> {
+        Self::with_config(
+            xlayer_builder_args,
+            compute_pending_block,
+            OpDAConfig::default(),
+            OpGasLimitConfig::default(),
+        )
     }
 
     pub fn with_config(
-        xlayer_builder_args: OpRbuilderArgs,
+        xlayer_builder_args: BuilderArgs,
+        compute_pending_block: bool,
         da_config: OpDAConfig,
         gas_limit_config: OpGasLimitConfig,
     ) -> eyre::Result<Self> {
@@ -40,10 +49,9 @@ impl XLayerPayloadServiceBuilder {
                 builder_config,
             )))
         } else {
-            let payload_builder =
-                OpPayloadBuilder::new(xlayer_builder_args.rollup_args.compute_pending_block)
-                    .with_da_config(da_config)
-                    .with_gas_limit_config(gas_limit_config);
+            let payload_builder = OpPayloadBuilder::new(compute_pending_block)
+                .with_da_config(da_config)
+                .with_gas_limit_config(gas_limit_config);
             XLayerPayloadServiceBuilderInner::Default(BasicPayloadServiceBuilder::new(
                 payload_builder,
             ))

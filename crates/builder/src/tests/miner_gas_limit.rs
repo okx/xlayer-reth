@@ -1,5 +1,5 @@
 use crate::{
-    args::{FlashblocksArgs, OpRbuilderArgs},
+    args::{BuilderArgs, FlashblocksArgs},
     tests::{BlockTransactionsExt, LocalInstance},
 };
 use alloy_provider::Provider;
@@ -29,7 +29,7 @@ async fn miner_gas_limit(rbuilder: LocalInstance) -> eyre::Result<()> {
 /// There is a deposit transaction for 182,706 gas, and builder transactions are 21,600 gas
 ///
 /// (785,000 - 182,706 - 21,600 - 21,600) / 53,000 = 10.54 = 10 transactions can fit
-#[rb_test(args = OpRbuilderArgs {
+#[rb_test(args = BuilderArgs {
     flashblocks: FlashblocksArgs {
         enabled: true,
         flashblocks_port: 0,

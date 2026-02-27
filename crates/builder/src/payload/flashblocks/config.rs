@@ -1,6 +1,6 @@
 use alloy_primitives::Address;
 
-use crate::{args::OpRbuilderArgs, payload::BuilderConfig};
+use crate::{args::BuilderArgs, payload::BuilderConfig};
 use core::{
     net::{Ipv4Addr, SocketAddr},
     time::Duration,
@@ -88,10 +88,10 @@ impl Default for FlashblocksConfig {
     }
 }
 
-impl TryFrom<OpRbuilderArgs> for FlashblocksConfig {
+impl TryFrom<BuilderArgs> for FlashblocksConfig {
     type Error = eyre::Report;
 
-    fn try_from(args: OpRbuilderArgs) -> Result<Self, Self::Error> {
+    fn try_from(args: BuilderArgs) -> Result<Self, Self::Error> {
         let interval = Duration::from_millis(args.flashblocks.flashblocks_block_time);
 
         let ws_addr = SocketAddr::new(

@@ -2,7 +2,7 @@
 name = "macros"
 version = "0.1.0"
 edition = "2024"
-description = "Macros supporting the tests infrastructure for op-rbuilder"
+description = "Macros supporting the tests infrastructure for flashblock-builder"
 
 [lib]
 proc-macro = true

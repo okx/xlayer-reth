@@ -19,9 +19,8 @@ use reth::{
 };
 use reth_node_api::FullNodeComponents;
 use reth_optimism_cli::Cli;
-use reth_optimism_node::OpNode;
+use reth_optimism_node::{args::RollupArgs, OpNode};
 use reth_rpc_server_types::RethRpcModule;
-use xlayer_builder::args::OpRbuilderArgs;
 
 use xlayer_chainspec::XLayerChainSpecParser;
 use xlayer_flashblocks::handler::FlashblocksService;
@@ -36,9 +35,9 @@ static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::ne
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
 #[command(next_help_heading = "Rollup")]
 struct Args {
-    /// Upstream rollup args + flashblock specific args
+    /// Upstream rollup args
     #[command(flatten)]
-    pub node_args: OpRbuilderArgs,
+    pub rollup_args: RollupArgs,
 
     #[command(flatten)]
     pub xlayer_args: XLayerArgs,
@@ -77,7 +76,7 @@ fn main() {
                 info!(target: "xlayer::monitor", "Global tracer initialized with output path: {}", args.xlayer_args.monitor.output_path);
             }
 
-            let op_node = OpNode::new(args.node_args.rollup_args.clone());
+            let op_node = OpNode::new(args.rollup_args.clone());
 
             let genesis_block = builder.config().chain.genesis().number.unwrap_or_default();
             info!("X Layer genesis block = {}", genesis_block);
@@ -95,7 +94,7 @@ fn main() {
             // For X Layer full link monitor
             let monitor = XLayerMonitor::new(
                 xlayer_args.monitor,
-                args.node_args.flashblocks.enabled,
+                xlayer_args.builder.flashblocks.enabled,
                 xlayer_args.sequencer_mode,
             );
 
@@ -106,7 +105,10 @@ fn main() {
 
             // Create the X Layer payload service builder
             // It handles both flashblocks and default modes internally
-            let payload_builder = XLayerPayloadServiceBuilder::new(args.node_args.clone())?;
+            let payload_builder = XLayerPayloadServiceBuilder::new(
+                args.xlayer_args.builder.clone(),
+                args.rollup_args.compute_pending_block,
+            )?;
 
             let NodeHandle { node, node_exit_future } = builder
                 .with_types_and_provider::<OpNode, BlockchainProvider<_>>()
@@ -120,13 +122,14 @@ fn main() {
                     let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
 
                     // Initialize flashblocks RPC service if not in flashblocks sequencer mode
-                    if !args.node_args.flashblocks.enabled {
+                    if !args.xlayer_args.builder.flashblocks.enabled {
                         if let Some(flashblock_rx) = new_op_eth_api.subscribe_received_flashblocks()
                         {
                             let service = FlashblocksService::new(
                                 ctx.node().clone(),
                                 flashblock_rx,
-                                args.node_args.clone(),
+                                args.xlayer_args.builder.clone(),
+                                args.rollup_args.flashblocks_url.is_some(),
                             )?;
                             service.spawn();
                             info!(target: "reth::cli", "xlayer flashblocks service initialized");

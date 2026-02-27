@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{debug, info, trace, warn};
 use xlayer_builder::{
-    args::OpRbuilderArgs, metrics::tokio::FlashblocksTaskMetrics, metrics::BuilderMetrics,
+    args::BuilderArgs, metrics::tokio::FlashblocksTaskMetrics, metrics::BuilderMetrics,
     payload::WebSocketPublisher,
 };
 
@@ -15,7 +15,7 @@ where
     node: Node,
     flashblock_rx: FlashBlockRx,
     ws_pub: Arc<WebSocketPublisher>,
-    op_args: OpRbuilderArgs,
+    has_flashblocks_url: bool,
 }
 
 impl<Node> FlashblocksService<Node>
@@ -25,7 +25,8 @@ where
     pub fn new(
         node: Node,
         flashblock_rx: FlashBlockRx,
-        op_args: OpRbuilderArgs,
+        op_args: BuilderArgs,
+        has_flashblocks_url: bool,
     ) -> Result<Self, eyre::Report> {
         let ws_addr = SocketAddr::new(
             op_args.flashblocks.flashblocks_addr.parse()?,
@@ -46,14 +47,14 @@ where
 
         info!(target: "flashblocks", "WebSocket publisher initialized at {}", ws_addr);
 
-        Ok(Self { node, flashblock_rx, ws_pub, op_args })
+        Ok(Self { node, flashblock_rx, ws_pub, has_flashblocks_url })
     }
 
     pub fn spawn(mut self) {
         debug!(target: "flashblocks", "Initializing flashblocks service");
 
         let task_executor = self.node.task_executor().clone();
-        if self.op_args.rollup_args.flashblocks_url.is_some() {
+        if self.has_flashblocks_url {
             task_executor.spawn_critical(
                 "xlayer-flashblocks-service",
                 Box::pin(async move {

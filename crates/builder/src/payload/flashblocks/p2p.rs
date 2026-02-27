@@ -5,7 +5,7 @@ use reth_optimism_payload_builder::OpBuiltPayload as RethOpBuiltPayload;
 use reth_optimism_primitives::OpBlock;
 use serde::{Deserialize, Serialize};
 
-pub(super) const AGENT_VERSION: &str = "op-rbuilder/1.0.0";
+pub(super) const AGENT_VERSION: &str = "flashblock-builder/1.0.0";
 pub(super) const FLASHBLOCKS_STREAM_PROTOCOL: crate::p2p::StreamProtocol =
     crate::p2p::StreamProtocol::new("/flashblocks/1.0.0");
 
