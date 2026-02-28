@@ -156,11 +156,11 @@ impl<P: Protocol> ChainDriverExt for ChainDriver<P> {
     }
 }
 
-pub trait OpRbuilderArgsTestExt {
+pub trait BuilderArgsTestExt {
     fn test_default() -> Self;
 }
 
-impl OpRbuilderArgsTestExt for crate::args::OpRbuilderArgs {
+impl BuilderArgsTestExt for crate::args::BuilderArgs {
     fn test_default() -> Self {
         let mut default = Self::default();
         default.flashblocks.flashblocks_port = 0; // randomize port

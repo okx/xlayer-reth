@@ -4,7 +4,7 @@ use reth_optimism_evm::OpEvmConfig;
 use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
 
 use crate::{
-    args::OpRbuilderArgs,
+    args::BuilderArgs,
     traits::{NodeBounds, PoolBounds},
     tx::signer::Signer,
 };
@@ -32,7 +32,7 @@ pub use flashblocks::{
 pub trait PayloadBuilder: Send + Sync + 'static {
     /// The type that has an implementation specific variant of the Config<T> struct.
     /// This is used to configure the payload builder service during startup.
-    type Config: TryFrom<OpRbuilderArgs, Error: Debug> + Clone + Debug + Send + Sync + 'static;
+    type Config: TryFrom<BuilderArgs, Error: Debug> + Clone + Debug + Send + Sync + 'static;
 
     /// The type that is used to instantiate the payload builder service
     /// that will be used by reth to build blocks whenever the node is
@@ -130,13 +130,13 @@ impl<S: Default + Clone> Default for BuilderConfig<S> {
     }
 }
 
-impl<S> TryFrom<OpRbuilderArgs> for BuilderConfig<S>
+impl<S> TryFrom<BuilderArgs> for BuilderConfig<S>
 where
-    S: TryFrom<OpRbuilderArgs, Error: Debug> + Clone,
+    S: TryFrom<BuilderArgs, Error: Debug> + Clone,
 {
     type Error = S::Error;
 
-    fn try_from(args: OpRbuilderArgs) -> Result<Self, Self::Error> {
+    fn try_from(args: BuilderArgs) -> Result<Self, Self::Error> {
         Ok(Self {
             builder_signer: args.builder_signer,
             block_time: Duration::from_millis(args.chain_block_time),

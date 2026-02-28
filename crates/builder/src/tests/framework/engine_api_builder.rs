@@ -97,7 +97,7 @@ where
 }
 
 #[async_trait::async_trait]
-impl<Provider, Pool, Validator> OpRbuilderEngineApiServer<OpEngineTypes>
+impl<Provider, Pool, Validator> FlashblockBuilderEngineApiServer<OpEngineTypes>
     for OpEngineApiExt<Provider, Pool, Validator>
 where
     Provider: HeaderProvider + BlockReader + StateProviderFactory + 'static,
@@ -207,7 +207,7 @@ where
 
 impl<Provider, Pool, Validator> IntoEngineApiRpcModule for OpEngineApiExt<Provider, Pool, Validator>
 where
-    Self: OpRbuilderEngineApiServer<OpEngineTypes>,
+    Self: FlashblockBuilderEngineApiServer<OpEngineTypes>,
 {
     fn into_rpc_module(self) -> RpcModule<()> {
         self.into_rpc().remove_context()
@@ -222,7 +222,7 @@ where
 /// This follows the Optimism specs that can be found at:
 /// <https://specs.optimism.io/protocol/exec-engine.html#engine-api>
 #[rpc(server, namespace = "engine", server_bounds(Engine::PayloadAttributes: jsonrpsee::core::DeserializeOwned))]
-pub trait OpRbuilderEngineApi<Engine: EngineTypes> {
+pub trait FlashblockBuilderEngineApi<Engine: EngineTypes> {
     /// Sends the given payload to the execution layer client, as specified for the Shanghai fork.
     ///
     /// See also <https://github.com/ethereum/execution-apis/blob/584905270d8ad665718058060267061ecfd79ca5/src/engine/shanghai.md#engine_newpayloadv2>
