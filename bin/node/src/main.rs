@@ -84,6 +84,7 @@ fn main() {
 
             // Clone xlayer_args early to avoid partial move issues
             let xlayer_args = args.xlayer_args.clone();
+            let datadir = builder.config().datadir().clone();
 
             let legacy_config = LegacyRpcRouterConfig {
                 enabled: xlayer_args.legacy.legacy_rpc_url.is_some(),
@@ -127,6 +128,7 @@ fn main() {
                                 ctx.node().clone(),
                                 flashblock_rx,
                                 args.node_args.clone(),
+                                datadir,
                             )?;
                             service.spawn();
                             info!(target: "reth::cli", "xlayer flashblocks service initialized");
