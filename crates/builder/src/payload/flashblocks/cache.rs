@@ -54,14 +54,12 @@ impl FlashblockPayloadsCache {
         parent_hash: B256,
     ) -> Option<Vec<WithEncoded<Recovered<T>>>> {
         let mut payloads = {
-            let mut guard = self.inner.lock();
-            let (_, curr_parent_hash, _) = guard.as_ref()?;
+            let guard = self.inner.lock();
+            let (_, curr_parent_hash, payloads) = guard.as_ref()?;
             if *curr_parent_hash != Some(parent_hash) {
                 return None;
             }
-            // Take ownership and flush the cache
-            let (_, _, payloads) = guard.take()?;
-            payloads
+            payloads.clone()
         };
 
         payloads.sort_by_key(|p| p.index);
