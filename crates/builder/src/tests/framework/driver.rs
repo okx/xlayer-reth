@@ -12,7 +12,7 @@ use reth_optimism_node::OpPayloadAttributes;
 
 use super::{EngineApi, Ipc, LocalInstance, TransactionBuilder};
 use crate::{
-    args::OpRbuilderArgs,
+    args::BuilderArgs,
     tests::{ExternalNode, Protocol, DEFAULT_DENOMINATOR, DEFAULT_ELASTICITY, DEFAULT_GAS_LIMIT},
     tx::signer::Signer,
 };
@@ -25,7 +25,7 @@ pub struct ChainDriver<RpcProtocol: Protocol = Ipc> {
     provider: RootProvider<Optimism>,
     signer: Option<Signer>,
     gas_limit: Option<u64>,
-    args: OpRbuilderArgs,
+    args: BuilderArgs,
     validation_nodes: Vec<ExternalNode>,
 }
 
@@ -56,7 +56,7 @@ impl<RpcProtocol: Protocol> ChainDriver<RpcProtocol> {
             provider,
             signer: Default::default(),
             gas_limit: None,
-            args: OpRbuilderArgs::default(),
+            args: BuilderArgs::default(),
             validation_nodes: vec![],
         }
     }

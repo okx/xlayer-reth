@@ -3,7 +3,7 @@ use super::{
     cache::FlashblockPayloadsCache,
     handler::PayloadHandler,
     p2p::{Message, AGENT_VERSION, FLASHBLOCKS_STREAM_PROTOCOL},
-    payload::{FlashblocksExecutionInfo, FlashblocksExtraCtx, OpPayloadBuilder},
+    payload::OpPayloadBuilder,
     wspub::WebSocketPublisher,
     FlashblocksConfig,
 };
@@ -36,12 +36,7 @@ impl FlashblocksServiceBuilder {
     where
         Node: NodeBounds,
         Pool: PoolBounds,
-        BuilderTx: BuilderTransactions<FlashblocksExtraCtx, FlashblocksExecutionInfo>
-            + Unpin
-            + Clone
-            + Send
-            + Sync
-            + 'static,
+        BuilderTx: BuilderTransactions + Unpin + Clone + Send + Sync + 'static,
     {
         // TODO: is there a different global token?
         // this is effectively unused right now due to the usage of reth's `task_executor`.
@@ -147,7 +142,7 @@ impl FlashblocksServiceBuilder {
         let (payload_service, payload_builder_handle) =
             PayloadBuilderService::new(payload_generator, ctx.provider().canonical_state_stream());
 
-        let syncer_ctx = super::ctx::OpPayloadSyncerCtx::new(
+        let handler_ctx = super::context::FlashblockHandlerContext::new(
             &ctx.provider().clone(),
             self.0.clone(),
             OpEvmConfig::optimism(ctx.chain_spec()),
@@ -156,6 +151,7 @@ impl FlashblocksServiceBuilder {
         .wrap_err("failed to create flashblocks payload builder context")?;
 
         let payload_handler = PayloadHandler::new(
+            handler_ctx,
             built_fb_payload_rx,
             built_payload_rx,
             incoming_message_rx,
@@ -163,7 +159,6 @@ impl FlashblocksServiceBuilder {
             payload_service.payload_events_handle(),
             p2p_cache.clone(),
             ws_pub.clone(),
-            syncer_ctx,
             ctx.provider().clone(),
             ctx.task_executor().clone(),
             cancel,

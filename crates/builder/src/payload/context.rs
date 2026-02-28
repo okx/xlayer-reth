@@ -4,7 +4,6 @@ use alloy_evm::Database;
 use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
 use alloy_primitives::{BlockHash, Bytes, U256};
 use alloy_rpc_types_eth::Withdrawals;
-use core::fmt::Debug;
 use op_alloy_consensus::OpDepositReceipt;
 use op_revm::OpSpecId;
 use reth::payload::PayloadBuilderAttributes;
@@ -45,7 +44,7 @@ use alloy_eips::eip2718::WithEncoded;
 
 /// Container type that holds all necessities to build a new payload.
 #[derive(Debug)]
-pub struct OpPayloadBuilderCtx<ExtraCtx: Debug + Default = ()> {
+pub struct OpPayloadBuilderCtx {
     /// The type that knows how to perform system calls and configure the evm.
     pub evm_config: OpEvmConfig,
     /// The DA config for the payload builder
@@ -66,19 +65,13 @@ pub struct OpPayloadBuilderCtx<ExtraCtx: Debug + Default = ()> {
     pub builder_signer: Option<Signer>,
     /// The metrics for the builder
     pub metrics: Arc<BuilderMetrics>,
-    /// Extra context for the payload builder
-    pub extra_ctx: ExtraCtx,
     /// Max gas that can be used by a transaction.
     pub max_gas_per_txn: Option<u64>,
 }
 
-impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
+impl OpPayloadBuilderCtx {
     pub(super) fn with_cancel(self, cancel: CancellationToken) -> Self {
         Self { cancel, ..self }
-    }
-
-    pub(super) fn with_extra_ctx(self, extra_ctx: ExtraCtx) -> Self {
-        Self { extra_ctx, ..self }
     }
 
     /// Returns the parent block the payload will be build on.
@@ -136,10 +129,7 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
     /// This will return the culmative DA bytes * scalar after Jovian
     /// after Ecotone, this will always return Some(0) as blobs aren't supported
     /// pre Ecotone, these fields aren't used.
-    pub fn blob_fields<Extra: Debug + Default>(
-        &self,
-        info: &ExecutionInfo<Extra>,
-    ) -> (Option<u64>, Option<u64>) {
+    pub fn blob_fields(&self, info: &ExecutionInfo) -> (Option<u64>, Option<u64>) {
         // For payload validation
         if let Some(blob_fields) = info.optional_blob_fields {
             return blob_fields;
@@ -228,7 +218,7 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
     }
 }
 
-impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
+impl OpPayloadBuilderCtx {
     /// Constructs a receipt for the given transaction.
     pub fn build_receipt<E: Evm>(
         &self,
@@ -262,10 +252,10 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
     }
 
     /// Executes all sequencer transactions that are included in the payload attributes.
-    pub(super) fn execute_sequencer_transactions<E: Debug + Default>(
+    pub(super) fn execute_sequencer_transactions(
         &self,
         db: &mut State<impl Database>,
-    ) -> Result<ExecutionInfo<E>, PayloadBuilderError> {
+    ) -> Result<ExecutionInfo, PayloadBuilderError> {
         let mut info = ExecutionInfo::with_capacity(self.attributes().transactions.len());
 
         let mut evm = self.evm_config.evm_with_env(&mut *db, self.evm_env.clone());
@@ -359,9 +349,9 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
 
     /// Executes cached transactions received via P2P, used to replay previously sequenced flashblock
     /// transactions when the builder changes before the full block is built.
-    pub(super) fn execute_cached_flashblocks_transactions<E: Debug + Default>(
+    pub(super) fn execute_cached_flashblocks_transactions(
         &self,
-        info: &mut ExecutionInfo<E>,
+        info: &mut ExecutionInfo,
         db: &mut State<impl Database>,
         cached_txs: Vec<WithEncoded<alloy_consensus::transaction::Recovered<OpTransactionSigned>>>,
     ) -> Result<(), PayloadBuilderError> {
@@ -466,9 +456,9 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
     /// Executes the given best transactions and updates the execution info.
     ///
     /// Returns `Ok(Some(())` if the job was cancelled.
-    pub(super) fn execute_best_transactions<E: Debug + Default>(
+    pub(super) fn execute_best_transactions(
         &self,
-        info: &mut ExecutionInfo<E>,
+        info: &mut ExecutionInfo,
         db: &mut State<impl Database>,
         best_txs: &mut impl PayloadTxsBounds,
         block_gas_limit: u64,

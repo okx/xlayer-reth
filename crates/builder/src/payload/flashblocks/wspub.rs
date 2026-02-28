@@ -72,7 +72,7 @@ impl WebSocketPublisher {
         info!(
             target: "payload_builder",
             event = "flashblock_sent",
-            message = "Sending flashblock to rollup-boost",
+            message = "Sending flashblock to subscribers",
             id = %payload.payload_id,
             index = payload.index,
             base = payload.base.is_some(),

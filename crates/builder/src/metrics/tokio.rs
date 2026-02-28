@@ -13,7 +13,7 @@ use tokio_metrics::{RuntimeMetrics, RuntimeMonitor, TaskMetrics, TaskMonitor};
 
 /// Metrics for a single monitored tokio task.
 #[derive(Metrics, Clone)]
-#[metrics(scope = "op_rbuilder.tokio_task")]
+#[metrics(scope = "flashblock_builder.tokio_task")]
 pub struct TokioTaskMetricsRecorder {
     /// Total number of times the task has been instrumented (spawned)
     pub instrumented_count: Counter,
@@ -52,7 +52,7 @@ pub struct TokioTaskMetricsRecorder {
 /// Note: Only stable tokio metrics are exposed here. Additional metrics like
 /// steal counts, schedule counts, and overflow counts require the `tokio_unstable` flag.
 #[derive(Metrics, Clone)]
-#[metrics(scope = "op_rbuilder.tokio_runtime")]
+#[metrics(scope = "flashblock_builder.tokio_runtime")]
 pub struct TokioRuntimeMetricsRecorder {
     /// Number of worker threads in the runtime
     pub workers_count: Gauge,

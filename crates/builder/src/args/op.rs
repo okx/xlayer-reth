@@ -1,24 +1,17 @@
-//! Additional Node command arguments.
+//! Flashblock builder command arguments.
 //!
-//! Copied from OptimismNode to allow easy extension.
-
-//! clap [Args](clap::Args) for optimism rollup configuration
+//! Builder-specific configuration for the flashblock payload builder.
 
 use crate::tx::signer::Signer;
 use alloy_primitives::Address;
 use anyhow::{anyhow, Result};
 use clap::Parser;
 use reth_optimism_cli::commands::Commands;
-use reth_optimism_node::args::RollupArgs;
 use std::path::PathBuf;
 
-/// Parameters for rollup configuration
+/// Parameters for the flashblock builder configuration.
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
-#[command(next_help_heading = "Rollup")]
-pub struct OpRbuilderArgs {
-    /// Rollup configuration
-    #[command(flatten)]
-    pub rollup_args: RollupArgs,
+pub struct BuilderArgs {
     /// Builder secret key for signing last transaction in block
     #[arg(long = "rollup.builder-secret-key", env = "BUILDER_SECRET_KEY")]
     pub builder_signer: Option<Signer>,
@@ -52,7 +45,7 @@ pub struct OpRbuilderArgs {
     pub flashblocks: FlashblocksArgs,
 }
 
-impl Default for OpRbuilderArgs {
+impl Default for BuilderArgs {
     fn default() -> Self {
         let args = crate::args::Cli::parse_from(["dummy", "node"]);
         let Commands::Node(node_command) = args.command else { unreachable!() };
@@ -71,7 +64,7 @@ fn expand_path(s: &str) -> Result<PathBuf> {
 /// Parameters for Flashblocks configuration
 /// The names in the struct are prefixed with `flashblocks` to avoid conflicts
 /// with the standard block building configuration since these args are flattened
-/// into the main `OpRbuilderArgs` struct with the other rollup/node args.
+/// into the main `BuilderArgs` struct with the other rollup/node args.
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
 pub struct FlashblocksArgs {
     /// When set to true, the builder will build flashblocks
@@ -107,14 +100,6 @@ pub struct FlashblocksArgs {
         env = "FLASHBLOCKS_DISABLE_STATE_ROOT"
     )]
     pub flashblocks_disable_state_root: bool,
-
-    /// Whether to builder running with rollup boost
-    #[arg(
-        long = "flashblocks.disable-rollup-boost",
-        default_value = "false",
-        env = "FLASHBLOCK_DISABLE_ROLLUP_BOOST"
-    )]
-    pub flashblocks_disable_rollup_boost: bool,
 
     /// Whether to disable async state root calculation on full payload resolution
     #[arg(

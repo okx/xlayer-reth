@@ -89,13 +89,7 @@ type NextBestFlashblocksTxs<Pool> = BestFlashblocksTxs<
 >;
 
 #[derive(Debug, Default, Clone)]
-pub(super) struct FlashblocksExecutionInfo {
-    /// Index of the last consumed flashblock
-    last_flashblock_index: usize,
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct FlashblocksExtraCtx {
+pub(super) struct FlashblocksState {
     /// Current flashblock index
     flashblock_index: u64,
     /// Target flashblock count per block
@@ -114,13 +108,19 @@ pub struct FlashblocksExtraCtx {
     da_footprint_per_batch: Option<u64>,
     /// Whether to disable state root calculation for each flashblock
     disable_state_root: bool,
-    /// Whether to disable running builder in rollup boost mode
-    disable_rollup_boost: bool,
+    /// Index into `ExecutionInfo` tracking the last consumed flashblock.
+    /// Used for slicing transactions/receipts per flashblock.
+    last_flashblock_tx_index: usize,
 }
 
-impl FlashblocksExtraCtx {
+impl FlashblocksState {
+    fn new(target_flashblock_count: u64, disable_state_root: bool) -> Self {
+        Self { target_flashblock_count, disable_state_root, ..Default::default() }
+    }
+
+    /// Creates state for the next flashblock with updated limits
     fn next(
-        self,
+        &self,
         target_gas_for_batch: u64,
         target_da_for_batch: Option<u64>,
         target_da_footprint_for_batch: Option<u64>,
@@ -130,30 +130,54 @@ impl FlashblocksExtraCtx {
             target_gas_for_batch,
             target_da_for_batch,
             target_da_footprint_for_batch,
-            ..self
+            ..*self
         }
     }
-}
 
-impl OpPayloadBuilderCtx<FlashblocksExtraCtx> {
-    /// Returns the current flashblock index
-    pub(crate) fn flashblock_index(&self) -> u64 {
-        self.extra_ctx.flashblock_index
+    fn with_batch_limits(
+        mut self,
+        gas_per_batch: u64,
+        da_per_batch: Option<u64>,
+        da_footprint_per_batch: Option<u64>,
+        target_gas_for_batch: u64,
+        target_da_for_batch: Option<u64>,
+        target_da_footprint_for_batch: Option<u64>,
+    ) -> Self {
+        self.gas_per_batch = gas_per_batch;
+        self.da_per_batch = da_per_batch;
+        self.da_footprint_per_batch = da_footprint_per_batch;
+        self.target_gas_for_batch = target_gas_for_batch;
+        self.target_da_for_batch = target_da_for_batch;
+        self.target_da_footprint_for_batch = target_da_footprint_for_batch;
+        self
     }
 
-    /// Returns the target flashblock count
-    pub(crate) fn target_flashblock_count(&self) -> u64 {
-        self.extra_ctx.target_flashblock_count
+    fn flashblock_index(&self) -> u64 {
+        self.flashblock_index
     }
 
-    /// Returns if the flashblock is the first fallback block
-    pub(crate) fn is_first_flashblock(&self) -> bool {
-        self.flashblock_index() == 0
+    fn target_flashblock_count(&self) -> u64 {
+        self.target_flashblock_count
     }
 
-    /// Returns if the flashblock is the last one
-    pub(crate) fn is_last_flashblock(&self) -> bool {
-        self.flashblock_index() == self.target_flashblock_count()
+    fn is_first_flashblock(&self) -> bool {
+        self.flashblock_index == 0
+    }
+
+    fn is_last_flashblock(&self) -> bool {
+        self.flashblock_index == self.target_flashblock_count
+    }
+
+    fn set_last_flashblock_tx_index(&mut self, index: usize) {
+        self.last_flashblock_tx_index = index;
+    }
+
+    /// Extracts new transactions since the last flashblock
+    fn slice_new_transactions<'a>(
+        &self,
+        all_transactions: &'a [OpTransactionSigned],
+    ) -> &'a [OpTransactionSigned] {
+        &all_transactions[self.last_flashblock_tx_index..]
     }
 }
 
@@ -256,7 +280,7 @@ impl<Pool, Client, BuilderTx, Tasks> OpPayloadBuilder<Pool, Client, BuilderTx, T
 where
     Pool: PoolBounds,
     Client: ClientBounds,
-    BuilderTx: BuilderTransactions<FlashblocksExtraCtx, FlashblocksExecutionInfo> + Send + Sync,
+    BuilderTx: BuilderTransactions + Send + Sync,
     Tasks: TaskSpawner + Clone + Unpin + 'static,
 {
     fn get_op_payload_builder_ctx(
@@ -265,8 +289,7 @@ where
             OpPayloadBuilderAttributes<op_alloy_consensus::OpTxEnvelope>,
         >,
         cancel: CancellationToken,
-        extra_ctx: FlashblocksExtraCtx,
-    ) -> eyre::Result<OpPayloadBuilderCtx<FlashblocksExtraCtx>> {
+    ) -> eyre::Result<OpPayloadBuilderCtx> {
         let chain_spec = self.client.chain_spec();
         let timestamp = config.attributes.timestamp();
 
@@ -299,7 +322,7 @@ where
             .next_evm_env(&config.parent_header, &block_env_attributes)
             .wrap_err("failed to create next evm env")?;
 
-        Ok(OpPayloadBuilderCtx::<FlashblocksExtraCtx> {
+        Ok(OpPayloadBuilderCtx {
             evm_config: self.evm_config.clone(),
             chain_spec,
             config,
@@ -310,7 +333,6 @@ where
             gas_limit_config: self.config.gas_limit_config.clone(),
             builder_signer: self.config.builder_signer,
             metrics: self.metrics.clone(),
-            extra_ctx,
             max_gas_per_txn: self.config.max_gas_per_txn,
         })
     }
@@ -333,16 +355,12 @@ where
 
         let disable_state_root = self.config.specific.disable_state_root;
         let ctx = self
-            .get_op_payload_builder_ctx(
-                config.clone(),
-                block_cancel.clone(),
-                FlashblocksExtraCtx {
-                    target_flashblock_count: self.config.flashblocks_per_block(),
-                    disable_state_root,
-                    ..Default::default()
-                },
-            )
+            .get_op_payload_builder_ctx(config.clone(), block_cancel.clone())
             .map_err(|e| PayloadBuilderError::Other(e.into()))?;
+
+        // Initialize flashblocks state for this block
+        let mut fb_state =
+            FlashblocksState::new(self.config.flashblocks_per_block(), disable_state_root);
 
         let state_provider = self.client.state_by_block_hash(ctx.parent().hash())?;
         let db = StateProviderDatabase::new(&state_provider);
@@ -380,8 +398,15 @@ where
         // For X Layer - skip if replaying
         if !ctx.attributes().no_tx_pool
             && !rebuild_external_payload
-            && let Err(e) =
-                self.builder_tx.add_builder_txs(&state_provider, &mut info, &ctx, &mut state, false)
+            && let Err(e) = self.builder_tx.add_builder_txs(
+                &state_provider,
+                &mut info,
+                &ctx,
+                &mut state,
+                false,
+                fb_state.is_first_flashblock(),
+                fb_state.is_last_flashblock(),
+            )
         {
             error!(
                 target: "payload_builder",
@@ -392,7 +417,7 @@ where
 
         // We should always calculate state root for fallback payload
         let (fallback_payload, fb_payload, bundle_state, new_tx_hashes) =
-            build_block(&mut state, &ctx, &mut info, true)?;
+            build_block(&mut state, &ctx, &mut info, Some(&mut fb_state), true)?;
         // For X Layer - skip if replaying
         if !rebuild_external_payload {
             self.built_fb_payload_tx
@@ -479,22 +504,23 @@ where
         let da_footprint_per_batch =
             info.da_footprint_scalar.map(|_| ctx.block_gas_limit() / target_flashblocks);
 
-        let extra_ctx = FlashblocksExtraCtx {
-            flashblock_index: 1,
-            target_flashblock_count: target_flashblocks,
-            target_gas_for_batch: gas_per_batch,
-            target_da_for_batch: da_per_batch,
+        fb_state = fb_state.with_batch_limits(
             gas_per_batch,
             da_per_batch,
             da_footprint_per_batch,
-            disable_state_root,
-            target_da_footprint_for_batch: da_footprint_per_batch,
-            disable_rollup_boost: self.config.specific.disable_rollup_boost,
+            gas_per_batch,
+            da_per_batch,
+            da_footprint_per_batch,
+        );
+        fb_state = FlashblocksState {
+            flashblock_index: 1,
+            target_flashblock_count: target_flashblocks,
+            ..fb_state
         };
 
         let fb_cancel = block_cancel.child_token();
         let mut ctx = self
-            .get_op_payload_builder_ctx(config, fb_cancel.clone(), extra_ctx)
+            .get_op_payload_builder_ctx(config, fb_cancel.clone())
             .map_err(|e| PayloadBuilderError::Other(e.into()))?;
 
         // Create best_transaction iterator
@@ -517,7 +543,7 @@ where
                 debug!(
                     target: "payload_builder",
                     id = %fb_payload.payload_id,
-                    flashblock_index = ctx.flashblock_index(),
+                    flashblock_index = fb_state.flashblock_index(),
                     block_number = ctx.block_number(),
                     "Received signal to build flashblock",
                 );
@@ -525,13 +551,14 @@ where
             } else {
                 // Channel closed - block building cancelled
                 self.resolve_best_payload(&ctx, best_payload, fallback_payload, &resolve_payload);
-                self.record_flashblocks_metrics(&ctx, &info, target_flashblocks);
+                self.record_flashblocks_metrics(&ctx, &fb_state, &info, target_flashblocks);
                 return Ok(());
             }
 
             // Build flashblock after receiving signal
-            let next_flashblocks_ctx = match self.build_next_flashblock(
+            let next_fb_state = match self.build_next_flashblock(
                 &ctx,
+                &mut fb_state,
                 &mut info,
                 &mut state,
                 &state_provider,
@@ -539,7 +566,7 @@ where
                 &block_cancel,
                 &mut best_payload,
             ) {
-                Ok(Some(next_flashblocks_ctx)) => next_flashblocks_ctx,
+                Ok(Some(next_fb_state)) => next_fb_state,
                 Ok(None) => {
                     self.resolve_best_payload(
                         &ctx,
@@ -547,14 +574,14 @@ where
                         fallback_payload,
                         &resolve_payload,
                     );
-                    self.record_flashblocks_metrics(&ctx, &info, target_flashblocks);
+                    self.record_flashblocks_metrics(&ctx, &fb_state, &info, target_flashblocks);
                     return Ok(());
                 }
                 Err(err) => {
                     error!(
                         target: "payload_builder",
                         id = %fb_payload.payload_id,
-                        flashblock_index = ctx.flashblock_index(),
+                        flashblock_index = fb_state.flashblock_index(),
                         block_number = ctx.block_number(),
                         ?err,
                         "Failed to build flashblock",
@@ -569,7 +596,7 @@ where
                 }
             };
 
-            ctx = ctx.with_extra_ctx(next_flashblocks_ctx);
+            fb_state = next_fb_state;
         }
     }
 
@@ -579,18 +606,19 @@ where
         P: StateRootProvider + HashedPostStateProvider + StorageRootProvider,
     >(
         &self,
-        ctx: &OpPayloadBuilderCtx<FlashblocksExtraCtx>,
-        info: &mut ExecutionInfo<FlashblocksExecutionInfo>,
+        ctx: &OpPayloadBuilderCtx,
+        fb_state: &mut FlashblocksState,
+        info: &mut ExecutionInfo,
         state: &mut State<DB>,
         state_provider: impl reth::providers::StateProvider + Clone,
         best_txs: &mut NextBestFlashblocksTxs<Pool>,
         block_cancel: &CancellationToken,
         best_payload: &mut (OpBuiltPayload, BundleState),
-    ) -> eyre::Result<Option<FlashblocksExtraCtx>> {
-        let flashblock_index = ctx.flashblock_index();
-        let mut target_gas_for_batch = ctx.extra_ctx.target_gas_for_batch;
-        let mut target_da_for_batch = ctx.extra_ctx.target_da_for_batch;
-        let mut target_da_footprint_for_batch = ctx.extra_ctx.target_da_footprint_for_batch;
+    ) -> eyre::Result<Option<FlashblocksState>> {
+        let flashblock_index = fb_state.flashblock_index();
+        let mut target_gas_for_batch = fb_state.target_gas_for_batch;
+        let mut target_da_for_batch = fb_state.target_da_for_batch;
+        let mut target_da_footprint_for_batch = fb_state.target_da_footprint_for_batch;
 
         info!(
             target: "payload_builder",
@@ -606,14 +634,21 @@ where
         );
         let flashblock_build_start_time = Instant::now();
 
-        let builder_txs =
-            match self.builder_tx.add_builder_txs(&state_provider, info, ctx, state, true) {
-                Ok(builder_txs) => builder_txs,
-                Err(e) => {
-                    error!(target: "payload_builder", "Error simulating builder txs: {}", e);
-                    vec![]
-                }
-            };
+        let builder_txs = match self.builder_tx.add_builder_txs(
+            &state_provider,
+            info,
+            ctx,
+            state,
+            true,
+            fb_state.is_first_flashblock(),
+            fb_state.is_last_flashblock(),
+        ) {
+            Ok(builder_txs) => builder_txs,
+            Err(e) => {
+                error!(target: "payload_builder", "Error simulating builder txs: {}", e);
+                vec![]
+            }
+        };
 
         // only reserve builder tx gas / da size that has not been committed yet
         // committed builder txs would have counted towards the gas / da used
@@ -658,8 +693,8 @@ where
         )
         .wrap_err("failed to execute best transactions")?;
         // Extract last transactions
-        let new_transactions = info.executed_transactions[info.extra.last_flashblock_index..]
-            .to_vec()
+        let new_transactions = fb_state
+            .slice_new_transactions(&info.executed_transactions)
             .iter()
             .map(|tx| tx.tx_hash())
             .collect::<Vec<_>>();
@@ -677,17 +712,21 @@ where
             .record(payload_transaction_simulation_time);
         ctx.metrics.payload_transaction_simulation_gauge.set(payload_transaction_simulation_time);
 
-        if let Err(e) = self.builder_tx.add_builder_txs(&state_provider, info, ctx, state, false) {
+        if let Err(e) = self.builder_tx.add_builder_txs(
+            &state_provider,
+            info,
+            ctx,
+            state,
+            false,
+            fb_state.is_first_flashblock(),
+            fb_state.is_last_flashblock(),
+        ) {
             error!(target: "payload_builder", "Error simulating builder txs: {}", e);
         };
 
         let total_block_built_duration = Instant::now();
-        let build_result = build_block(
-            state,
-            ctx,
-            info,
-            !ctx.extra_ctx.disable_state_root || ctx.attributes().no_tx_pool,
-        );
+        let calculate_state_root = !fb_state.disable_state_root || ctx.attributes().no_tx_pool;
+        let build_result = build_block(state, ctx, info, Some(fb_state), calculate_state_root);
         let total_block_built_duration = total_block_built_duration.elapsed();
         ctx.metrics.total_block_built_duration.record(total_block_built_duration);
         ctx.metrics.total_block_built_gauge.set(total_block_built_duration);
@@ -701,11 +740,6 @@ where
                 fb_payload.index = flashblock_index;
                 fb_payload.base = None;
 
-                // If main token got canceled in here that means we received get_payload and we should drop everything and now update best_payload
-                // To ensure that we will return same blocks as rollup-boost (to leverage caches)
-                if !ctx.extra_ctx.disable_rollup_boost && block_cancel.is_cancelled() {
-                    return Ok(None);
-                }
                 let flashblock_byte_size = self
                     .ws_pub
                     .publish(&fb_payload)
@@ -729,7 +763,7 @@ where
                 );
 
                 // Update bundle_state for next iteration
-                if let Some(da_limit) = ctx.extra_ctx.da_per_batch {
+                if let Some(da_limit) = fb_state.da_per_batch {
                     if let Some(da) = target_da_for_batch.as_mut() {
                         *da += da_limit;
                     } else {
@@ -739,16 +773,15 @@ where
                     }
                 }
 
-                let target_gas_for_batch =
-                    ctx.extra_ctx.target_gas_for_batch + ctx.extra_ctx.gas_per_batch;
+                let target_gas_for_batch = fb_state.target_gas_for_batch + fb_state.gas_per_batch;
 
                 if let (Some(footprint), Some(da_footprint_limit)) =
-                    (target_da_footprint_for_batch.as_mut(), ctx.extra_ctx.da_footprint_per_batch)
+                    (target_da_footprint_for_batch.as_mut(), fb_state.da_footprint_per_batch)
                 {
                     *footprint += da_footprint_limit;
                 }
 
-                let next_extra_ctx = ctx.extra_ctx.clone().next(
+                let next_fb_state = fb_state.next(
                     target_gas_for_batch,
                     target_da_for_batch,
                     target_da_footprint_for_batch,
@@ -761,18 +794,18 @@ where
                     flashblock_index = flashblock_index,
                     current_gas = info.cumulative_gas_used,
                     current_da = info.cumulative_da_bytes_used,
-                    target_flashblocks = ctx.target_flashblock_count(),
+                    target_flashblocks = fb_state.target_flashblock_count(),
                     "Flashblock built"
                 );
 
-                Ok(Some(next_extra_ctx))
+                Ok(Some(next_fb_state))
             }
         }
     }
 
     fn resolve_best_payload(
         &self,
-        ctx: &OpPayloadBuilderCtx<FlashblocksExtraCtx>,
+        ctx: &OpPayloadBuilderCtx,
         best_payload: (OpBuiltPayload, BundleState),
         fallback_payload: OpBuiltPayload,
         resolve_payload: &BlockCell<OpBuiltPayload>,
@@ -838,15 +871,16 @@ where
     /// Do some logging and metric recording when we stop build flashblocks
     fn record_flashblocks_metrics(
         &self,
-        ctx: &OpPayloadBuilderCtx<FlashblocksExtraCtx>,
-        info: &ExecutionInfo<FlashblocksExecutionInfo>,
+        ctx: &OpPayloadBuilderCtx,
+        fb_state: &FlashblocksState,
+        info: &ExecutionInfo,
         flashblocks_per_block: u64,
     ) {
         ctx.metrics.block_built_success.increment(1);
-        ctx.metrics.flashblock_count.record(ctx.flashblock_index() as f64);
+        ctx.metrics.flashblock_count.record(fb_state.flashblock_index() as f64);
         ctx.metrics
             .missing_flashblocks_count
-            .record(flashblocks_per_block.saturating_sub(ctx.flashblock_index()) as f64);
+            .record(flashblocks_per_block.saturating_sub(fb_state.flashblock_index()) as f64);
         ctx.metrics.payload_num_tx.record(info.executed_transactions.len() as f64);
         ctx.metrics.payload_num_tx_gauge.set(info.executed_transactions.len() as f64);
 
@@ -855,7 +889,7 @@ where
             event = "build_complete",
             id = %ctx.payload_id(),
             flashblocks_per_block = flashblocks_per_block,
-            flashblock_index = ctx.flashblock_index(),
+            flashblock_index = fb_state.flashblock_index(),
             "Flashblocks building complete"
         );
     }
@@ -867,8 +901,7 @@ impl<Pool, Client, BuilderTx, Tasks> PayloadBuilder
 where
     Pool: PoolBounds,
     Client: ClientBounds,
-    BuilderTx:
-        BuilderTransactions<FlashblocksExtraCtx, FlashblocksExecutionInfo> + Clone + Send + Sync,
+    BuilderTx: BuilderTransactions + Clone + Send + Sync,
     Tasks: TaskSpawner + Clone + Unpin + 'static,
 {
     type Attributes = OpPayloadBuilderAttributes<OpTransactionSigned>;
@@ -883,13 +916,12 @@ where
     }
 }
 
-fn execute_pre_steps<DB, ExtraCtx>(
+fn execute_pre_steps<DB>(
     state: &mut State<DB>,
-    ctx: &OpPayloadBuilderCtx<ExtraCtx>,
-) -> Result<ExecutionInfo<FlashblocksExecutionInfo>, PayloadBuilderError>
+    ctx: &OpPayloadBuilderCtx,
+) -> Result<ExecutionInfo, PayloadBuilderError>
 where
     DB: Database<Error = ProviderError> + std::fmt::Debug,
-    ExtraCtx: std::fmt::Debug + Default,
 {
     // 1. apply pre-execution changes
     ctx.evm_config
@@ -903,16 +935,16 @@ where
     Ok(info)
 }
 
-pub(super) fn build_block<DB, P, ExtraCtx>(
+pub(super) fn build_block<DB, P>(
     state: &mut State<DB>,
-    ctx: &OpPayloadBuilderCtx<ExtraCtx>,
-    info: &mut ExecutionInfo<FlashblocksExecutionInfo>,
+    ctx: &OpPayloadBuilderCtx,
+    info: &mut ExecutionInfo,
+    fb_state: Option<&mut FlashblocksState>,
     calculate_state_root: bool,
 ) -> Result<(OpBuiltPayload, OpFlashblockPayload, BundleState, Vec<B256>), PayloadBuilderError>
 where
     DB: Database<Error = ProviderError> + AsRef<P>,
     P: StateRootProvider + HashedPostStateProvider + StorageRootProvider,
-    ExtraCtx: std::fmt::Debug + Default,
 {
     // We use it to preserve state, so we run merge_transitions on transition state at most once
     let untouched_transition_state = state.transition_state.clone();
@@ -1072,7 +1104,8 @@ where
     let block_hash = sealed_block.hash();
 
     // pick the new transactions from the info field and update the last flashblock index
-    let new_transactions = info.executed_transactions[info.extra.last_flashblock_index..].to_vec();
+    let last_idx = fb_state.as_ref().map_or(0, |s| s.last_flashblock_tx_index);
+    let new_transactions = info.executed_transactions[last_idx..].to_vec();
 
     let new_transactions_encoded =
         new_transactions.iter().map(|tx| tx.encoded_2718().into()).collect::<Vec<_>>();
@@ -1080,8 +1113,10 @@ where
     // For X Layer, monitoring logs
     let new_tx_hashes = new_transactions.iter().map(|tx| tx.tx_hash()).collect::<Vec<_>>();
 
-    let new_receipts = info.receipts[info.extra.last_flashblock_index..].to_vec();
-    info.extra.last_flashblock_index = info.executed_transactions.len();
+    let new_receipts = info.receipts[last_idx..].to_vec();
+    if let Some(fb) = fb_state {
+        fb.set_last_flashblock_tx_index(info.executed_transactions.len());
+    }
     let receipts_with_hash = new_transactions
         .iter()
         .zip(new_receipts.iter())

@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{debug, info, trace, warn};
 use xlayer_builder::{
-    args::OpRbuilderArgs, metrics::tokio::FlashblocksTaskMetrics, metrics::BuilderMetrics,
+    args::FlashblocksArgs, metrics::tokio::FlashblocksTaskMetrics, metrics::BuilderMetrics,
     payload::WebSocketPublisher,
 };
 
@@ -15,7 +15,7 @@ where
     node: Node,
     flashblock_rx: FlashBlockRx,
     ws_pub: Arc<WebSocketPublisher>,
-    op_args: OpRbuilderArgs,
+    relay_flashblocks: bool,
 }
 
 impl<Node> FlashblocksService<Node>
@@ -25,12 +25,10 @@ where
     pub fn new(
         node: Node,
         flashblock_rx: FlashBlockRx,
-        op_args: OpRbuilderArgs,
+        args: FlashblocksArgs,
+        relay_flashblocks: bool,
     ) -> Result<Self, eyre::Report> {
-        let ws_addr = SocketAddr::new(
-            op_args.flashblocks.flashblocks_addr.parse()?,
-            op_args.flashblocks.flashblocks_port,
-        );
+        let ws_addr = SocketAddr::new(args.flashblocks_addr.parse()?, args.flashblocks_port);
 
         let metrics = Arc::new(BuilderMetrics::default());
         let task_metrics = Arc::new(FlashblocksTaskMetrics::new());
@@ -39,21 +37,21 @@ where
                 ws_addr,
                 metrics,
                 &task_metrics.websocket_publisher,
-                op_args.flashblocks.ws_subscriber_limit,
+                args.ws_subscriber_limit,
             )
             .map_err(|e| eyre::eyre!("Failed to create WebSocket publisher: {e}"))?,
         );
 
         info!(target: "flashblocks", "WebSocket publisher initialized at {}", ws_addr);
 
-        Ok(Self { node, flashblock_rx, ws_pub, op_args })
+        Ok(Self { node, flashblock_rx, ws_pub, relay_flashblocks })
     }
 
     pub fn spawn(mut self) {
         debug!(target: "flashblocks", "Initializing flashblocks service");
 
         let task_executor = self.node.task_executor().clone();
-        if self.op_args.rollup_args.flashblocks_url.is_some() {
+        if self.relay_flashblocks {
             task_executor.spawn_critical(
                 "xlayer-flashblocks-service",
                 Box::pin(async move {

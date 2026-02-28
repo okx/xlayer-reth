@@ -2,12 +2,17 @@ use clap::Args;
 use std::time::Duration;
 use url::Url;
 
+use xlayer_builder::args::BuilderArgs;
 use xlayer_monitor::FullLinkMonitorArgs;
 
 /// X Layer specific configuration flags
 #[derive(Debug, Clone, Args, PartialEq, Eq, Default)]
 #[command(next_help_heading = "X Layer")]
 pub struct XLayerArgs {
+    /// Flashblock builder configuration
+    #[command(flatten)]
+    pub builder: BuilderArgs,
+
     /// Enable legacy rpc routing
     #[command(flatten)]
     pub legacy: LegacyRpcArgs,
@@ -291,10 +296,7 @@ mod tests {
                 legacy_rpc_url: Some("invalid-url".to_string()),
                 legacy_rpc_timeout: Duration::from_secs(30),
             },
-            monitor: FullLinkMonitorArgs::default(),
-            enable_flashblocks_subscription: false,
-            flashblocks_subscription_max_addresses: 1000,
-            sequencer_mode: false,
+            ..Default::default()
         };
 
         let result = args.validate();

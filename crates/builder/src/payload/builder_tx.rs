@@ -137,107 +137,121 @@ impl BuilderTransactionError {
     }
 }
 
-pub trait BuilderTransactions<ExtraCtx: Debug + Default = (), Extra: Debug + Default = ()> {
+pub trait BuilderTransactions {
     // Simulates and returns the signed builder transactions. The simulation modifies and commit
     // changes to the db so call new_simulation_state to simulate on a new copy of the state
     fn simulate_builder_txs(
         &self,
-        ctx: &OpPayloadBuilderCtx<ExtraCtx>,
+        ctx: &OpPayloadBuilderCtx,
         db: &mut State<impl Database + DatabaseRef>,
+        is_first_flashblock: bool,
+        is_last_flashblock: bool,
     ) -> Result<Vec<BuilderTransactionCtx>, BuilderTransactionError>;
 
     fn simulate_builder_txs_with_state_copy(
         &self,
         state_provider: impl StateProvider + Clone,
-        ctx: &OpPayloadBuilderCtx<ExtraCtx>,
+        ctx: &OpPayloadBuilderCtx,
         db: &State<impl Database>,
+        is_first_flashblock: bool,
+        is_last_flashblock: bool,
     ) -> Result<Vec<BuilderTransactionCtx>, BuilderTransactionError> {
         let mut simulation_state = self.new_simulation_state(state_provider, db);
-        self.simulate_builder_txs(ctx, &mut simulation_state)
+        self.simulate_builder_txs(
+            ctx,
+            &mut simulation_state,
+            is_first_flashblock,
+            is_last_flashblock,
+        )
     }
 
+    #[expect(clippy::too_many_arguments)]
     fn add_builder_txs(
         &self,
         state_provider: impl StateProvider + Clone,
-        info: &mut ExecutionInfo<Extra>,
-        builder_ctx: &OpPayloadBuilderCtx<ExtraCtx>,
+        info: &mut ExecutionInfo,
+        builder_ctx: &OpPayloadBuilderCtx,
         db: &mut State<impl Database>,
         top_of_block: bool,
+        is_first_flashblock: bool,
+        is_last_flashblock: bool,
     ) -> Result<Vec<BuilderTransactionCtx>, BuilderTransactionError> {
-        {
-            let builder_txs =
-                self.simulate_builder_txs_with_state_copy(state_provider, builder_ctx, db)?;
+        let builder_txs = self.simulate_builder_txs_with_state_copy(
+            state_provider,
+            builder_ctx,
+            db,
+            is_first_flashblock,
+            is_last_flashblock,
+        )?;
 
-            let mut evm =
-                builder_ctx.evm_config.evm_with_env(&mut *db, builder_ctx.evm_env.clone());
+        let mut evm = builder_ctx.evm_config.evm_with_env(&mut *db, builder_ctx.evm_env.clone());
 
-            let mut invalid = HashSet::new();
+        let mut invalid = HashSet::new();
 
-            for builder_tx in builder_txs.iter() {
-                if builder_tx.is_top_of_block != top_of_block {
-                    // don't commit tx if the buidler tx is not being added in the intended
-                    // position in the block
-                    continue;
-                }
-                if invalid.contains(&builder_tx.signed_tx.signer()) {
-                    warn!(target: "payload_builder", tx_hash = ?builder_tx.signed_tx.tx_hash(), "builder signer invalid as previous builder tx reverted");
-                    continue;
-                }
-
-                let ResultAndState { result, state } = match evm.transact(&builder_tx.signed_tx) {
-                    Ok(res) => res,
-                    Err(err) => {
-                        if let Some(err) = err.as_invalid_tx_err() {
-                            if err.is_nonce_too_low() {
-                                // if the nonce is too low, we can skip this transaction
-                                trace!(target: "payload_builder", %err, ?builder_tx.signed_tx, "skipping nonce too low builder transaction");
-                            } else {
-                                // if the transaction is invalid, we can skip it and all of its
-                                // descendants
-                                trace!(target: "payload_builder", %err, ?builder_tx.signed_tx, "skipping invalid builder transaction and its descendants");
-                                invalid.insert(builder_tx.signed_tx.signer());
-                            }
-
-                            continue;
-                        }
-                        // this is an error that we should treat as fatal for this attempt
-                        return Err(BuilderTransactionError::EvmExecutionError(Box::new(err)));
-                    }
-                };
-
-                if !result.is_success() {
-                    warn!(target: "payload_builder", tx_hash = ?builder_tx.signed_tx.tx_hash(), result = ?result, "builder tx reverted");
-                    invalid.insert(builder_tx.signed_tx.signer());
-                    continue;
-                }
-
-                // Add gas used by the transaction to cumulative gas used, before creating the receipt
-                let gas_used = result.gas_used();
-                info.cumulative_gas_used += gas_used;
-                info.cumulative_da_bytes_used += builder_tx.da_size;
-
-                let ctx = ReceiptBuilderCtx {
-                    tx: builder_tx.signed_tx.inner(),
-                    evm: &evm,
-                    result,
-                    state: &state,
-                    cumulative_gas_used: info.cumulative_gas_used,
-                };
-                info.receipts.push(builder_ctx.build_receipt(ctx, None));
-
-                // Commit changes
-                evm.db_mut().commit(state);
-
-                // Append sender and transaction to the respective lists
-                info.executed_senders.push(builder_tx.signed_tx.signer());
-                info.executed_transactions.push(builder_tx.signed_tx.clone().into_inner());
+        for builder_tx in builder_txs.iter() {
+            if builder_tx.is_top_of_block != top_of_block {
+                // don't commit tx if the buidler tx is not being added in the intended
+                // position in the block
+                continue;
+            }
+            if invalid.contains(&builder_tx.signed_tx.signer()) {
+                warn!(target: "payload_builder", tx_hash = ?builder_tx.signed_tx.tx_hash(), "builder signer invalid as previous builder tx reverted");
+                continue;
             }
 
-            // Release the db reference by dropping evm
-            drop(evm);
+            let ResultAndState { result, state } = match evm.transact(&builder_tx.signed_tx) {
+                Ok(res) => res,
+                Err(err) => {
+                    if let Some(err) = err.as_invalid_tx_err() {
+                        if err.is_nonce_too_low() {
+                            // if the nonce is too low, we can skip this transaction
+                            trace!(target: "payload_builder", %err, ?builder_tx.signed_tx, "skipping nonce too low builder transaction");
+                        } else {
+                            // if the transaction is invalid, we can skip it and all of its
+                            // descendants
+                            trace!(target: "payload_builder", %err, ?builder_tx.signed_tx, "skipping invalid builder transaction and its descendants");
+                            invalid.insert(builder_tx.signed_tx.signer());
+                        }
 
-            Ok(builder_txs)
+                        continue;
+                    }
+                    // this is an error that we should treat as fatal for this attempt
+                    return Err(BuilderTransactionError::EvmExecutionError(Box::new(err)));
+                }
+            };
+
+            if !result.is_success() {
+                warn!(target: "payload_builder", tx_hash = ?builder_tx.signed_tx.tx_hash(), result = ?result, "builder tx reverted");
+                invalid.insert(builder_tx.signed_tx.signer());
+                continue;
+            }
+
+            // Add gas used by the transaction to cumulative gas used, before creating the receipt
+            let gas_used = result.gas_used();
+            info.cumulative_gas_used += gas_used;
+            info.cumulative_da_bytes_used += builder_tx.da_size;
+
+            let ctx = ReceiptBuilderCtx {
+                tx: builder_tx.signed_tx.inner(),
+                evm: &evm,
+                result,
+                state: &state,
+                cumulative_gas_used: info.cumulative_gas_used,
+            };
+            info.receipts.push(builder_ctx.build_receipt(ctx, None));
+
+            // Commit changes
+            evm.db_mut().commit(state);
+
+            // Append sender and transaction to the respective lists
+            info.executed_senders.push(builder_tx.signed_tx.signer());
+            info.executed_transactions.push(builder_tx.signed_tx.clone().into_inner());
         }
+
+        // Release the db reference by dropping evm
+        drop(evm);
+
+        Ok(builder_txs)
     }
 
     // Creates a copy of the state to simulate against
@@ -261,7 +275,7 @@ pub trait BuilderTransactions<ExtraCtx: Debug + Default = (), Extra: Debug + Def
         from: Signer,
         gas_used: u64,
         calldata: Bytes,
-        ctx: &OpPayloadBuilderCtx<ExtraCtx>,
+        ctx: &OpPayloadBuilderCtx,
         db: impl DatabaseRef,
     ) -> Result<Recovered<OpTransactionSigned>, BuilderTransactionError> {
         let nonce = get_nonce(db, from.address)?;
@@ -282,7 +296,7 @@ pub trait BuilderTransactions<ExtraCtx: Debug + Default = (), Extra: Debug + Def
     fn commit_txs(
         &self,
         signed_txs: Vec<Recovered<OpTransactionSigned>>,
-        ctx: &OpPayloadBuilderCtx<ExtraCtx>,
+        ctx: &OpPayloadBuilderCtx,
         db: &mut State<impl Database>,
     ) -> Result<(), BuilderTransactionError> {
         let mut evm = ctx.evm_config.evm_with_env(&mut *db, ctx.evm_env.clone());
@@ -358,19 +372,18 @@ pub trait BuilderTransactions<ExtraCtx: Debug + Default = (), Extra: Debug + Def
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct BuilderTxBase<ExtraCtx = ()> {
+pub(super) struct BuilderTxBase {
     pub signer: Option<Signer>,
-    _marker: std::marker::PhantomData<ExtraCtx>,
 }
 
-impl<ExtraCtx: Debug + Default> BuilderTxBase<ExtraCtx> {
+impl BuilderTxBase {
     pub(super) fn new(signer: Option<Signer>) -> Self {
-        Self { signer, _marker: std::marker::PhantomData }
+        Self { signer }
     }
 
     pub(super) fn simulate_builder_tx(
         &self,
-        ctx: &OpPayloadBuilderCtx<ExtraCtx>,
+        ctx: &OpPayloadBuilderCtx,
         db: impl DatabaseRef,
     ) -> Result<Option<BuilderTransactionCtx>, BuilderTransactionError> {
         match self.signer {
@@ -415,7 +428,7 @@ impl<ExtraCtx: Debug + Default> BuilderTxBase<ExtraCtx> {
 
     fn signed_builder_tx(
         &self,
-        ctx: &OpPayloadBuilderCtx<ExtraCtx>,
+        ctx: &OpPayloadBuilderCtx,
         db: impl DatabaseRef,
         signer: Signer,
         gas_used: u64,

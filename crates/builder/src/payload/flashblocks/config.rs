@@ -1,6 +1,6 @@
 use alloy_primitives::Address;
 
-use crate::{args::OpRbuilderArgs, payload::BuilderConfig};
+use crate::{args::BuilderArgs, payload::BuilderConfig};
 use core::{
     net::{Ipv4Addr, SocketAddr},
     time::Duration,
@@ -20,9 +20,6 @@ pub struct FlashblocksConfig {
 
     /// Should we disable state root calculation for each flashblock
     pub disable_state_root: bool,
-
-    /// Should we disable running builder in rollup boost mode
-    pub disable_rollup_boost: bool,
 
     /// Should we disable async state root calculation on full payload resolution
     pub disable_async_calculate_state_root: bool,
@@ -71,7 +68,6 @@ impl Default for FlashblocksConfig {
             ws_addr: SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 1111),
             interval: Duration::from_millis(250),
             disable_state_root: false,
-            disable_rollup_boost: false,
             disable_async_calculate_state_root: false,
             number_contract_address: None,
             send_offset_ms: 0,
@@ -88,10 +84,10 @@ impl Default for FlashblocksConfig {
     }
 }
 
-impl TryFrom<OpRbuilderArgs> for FlashblocksConfig {
+impl TryFrom<BuilderArgs> for FlashblocksConfig {
     type Error = eyre::Report;
 
-    fn try_from(args: OpRbuilderArgs) -> Result<Self, Self::Error> {
+    fn try_from(args: BuilderArgs) -> Result<Self, Self::Error> {
         let interval = Duration::from_millis(args.flashblocks.flashblocks_block_time);
 
         let ws_addr = SocketAddr::new(
@@ -100,8 +96,6 @@ impl TryFrom<OpRbuilderArgs> for FlashblocksConfig {
         );
 
         let disable_state_root = args.flashblocks.flashblocks_disable_state_root;
-
-        let disable_rollup_boost = args.flashblocks.flashblocks_disable_rollup_boost;
 
         let disable_async_calculate_state_root =
             args.flashblocks.flashblocks_disable_async_calculate_state_root;
@@ -112,7 +106,6 @@ impl TryFrom<OpRbuilderArgs> for FlashblocksConfig {
             ws_addr,
             interval,
             disable_state_root,
-            disable_rollup_boost,
             disable_async_calculate_state_root,
             number_contract_address,
             send_offset_ms: args.flashblocks.flashblocks_send_offset_ms,
