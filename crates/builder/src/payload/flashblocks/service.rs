@@ -104,7 +104,7 @@ impl FlashblocksServiceBuilder {
         // Channels for built full block payloads
         let (built_payload_tx, built_payload_rx) = tokio::sync::mpsc::channel(16);
 
-        let p2p_cache = FlashblockPayloadsCache::new();
+        let p2p_cache = FlashblockPayloadsCache::new(None);
 
         let ws_pub: Arc<WebSocketPublisher> = WebSocketPublisher::new(
             self.0.specific.ws_addr,

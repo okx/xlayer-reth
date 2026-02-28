@@ -15,6 +15,7 @@ mod service;
 mod timing;
 mod wspub;
 
+pub use cache::FlashblockPayloadsCache;
 pub use wspub::WebSocketPublisher;
 
 /// Block building strategy that progressively builds chunks of a block and makes them available

@@ -20,7 +20,9 @@ pub use builder_tx::{
     InvalidContractDataError, SimulationSuccessResult,
 };
 pub use context::OpPayloadBuilderCtx;
-pub use flashblocks::{FlashblocksBuilder, FlashblocksServiceBuilder, WebSocketPublisher};
+pub use flashblocks::{
+    FlashblockPayloadsCache, FlashblocksBuilder, FlashblocksServiceBuilder, WebSocketPublisher,
+};
 
 /// Defines the interface for any block builder implementation API entry point.
 ///
