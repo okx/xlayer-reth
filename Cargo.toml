@@ -127,6 +127,7 @@ reth-tracing = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb4
 reth-transaction-pool = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-optimism-flashblocks = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-trie = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
+reth-trie-db = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 
 # ==============================================================================
 # Revm Dependencies (follows upstream reth)
@@ -199,6 +200,7 @@ eyre = { version = "0.6.12" }
 hex = "0.4"
 metrics = "0.24.1"
 moka = { version = "0.12.11", features = ["sync"] }
+criterion = { version = "0.5", features = ["html_reports"] }
 once_cell = "1.19"
 parking_lot = { version = "0.12.3" }
 secp256k1 = { version = "0.30" }

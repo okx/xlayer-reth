@@ -52,7 +52,7 @@ use reth_revm::{
     State,
 };
 use reth_transaction_pool::TransactionPool;
-use reth_trie::{updates::TrieUpdates, HashedPostState};
+use reth_trie::{updates::TrieUpdates, HashedPostState, TrieInput};
 use revm::Database;
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use tokio::sync::mpsc;
@@ -111,6 +111,9 @@ pub(super) struct FlashblocksState {
     /// Index into `ExecutionInfo` tracking the last consumed flashblock.
     /// Used for slicing transactions/receipts per flashblock.
     last_flashblock_tx_index: usize,
+    /// Cached trie updates from previous flashblock for incremental state root calculation.
+    /// None only for the first flashblock; populated after each subsequent state root calculation.
+    prev_trie_updates: Option<Arc<TrieUpdates>>,
 }
 
 impl FlashblocksState {
@@ -130,6 +133,7 @@ impl FlashblocksState {
             target_gas_for_batch,
             target_da_for_batch,
             target_da_footprint_for_batch,
+            prev_trie_updates: self.prev_trie_updates.clone(),
             ..*self
         }
     }
@@ -980,24 +984,67 @@ where
     let mut state_root = B256::ZERO;
     let mut trie_output = TrieUpdates::default();
     let mut hashed_state = HashedPostState::default();
+    let mut trie_updates_to_cache: Option<TrieUpdates> = None;
 
     if calculate_state_root {
         let state_provider = state.database.as_ref();
+
+        // prev_trie_updates is None for the first flashblock.
+        let prev_trie = fb_state.as_deref().and_then(|s| s.prev_trie_updates.clone());
+        let flashblock_index = fb_state.as_deref().map(|s| s.flashblock_index()).unwrap_or(0);
+
         hashed_state = state_provider.hashed_post_state(&state.bundle_state);
-        (state_root, trie_output) = {
+
+        (state_root, trie_output) = if let Some(prev_trie) = prev_trie {
+            // Incremental path: Use cached trie from previous flashblock
+            debug!(
+                target: "payload_builder",
+                flashblock_index,
+                "Using incremental state root calculation with cached trie"
+            );
+
+            let trie_input = TrieInput::new(
+                prev_trie.as_ref().clone(),
+                hashed_state.clone(),
+                hashed_state.construct_prefix_sets(),
+            );
+
+            state_provider
+                .state_root_from_nodes_with_updates(trie_input)
+                .map_err(PayloadBuilderError::other)?
+        } else {
+            debug!(
+                target: "payload_builder",
+                flashblock_index,
+                "Using full state root calculation"
+            );
+
             state.database.as_ref().state_root_with_updates(hashed_state.clone()).inspect_err(
                 |err| {
-                    warn!(target: "payload_builder",
-                    parent_header=%ctx.parent().hash(),
+                    warn!(
+                        target: "payload_builder",
+                        parent_header=%ctx.parent().hash(),
                         %err,
                         "failed to calculate state root for payload"
                     );
                 },
             )?
         };
+
+        // Cache trie updates to apply in fb_state later (avoids mut on fb_state parameter).
+        trie_updates_to_cache = Some(trie_output.clone());
+
         let state_root_calculation_time = state_root_start_time.elapsed();
         ctx.metrics.state_root_calculation_duration.record(state_root_calculation_time);
         ctx.metrics.state_root_calculation_gauge.set(state_root_calculation_time);
+
+        debug!(
+            target: "payload_builder",
+            flashblock_index,
+            state_root = %state_root,
+            duration_ms = state_root_calculation_time.as_millis(),
+            "State root calculation completed"
+        );
     }
 
     let mut requests_hash = None;
@@ -1115,6 +1162,9 @@ where
 
     let new_receipts = info.receipts[last_idx..].to_vec();
     if let Some(fb) = fb_state {
+        if let Some(updates) = trie_updates_to_cache.take() {
+            fb.prev_trie_updates = Some(Arc::new(updates));
+        }
         fb.set_last_flashblock_tx_index(info.executed_transactions.len());
     }
     let receipts_with_hash = new_transactions
