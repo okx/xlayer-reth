@@ -144,4 +144,441 @@ impl FlashblockPayloadsCache {
             },
         )
     }
+
+    #[cfg(test)]
+    fn with_persist_path(path: PathBuf) -> Self {
+        Self { inner: Arc::new(Mutex::new(None)), persist_path: Some(path) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use op_alloy_rpc_types_engine::{
+        OpFlashblockPayloadBase, OpFlashblockPayloadDelta, OpFlashblockPayloadMetadata,
+    };
+    use reth_optimism_primitives::OpTransactionSigned;
+    use std::collections::BTreeMap;
+
+    /// RAII guard for a temporary directory that cleans up on drop (success or failure).
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("xlayer_cache_test_{name}_{}", std::process::id()));
+            std::fs::create_dir_all(&path).expect("failed to create temp dir");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Creates a test flashblock payload with configurable fields.
+    fn make_payload(
+        payload_id: [u8; 8],
+        index: u64,
+        parent_hash: Option<B256>,
+        block_number: u64,
+    ) -> OpFlashblockPayload {
+        OpFlashblockPayload {
+            payload_id: PayloadId::new(payload_id),
+            index,
+            base: parent_hash.map(|hash| OpFlashblockPayloadBase {
+                parent_hash: hash,
+                block_number,
+                ..Default::default()
+            }),
+            diff: OpFlashblockPayloadDelta::default(),
+            metadata: OpFlashblockPayloadMetadata {
+                block_number,
+                new_account_balances: BTreeMap::new(),
+                receipts: BTreeMap::new(),
+            },
+        }
+    }
+
+    // ========================================================================
+    // Cache creation
+    // ========================================================================
+
+    #[test]
+    fn default_cache_is_empty() {
+        let cache = FlashblockPayloadsCache::default();
+        assert!(cache.inner.lock().is_none());
+        assert!(cache.persist_path.is_none());
+    }
+
+    #[test]
+    fn new_without_datadir_has_no_persist_path() {
+        let cache = FlashblockPayloadsCache::new(None);
+        assert!(cache.persist_path.is_none());
+    }
+
+    // ========================================================================
+    // add_flashblock_payload
+    // ========================================================================
+
+    #[test]
+    fn add_single_payload_creates_sequence() {
+        let cache = FlashblockPayloadsCache::default();
+        let parent = B256::random();
+        let payload = make_payload([1u8; 8], 0, Some(parent), 100);
+
+        cache.add_flashblock_payload(payload).unwrap();
+
+        let guard = cache.inner.lock();
+        let seq = guard.as_ref().unwrap();
+        assert_eq!(seq.payload_id, PayloadId::new([1u8; 8]));
+        assert_eq!(seq.parent_hash, Some(parent));
+        assert_eq!(seq.payloads.len(), 1);
+    }
+
+    #[test]
+    fn add_payloads_same_id_appends() {
+        let cache = FlashblockPayloadsCache::default();
+        let parent = B256::random();
+        let id = [1u8; 8];
+
+        // First payload (base, index 0)
+        cache.add_flashblock_payload(make_payload(id, 0, Some(parent), 100)).unwrap();
+        // Second payload (incremental, index 1)
+        cache.add_flashblock_payload(make_payload(id, 1, None, 100)).unwrap();
+        // Third payload (incremental, index 2)
+        cache.add_flashblock_payload(make_payload(id, 2, None, 100)).unwrap();
+
+        let guard = cache.inner.lock();
+        let seq = guard.as_ref().unwrap();
+        assert_eq!(seq.payload_id, PayloadId::new(id));
+        assert_eq!(seq.payloads.len(), 3);
+        assert_eq!(seq.payloads[0].index, 0);
+        assert_eq!(seq.payloads[1].index, 1);
+        assert_eq!(seq.payloads[2].index, 2);
+    }
+
+    #[test]
+    fn add_payload_new_id_replaces_sequence() {
+        let cache = FlashblockPayloadsCache::default();
+        let parent_a = B256::random();
+        let parent_b = B256::random();
+
+        // Add payloads for first block
+        cache.add_flashblock_payload(make_payload([1u8; 8], 0, Some(parent_a), 100)).unwrap();
+        cache.add_flashblock_payload(make_payload([1u8; 8], 1, None, 100)).unwrap();
+
+        // New payload_id replaces the entire cache
+        cache.add_flashblock_payload(make_payload([2u8; 8], 0, Some(parent_b), 101)).unwrap();
+
+        let guard = cache.inner.lock();
+        let seq = guard.as_ref().unwrap();
+        assert_eq!(seq.payload_id, PayloadId::new([2u8; 8]));
+        assert_eq!(seq.parent_hash, Some(parent_b));
+        assert_eq!(seq.payloads.len(), 1);
+    }
+
+    #[test]
+    fn parent_hash_extracted_from_first_payload_with_base() {
+        let cache = FlashblockPayloadsCache::default();
+        let parent = B256::random();
+        let id = [1u8; 8];
+
+        // First payload without base (no parent_hash)
+        cache.add_flashblock_payload(make_payload(id, 1, None, 100)).unwrap();
+
+        {
+            let guard = cache.inner.lock();
+            assert_eq!(guard.as_ref().unwrap().parent_hash, None);
+        }
+
+        // Second payload with base containing parent_hash - should backfill
+        cache.add_flashblock_payload(make_payload(id, 0, Some(parent), 100)).unwrap();
+
+        let guard = cache.inner.lock();
+        assert_eq!(guard.as_ref().unwrap().parent_hash, Some(parent));
+    }
+
+    #[test]
+    fn parent_hash_not_overwritten_once_set() {
+        let cache = FlashblockPayloadsCache::default();
+        let parent_first = B256::random();
+        let parent_second = B256::random();
+        let id = [1u8; 8];
+
+        // First payload sets parent_hash
+        cache.add_flashblock_payload(make_payload(id, 0, Some(parent_first), 100)).unwrap();
+
+        // Second payload with different parent_hash in base - should NOT overwrite
+        cache.add_flashblock_payload(make_payload(id, 1, Some(parent_second), 100)).unwrap();
+
+        let guard = cache.inner.lock();
+        assert_eq!(guard.as_ref().unwrap().parent_hash, Some(parent_first));
+    }
+
+    // ========================================================================
+    // FlashblockPayloadsSequence serialization
+    // ========================================================================
+
+    #[test]
+    fn sequence_serde_roundtrip() {
+        let parent = B256::random();
+        let sequence = FlashblockPayloadsSequence {
+            payload_id: PayloadId::new([42u8; 8]),
+            parent_hash: Some(parent),
+            payloads: vec![
+                make_payload([42u8; 8], 0, Some(parent), 100),
+                make_payload([42u8; 8], 1, None, 100),
+            ],
+        };
+
+        let json = serde_json::to_vec(&sequence).unwrap();
+        let deserialized: FlashblockPayloadsSequence = serde_json::from_slice(&json).unwrap();
+
+        assert_eq!(deserialized.payload_id, sequence.payload_id);
+        assert_eq!(deserialized.parent_hash, sequence.parent_hash);
+        assert_eq!(deserialized.payloads.len(), sequence.payloads.len());
+        assert_eq!(deserialized.payloads[0].index, 0);
+        assert_eq!(deserialized.payloads[1].index, 1);
+    }
+
+    #[test]
+    fn sequence_serde_with_none_parent_hash() {
+        let sequence = FlashblockPayloadsSequence {
+            payload_id: PayloadId::new([1u8; 8]),
+            parent_hash: None,
+            payloads: vec![make_payload([1u8; 8], 0, None, 50)],
+        };
+
+        let json = serde_json::to_vec(&sequence).unwrap();
+        let deserialized: FlashblockPayloadsSequence = serde_json::from_slice(&json).unwrap();
+
+        assert_eq!(deserialized.parent_hash, None);
+    }
+
+    #[tokio::test]
+    async fn persist_writes_file_and_load_restores() {
+        let tmp = TempDir::new("persist_roundtrip");
+        let file_path = tmp.path().join(PENDING_SEQUENCE_FILE);
+
+        let cache = FlashblockPayloadsCache::with_persist_path(file_path.clone());
+        let parent = B256::random();
+        let id = [10u8; 8];
+
+        cache.add_flashblock_payload(make_payload(id, 0, Some(parent), 200)).unwrap();
+        cache.add_flashblock_payload(make_payload(id, 1, None, 200)).unwrap();
+        cache.add_flashblock_payload(make_payload(id, 2, None, 200)).unwrap();
+
+        // Persist to disk
+        cache.persist().await.unwrap();
+
+        // Verify file exists
+        assert!(file_path.exists(), "persistence file should exist after persist()");
+
+        // Verify no temp file left behind
+        let tmp_path = file_path.with_file_name(format!(".{PENDING_SEQUENCE_FILE}"));
+        assert!(!tmp_path.exists(), "temp file should be cleaned up after atomic rename");
+
+        // Load from file and verify contents match
+        let loaded = FlashblockPayloadsCache::load_from_file(&file_path).unwrap();
+        let loaded_guard = loaded.inner.lock();
+        let loaded_seq = loaded_guard.as_ref().unwrap();
+
+        assert_eq!(loaded_seq.payload_id, PayloadId::new(id));
+        assert_eq!(loaded_seq.parent_hash, Some(parent));
+        assert_eq!(loaded_seq.payloads.len(), 3);
+        assert_eq!(loaded_seq.payloads[0].index, 0);
+        assert_eq!(loaded_seq.payloads[1].index, 1);
+        assert_eq!(loaded_seq.payloads[2].index, 2);
+    }
+
+    #[tokio::test]
+    async fn persist_no_path_is_noop() {
+        let cache = FlashblockPayloadsCache::default();
+        cache.add_flashblock_payload(make_payload([1u8; 8], 0, Some(B256::ZERO), 1)).unwrap();
+
+        // Should succeed without writing anything (no persist_path)
+        cache.persist().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn persist_empty_cache_is_noop() {
+        let tmp = TempDir::new("persist_empty");
+        let file_path = tmp.path().join(PENDING_SEQUENCE_FILE);
+
+        let cache = FlashblockPayloadsCache::with_persist_path(file_path.clone());
+
+        // Cache is empty — persist should be a no-op
+        cache.persist().await.unwrap();
+        assert!(!file_path.exists(), "no file should be written for empty cache");
+    }
+
+    #[tokio::test]
+    async fn persist_overwrites_previous_file() {
+        let tmp = TempDir::new("persist_overwrite");
+        let file_path = tmp.path().join(PENDING_SEQUENCE_FILE);
+
+        let cache = FlashblockPayloadsCache::with_persist_path(file_path.clone());
+
+        // First sequence
+        let parent_a = B256::random();
+        cache.add_flashblock_payload(make_payload([1u8; 8], 0, Some(parent_a), 100)).unwrap();
+        cache.persist().await.unwrap();
+
+        // Replace with second sequence
+        let parent_b = B256::random();
+        cache.add_flashblock_payload(make_payload([2u8; 8], 0, Some(parent_b), 101)).unwrap();
+        cache.persist().await.unwrap();
+
+        // Loaded data should reflect the second sequence
+        let loaded = FlashblockPayloadsCache::load_from_file(&file_path).unwrap();
+        let guard = loaded.inner.lock();
+        let seq = guard.as_ref().unwrap();
+        assert_eq!(seq.payload_id, PayloadId::new([2u8; 8]));
+        assert_eq!(seq.parent_hash, Some(parent_b));
+    }
+
+    #[test]
+    fn load_from_nonexistent_file_returns_error() {
+        let result = FlashblockPayloadsCache::load_from_file(Path::new("/nonexistent/path.json"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_from_invalid_json_returns_error() {
+        let tmp = TempDir::new("load_invalid");
+        let file_path = tmp.path().join("bad.json");
+        std::fs::write(&file_path, b"not valid json").unwrap();
+
+        let result = FlashblockPayloadsCache::load_from_file(&file_path);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn persist_file_contains_valid_json() {
+        let tmp = TempDir::new("persist_json");
+        let file_path = tmp.path().join(PENDING_SEQUENCE_FILE);
+
+        let cache = FlashblockPayloadsCache::with_persist_path(file_path.clone());
+        let parent = B256::random();
+        cache.add_flashblock_payload(make_payload([5u8; 8], 0, Some(parent), 42)).unwrap();
+        cache.persist().await.unwrap();
+
+        // Read raw bytes and verify it's valid JSON that deserializes correctly
+        let data = std::fs::read(&file_path).unwrap();
+        let seq: FlashblockPayloadsSequence = serde_json::from_slice(&data).unwrap();
+        assert_eq!(seq.payload_id, PayloadId::new([5u8; 8]));
+        assert_eq!(seq.parent_hash, Some(parent));
+        assert_eq!(seq.payloads[0].metadata.block_number, 42);
+    }
+
+    #[test]
+    fn get_txs_empty_cache_returns_none() {
+        let cache = FlashblockPayloadsCache::default();
+        let result = cache.get_flashblocks_sequence_txs::<OpTransactionSigned>(B256::random());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn get_txs_wrong_parent_hash_returns_none() {
+        let cache = FlashblockPayloadsCache::default();
+        let parent = B256::random();
+        let wrong_parent = B256::random();
+
+        cache.add_flashblock_payload(make_payload([1u8; 8], 0, Some(parent), 100)).unwrap();
+
+        let result = cache.get_flashblocks_sequence_txs::<OpTransactionSigned>(wrong_parent);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn get_txs_only_base_payload_returns_empty_vec() {
+        let cache = FlashblockPayloadsCache::default();
+        let parent = B256::random();
+
+        // Only index 0 (base) — no flashblock transactions to return
+        cache.add_flashblock_payload(make_payload([1u8; 8], 0, Some(parent), 100)).unwrap();
+
+        let result = cache.get_flashblocks_sequence_txs::<OpTransactionSigned>(parent);
+        assert_eq!(result, Some(vec![]));
+    }
+
+    #[test]
+    fn get_txs_with_none_parent_hash_returns_none() {
+        let cache = FlashblockPayloadsCache::default();
+
+        // Payload without base (parent_hash will be None)
+        cache.add_flashblock_payload(make_payload([1u8; 8], 1, None, 100)).unwrap();
+
+        // Any query should return None since cached parent_hash is None
+        let result = cache.get_flashblocks_sequence_txs::<OpTransactionSigned>(B256::ZERO);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn get_txs_non_sequential_indexes_returns_none() {
+        let cache = FlashblockPayloadsCache::default();
+        let parent = B256::random();
+        let id = [1u8; 8];
+
+        // index 0 (base)
+        cache.add_flashblock_payload(make_payload(id, 0, Some(parent), 100)).unwrap();
+        // index 1 — sequential
+        cache.add_flashblock_payload(make_payload(id, 1, None, 100)).unwrap();
+        // index 3 — gap (skipped index 2)
+        cache.add_flashblock_payload(make_payload(id, 3, None, 100)).unwrap();
+
+        let result = cache.get_flashblocks_sequence_txs::<OpTransactionSigned>(parent);
+        assert!(result.is_none(), "gap in indexes should return None");
+    }
+
+    #[test]
+    fn concurrent_add_and_read() {
+        let cache = FlashblockPayloadsCache::default();
+        let cache_clone = cache.clone();
+        let parent = B256::random();
+        let id = [1u8; 8];
+
+        // Spawn writer thread
+        let writer = std::thread::spawn(move || {
+            for i in 0..100u64 {
+                cache_clone.add_flashblock_payload(make_payload(id, i, Some(parent), 100)).unwrap();
+            }
+        });
+
+        // Read concurrently from main thread
+        for _ in 0..50 {
+            let guard = cache.inner.lock();
+            if let Some(seq) = guard.as_ref() {
+                assert_eq!(seq.payload_id, PayloadId::new(id));
+                assert!(!seq.payloads.is_empty());
+            }
+            drop(guard);
+        }
+
+        writer.join().unwrap();
+
+        let guard = cache.inner.lock();
+        let seq = guard.as_ref().unwrap();
+        assert_eq!(seq.payloads.len(), 100);
+    }
+
+    #[test]
+    fn clone_shares_underlying_data() {
+        let cache = FlashblockPayloadsCache::default();
+        let clone = cache.clone();
+
+        cache.add_flashblock_payload(make_payload([1u8; 8], 0, Some(B256::ZERO), 1)).unwrap();
+
+        // Clone should see the same data
+        let guard = clone.inner.lock();
+        assert!(guard.is_some());
+        assert_eq!(guard.as_ref().unwrap().payloads.len(), 1);
+    }
 }
