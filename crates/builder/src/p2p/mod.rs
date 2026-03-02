@@ -511,6 +511,14 @@ mod test {
     const TEST_AGENT_VERSION: &str = "test/1.0.0";
     const TEST_PROTOCOL: StreamProtocol = StreamProtocol::new("/test/1.0.0");
 
+    fn get_free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("can bind to an ephemeral port")
+            .local_addr()
+            .expect("can read bound address")
+            .port()
+    }
+
     #[derive(Debug, PartialEq, Eq, Clone)]
     struct TestMessage {
         content: String,
@@ -543,9 +551,16 @@ mod test {
 
     #[tokio::test]
     async fn two_nodes_can_connect_and_message() {
+        let port1 = get_free_port();
+        let port2 = loop {
+            let port = get_free_port();
+            if port != port1 {
+                break port;
+            }
+        };
         let NodeBuildResult { node: node1, outgoing_message_tx: _, incoming_message_rxs: mut rx1 } =
             NodeBuilder::new()
-                .with_listen_addr("/ip4/127.0.0.1/tcp/9000".parse().unwrap())
+                .with_listen_addr(format!("/ip4/127.0.0.1/tcp/{port1}").parse().unwrap())
                 .with_agent_version(TEST_AGENT_VERSION.to_string())
                 .with_protocol(TEST_PROTOCOL)
                 .try_build::<TestMessage>()
@@ -554,20 +569,27 @@ mod test {
             NodeBuilder::new()
                 .with_known_peers(node1.multiaddrs())
                 .with_protocol(TEST_PROTOCOL)
-                .with_listen_addr("/ip4/127.0.0.1/tcp/9001".parse().unwrap())
+                .with_listen_addr(format!("/ip4/127.0.0.1/tcp/{port2}").parse().unwrap())
                 .with_agent_version(TEST_AGENT_VERSION.to_string())
                 .try_build::<TestMessage>()
                 .unwrap();
 
         tokio::spawn(async move { node1.run().await });
         tokio::spawn(async move { node2.run().await });
-        // sleep to allow nodes to connect
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
         let message = TestMessage { content: "message".to_string() };
-        tx2.send(message.clone()).await.unwrap();
-
-        let recv_message: TestMessage = rx1.remove(&TEST_PROTOCOL).unwrap().recv().await.unwrap();
+        let mut rx = rx1.remove(&TEST_PROTOCOL).unwrap();
+        let recv_message: TestMessage = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                tx2.send(message.clone()).await.unwrap();
+                if let Ok(Some(received)) =
+                    tokio::time::timeout(Duration::from_millis(200), rx.recv()).await
+                {
+                    return received;
+                }
+            }
+        })
+        .await
+        .expect("message receive timed out");
         assert_eq!(recv_message, message);
     }
 }
