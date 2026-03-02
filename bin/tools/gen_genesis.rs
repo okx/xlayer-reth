@@ -104,8 +104,8 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
         })
         .wrap_err("Failed to set interrupt handler")?;
 
-        // Initialize the environment (opens the database in read-only mode)
-        let Environment { provider_factory, .. } = self.env.init::<N>(AccessRights::RO)?;
+        // Initialize the environment (opens the database in read-write mode to avoid error)
+        let Environment { provider_factory, .. } = self.env.init::<N>(AccessRights::RW)?;
 
         // Get the latest block number from the database
         let provider = provider_factory.provider()?;
