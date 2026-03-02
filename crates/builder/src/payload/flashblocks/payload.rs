@@ -940,7 +940,9 @@ where
                 let precalc_result = precalc_pipeline.and_then(|pipeline| {
                     drop(pipeline.work_tx);
                     let mut latest = None;
-                    while let Ok(result) = pipeline.result_rx.recv() {
+                    let timeout = std::time::Duration::from_secs(30);
+                    // First recv with timeout to avoid hanging if worker is stuck
+                    while let Ok(result) = pipeline.result_rx.recv_timeout(timeout) {
                         let is_target = result.flashblock_index == target_index;
                         latest = Some(result);
                         if is_target {
