@@ -939,16 +939,24 @@ where
 
         let payload = match best_payload.0.block().header().state_root {
             B256::ZERO => {
-                // Drain the async trie precalc pipeline for the latest result
+                // Block-wait for the worker to finish the immediately prior flashblock.
+                // Drop work_tx so the worker finishes remaining items and exits.
+                let target_index = current_flashblock_index.saturating_sub(1);
                 let precalc_result = precalc_pipeline.and_then(|pipeline| {
+                    drop(pipeline.work_tx);
                     let mut latest = None;
-                    while let Ok(result) = pipeline.result_rx.try_recv() {
+                    while let Ok(result) = pipeline.result_rx.recv() {
+                        let is_target = result.flashblock_index == target_index;
                         latest = Some(result);
+                        if is_target {
+                            break;
+                        }
                     }
                     if let Some(ref result) = latest {
                         info!(
                             target: "payload_builder",
                             flashblock_index = result.flashblock_index,
+                            target_index,
                             "Using async trie precalc result for resolve"
                         );
                     }
@@ -1122,9 +1130,9 @@ where
     // calculate the state root
     let state_root_start_time = Instant::now();
     let mut state_root = B256::ZERO;
-    let mut trie_output = TrieUpdates::default();
+    let mut trie_output_arc = Arc::new(TrieUpdates::default());
     let mut hashed_state = HashedPostState::default();
-    let mut trie_updates_to_cache: Option<TrieUpdates> = None;
+    let mut trie_updates_to_cache: Option<Arc<TrieUpdates>> = None;
 
     if calculate_state_root {
         let state_provider = state.database.as_ref();
@@ -1135,7 +1143,7 @@ where
 
         hashed_state = state_provider.hashed_post_state(&state.bundle_state);
 
-        (state_root, trie_output) = if let Some(prev_trie) = prev_trie {
+        if let Some(prev_trie) = prev_trie {
             // Incremental path: Use cached trie from previous flashblock
             debug!(
                 target: "payload_builder",
@@ -1149,9 +1157,11 @@ where
                 hashed_state.construct_prefix_sets(),
             );
 
-            state_provider
+            let trie_output;
+            (state_root, trie_output) = state_provider
                 .state_root_from_nodes_with_updates(trie_input)
-                .map_err(PayloadBuilderError::other)?
+                .map_err(PayloadBuilderError::other)?;
+            trie_output_arc = Arc::new(trie_output);
         } else {
             debug!(
                 target: "payload_builder",
@@ -1159,20 +1169,23 @@ where
                 "Using full state root calculation"
             );
 
-            state.database.as_ref().state_root_with_updates(hashed_state.clone()).inspect_err(
-                |err| {
-                    warn!(
-                        target: "payload_builder",
-                        parent_header=%ctx.parent().hash(),
-                        %err,
-                        "failed to calculate state root for payload"
-                    );
-                },
-            )?
+            let trie_output;
+            (state_root, trie_output) =
+                state.database.as_ref().state_root_with_updates(hashed_state.clone()).inspect_err(
+                    |err| {
+                        warn!(
+                            target: "payload_builder",
+                            parent_header=%ctx.parent().hash(),
+                            %err,
+                            "failed to calculate state root for payload"
+                        );
+                    },
+                )?;
+            trie_output_arc = Arc::new(trie_output);
         };
 
         // Cache trie updates to apply in fb_state later (avoids mut on fb_state parameter).
-        trie_updates_to_cache = Some(trie_output.clone());
+        trie_updates_to_cache = Some(trie_output_arc.clone());
 
         let state_root_calculation_time = state_root_start_time.elapsed();
         ctx.metrics.state_root_calculation_duration.record(state_root_calculation_time);
@@ -1271,7 +1284,7 @@ where
     let executed = BuiltPayloadExecutedBlock {
         recovered_block: Arc::new(recovered_block),
         execution_output: Arc::new(execution_output),
-        trie_updates: either::Either::Left(Arc::new(trie_output)),
+        trie_updates: either::Either::Left(trie_output_arc),
         hashed_state: either::Either::Left(Arc::new(hashed_state)),
     };
     debug!(
@@ -1303,7 +1316,7 @@ where
     let new_receipts = info.receipts[last_idx..].to_vec();
     if let Some(fb) = fb_state {
         if let Some(updates) = trie_updates_to_cache.take() {
-            fb.prev_trie_updates = Some(Arc::new(updates));
+            fb.prev_trie_updates = Some(updates);
         }
         fb.set_last_flashblock_tx_index(info.executed_transactions.len());
     }
@@ -1448,16 +1461,18 @@ fn calculate_state_root_on_resolve(
     let hashed_state = state_provider.hashed_post_state(&ctx.best_payload.1);
     let hashed_state_time = hashed_state_start.elapsed();
 
+    // Only use precalc from the immediately prior flashblock (strict incremental)
+    let eligible_precalc =
+        precalc_result.filter(|p| p.flashblock_index + 1 == ctx.current_flashblock_index);
+
     let state_root_start = Instant::now();
-    let (state_root, trie_updates, method) = if let Some(precalc) = precalc_result {
+    let (state_root, trie_updates, method) = if let Some(precalc) = eligible_precalc {
         let delta_prefix_sets = compute_delta_prefix_sets(&precalc.hashed_state, &hashed_state);
-        let is_immediate = precalc.flashblock_index + 1 == ctx.current_flashblock_index;
 
         info!(
             target: "payload_builder",
             precalc_flashblock = precalc.flashblock_index,
             current_flashblock = ctx.current_flashblock_index,
-            is_immediate,
             delta_account_count = delta_prefix_sets.account_prefix_set.len(),
             delta_storage_count = delta_prefix_sets.storage_prefix_sets.len(),
             "Using incremental resolve with delta prefix sets"
@@ -1479,10 +1494,8 @@ fn calculate_state_root_on_resolve(
                 );
             })?;
 
-        let method = if is_immediate { "incremental" } else { "incremental_stale" };
-        (root, updates, method)
+        (root, updates, "incremental")
     } else {
-        // Cold path: no precalc available
         let (root, updates) =
             state_provider.state_root_with_updates(hashed_state.clone()).inspect_err(|err| {
                 warn!(target: "payload_builder",
@@ -1523,15 +1536,9 @@ fn run_trie_precalc_worker(
     state_provider: Box<dyn reth::providers::StateProvider>,
     metrics: Arc<BuilderMetrics>,
 ) {
-    let mut prev_trie_updates: Option<Arc<TrieUpdates>> = None;
+    let mut prev_trie_updates: Option<TrieUpdates> = None;
 
     while let Ok(work_item) = work_rx.recv() {
-        // Skip stale items, always compute the latest available flashblock
-        let mut latest_item = work_item;
-        while let Ok(newer_item) = work_rx.try_recv() {
-            latest_item = newer_item;
-        }
-        let work_item = latest_item;
 
         let start_time = Instant::now();
 
@@ -1539,10 +1546,8 @@ fn run_trie_precalc_worker(
 
         let result = if let Some(prev_trie) = prev_trie_updates.take() {
             // Incremental path: reuse cached trie nodes from previous flashblock
-            let trie_updates_owned =
-                Arc::try_unwrap(prev_trie).unwrap_or_else(|arc| arc.as_ref().clone());
             let trie_input = TrieInput::new(
-                trie_updates_owned,
+                prev_trie,
                 hashed_state.clone(),
                 hashed_state.construct_prefix_sets(),
             );
@@ -1554,9 +1559,6 @@ fn run_trie_precalc_worker(
 
         match result {
             Ok((state_root, trie_output)) => {
-                let trie_updates = Arc::new(trie_output);
-                prev_trie_updates = Some(trie_updates.clone());
-
                 let elapsed = start_time.elapsed();
                 info!(
                     target: "payload_builder",
@@ -1565,12 +1567,15 @@ fn run_trie_precalc_worker(
                     duration_ms = elapsed.as_millis(),
                     "Async trie precalculation completed"
                 );
-                metrics.state_root_calculation_duration.record(elapsed);
+                metrics.trie_precalc_duration.record(elapsed);
+
+                // Clone for our incremental chain, wrap in Arc for cross-thread transfer
+                prev_trie_updates = Some(trie_output.clone());
 
                 if result_tx
                     .send(TriePrecalcResult {
                         flashblock_index: work_item.flashblock_index,
-                        trie_updates,
+                        trie_updates: Arc::new(trie_output),
                         hashed_state,
                     })
                     .is_err()
