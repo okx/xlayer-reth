@@ -15,8 +15,6 @@ pub const DEFAULT_L2_CHAIN_ID: u64 = 195;
 pub const DEFAULT_L2_SEQ_URL: &str = "http://localhost:8123";
 /// Default L2 RPC node URL for testing
 pub const DEFAULT_L2_NETWORK_URL: &str = "http://localhost:8124";
-/// Default L2 op-rbuilder URL for testing
-pub const DEFAULT_L2_BUILDER_URL: &str = "http://localhost:8125";
 // Default L2 RPC node with flashblocks enabled
 pub const DEFAULT_L2_NETWORK_URL_FB: &str = "http://localhost:8124";
 // Default L2 RPC node with flashblocks disabled

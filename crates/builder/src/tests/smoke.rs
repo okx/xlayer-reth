@@ -1,5 +1,5 @@
 use crate::{
-    args::{FlashblocksArgs, OpRbuilderArgs},
+    args::{BuilderArgs, FlashblocksArgs},
     tests::{BuilderTxValidation, LocalInstance, TransactionBuilderExt},
 };
 use alloy_primitives::TxHash;
@@ -18,7 +18,7 @@ use tracing::info;
 ///
 /// Generated blocks are also validated against an external op-reth node to
 /// ensure their correctness.
-#[rb_test(args = OpRbuilderArgs {
+#[rb_test(args = BuilderArgs {
     flashblocks: FlashblocksArgs {
         enabled: true,
         flashblocks_port: 0,
@@ -169,7 +169,7 @@ async fn test_no_tx_pool(rbuilder: LocalInstance) -> eyre::Result<()> {
     Ok(())
 }
 
-#[rb_test(args = OpRbuilderArgs {
+#[rb_test(args = BuilderArgs {
     max_gas_per_txn: Some(25000),
     ..Default::default()
 })]
@@ -216,7 +216,7 @@ async fn chain_produces_big_tx_with_gas_limit(rbuilder: LocalInstance) -> eyre::
     Ok(())
 }
 
-#[rb_test(args = OpRbuilderArgs {
+#[rb_test(args = BuilderArgs {
     ..Default::default()
 })]
 async fn chain_produces_big_tx_without_gas_limit(rbuilder: LocalInstance) -> eyre::Result<()> {
@@ -252,7 +252,7 @@ async fn chain_produces_big_tx_without_gas_limit(rbuilder: LocalInstance) -> eyr
 
 /// Validates that each block contains builder transactions using the
 /// BuilderTxValidation utility.
-#[rb_test(args = OpRbuilderArgs {
+#[rb_test(args = BuilderArgs {
     flashblocks: FlashblocksArgs {
         enabled: true,
         flashblocks_port: 0,

@@ -1,5 +1,5 @@
 use crate::{
-    args::{FlashblocksArgs, OpRbuilderArgs},
+    args::{BuilderArgs, FlashblocksArgs},
     tests::{BlockTransactionsExt, LocalInstance},
 };
 use alloy_eips::{eip1559::MIN_PROTOCOL_BASE_FEE, BlockNumberOrTag::Latest, Encodable2718};
@@ -7,7 +7,7 @@ use alloy_primitives::bytes;
 use macros::rb_test;
 use std::time::Duration;
 
-#[rb_test(args = OpRbuilderArgs {
+#[rb_test(args = BuilderArgs {
     flashblocks: FlashblocksArgs {
         enabled: true,
         flashblocks_port: 0,

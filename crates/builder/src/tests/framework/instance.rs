@@ -1,14 +1,12 @@
 use crate::{
-    args::OpRbuilderArgs,
-    builders::{BuilderConfig, FlashblocksBuilder, PayloadBuilder},
-    primitives::reth::engine_api_builder::OpEngineApiBuilder,
-    revert_protection::{EthApiExtServer, RevertProtectionExt},
+    args::BuilderArgs,
+    payload::{BuilderConfig, FlashblocksBuilder, PayloadBuilder},
     tests::{
-        builder_signer, create_test_db, framework::driver::ChainDriver, EngineApi, Ipc,
-        TransactionPoolObserver,
+        builder_signer, create_test_db,
+        framework::{driver::ChainDriver, engine_api_builder::OpEngineApiBuilder},
+        EngineApi, Ipc, TransactionPoolObserver,
     },
-    tx::FBPooledTransaction,
-    tx_signer::Signer,
+    tx::signer::Signer,
 };
 use alloy_primitives::B256;
 use alloy_provider::{Identity, ProviderBuilder, RootProvider};
@@ -36,10 +34,12 @@ use reth_node_builder::{NodeBuilder, NodeConfig};
 use reth_optimism_chainspec::OpChainSpec;
 use reth_optimism_cli::commands::Commands;
 use reth_optimism_node::{
+    args::RollupArgs,
     node::{OpAddOns, OpAddOnsBuilder, OpEngineValidatorBuilder, OpPoolBuilder},
     OpNode,
 };
 use reth_optimism_rpc::OpEthApiBuilder;
+use reth_optimism_txpool::OpPooledTransaction;
 use reth_transaction_pool::{AllTransactionsEvents, TransactionPool};
 use std::{
     sync::{Arc, LazyLock},
@@ -54,7 +54,7 @@ use tokio_util::sync::CancellationToken;
 pub struct LocalInstance {
     signer: Signer,
     config: NodeConfig<OpChainSpec>,
-    args: OpRbuilderArgs,
+    args: BuilderArgs,
     task_manager: Option<TaskManager>,
     exit_future: NodeExitFuture,
     _node_handle: Box<dyn Any + Send>,
@@ -67,7 +67,7 @@ impl LocalInstance {
     ///
     /// This method does not prefund any accounts, so before sending any transactions
     /// make sure that sender accounts are funded.
-    pub async fn new<P: PayloadBuilder>(args: OpRbuilderArgs) -> eyre::Result<Self> {
+    pub async fn new<P: PayloadBuilder>(args: BuilderArgs) -> eyre::Result<Self> {
         Box::pin(Self::new_with_config::<P>(args, default_node_config())).await
     }
 
@@ -77,25 +77,28 @@ impl LocalInstance {
     /// This method does not prefund any accounts, so before sending any transactions
     /// make sure that sender accounts are funded.
     pub async fn new_with_config<P: PayloadBuilder>(
-        args: OpRbuilderArgs,
+        args: BuilderArgs,
         config: NodeConfig<OpChainSpec>,
     ) -> eyre::Result<Self> {
         let mut args = args;
         let task_manager = task_manager();
-        let op_node = OpNode::new(args.rollup_args.clone());
+
+        // Create RollupArgs separately via CLI parse trick (same pattern as BuilderArgs)
+        let rollup_args = RollupArgs { enable_tx_conditional: true, ..Default::default() };
+
+        let op_node = OpNode::new(rollup_args.clone());
         let reverted_cache = Cache::builder().max_capacity(100).build();
         let reverted_cache_clone = reverted_cache.clone();
 
         let (rpc_ready_tx, rpc_ready_rx) = oneshot::channel::<()>();
         let (txpool_ready_tx, txpool_ready_rx) =
-            oneshot::channel::<AllTransactionsEvents<FBPooledTransaction>>();
+            oneshot::channel::<AllTransactionsEvents<OpPooledTransaction>>();
 
         let signer = args.builder_signer.unwrap_or(builder_signer());
         args.builder_signer = Some(signer);
-        args.rollup_args.enable_tx_conditional = true;
 
         let builder_config = BuilderConfig::<P::Config>::try_from(args.clone())
-            .expect("Failed to convert rollup args to builder config");
+            .expect("Failed to convert builder args to builder config");
         let da_config = builder_config.da_config.clone();
         let gas_limit_config = builder_config.gas_limit_config.clone();
 
@@ -105,8 +108,8 @@ impl LocalInstance {
             OpEngineValidatorBuilder,
             OpEngineApiBuilder<OpEngineValidatorBuilder>,
         > = OpAddOnsBuilder::default()
-            .with_sequencer(args.rollup_args.sequencer.clone())
-            .with_enable_tx_conditional(args.rollup_args.enable_tx_conditional)
+            .with_sequencer(rollup_args.sequencer.clone())
+            .with_enable_tx_conditional(rollup_args.enable_tx_conditional)
             .with_da_config(da_config)
             .with_gas_limit_config(gas_limit_config)
             .build();
@@ -118,28 +121,10 @@ impl LocalInstance {
             .with_components(
                 op_node
                     .components()
-                    .pool(pool_component(&args))
+                    .pool(pool_component(&rollup_args))
                     .payload(P::new_service(builder_config)?),
             )
             .with_add_ons(addons)
-            .extend_rpc_modules(move |ctx| {
-                if args.enable_revert_protection {
-                    tracing::info!("Revert protection enabled");
-
-                    let pool = ctx.pool().clone();
-                    let provider = ctx.provider().clone();
-                    let revert_protection_ext = RevertProtectionExt::new(
-                        pool,
-                        provider,
-                        ctx.registry.eth_api().clone(),
-                        reverted_cache,
-                    );
-
-                    ctx.modules.add_or_replace_configured(revert_protection_ext.into_rpc())?;
-                }
-
-                Ok(())
-            })
             .on_rpc_started(move |_, _| {
                 let _ = rpc_ready_tx.send(());
                 Ok(())
@@ -186,7 +171,7 @@ impl LocalInstance {
         &self.config
     }
 
-    pub const fn args(&self) -> &OpRbuilderArgs {
+    pub const fn args(&self) -> &BuilderArgs {
         &self.args
     }
 
@@ -310,14 +295,9 @@ fn task_manager() -> TaskManager {
     TaskManager::new(tokio::runtime::Handle::current())
 }
 
-fn pool_component(args: &OpRbuilderArgs) -> OpPoolBuilder<FBPooledTransaction> {
-    let rollup_args = &args.rollup_args;
-    OpPoolBuilder::<FBPooledTransaction>::default()
-        .with_enable_tx_conditional(
-            // Revert protection uses the same internal pool logic as conditional transactions
-            // to garbage collect transactions out of the bundle range.
-            rollup_args.enable_tx_conditional || args.enable_revert_protection,
-        )
+fn pool_component(rollup_args: &RollupArgs) -> OpPoolBuilder {
+    OpPoolBuilder::default()
+        .with_enable_tx_conditional(rollup_args.enable_tx_conditional)
         .with_supervisor(rollup_args.supervisor_http.clone(), rollup_args.supervisor_safety_level)
 }
 
