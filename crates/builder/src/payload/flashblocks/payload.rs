@@ -585,7 +585,8 @@ where
         {
             match self.client.state_by_block_hash(ctx.parent().hash()) {
                 Ok(worker_state_provider) => {
-                    let (work_tx, work_rx) = std::sync::mpsc::sync_channel(2);
+                    let (work_tx, work_rx) =
+                        std::sync::mpsc::sync_channel((expected_flashblocks + 1) as usize);
                     let (result_tx, result_rx) =
                         std::sync::mpsc::sync_channel((expected_flashblocks + 1) as usize);
                     let metrics = self.metrics.clone();
@@ -1535,6 +1536,13 @@ fn run_trie_precalc_worker(
     let mut prev_trie_updates: Option<Arc<TrieUpdates>> = None;
 
     while let Ok(work_item) = work_rx.recv() {
+        // Skip stale items, always compute the latest available flashblock
+        let mut latest_item = work_item;
+        while let Ok(newer_item) = work_rx.try_recv() {
+            latest_item = newer_item;
+        }
+        let work_item = latest_item;
+
         let start_time = Instant::now();
 
         let hashed_state = state_provider.hashed_post_state(&work_item.bundle_state);
