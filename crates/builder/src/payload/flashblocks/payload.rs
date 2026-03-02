@@ -1463,13 +1463,12 @@ fn calculate_state_root_on_resolve(
     let eligible_precalc =
         precalc_result.filter(|p| p.flashblock_index + 1 == ctx.current_flashblock_index);
 
-    let (state_root, trie_updates, hashed_state, method) = if let Some(precalc) = eligible_precalc
-    {
+    let (state_root, trie_updates, hashed_state, method) = if let Some(precalc) = eligible_precalc {
         // The worker already computed the correct state root for this BundleState.
         // Both worker and resolve share the same Arc<BundleState>, so the worker's
         // state_root is exactly what we need. No cross-provider recomputation required.
-        let trie_updates = Arc::try_unwrap(precalc.trie_updates)
-            .unwrap_or_else(|arc| arc.as_ref().clone());
+        let trie_updates =
+            Arc::try_unwrap(precalc.trie_updates).unwrap_or_else(|arc| arc.as_ref().clone());
 
         (precalc.state_root, trie_updates, precalc.hashed_state, "incremental")
     } else {
@@ -1517,7 +1516,6 @@ fn run_trie_precalc_worker(
     let mut prev_trie_updates: Option<TrieUpdates> = None;
 
     while let Ok(work_item) = work_rx.recv() {
-
         let start_time = Instant::now();
 
         let hashed_state = state_provider.hashed_post_state(&work_item.bundle_state);
@@ -1578,4 +1576,3 @@ fn run_trie_precalc_worker(
 
     debug!(target: "payload_builder", "Trie precalc worker exiting");
 }
-
