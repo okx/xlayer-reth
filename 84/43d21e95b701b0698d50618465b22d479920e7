@@ -1,0 +1,10 @@
+crates/builder/src/tests/framework/instance.rs
+  # agent: Mixed
+  Human 1-32,34-57,59-115,117-246,248-308,311-423
+---
+{
+  "metadata": {
+    "base_commit_sha": "8443d21e95b701b0698d50618465b22d479920e7",
+    "prompts": {}
+  }
+}
