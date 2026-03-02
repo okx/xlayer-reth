@@ -1441,39 +1441,23 @@ fn calculate_state_root_on_resolve(
 ) -> Result<(B256, TrieUpdates, HashedPostState), PayloadBuilderError> {
     let total_start_time = Instant::now();
 
-    // Only use incremental path if precalc is from the immediately previous flashblock
-    let eligible_precalc = precalc_result.filter(|precalc| {
-        let eligible = precalc.flashblock_index + 1 == ctx.current_flashblock_index;
-        if !eligible {
-            info!(
-                target: "payload_builder",
-                precalc_flashblock = precalc.flashblock_index,
-                current_flashblock = ctx.current_flashblock_index,
-                "Precalc stale (not immediately previous flashblock), falling back to cold path"
-            );
-        }
-        eligible
-    });
-    let used_precalc = eligible_precalc.is_some();
-
     let hashed_state_start = Instant::now();
     let hashed_state = state_provider.hashed_post_state(&ctx.best_payload.1);
     let hashed_state_time = hashed_state_start.elapsed();
 
     let state_root_start = Instant::now();
-    let (state_root, trie_updates) = if let Some(precalc) = eligible_precalc {
-        // Incremental path: use precalculated trie from background worker
-        // with delta prefix sets — only recompute paths that changed since precalc
+    let (state_root, trie_updates, method) = if let Some(precalc) = precalc_result {
         let delta_prefix_sets = compute_delta_prefix_sets(&precalc.hashed_state, &hashed_state);
+        let is_immediate = precalc.flashblock_index + 1 == ctx.current_flashblock_index;
 
         info!(
             target: "payload_builder",
             precalc_flashblock = precalc.flashblock_index,
-            full_account_count = hashed_state.accounts.len(),
+            current_flashblock = ctx.current_flashblock_index,
+            is_immediate,
             delta_account_count = delta_prefix_sets.account_prefix_set.len(),
-            full_storage_count = hashed_state.storages.len(),
             delta_storage_count = delta_prefix_sets.storage_prefix_sets.len(),
-            "Using delta prefix sets for resolve"
+            "Using incremental resolve with delta prefix sets"
         );
 
         let trie_updates_owned = Arc::try_unwrap(precalc.trie_updates)
@@ -1482,27 +1466,33 @@ fn calculate_state_root_on_resolve(
         let trie_input =
             TrieInput::new(trie_updates_owned, hashed_state.clone(), delta_prefix_sets);
 
-        state_provider.state_root_from_nodes_with_updates(trie_input).inspect_err(|err| {
-            warn!(target: "payload_builder",
-                parent_header=%ctx.parent_hash,
-                %err,
-                "failed incremental state root on resolve"
-            );
-        })?
+        let (root, updates) = state_provider
+            .state_root_from_nodes_with_updates(trie_input)
+            .inspect_err(|err| {
+                warn!(target: "payload_builder",
+                    parent_header=%ctx.parent_hash,
+                    %err,
+                    "failed incremental state root on resolve"
+                );
+            })?;
+
+        let method = if is_immediate { "incremental" } else { "incremental_stale" };
+        (root, updates, method)
     } else {
-        // Cold path: full trie calculation
-        state_provider.state_root_with_updates(hashed_state.clone()).inspect_err(|err| {
-            warn!(target: "payload_builder",
-                parent_header=%ctx.parent_hash,
-                %err,
-                "failed to calculate state root for payload"
-            );
-        })?
+        // Cold path: no precalc available
+        let (root, updates) =
+            state_provider.state_root_with_updates(hashed_state.clone()).inspect_err(|err| {
+                warn!(target: "payload_builder",
+                    parent_header=%ctx.parent_hash,
+                    %err,
+                    "failed to calculate state root for payload"
+                );
+            })?;
+        (root, updates, "cold")
     };
     let state_root_time = state_root_start.elapsed();
 
     let total_time = total_start_time.elapsed();
-    let method = if used_precalc { "incremental" } else { "cold" };
     info!(
         target: "payload_builder",
         hashed_state_ms = hashed_state_time.as_millis(),
