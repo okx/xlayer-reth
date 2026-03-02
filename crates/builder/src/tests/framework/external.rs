@@ -10,13 +10,13 @@ use op_alloy_network::Optimism;
 use op_alloy_rpc_types_engine::OpExecutionPayloadV4;
 use std::path::{Path, PathBuf};
 use testcontainers::bollard::{
-    Docker,
     exec::{CreateExecOptions, StartExecResults},
     models::{ContainerCreateBody, ContainerCreateResponse, HostConfig},
     query_parameters::{
         AttachContainerOptions, CreateContainerOptions, CreateImageOptions, RemoveContainerOptions,
         StartContainerOptions, StopContainerOptions,
     },
+    Docker,
 };
 use tokio::signal;
 use tracing::{debug, warn};
@@ -296,9 +296,7 @@ async fn create_container(
         ..Default::default()
     };
 
-    Ok(docker
-        .create_container(Some(CreateContainerOptions::default()), container_config)
-        .await?)
+    Ok(docker.create_container(Some(CreateContainerOptions::default()), container_config).await?)
 }
 
 async fn relax_permissions(docker: &Docker, container: &str, path: &str) -> eyre::Result<()> {
