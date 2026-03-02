@@ -21,7 +21,10 @@ use alloy_consensus::{
 };
 use alloy_eips::{eip7685::EMPTY_REQUESTS_HASH, merge::BEACON_NONCE, Encodable2718};
 use alloy_evm::block::BlockExecutionResult;
-use alloy_primitives::{Address, BlockHash, B256, U256};
+use alloy_primitives::{
+    map::{B256Map, B256Set},
+    Address, BlockHash, B256, U256,
+};
 use eyre::WrapErr as _;
 use op_alloy_rpc_types_engine::{
     OpFlashblockPayload, OpFlashblockPayloadBase, OpFlashblockPayloadDelta,
@@ -143,6 +146,7 @@ impl FlashblocksExtraCtx {
 }
 
 /// Result of an async trie precalculation for a single flashblock.
+#[derive(Debug)]
 struct TriePrecalcResult {
     /// The flashblock index this result corresponds to.
     flashblock_index: u64,
@@ -154,9 +158,10 @@ struct TriePrecalcResult {
 }
 
 /// Work item sent from the main flashblock loop to the background trie worker.
+#[derive(Debug)]
 struct TriePrecalcWorkItem {
     flashblock_index: u64,
-    bundle_state: BundleState,
+    bundle_state: Arc<BundleState>,
 }
 
 /// Manages the async trie precalculation pipeline.
@@ -454,7 +459,7 @@ where
                 .try_send(fb_payload.clone())
                 .map_err(PayloadBuilderError::other)?;
         }
-        let mut best_payload = (fallback_payload.clone(), bundle_state);
+        let mut best_payload = (fallback_payload.clone(), Arc::new(bundle_state));
 
         info!(
             target: "payload_builder",
@@ -725,7 +730,7 @@ where
         state_provider: impl reth::providers::StateProvider + Clone,
         best_txs: &mut NextBestFlashblocksTxs<Pool>,
         block_cancel: &CancellationToken,
-        best_payload: &mut (OpBuiltPayload, BundleState),
+        best_payload: &mut (OpBuiltPayload, Arc<BundleState>),
     ) -> eyre::Result<Option<FlashblocksExtraCtx>> {
         let flashblock_index = ctx.flashblock_index();
         let mut target_gas_for_batch = ctx.extra_ctx.target_gas_for_batch;
@@ -853,7 +858,7 @@ where
                 self.built_fb_payload_tx
                     .try_send(fb_payload)
                     .wrap_err("failed to send built payload to handler")?;
-                *best_payload = (new_payload, bundle_state);
+                *best_payload = (new_payload, Arc::new(bundle_state));
 
                 // Record flashblock build duration
                 ctx.metrics.flashblock_build_duration.record(flashblock_build_start_time.elapsed());
@@ -913,7 +918,7 @@ where
     fn resolve_best_payload(
         &self,
         ctx: &OpPayloadBuilderCtx<FlashblocksExtraCtx>,
-        best_payload: (OpBuiltPayload, BundleState),
+        best_payload: (OpBuiltPayload, Arc<BundleState>),
         fallback_payload: OpBuiltPayload,
         resolve_payload: &BlockCell<OpBuiltPayload>,
         precalc_pipeline: Option<AsyncTriePrecalcPipeline>,
@@ -1359,7 +1364,7 @@ where
 }
 
 struct CalculateStateRootContext {
-    best_payload: (OpBuiltPayload, BundleState),
+    best_payload: (OpBuiltPayload, Arc<BundleState>),
     parent_hash: BlockHash,
     built_payload_tx: mpsc::Sender<OpBuiltPayload>,
     metrics: Arc<OpRBuilderMetrics>,
@@ -1584,15 +1589,15 @@ fn compute_delta_prefix_sets(
     final_state: &HashedPostState,
 ) -> TriePrefixSetsMut {
     let mut account_prefix_set = PrefixSetMut::default();
-    let mut storage_prefix_sets = alloy_primitives::map::B256Map::<PrefixSetMut>::default();
-    let mut destroyed_accounts = alloy_primitives::map::B256Set::default();
+    let mut storage_prefix_sets = B256Map::<PrefixSetMut>::default();
+    let mut destroyed_accounts = B256Set::default();
 
     // 1. Forward pass: iterate final_state accounts, compare against precalc_state
     for (hashed_address, final_account) in &final_state.accounts {
-        let changed = match precalc_state.accounts.get(hashed_address) {
-            Some(precalc_account) => precalc_account != final_account,
-            None => true, // New account not in precalc
-        };
+        let changed = !precalc_state
+            .accounts
+            .get(hashed_address)
+            .is_some_and(|precalc| precalc == final_account);
         if changed {
             account_prefix_set.insert(Nibbles::unpack(hashed_address));
             // If account was destroyed (None) in final but existed in precalc, mark it
@@ -1634,10 +1639,10 @@ fn compute_delta_prefix_sets(
 
                     // Forward: slots in final that differ from precalc
                     for (slot_key, final_value) in &final_storage.storage {
-                        let changed = match precalc_storage.storage.get(slot_key) {
-                            Some(precalc_value) => precalc_value != final_value,
-                            None => true,
-                        };
+                        let changed = !precalc_storage
+                            .storage
+                            .get(slot_key)
+                            .is_some_and(|precalc_value| precalc_value == final_value);
                         if changed {
                             storage_set.insert(Nibbles::unpack(slot_key));
                             has_storage_diff = true;
