@@ -972,7 +972,7 @@ where
                 match self.client.state_by_block_hash(ctx.parent().hash()) {
                     Ok(state_provider) => {
                         if self.config.specific.disable_async_calculate_state_root {
-                            resolve_zero_state_root(state_root_ctx, state_provider, precalc_result)
+                            resolve_zero_state_root(state_root_ctx, state_provider, precalc_result, wait_elapsed)
                                 .unwrap_or_else(|err| {
                                     warn!(
                                         target: "payload_builder",
@@ -987,6 +987,7 @@ where
                                     state_root_ctx,
                                     state_provider,
                                     precalc_result,
+                                    wait_elapsed,
                                 );
                             }));
                             fallback_payload_for_resolve
@@ -1386,11 +1387,12 @@ fn resolve_zero_state_root(
     ctx: CalculateStateRootContext,
     state_provider: Box<dyn reth::providers::StateProvider>,
     precalc_result: Option<TriePrecalcResult>,
+    precalc_wait: std::time::Duration,
 ) -> Result<OpBuiltPayload, PayloadBuilderError> {
     let resolve_start_time = Instant::now();
 
     let (state_root, trie_updates, hashed_state) =
-        calculate_state_root_on_resolve(&ctx, state_provider, precalc_result)?;
+        calculate_state_root_on_resolve(&ctx, state_provider, precalc_result, precalc_wait)?;
 
     let payload_id = ctx.best_payload.0.id();
     let fees = ctx.best_payload.0.fees();
@@ -1448,8 +1450,9 @@ fn calculate_state_root_on_resolve(
     ctx: &CalculateStateRootContext,
     state_provider: Box<dyn reth::providers::StateProvider>,
     precalc_result: Option<TriePrecalcResult>,
+    precalc_wait: std::time::Duration,
 ) -> Result<(B256, TrieUpdates, HashedPostState), PayloadBuilderError> {
-    let total_start_time = Instant::now();
+    let calc_start_time = Instant::now();
 
     // Only use precalc from the immediately prior flashblock (strict incremental)
     let eligible_precalc =
@@ -1462,14 +1465,6 @@ fn calculate_state_root_on_resolve(
         // state_root is exactly what we need. No cross-provider recomputation required.
         let trie_updates = Arc::try_unwrap(precalc.trie_updates)
             .unwrap_or_else(|arc| arc.as_ref().clone());
-
-        info!(
-            target: "payload_builder",
-            precalc_flashblock = precalc.flashblock_index,
-            current_flashblock = ctx.current_flashblock_index,
-            state_root = %precalc.state_root,
-            "Using worker's precomputed state root directly"
-        );
 
         (precalc.state_root, trie_updates, precalc.hashed_state, "incremental")
     } else {
@@ -1485,9 +1480,12 @@ fn calculate_state_root_on_resolve(
         (root, updates, hashed_state, "cold")
     };
 
-    let total_time = total_start_time.elapsed();
+    let calc_time = calc_start_time.elapsed();
+    let total_time = precalc_wait + calc_time;
     info!(
         target: "payload_builder",
+        precalc_wait_ms = precalc_wait.as_millis(),
+        calc_ms = calc_time.as_millis(),
         total_ms = total_time.as_millis(),
         state_root = %state_root,
         method,
