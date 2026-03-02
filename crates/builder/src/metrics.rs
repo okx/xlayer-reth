@@ -46,6 +46,8 @@ pub struct OpRBuilderMetrics {
     pub state_root_calculation_duration: Histogram,
     /// Latest state root calculation duration
     pub state_root_calculation_gauge: Gauge,
+    /// Histogram of async trie precalculation duration (background worker)
+    pub trie_precalc_duration: Histogram,
     /// Histogram of sequencer transaction execution duration
     pub sequencer_tx_duration: Histogram,
     /// Latest sequencer transaction execution duration
