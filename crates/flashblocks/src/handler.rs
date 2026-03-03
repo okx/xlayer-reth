@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tracing::{debug, info, trace, warn};
 
 use reth_node_api::FullNodeComponents;
@@ -127,22 +127,41 @@ where
 async fn handle_persistence(mut rx: FlashBlockRx, datadir: ChainPath<DataDirPath>) {
     let cache = FlashblockPayloadsCache::new(Some(datadir));
 
+    // Set default flush interval to 5 seconds
+    let mut flush_interval = tokio::time::interval(Duration::from_secs(5));
+    let mut dirty = false;
+
     loop {
-        match rx.recv().await {
-            Ok(flashblock) => {
-                if let Err(e) = cache.add_flashblock_payload(FlashBlock::clone(&flashblock)) {
-                    warn!(target: "flashblocks", "Failed to cache flashblock payload: {e}");
-                    continue;
-                }
-                if let Err(e) = cache.persist().await {
-                    warn!(target: "flashblocks", "Failed to persist pending sequence: {e}");
+        tokio::select! {
+            result = rx.recv() => {
+                match result {
+                    Ok(flashblock) => {
+                        if let Err(e) = cache.add_flashblock_payload(flashblock.as_ref().clone()) {
+                            warn!(target: "flashblocks", "Failed to cache flashblock payload: {e}");
+                            continue;
+                        }
+                        dirty = true;
+                    }
+                    Err(e) => {
+                        warn!(target: "flashblocks", "Persistence handle receiver error: {e:?}");
+                        break;
+                    }
                 }
             }
-            Err(e) => {
-                warn!(target: "flashblocks", "Persistence handle receiver error: {e:?}");
-                break;
+            _ = flush_interval.tick() => {
+                if dirty {
+                    if let Err(e) = cache.persist().await {
+                        warn!(target: "flashblocks", "Failed to persist pending sequence: {e}");
+                    }
+                    dirty = false;
+                }
             }
         }
+    }
+
+    // Flush again on shutdown
+    if dirty && let Err(e) = cache.persist().await {
+        warn!(target: "flashblocks", "Failed final persist of pending sequence: {e}");
     }
 
     info!(target: "flashblocks", "Flashblocks persistence handle stopped");

@@ -152,7 +152,7 @@ pub struct FlashblocksArgs {
     )]
     pub ws_subscriber_limit: Option<u16>,
 
-    ///Enable replay from the persistence file on startup
+    /// Enable replay from the persistence file on startup
     #[arg(
         long = "flashblocks.replay-from-persistence-file",
         env = "FLASHBLOCKS_REPLAY_FROM_PERSISTENCE_FILE",

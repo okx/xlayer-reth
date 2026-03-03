@@ -20,12 +20,19 @@ const FLASHBLOCKS_DIR: &str = "flashblocks";
 /// Flashblocks persistence filename for the current pending flashblocks sequence.
 const PENDING_SEQUENCE_FILE: &str = "pending_sequence.json";
 
-fn init_pending_sequence_path(datadir: ChainPath<DataDirPath>) -> eyre::Result<PathBuf> {
+fn init_pending_sequence_path(datadir: ChainPath<DataDirPath>) -> Option<PathBuf> {
     let flashblocks_dir = datadir.data_dir().join(FLASHBLOCKS_DIR);
-    std::fs::create_dir_all(&flashblocks_dir).map_err(|e| {
-        eyre::eyre!("Failed to create flashblocks directory at {}: {e}", flashblocks_dir.display())
-    })?;
-    Ok(flashblocks_dir.join(PENDING_SEQUENCE_FILE))
+    std::fs::create_dir_all(&flashblocks_dir)
+        .inspect_err(|e| {
+            // log target is flashblocks since datadir init can be for both sequencer and RPC
+            tracing::warn!(
+                target: "flashblocks",
+                "Failed to create flashblocks directory at {}: {e}",
+                flashblocks_dir.display()
+            );
+        })
+        .ok()?;
+    Some(flashblocks_dir.join(PENDING_SEQUENCE_FILE))
 }
 
 fn try_load_from_filepath(path: Option<&Path>) -> Option<FlashblockPayloadsSequence> {
@@ -36,18 +43,18 @@ fn try_load_from_filepath(path: Option<&Path>) -> Option<FlashblockPayloadsSeque
 
     let data = std::fs::read(path)
         .inspect_err(|e| {
-            tracing::warn!(target: "flashblocks", "Failed to read flashblocks persistence file: {e}");
+            tracing::warn!(target: "payload_builder", "Failed to read flashblocks persistence file: {e}");
         })
         .ok()?;
 
     let sequence = serde_json::from_slice::<FlashblockPayloadsSequence>(&data)
         .inspect_err(|e| {
-            tracing::warn!(target: "flashblocks", "Failed to deserialize flashblocks persistence file: {e}");
+            tracing::warn!(target: "payload_builder", "Failed to deserialize flashblocks persistence file: {e}");
         })
         .ok()?;
 
     tracing::info!(
-        target: "flashblocks",
+        target: "payload_builder",
         payload_id = %sequence.payload_id,
         parent_hash = ?sequence.parent_hash,
         payloads = sequence.payloads.len(),
@@ -74,13 +81,7 @@ pub struct FlashblockPayloadsCache {
 
 impl FlashblockPayloadsCache {
     pub fn new(datadir: Option<ChainPath<DataDirPath>>) -> Self {
-        let persist_path = datadir.and_then(|d| {
-            init_pending_sequence_path(d)
-                .inspect_err(|e| {
-                    tracing::warn!(target: "flashblocks", "Failed to init persistence path: {e}");
-                })
-                .ok()
-        });
+        let persist_path = datadir.and_then(init_pending_sequence_path);
 
         Self {
             inner: Arc::new(Mutex::new(try_load_from_filepath(persist_path.as_deref()))),
@@ -129,13 +130,6 @@ impl FlashblockPayloadsCache {
         Ok(())
     }
 
-    pub fn load_from_file(path: &Path) -> eyre::Result<Self> {
-        let data = std::fs::read(path)?;
-        let sequence: FlashblockPayloadsSequence = serde_json::from_slice(&data)?;
-
-        Ok(Self { inner: Arc::new(Mutex::new(Some(sequence))), persist_path: None })
-    }
-
     /// Get the flashblocks sequence transactions for a given `parent_hash`. Note that we do not
     /// yield sequencer transactions that were included in the payload attributes (index 0).
     ///
@@ -163,9 +157,10 @@ impl FlashblockPayloadsCache {
             |mut acc, (expected_index, payload)| {
                 if payload.index != expected_index as u64 + 1 {
                     tracing::warn!(
+                        target: "payload_builder",
                         expected = expected_index + 1,
                         got = payload.index,
-                        "flashblock payloads have missing or out-of-order indexes"
+                        "flashblock payloads have missing or out-of-order indexes",
                     );
                     return None;
                 }
@@ -416,9 +411,8 @@ mod tests {
         assert!(!tmp_path.exists(), "temp file should be cleaned up after atomic rename");
 
         // Load from file and verify contents match
-        let loaded = FlashblockPayloadsCache::load_from_file(&file_path).unwrap();
-        let loaded_guard = loaded.inner.lock();
-        let loaded_seq = loaded_guard.as_ref().unwrap();
+        let loaded_seq =
+            try_load_from_filepath(Some(&file_path)).expect("should load persisted sequence");
 
         assert_eq!(loaded_seq.payload_id, PayloadId::new(id));
         assert_eq!(loaded_seq.parent_hash, Some(parent));
@@ -467,27 +461,26 @@ mod tests {
         cache.persist().await.unwrap();
 
         // Loaded data should reflect the second sequence
-        let loaded = FlashblockPayloadsCache::load_from_file(&file_path).unwrap();
-        let guard = loaded.inner.lock();
-        let seq = guard.as_ref().unwrap();
-        assert_eq!(seq.payload_id, PayloadId::new([2u8; 8]));
-        assert_eq!(seq.parent_hash, Some(parent_b));
+        let loaded_seq =
+            try_load_from_filepath(Some(&file_path)).expect("should load persisted sequence");
+        assert_eq!(loaded_seq.payload_id, PayloadId::new([2u8; 8]));
+        assert_eq!(loaded_seq.parent_hash, Some(parent_b));
     }
 
     #[test]
-    fn load_from_nonexistent_file_returns_error() {
-        let result = FlashblockPayloadsCache::load_from_file(Path::new("/nonexistent/path.json"));
-        assert!(result.is_err());
+    fn load_from_nonexistent_file_returns_none() {
+        let result = try_load_from_filepath(Some(Path::new("/nonexistent/path.json")));
+        assert!(result.is_none());
     }
 
     #[test]
-    fn load_from_invalid_json_returns_error() {
+    fn load_from_invalid_json_returns_none() {
         let tmp = TempDir::new("load_invalid");
         let file_path = tmp.path().join("bad.json");
         std::fs::write(&file_path, b"not valid json").unwrap();
 
-        let result = FlashblockPayloadsCache::load_from_file(&file_path);
-        assert!(result.is_err());
+        let result = try_load_from_filepath(Some(&file_path));
+        assert!(result.is_none());
     }
 
     #[tokio::test]
