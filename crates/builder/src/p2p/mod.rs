@@ -511,12 +511,25 @@ mod test {
     const TEST_AGENT_VERSION: &str = "test/1.0.0";
     const TEST_PROTOCOL: StreamProtocol = StreamProtocol::new("/test/1.0.0");
 
-    fn get_free_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0")
-            .expect("can bind to an ephemeral port")
-            .local_addr()
-            .expect("can read bound address")
-            .port()
+    /// Binds two ephemeral ports on 127.0.0.1, guaranteeing they are distinct.
+    /// Returns `(port1, port2, guard1, guard2)` — callers must hold the guards
+    /// alive until the ports are handed off to avoid TOCTOU races where the OS
+    /// reassigns a released port.
+    fn get_two_free_ports() -> (u16, u16, std::net::TcpListener, std::net::TcpListener) {
+        let listener1 = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("can bind to an ephemeral port");
+        let port1 = listener1.local_addr().expect("can read bound address").port();
+
+        const MAX_RETRIES: u32 = 100;
+        for _ in 0..MAX_RETRIES {
+            let listener2 = std::net::TcpListener::bind("127.0.0.1:0")
+                .expect("can bind to an ephemeral port");
+            let port2 = listener2.local_addr().expect("can read bound address").port();
+            if port2 != port1 {
+                return (port1, port2, listener1, listener2);
+            }
+        }
+        panic!("failed to obtain two distinct ephemeral ports after {MAX_RETRIES} retries");
     }
 
     #[derive(Debug, PartialEq, Eq, Clone)]
@@ -551,13 +564,13 @@ mod test {
 
     #[tokio::test]
     async fn two_nodes_can_connect_and_message() {
-        let port1 = get_free_port();
-        let port2 = loop {
-            let port = get_free_port();
-            if port != port1 {
-                break port;
-            }
-        };
+        let (port1, port2, _guard1, _guard2) = get_two_free_ports();
+
+        // Drop the guards right before building so libp2p can bind the ports.
+        // The window between drop and `listen_on` is minimal.
+        drop(_guard1);
+        drop(_guard2);
+
         let NodeBuildResult { node: node1, outgoing_message_tx: _, incoming_message_rxs: mut rx1 } =
             NodeBuilder::new()
                 .with_listen_addr(format!("/ip4/127.0.0.1/tcp/{port1}").parse().unwrap())
@@ -580,7 +593,9 @@ mod test {
         let mut rx = rx1.remove(&TEST_PROTOCOL).unwrap();
         let recv_message: TestMessage = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                tx2.send(message.clone()).await.unwrap();
+                // Use try_send to avoid panicking if the channel is full
+                // (e.g. connection not yet established and messages are buffered).
+                let _ = tx2.try_send(message.clone());
                 if let Ok(Some(received)) =
                     tokio::time::timeout(Duration::from_millis(200), rx.recv()).await
                 {
