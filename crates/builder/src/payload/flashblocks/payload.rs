@@ -28,7 +28,7 @@ use op_alloy_rpc_types_engine::{
     OpFlashblockPayload, OpFlashblockPayloadBase, OpFlashblockPayloadDelta,
     OpFlashblockPayloadMetadata,
 };
-use reth::{payload::PayloadBuilderAttributes, tasks::TaskSpawner};
+use reth::{payload::PayloadBuilderAttributes, providers::StateProvider, tasks::TaskSpawner};
 use reth_basic_payload_builder::BuildOutcome;
 use reth_chainspec::EthChainSpec;
 use reth_evm::{execute::BlockBuilder, ConfigureEvm};
@@ -732,7 +732,7 @@ where
         fb_state: &mut FlashblocksState,
         info: &mut ExecutionInfo,
         state: &mut State<DB>,
-        state_provider: impl reth::providers::StateProvider + Clone,
+        state_provider: impl StateProvider + Clone,
         best_txs: &mut NextBestFlashblocksTxs<Pool>,
         block_cancel: &CancellationToken,
         best_payload: &mut (OpBuiltPayload, Arc<BundleState>),
@@ -1397,7 +1397,7 @@ struct CalculateStateRootContext {
 
 fn resolve_zero_state_root(
     ctx: CalculateStateRootContext,
-    state_provider: Box<dyn reth::providers::StateProvider>,
+    state_provider: Box<dyn StateProvider>,
     precalc_result: Option<TriePrecalcResult>,
     precalc_wait: std::time::Duration,
 ) -> Result<OpBuiltPayload, PayloadBuilderError> {
@@ -1442,7 +1442,7 @@ fn resolve_zero_state_root(
     }
 
     let resolve_total_time = resolve_start_time.elapsed();
-    info!(
+    debug!(
         target: "payload_builder",
         state_root = %state_root,
         resolve_total_ms = resolve_total_time.as_millis(),
@@ -1460,7 +1460,7 @@ fn resolve_zero_state_root(
 /// Otherwise falls back to a cold full calculation via the provided state_provider.
 fn calculate_state_root_on_resolve(
     ctx: &CalculateStateRootContext,
-    state_provider: Box<dyn reth::providers::StateProvider>,
+    state_provider: Box<dyn StateProvider>,
     precalc_result: Option<TriePrecalcResult>,
     precalc_wait: std::time::Duration,
 ) -> Result<(B256, TrieUpdates, HashedPostState), PayloadBuilderError> {
@@ -1517,7 +1517,7 @@ fn calculate_state_root_on_resolve(
 fn run_trie_precalc_worker(
     work_rx: std::sync::mpsc::Receiver<TriePrecalcWorkItem>,
     result_tx: std::sync::mpsc::SyncSender<TriePrecalcResult>,
-    state_provider: Box<dyn reth::providers::StateProvider>,
+    state_provider: Box<dyn StateProvider>,
     metrics: Arc<BuilderMetrics>,
 ) {
     let mut prev_trie_updates: Option<TrieUpdates> = None;
