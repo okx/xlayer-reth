@@ -58,6 +58,13 @@ pub struct GenGenesisCommand<C: ChainSpecParser> {
     #[arg(long = "output", value_name = "OUTPUT", verbatim_doc_comment)]
     output_path: PathBuf,
 
+    /// The path to write the generated genesis file without the alloc field.
+    ///
+    /// When provided, a second JSON file is written that contains all genesis fields
+    /// except "alloc". This is useful for producing a compact chainspec configuration.
+    #[arg(long = "output-chainspec", value_name = "OUTPUT_CHAINSPEC", verbatim_doc_comment)]
+    output_chainspec: Option<PathBuf>,
+
     /// Batch size for progress reporting.
     #[arg(long, value_name = "BATCH_SIZE", default_value = "100000")]
     batch_size: u64,
@@ -73,6 +80,9 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
         info!(target: "reth::cli", "Generating genesis from database");
         info!(target: "reth::cli", "Template genesis: {}", self.template_genesis.display());
         info!(target: "reth::cli", "Output: {}", self.output_path.display());
+        if let Some(ref p) = self.output_chainspec {
+            info!(target: "reth::cli", "Output chainspec (no alloc): {}", p.display());
+        }
 
         // Read the template genesis file
         let template_genesis: Genesis = {
@@ -203,6 +213,29 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
             self.output_path.display()
         );
 
+        // Write chainspec (genesis without alloc) if requested
+        if let Some(ref chainspec_path) = self.output_chainspec {
+            let mut chainspec_value = serde_json::to_value(&new_genesis)
+                .wrap_err("Failed to serialize genesis to JSON value")?;
+            if let Some(obj) = chainspec_value.as_object_mut() {
+                obj.remove("alloc");
+            }
+
+            let chainspec_file = File::create(chainspec_path).wrap_err_with(|| {
+                format!("Failed to create chainspec output file: {}", chainspec_path.display())
+            })?;
+            let mut chainspec_writer = BufWriter::new(chainspec_file);
+            serde_json::to_writer_pretty(&mut chainspec_writer, &chainspec_value)
+                .wrap_err("Failed to write chainspec JSON")?;
+            chainspec_writer.flush().wrap_err("Failed to flush chainspec output file")?;
+
+            info!(
+                target: "reth::cli",
+                "Wrote genesis without alloc to {}",
+                chainspec_path.display()
+            );
+        }
+
         Ok(())
     }
 
@@ -297,11 +330,7 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
     }
 
     /// Read bytecode for an account
-    fn read_account_bytecode<TX: DbTx>(
-        &self,
-        tx: &TX,
-        hash: B256,
-    ) -> Result<Option<Bytes>> {
+    fn read_account_bytecode<TX: DbTx>(&self, tx: &TX, hash: B256) -> Result<Option<Bytes>> {
         // Skip if it's the empty code hash (keccak256 of empty bytes)
         if hash == EMPTY_CODE_HASH {
             return Ok(None);
