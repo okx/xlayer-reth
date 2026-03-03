@@ -116,7 +116,7 @@ impl LocalInstance {
 
         let node_builder = NodeBuilder::<_, OpChainSpec>::new(config.clone())
             .with_database(create_test_db(config.clone()))
-            .with_launch_context(task_manager.executor())
+            .with_launch_context(task_manager.clone())
             .with_types::<OpNode>()
             .with_components(
                 op_node
@@ -229,7 +229,7 @@ impl LocalInstance {
 impl Drop for LocalInstance {
     fn drop(&mut self) {
         if let Some(task_manager) = self.task_manager.take() {
-            task_manager.graceful_shutdown_with_timeout(Duration::from_secs(3));
+            drop(task_manager);
             std::fs::remove_dir_all(self.config().datadir().to_string()).unwrap_or_else(|e| {
                 panic!("Failed to remove temporary data directory {}: {e}", self.config().datadir())
             });
