@@ -474,7 +474,12 @@ where
             schedule = ?flashblock_scheduler,
             "Computed flashblock timing schedule"
         );
-        let target_flashblocks = flashblock_scheduler.target_flashblocks();
+        // Get target number of flashblocks to build. If no flashblocks are scheduled, return early.
+        let Some(target_flashblocks) = flashblock_scheduler.target_flashblocks() else {
+            self.resolve_best_payload(&ctx, best_payload, fallback_payload, &resolve_payload);
+            self.record_flashblocks_metrics(&ctx, &fb_state, &info, 0);
+            return Ok(());
+        };
 
         let expected_flashblocks = self.config.flashblocks_per_block();
         if target_flashblocks < expected_flashblocks {
@@ -550,6 +555,12 @@ where
                 ctx = ctx.with_cancel(new_fb_cancel);
             } else {
                 // Channel closed - block building cancelled
+                self.resolve_best_payload(&ctx, best_payload, fallback_payload, &resolve_payload);
+                self.record_flashblocks_metrics(&ctx, &fb_state, &info, target_flashblocks);
+                return Ok(());
+            }
+
+            if fb_state.flashblock_index() > fb_state.target_flashblock_count() {
                 self.resolve_best_payload(&ctx, best_payload, fallback_payload, &resolve_payload);
                 self.record_flashblocks_metrics(&ctx, &fb_state, &info, target_flashblocks);
                 return Ok(());
