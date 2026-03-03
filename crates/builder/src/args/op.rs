@@ -171,7 +171,6 @@ pub struct FlashblocksArgs {
         default_value = "256"
     )]
     pub ws_subscriber_limit: Option<u16>,
-
 }
 
 impl Default for FlashblocksArgs {

@@ -54,7 +54,7 @@ use reth_revm::{
 use reth_transaction_pool::TransactionPool;
 use reth_trie::{updates::TrieUpdates, HashedPostState, TrieInput};
 use revm::Database;
-use std::{collections::BTreeMap, sync::Arc, time::Instant};
+use std::{collections::BTreeMap, sync::mpsc::TrySendError, sync::Arc, time::Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -699,14 +699,14 @@ where
                                 "Sent work item to async trie precalc pipeline"
                             );
                         }
-                        Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                        Err(TrySendError::Full(_)) => {
                             warn!(
                                 target: "payload_builder",
                                 flashblock_index = fb_index,
                                 "Async trie precalc pipeline full, skipping"
                             );
                         }
-                        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                        Err(TrySendError::Disconnected(_)) => {
                             warn!(
                                 target: "payload_builder",
                                 flashblock_index = fb_index,
@@ -1454,7 +1454,7 @@ fn resolve_zero_state_root(
 
 /// Calculates only the state root for an existing payload.
 ///
-/// If `precalc_result` is available and matches the immediately prior flashblock,
+/// If `precalc_result` is available and is for the last built flashblock,
 /// directly reuses the worker's already-computed state root, trie updates, and hashed
 /// state. The worker operates on the same `Arc<BundleState>` so its results are correct.
 /// Otherwise falls back to a cold full calculation via the provided state_provider.
