@@ -932,7 +932,7 @@ where
         fallback_payload: OpBuiltPayload,
         resolve_payload: &BlockCell<OpBuiltPayload>,
         precalc_pipeline: Option<AsyncTriePrecalcPipeline>,
-        current_flashblock_index: u64,
+        flashblock_count: u64,
     ) {
         if resolve_payload.get().is_some() {
             return;
@@ -942,7 +942,7 @@ where
             B256::ZERO => {
                 // Block-wait for the worker to finish the immediately prior flashblock.
                 // Drop work_tx so the worker finishes remaining items and exits.
-                let target_index = current_flashblock_index.saturating_sub(1);
+                let target_index = flashblock_count.saturating_sub(1);
                 let wait_start = Instant::now();
                 let precalc_result = precalc_pipeline.and_then(|pipeline| {
                     drop(pipeline.work_tx);
@@ -983,7 +983,7 @@ where
                     parent_hash: ctx.parent().hash(),
                     built_payload_tx: self.built_payload_tx.clone(),
                     metrics: self.metrics.clone(),
-                    current_flashblock_index,
+                    flashblock_count,
                 };
 
                 // Async calculate state root
@@ -1392,7 +1392,7 @@ struct CalculateStateRootContext {
     parent_hash: BlockHash,
     built_payload_tx: mpsc::Sender<OpBuiltPayload>,
     metrics: Arc<BuilderMetrics>,
-    current_flashblock_index: u64,
+    flashblock_count: u64,
 }
 
 fn resolve_zero_state_root(
@@ -1466,9 +1466,9 @@ fn calculate_state_root_on_resolve(
 ) -> Result<(B256, TrieUpdates, HashedPostState), PayloadBuilderError> {
     let calc_start_time = Instant::now();
 
-    // Only use precalc from the immediately prior flashblock (strict incremental)
+    // Only use precalc if the worker computed the state root for the last built flashblock
     let eligible_precalc =
-        precalc_result.filter(|p| p.flashblock_index + 1 == ctx.current_flashblock_index);
+        precalc_result.filter(|p| p.flashblock_index + 1 == ctx.flashblock_count);
 
     let (state_root, trie_updates, hashed_state, method) = if let Some(precalc) = eligible_precalc {
         // The worker already computed the correct state root for this BundleState.
