@@ -52,7 +52,7 @@ where
 
         let task_executor = self.node.task_executor().clone();
         if self.relay_flashblocks {
-            task_executor.spawn_critical(
+            task_executor.spawn_critical_task(
                 "xlayer-flashblocks-service",
                 Box::pin(async move {
                     self.run().await;

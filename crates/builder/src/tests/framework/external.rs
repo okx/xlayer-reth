@@ -10,12 +10,13 @@ use op_alloy_network::Optimism;
 use op_alloy_rpc_types_engine::OpExecutionPayloadV4;
 use std::path::{Path, PathBuf};
 use testcontainers::bollard::{
-    exec::{CreateExecOptions, StartExecResults},
-    models::{ContainerCreateBody, ContainerCreateResponse, HostConfig},
-    query_parameters::{
-        AttachContainerOptions, CreateContainerOptions, CreateImageOptions, RemoveContainerOptions,
+    container::{
+        AttachContainerOptions, Config, CreateContainerOptions, RemoveContainerOptions,
         StartContainerOptions, StopContainerOptions,
     },
+    exec::{CreateExecOptions, StartExecResults},
+    image::CreateImageOptions,
+    secret::{ContainerCreateResponse, HostConfig},
     Docker,
 };
 use tokio::signal;
@@ -66,7 +67,7 @@ impl ExternalNode {
         // Create Docker container with reth EL client
         let container = create_container(&tempdir, &docker, version_tag).await?;
 
-        docker.start_container(&container.id, None::<StartContainerOptions>).await?;
+        docker.start_container(&container.id, None::<StartContainerOptions<String>>).await?;
 
         // Wait for the container to be ready and IPCs to be created
         await_ipc_readiness(&docker, &container.id).await?;
@@ -259,8 +260,8 @@ async fn create_container(
     // first pull the image locally
     let mut pull_stream = docker.create_image(
         Some(CreateImageOptions {
-            from_image: Some("ghcr.io/paradigmxyz/op-reth".to_string()),
-            tag: Some(version_tag.to_string()),
+            from_image: "ghcr.io/paradigmxyz/op-reth".to_string(),
+            tag: version_tag.into(),
             ..Default::default()
         }),
         None,
@@ -272,7 +273,7 @@ async fn create_container(
     }
 
     // Don't expose any ports, as we will only use IPC for communication.
-    let container_config = ContainerCreateBody {
+    let container_config = Config {
         image: Some(format!("ghcr.io/paradigmxyz/op-reth:{version_tag}")),
         entrypoint: Some(vec!["op-reth".to_string()]),
         cmd: Some(
@@ -296,7 +297,9 @@ async fn create_container(
         ..Default::default()
     };
 
-    Ok(docker.create_container(Some(CreateContainerOptions::default()), container_config).await?)
+    Ok(docker
+        .create_container(Some(CreateContainerOptions::<String>::default()), container_config)
+        .await?)
 }
 
 async fn relax_permissions(docker: &Docker, container: &str, path: &str) -> eyre::Result<()> {
@@ -337,11 +340,11 @@ async fn await_ipc_readiness(docker: &Docker, container: &str) -> eyre::Result<(
     let mut attach_stream = docker
         .attach_container(
             container,
-            Some(AttachContainerOptions {
-                stdout: true,
-                stderr: true,
-                stream: true,
-                logs: true,
+            Some(AttachContainerOptions::<String> {
+                stdout: Some(true),
+                stderr: Some(true),
+                stream: Some(true),
+                logs: Some(true),
                 ..Default::default()
             }),
         )
