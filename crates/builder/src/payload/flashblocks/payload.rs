@@ -497,7 +497,14 @@ where
             ctx.metrics.payload_num_tx_gauge.set(info.executed_transactions.len() as f64);
 
             // return early since we don't need to build a block with transactions from the pool
-            self.resolve_best_payload(&ctx, best_payload, fallback_payload, &resolve_payload, None, 0);
+            self.resolve_best_payload(
+                &ctx,
+                best_payload,
+                fallback_payload,
+                &resolve_payload,
+                None,
+                0,
+            );
             return Ok(());
         }
 
@@ -587,7 +594,7 @@ where
                     self.task_executor.spawn_blocking(Box::pin(async move {
                         run_trie_precalc_worker(work_rx, result_tx, worker_state_provider, metrics);
                     }));
-                    info!(
+                    debug!(
                         target: "payload_builder",
                         "Async trie precalculation pipeline started"
                     );
@@ -735,7 +742,7 @@ where
         let mut target_da_for_batch = fb_state.target_da_for_batch;
         let mut target_da_footprint_for_batch = fb_state.target_da_footprint_for_batch;
 
-        info!(
+        debug!(
             target: "payload_builder",
             block_number = ctx.block_number(),
             flashblock_index,
@@ -952,7 +959,7 @@ where
                     latest
                 });
                 let wait_elapsed = wait_start.elapsed();
-                info!(
+                debug!(
                     target: "payload_builder",
                     wait_ms = wait_elapsed.as_millis(),
                     target_index,
@@ -1486,7 +1493,7 @@ fn calculate_state_root_on_resolve(
 
     let calc_time = calc_start_time.elapsed();
     let total_time = precalc_wait + calc_time;
-    info!(
+    debug!(
         target: "payload_builder",
         precalc_wait_ms = precalc_wait.as_millis(),
         calc_ms = calc_time.as_millis(),
@@ -1536,7 +1543,7 @@ fn run_trie_precalc_worker(
         match result {
             Ok((state_root, trie_output)) => {
                 let elapsed = start_time.elapsed();
-                info!(
+                debug!(
                     target: "payload_builder",
                     flashblock_index = work_item.flashblock_index,
                     state_root = %state_root,
