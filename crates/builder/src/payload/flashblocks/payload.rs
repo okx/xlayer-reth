@@ -475,7 +475,8 @@ where
             "Computed flashblock timing schedule"
         );
         // Get target number of flashblocks to build. If no flashblocks are scheduled, return early.
-        let Some(target_flashblocks) = flashblock_scheduler.target_flashblocks() else {
+        let target_flashblocks = flashblock_scheduler.target_flashblocks();
+        if target_flashblocks == 0 {
             self.resolve_best_payload(&ctx, best_payload, fallback_payload, &resolve_payload);
             self.record_flashblocks_metrics(&ctx, &fb_state, &info, 0);
             return Ok(());
