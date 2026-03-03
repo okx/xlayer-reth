@@ -2,9 +2,8 @@ use crate::{
     args::BuilderArgs,
     payload::{BuilderConfig, FlashblocksBuilder, PayloadBuilder},
     tests::{
-        builder_signer, create_test_db,
-        framework::{driver::ChainDriver, engine_api_builder::OpEngineApiBuilder},
-        EngineApi, Ipc, TransactionPoolObserver,
+        builder_signer, create_test_db, framework::driver::ChainDriver, EngineApi, Ipc,
+        TransactionPoolObserver,
     },
     tx::signer::Signer,
 };
@@ -102,17 +101,13 @@ impl LocalInstance {
         let da_config = builder_config.da_config.clone();
         let gas_limit_config = builder_config.gas_limit_config.clone();
 
-        let addons: OpAddOns<
-            _,
-            OpEthApiBuilder,
-            OpEngineValidatorBuilder,
-            OpEngineApiBuilder<OpEngineValidatorBuilder>,
-        > = OpAddOnsBuilder::default()
-            .with_sequencer(rollup_args.sequencer.clone())
-            .with_enable_tx_conditional(rollup_args.enable_tx_conditional)
-            .with_da_config(da_config)
-            .with_gas_limit_config(gas_limit_config)
-            .build();
+        let addons: OpAddOns<_, OpEthApiBuilder, OpEngineValidatorBuilder> =
+            OpAddOnsBuilder::default()
+                .with_sequencer(rollup_args.sequencer.clone())
+                .with_enable_tx_conditional(rollup_args.enable_tx_conditional)
+                .with_da_config(da_config)
+                .with_gas_limit_config(gas_limit_config)
+                .build();
 
         let node_builder = NodeBuilder::<_, OpChainSpec>::new(config.clone())
             .with_database(create_test_db(config.clone()))

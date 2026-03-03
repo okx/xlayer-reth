@@ -1,7 +1,6 @@
 mod apis;
 mod contracts;
 mod driver;
-pub(crate) mod engine_api_builder;
 mod external;
 mod instance;
 mod txs;

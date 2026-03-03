@@ -516,14 +516,14 @@ mod test {
     /// alive until the ports are handed off to avoid TOCTOU races where the OS
     /// reassigns a released port.
     fn get_two_free_ports() -> (u16, u16, std::net::TcpListener, std::net::TcpListener) {
-        let listener1 = std::net::TcpListener::bind("127.0.0.1:0")
-            .expect("can bind to an ephemeral port");
+        let listener1 =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("can bind to an ephemeral port");
         let port1 = listener1.local_addr().expect("can read bound address").port();
 
         const MAX_RETRIES: u32 = 100;
         for _ in 0..MAX_RETRIES {
-            let listener2 = std::net::TcpListener::bind("127.0.0.1:0")
-                .expect("can bind to an ephemeral port");
+            let listener2 =
+                std::net::TcpListener::bind("127.0.0.1:0").expect("can bind to an ephemeral port");
             let port2 = listener2.local_addr().expect("can read bound address").port();
             if port2 != port1 {
                 return (port1, port2, listener1, listener2);
