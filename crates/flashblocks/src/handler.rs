@@ -125,7 +125,7 @@ where
 
 /// Handles the persistence of the pending flashblocks sequence to disk.
 async fn handle_persistence(mut rx: FlashBlockRx, datadir: ChainPath<DataDirPath>) {
-    let cache = FlashblockPayloadsCache::new(Some(&datadir));
+    let cache = FlashblockPayloadsCache::new(Some(datadir));
 
     loop {
         match rx.recv().await {

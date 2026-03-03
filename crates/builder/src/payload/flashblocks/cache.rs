@@ -20,12 +20,41 @@ const FLASHBLOCKS_DIR: &str = "flashblocks";
 /// Flashblocks persistence filename for the current pending flashblocks sequence.
 const PENDING_SEQUENCE_FILE: &str = "pending_sequence.json";
 
-fn init_pending_sequence_path(datadir: &ChainPath<DataDirPath>) -> eyre::Result<PathBuf> {
+fn init_pending_sequence_path(datadir: ChainPath<DataDirPath>) -> eyre::Result<PathBuf> {
     let flashblocks_dir = datadir.data_dir().join(FLASHBLOCKS_DIR);
     std::fs::create_dir_all(&flashblocks_dir).map_err(|e| {
         eyre::eyre!("Failed to create flashblocks directory at {}: {e}", flashblocks_dir.display())
     })?;
     Ok(flashblocks_dir.join(PENDING_SEQUENCE_FILE))
+}
+
+fn try_load_from_filepath(path: Option<&Path>) -> Option<FlashblockPayloadsSequence> {
+    let path = path?;
+    if !path.exists() {
+        return None;
+    }
+
+    let data = std::fs::read(path)
+        .inspect_err(|e| {
+            tracing::warn!(target: "flashblocks", "Failed to read flashblocks persistence file: {e}");
+        })
+        .ok()?;
+
+    let sequence = serde_json::from_slice::<FlashblockPayloadsSequence>(&data)
+        .inspect_err(|e| {
+            tracing::warn!(target: "flashblocks", "Failed to deserialize flashblocks persistence file: {e}");
+        })
+        .ok()?;
+
+    tracing::info!(
+        target: "flashblocks",
+        payload_id = %sequence.payload_id,
+        parent_hash = ?sequence.parent_hash,
+        payloads = sequence.payloads.len(),
+        "Loaded pending flashblocks sequence from disk"
+    );
+
+    Some(sequence)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,7 +73,7 @@ pub struct FlashblockPayloadsCache {
 }
 
 impl FlashblockPayloadsCache {
-    pub fn new(datadir: Option<&ChainPath<DataDirPath>>) -> Self {
+    pub fn new(datadir: Option<ChainPath<DataDirPath>>) -> Self {
         let persist_path = datadir.and_then(|d| {
             init_pending_sequence_path(d)
                 .inspect_err(|e| {
@@ -52,7 +81,11 @@ impl FlashblockPayloadsCache {
                 })
                 .ok()
         });
-        Self { inner: Arc::new(Mutex::new(None)), persist_path }
+
+        Self {
+            inner: Arc::new(Mutex::new(try_load_from_filepath(persist_path.as_deref()))),
+            persist_path,
+        }
     }
 
     pub fn add_flashblock_payload(&self, payload: OpFlashblockPayload) -> eyre::Result<()> {
@@ -100,10 +133,7 @@ impl FlashblockPayloadsCache {
         let data = std::fs::read(path)?;
         let sequence: FlashblockPayloadsSequence = serde_json::from_slice(&data)?;
 
-        let cache = Self::default();
-        *cache.inner.lock() = Some(sequence);
-
-        Ok(cache)
+        Ok(Self { inner: Arc::new(Mutex::new(Some(sequence))), persist_path: None })
     }
 
     /// Get the flashblocks sequence transactions for a given `parent_hash`. Note that we do not
