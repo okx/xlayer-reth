@@ -38,6 +38,7 @@ fn init_pending_sequence_path(datadir: ChainPath<DataDirPath>) -> Option<PathBuf
 fn try_load_from_filepath(path: Option<&Path>) -> Option<FlashblockPayloadsSequence> {
     let path = path?;
     if !path.exists() {
+        tracing::warn!(target: "payload_builder", "Failed to read flashblocks persistence file: does not exist");
         return None;
     }
 
