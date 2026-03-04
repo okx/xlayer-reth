@@ -66,7 +66,7 @@ pub struct GenGenesisCommand<C: ChainSpecParser> {
     output_chainspec: Option<PathBuf>,
 
     /// Batch size for progress reporting.
-    #[arg(long, value_name = "BATCH_SIZE", default_value = "100000")]
+    #[arg(long, value_name = "BATCH_SIZE", default_value = "100000", value_parser = clap::value_parser!(u64).range(1..))]
     batch_size: u64,
 }
 
@@ -78,6 +78,7 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
     {
         info!(target: "reth::cli", "{} ({}) starting", version_metadata().name_client, version_metadata().short_version);
         info!(target: "reth::cli", "Generating genesis from database");
+        info!(target: "reth::cli", "NOTE: Stop the node before running this command. A long-lived read transaction is held for the entire duration, which prevents MDBX from reclaiming freed pages and may cause the database file to grow.");
         info!(target: "reth::cli", "Template genesis: {}", self.template_genesis.display());
         info!(target: "reth::cli", "Output: {}", self.output_path.display());
         if let Some(ref p) = self.output_chainspec {
@@ -123,7 +124,9 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
             provider.last_block_number().wrap_err("Failed to get latest block number")?;
 
         // Genesis block number is latest + 1 (the next block after the exported state)
-        let genesis_block_number = latest_block + 1;
+        let genesis_block_number = latest_block
+            .checked_add(1)
+            .ok_or_else(|| eyre::eyre!("Block number overflow: latest block is u64::MAX"))?;
 
         info!(
             target: "reth::cli",
@@ -196,44 +199,68 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
             blob_gas_used: template_genesis.blob_gas_used,
         };
 
-        // Write the genesis file
-        let output_file = File::create(&self.output_path).wrap_err_with(|| {
-            format!("Failed to create output file: {}", self.output_path.display())
-        })?;
-        let mut writer = BufWriter::new(output_file);
-
-        serde_json::to_writer_pretty(&mut writer, &new_genesis)
-            .wrap_err("Failed to write genesis JSON")?;
-        writer.flush().wrap_err("Failed to flush output file")?;
-
-        info!(
-            target: "reth::cli",
-            "Genesis generation complete! Wrote {} accounts to {}",
-            new_genesis.alloc.len(),
-            self.output_path.display()
-        );
-
-        // Write chainspec (genesis without alloc) if requested
-        if let Some(ref chainspec_path) = self.output_chainspec {
-            let mut chainspec_value = serde_json::to_value(&new_genesis)
-                .wrap_err("Failed to serialize genesis to JSON value")?;
-            if let Some(obj) = chainspec_value.as_object_mut() {
-                obj.remove("alloc");
-            }
-
-            let chainspec_file = File::create(chainspec_path).wrap_err_with(|| {
-                format!("Failed to create chainspec output file: {}", chainspec_path.display())
+        // Write output files, cleaning up partial files on failure
+        let write_result = (|| -> Result<()> {
+            // Write the genesis file
+            let output_file = File::create(&self.output_path).wrap_err_with(|| {
+                format!("Failed to create output file: {}", self.output_path.display())
             })?;
-            let mut chainspec_writer = BufWriter::new(chainspec_file);
-            serde_json::to_writer_pretty(&mut chainspec_writer, &chainspec_value)
-                .wrap_err("Failed to write chainspec JSON")?;
-            chainspec_writer.flush().wrap_err("Failed to flush chainspec output file")?;
+            let mut writer = BufWriter::new(output_file);
+
+            serde_json::to_writer_pretty(&mut writer, &new_genesis)
+                .wrap_err("Failed to write genesis JSON")?;
+            writer.flush().wrap_err("Failed to flush output file")?;
 
             info!(
                 target: "reth::cli",
-                "Wrote genesis without alloc to {}",
-                chainspec_path.display()
+                "Genesis generation complete! Wrote {} accounts to {}",
+                new_genesis.alloc.len(),
+                self.output_path.display()
             );
+
+            // Write chainspec (genesis without alloc) if requested
+            if let Some(ref chainspec_path) = self.output_chainspec {
+                let mut chainspec_value = serde_json::to_value(&new_genesis)
+                    .wrap_err("Failed to serialize genesis to JSON value")?;
+                if let Some(obj) = chainspec_value.as_object_mut() {
+                    obj.remove("alloc");
+                }
+
+                let chainspec_file = File::create(chainspec_path).wrap_err_with(|| {
+                    format!("Failed to create chainspec output file: {}", chainspec_path.display())
+                })?;
+                let mut chainspec_writer = BufWriter::new(chainspec_file);
+                serde_json::to_writer_pretty(&mut chainspec_writer, &chainspec_value)
+                    .wrap_err("Failed to write chainspec JSON")?;
+                chainspec_writer.flush().wrap_err("Failed to flush chainspec output file")?;
+
+                info!(
+                    target: "reth::cli",
+                    "Wrote genesis without alloc to {}",
+                    chainspec_path.display()
+                );
+            }
+
+            Ok(())
+        })();
+
+        // On failure, remove any partially written output files to avoid leaving corrupt data
+        if let Err(e) = write_result {
+            for path in
+                std::iter::once(&self.output_path).chain(self.output_chainspec.as_ref())
+            {
+                if path.exists() {
+                    warn!(
+                        target: "reth::cli",
+                        "Removing incomplete output file: {}",
+                        path.display()
+                    );
+                    if let Err(remove_err) = std::fs::remove_file(path) {
+                        warn!(target: "reth::cli", "Failed to remove output file: {}", remove_err);
+                    }
+                }
+            }
+            return Err(e);
         }
 
         Ok(())
@@ -248,12 +275,12 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
         let mut alloc = BTreeMap::new();
         let mut processed_accounts = 0u64;
 
-        // Read all accounts from PlainAccountState
         info!(target: "reth::cli", "Reading accounts from database...");
 
         let mut account_cursor = tx.cursor_read::<tables::PlainAccountState>()?;
+        // Hoist the storage cursor outside the account loop to avoid per-account cursor overhead
+        let mut storage_cursor = tx.cursor_dup_read::<tables::PlainStorageState>()?;
 
-        // Walk through all accounts
         for result in account_cursor.walk(None)? {
             if shutdown.load(Ordering::SeqCst) {
                 warn!(target: "reth::cli", "Interrupted after processing {} accounts", processed_accounts);
@@ -262,17 +289,23 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
 
             let (address, account) = result?;
 
-            // Get storage for this account
-            let storage = self.read_account_storage(tx, address)?;
+            let storage = Self::read_account_storage_with_cursor(
+                &mut storage_cursor,
+                address,
+                shutdown,
+            )?;
 
-            // Get bytecode if the account has code
+            if shutdown.load(Ordering::SeqCst) {
+                warn!(target: "reth::cli", "Interrupted after processing {} accounts", processed_accounts);
+                return Err(eyre::eyre!("Interrupted"));
+            }
+
             let code = if let Some(hash) = account.bytecode_hash {
                 self.read_account_bytecode(tx, hash)?
             } else {
                 None
             };
 
-            // Create the genesis account
             let genesis_account = GenesisAccount {
                 balance: account.balance,
                 // None omits the field from JSON, which is equivalent to nonce=0 for genesis parsers
@@ -285,7 +318,6 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
             alloc.insert(address, genesis_account);
             processed_accounts += 1;
 
-            // Log progress periodically
             if processed_accounts.is_multiple_of(self.batch_size) {
                 info!(
                     target: "reth::cli",
@@ -300,25 +332,26 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
         Ok(alloc)
     }
 
-    /// Read storage slots for an account
-    fn read_account_storage<TX: DbTx>(
-        &self,
-        tx: &TX,
+    /// Read storage slots for an account using an already-created cursor.
+    fn read_account_storage_with_cursor(
+        cursor: &mut (impl DbDupCursorRO<tables::PlainStorageState>
+                  + DbCursorRO<tables::PlainStorageState>),
         address: Address,
+        shutdown: &AtomicBool,
     ) -> Result<BTreeMap<B256, B256>> {
         let mut storage = BTreeMap::new();
-        let mut cursor = tx.cursor_dup_read::<tables::PlainStorageState>()?;
 
-        // Walk all storage slots for this address
         if let Some(result) = cursor.seek_exact(address)? {
             let (_, entry) = result;
-            // The first entry
             if entry.value != U256::ZERO {
                 storage.insert(entry.key, B256::from(entry.value));
             }
 
-            // Continue walking duplicates
+            // Continue walking duplicates, checking for shutdown periodically
             while let Some(result) = cursor.next_dup()? {
+                if shutdown.load(Ordering::SeqCst) {
+                    break;
+                }
                 let (_, entry) = result;
                 if entry.value != U256::ZERO {
                     storage.insert(entry.key, B256::from(entry.value));
