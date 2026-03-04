@@ -10,14 +10,31 @@ use reth_ethereum_forks::EthereumHardfork;
 use reth_optimism_chainspec::{make_op_genesis_header, OpChainSpec};
 use reth_optimism_forks::OpHardfork;
 use reth_primitives_traits::SealedHeader;
+use std::path::Path;
 use std::sync::Arc;
 
 /// X Layer Devnet genesis hash
 ///
 /// Computed from the genesis block header.
 /// Read from the resource file to pick up any updates without manual changes.
+/// If the file doesn't exist, it will be created with the hash of an empty string.
 pub(crate) static XLAYER_DEVNET_GENESIS_HASH: Lazy<B256> = Lazy::new(|| {
-    include_str!("../res/genesis/xlayer-devnet-genesis-hash.txt")
+    let genesis_hash_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("res/genesis/xlayer-devnet-genesis-hash.txt");
+
+    if !genesis_hash_path.exists() {
+        // Create the file with hash of empty bytes
+
+        let empty_hash = "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470";
+        if let Some(parent) = genesis_hash_path.parent() {
+            std::fs::create_dir_all(parent).expect("Failed to create genesis directory");
+        }
+        std::fs::write(&genesis_hash_path, empty_hash)
+            .expect("Failed to write xlayer-devnet-genesis-hash.txt");
+    }
+
+    std::fs::read_to_string(&genesis_hash_path)
+        .expect("Failed to read xlayer-devnet-genesis-hash.txt")
         .trim()
         .parse()
         .expect("Invalid XLAYER_DEVNET_GENESIS_HASH in xlayer-devnet-genesis-hash.txt")
@@ -27,8 +44,23 @@ pub(crate) static XLAYER_DEVNET_GENESIS_HASH: Lazy<B256> = Lazy::new(|| {
 ///
 /// The Merkle Patricia Trie root of all 1,866,483 accounts in the genesis alloc.
 /// Read from the resource file to pick up any updates without manual changes.
+/// If the file doesn't exist, it will be created with the hash of an empty string.
 pub(crate) static XLAYER_DEVNET_STATE_ROOT: Lazy<B256> = Lazy::new(|| {
-    include_str!("../res/genesis/xlayer-devnet-state-root.txt")
+    let state_root_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("res/genesis/xlayer-devnet-state-root.txt");
+
+    if !state_root_path.exists() {
+        // Create the file with hash of empty hash
+        let empty_hash = "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470";
+        if let Some(parent) = state_root_path.parent() {
+            std::fs::create_dir_all(parent).expect("Failed to create genesis directory");
+        }
+        std::fs::write(&state_root_path, empty_hash)
+            .expect("Failed to write xlayer-devnet-state-root.txt");
+    }
+
+    std::fs::read_to_string(&state_root_path)
+        .expect("Failed to read xlayer-devnet-state-root.txt")
         .trim()
         .parse()
         .expect("Invalid XLAYER_DEVNET_STATE_ROOT in xlayer-devnet-state-root.txt")
