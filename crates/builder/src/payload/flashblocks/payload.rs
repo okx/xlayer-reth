@@ -561,6 +561,7 @@ where
                 return Ok(());
             }
 
+            // Check if we have reached target flashblocks count
             if fb_state.flashblock_index() > fb_state.target_flashblock_count() {
                 self.resolve_best_payload(&ctx, best_payload, fallback_payload, &resolve_payload);
                 self.record_flashblocks_metrics(&ctx, &fb_state, &info, target_flashblocks);
