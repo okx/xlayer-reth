@@ -60,6 +60,9 @@ pub struct FlashblocksConfig {
 
     /// Maximum number of concurrent WebSocket subscribers
     pub ws_subscriber_limit: Option<u16>,
+
+    /// Whether to replay from the persistence file on startup
+    pub replay_from_persistence_file: bool,
 }
 
 impl Default for FlashblocksConfig {
@@ -80,6 +83,7 @@ impl Default for FlashblocksConfig {
             p2p_send_full_payload: false,
             p2p_process_full_payload: false,
             ws_subscriber_limit: None,
+            replay_from_persistence_file: false,
         }
     }
 }
@@ -118,6 +122,7 @@ impl TryFrom<BuilderArgs> for FlashblocksConfig {
             p2p_send_full_payload: args.flashblocks.p2p.p2p_send_full_payload,
             p2p_process_full_payload: args.flashblocks.p2p.p2p_process_full_payload,
             ws_subscriber_limit: args.flashblocks.ws_subscriber_limit,
+            replay_from_persistence_file: args.flashblocks.replay_from_persistence_file,
         })
     }
 }

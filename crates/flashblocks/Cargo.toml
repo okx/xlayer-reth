@@ -13,6 +13,7 @@ default = []
 [dependencies]
 xlayer-builder.workspace = true
 reth-node-api.workspace = true
+reth-node-core.workspace = true
 reth-primitives-traits.workspace = true
 reth-tracing.workspace = true
 reth-optimism-flashblocks.workspace = true

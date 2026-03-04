@@ -14212,6 +14212,7 @@ dependencies = [
  "jsonrpsee",
  "moka",
  "reth-node-api",
+ "reth-node-core",
  "reth-optimism-flashblocks",
  "reth-primitives-traits",
  "reth-rpc",
