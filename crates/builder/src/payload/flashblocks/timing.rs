@@ -124,13 +124,6 @@ impl FlashblockScheduler {
                     }
                 }
                 _ = block_cancel.cancelled() => {
-                    warn!(
-                        target: "payload_builder",
-                        id = %payload_id,
-                        missed_count = self.target_flashblocks - i as u64,
-                        target_flashblocks = self.target_flashblocks,
-                        "Missing flashblocks because the payload building job was cancelled too early"
-                    );
                     return
                 },
             }
