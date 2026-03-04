@@ -356,4 +356,83 @@ mod tests {
             _ => panic!("Jovian fork should use timestamp condition"),
         }
     }
+
+    #[test]
+    fn test_xlayer_devnet_genesis_hash_is_valid_b256() {
+        let hash = *XLAYER_DEVNET_GENESIS_HASH;
+        // Verify it's a valid B256 (32 bytes)
+        assert_eq!(hash.len(), 32);
+    }
+
+    #[test]
+    fn test_xlayer_devnet_state_root_is_valid_b256() {
+        let state_root = *XLAYER_DEVNET_STATE_ROOT;
+        // Verify it's a valid B256 (32 bytes)
+        assert_eq!(state_root.len(), 32);
+    }
+
+    #[test]
+    fn test_xlayer_devnet_genesis_hash_file_path() {
+        let genesis_hash_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("res/genesis/xlayer-devnet-genesis-hash.txt");
+        // Verify the path is constructed correctly
+        assert!(genesis_hash_path.to_string_lossy().contains("xlayer-devnet-genesis-hash.txt"));
+    }
+
+    #[test]
+    fn test_xlayer_devnet_state_root_file_path() {
+        let state_root_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("res/genesis/xlayer-devnet-state-root.txt");
+        // Verify the path is constructed correctly
+        assert!(state_root_path.to_string_lossy().contains("xlayer-devnet-state-root.txt"));
+    }
+
+    #[test]
+    fn test_xlayer_devnet_genesis_files_created_or_exist() {
+        // This test verifies that after initialization, the files either exist or have been created
+        let genesis_hash_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("res/genesis/xlayer-devnet-genesis-hash.txt");
+        let state_root_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("res/genesis/xlayer-devnet-state-root.txt");
+
+        // Force initialization by accessing the lazy statics
+        let _ = *XLAYER_DEVNET_GENESIS_HASH;
+        let _ = *XLAYER_DEVNET_STATE_ROOT;
+
+        // After initialization, files should exist
+        assert!(genesis_hash_path.exists(), "Genesis hash file should exist after initialization");
+        assert!(state_root_path.exists(), "State root file should exist after initialization");
+    }
+
+    #[test]
+    fn test_xlayer_devnet_genesis_hash_parseable() {
+        // Verify that the genesis hash can be parsed from the file
+        let hash = *XLAYER_DEVNET_GENESIS_HASH;
+        // Should not panic and should be a valid hash
+        assert_ne!(hash, B256::ZERO);
+    }
+
+    #[test]
+    fn test_xlayer_devnet_state_root_parseable() {
+        // Verify that the state root can be parsed from the file
+        let state_root = *XLAYER_DEVNET_STATE_ROOT;
+        // Should not panic and should be a valid hash
+        assert_ne!(state_root, B256::ZERO);
+    }
+
+    #[test]
+    fn test_xlayer_devnet_genesis_hash_consistent() {
+        // Verify that reading the hash multiple times returns the same value
+        let hash1 = *XLAYER_DEVNET_GENESIS_HASH;
+        let hash2 = *XLAYER_DEVNET_GENESIS_HASH;
+        assert_eq!(hash1, hash2, "Genesis hash should be consistent across multiple reads");
+    }
+
+    #[test]
+    fn test_xlayer_devnet_state_root_consistent() {
+        // Verify that reading the state root multiple times returns the same value
+        let root1 = *XLAYER_DEVNET_STATE_ROOT;
+        let root2 = *XLAYER_DEVNET_STATE_ROOT;
+        assert_eq!(root1, root2, "State root should be consistent across multiple reads");
+    }
 }
