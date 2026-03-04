@@ -66,7 +66,7 @@ pub struct GenGenesisCommand<C: ChainSpecParser> {
     output_chainspec: Option<PathBuf>,
 
     /// Batch size for progress reporting.
-    #[arg(long, value_name = "BATCH_SIZE", default_value = "100000", value_parser = clap::value_parser!(u64).range(1..))]
+    #[arg(long, value_name = "BATCH_SIZE", default_value = "1000000", value_parser = clap::value_parser!(u64).range(1..))]
     batch_size: u64,
 }
 
