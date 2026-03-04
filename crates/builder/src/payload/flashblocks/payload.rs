@@ -480,7 +480,7 @@ where
             self.resolve_best_payload(&ctx, best_payload, fallback_payload, &resolve_payload);
             self.record_flashblocks_metrics(&ctx, &fb_state, &info, 0);
             return Ok(());
-        };
+        }
 
         let expected_flashblocks = self.config.flashblocks_per_block();
         if target_flashblocks < expected_flashblocks {

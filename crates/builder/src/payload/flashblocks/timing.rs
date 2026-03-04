@@ -825,7 +825,7 @@ mod tests {
         cancel.cancel();
         handle.await.unwrap();
 
-        // Should have: 1 immediate + 1 scheduled = 2
+        // Should have: 1 immediate + 3 scheduled = 4
         let mut count = 0;
         while rx.try_recv().is_ok() {
             count += 1;
