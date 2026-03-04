@@ -27,36 +27,42 @@ impl FlashblockScheduler {
         block_time: Duration,
         payload_timestamp: u64,
     ) -> Self {
-        // Capture current time for calculating relative offsets
-        let reference_system = std::time::SystemTime::now();
-        let reference_instant = tokio::time::Instant::now();
+        Self::from_reference(
+            config,
+            block_time,
+            payload_timestamp,
+            std::time::SystemTime::now(),
+            tokio::time::Instant::now(),
+        )
+    }
 
+    fn from_reference(
+        config: &FlashblocksConfig,
+        block_time: Duration,
+        payload_timestamp: u64,
+        reference_system: std::time::SystemTime,
+        reference_instant: tokio::time::Instant,
+    ) -> Self {
         // Calculate how much time remains until the payload deadline
         let remaining_time =
             compute_remaining_time(block_time, payload_timestamp, reference_system);
 
-        let (target_flashblocks, send_times) = if let Some(remaining_time) = remaining_time {
-            // Calculate the target flashblocks based on the remaining time
-            let target_flashblocks =
-                remaining_time.as_millis().div_ceil(config.interval.as_millis()) as u64;
+        // Calculate the target flashblocks based on the remaining time
+        let target_flashblocks =
+            remaining_time.as_millis().div_ceil(config.interval.as_millis()) as u64;
 
-            // Compute the schedule as relative durations from now
-            let intervals = compute_scheduler_intervals(
-                config.interval,
-                config.send_offset_ms,
-                config.end_buffer_ms,
-                remaining_time,
-                target_flashblocks,
-            );
+        // Compute the schedule as relative durations from now
+        let intervals = compute_scheduler_intervals(
+            config.interval,
+            config.send_offset_ms,
+            config.end_buffer_ms,
+            remaining_time,
+            target_flashblocks,
+        );
 
-            // Convert relative durations to absolute instants for
-            // tokio::time::sleep_until
-            let send_times = intervals.into_iter().map(|d| reference_instant + d).collect();
-            (target_flashblocks, send_times)
-        } else {
-            // Case when FCU is late
-            (0, vec![])
-        };
+        // Convert relative durations to absolute instants for
+        // tokio::time::sleep_until
+        let send_times = intervals.into_iter().map(|d| reference_instant + d).collect();
 
         Self { reference_system, reference_instant, target_flashblocks, send_times }
     }
@@ -139,12 +145,13 @@ impl FlashblockScheduler {
 
 /// Computes the remaining time until the payload deadline. Calculates remaining
 /// time as `payload_timestamp - now`. The result is capped at `block_time`. If
-/// the timestamp is in the past (late FCU), returns `None`.
+/// the timestamp is in the past (late FCU), returns `block_time` for backwards
+/// compatibility so that payload building still proceeds.
 fn compute_remaining_time(
     block_time: Duration,
     payload_timestamp: u64,
     reference_system: std::time::SystemTime,
-) -> Option<Duration> {
+) -> Duration {
     let target_time = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(payload_timestamp);
 
     target_time
@@ -152,11 +159,10 @@ fn compute_remaining_time(
         .ok()
         .filter(|d| !d.is_zero())
         .map(|d| d.min(block_time))
-        .or_else(|| {
+        .unwrap_or_else(|| {
             // If we're here then the payload timestamp is in the past. This
             // happens when the FCU is really late and it also means we're
-            // expecting a getPayload call basically right away, so we don't
-            // have any time to build.
+            // expecting a getPayload call basically right away.
             let delay_ms =
                 reference_system.duration_since(target_time).map_or(0, |d| d.as_millis());
             warn!(
@@ -165,7 +171,9 @@ fn compute_remaining_time(
                 delay_ms,
                 "Late FCU: payload timestamp is in the past"
             );
-            None
+            // For backwards compatibility, we will trigger payload building
+            // based on the configured block time.
+            block_time
         })
 }
 
@@ -486,7 +494,7 @@ mod tests {
         block_time_ms: u64,
         reference_ms: u64,
         payload_timestamp: u64,
-        expected_remaining_ms: Option<Duration>,
+        expected_remaining_ms: Duration,
     }
 
     fn check_remaining_time(test_case: RemainingTimeTestCase) {
@@ -516,49 +524,52 @@ mod tests {
                 block_time_ms: 2000,
                 reference_ms: 1_000_000,
                 payload_timestamp: 1002,
-                expected_remaining_ms: Some(Duration::from_millis(2000)),
+                expected_remaining_ms: Duration::from_millis(2000),
             },
             RemainingTimeTestCase {
                 name: "remaining exceeds block time (capped)",
                 block_time_ms: 1000,
                 reference_ms: 1_000_000,
                 payload_timestamp: 1005,
-                expected_remaining_ms: Some(Duration::from_millis(1000)),
+                expected_remaining_ms: Duration::from_millis(1000),
             },
+            // Late FCU cases: returns block_time for backwards compatibility
             RemainingTimeTestCase {
                 name: "late FCU (844ms past timestamp)",
                 block_time_ms: 1000,
                 reference_ms: 1_000_844, // 1000.844 seconds
                 payload_timestamp: 1000,
-                expected_remaining_ms: None,
+                expected_remaining_ms: Duration::from_millis(1000),
             },
             RemainingTimeTestCase {
                 name: "late FCU (1ms past timestamp)",
                 block_time_ms: 1000,
                 reference_ms: 1_000_001, // 1000.001 seconds
                 payload_timestamp: 1000,
-                expected_remaining_ms: None,
+                expected_remaining_ms: Duration::from_millis(1000),
             },
+            // Edge case: System time is exactly at the payload timestamp
             RemainingTimeTestCase {
                 name: "exact match (zero remaining)",
                 block_time_ms: 1000,
                 reference_ms: 1_000_000, // exactly 1000 seconds
                 payload_timestamp: 1000,
-                expected_remaining_ms: None,
+                expected_remaining_ms: Duration::from_millis(1000),
             },
+            // Edge case: Remaining time is exactly block time
             RemainingTimeTestCase {
                 name: "remaining exactly equals block time",
                 block_time_ms: 1000,
                 reference_ms: 1_000_000,
                 payload_timestamp: 1001,
-                expected_remaining_ms: Some(Duration::from_millis(1000)),
+                expected_remaining_ms: Duration::from_millis(1000),
             },
             RemainingTimeTestCase {
                 name: "sub-second remaining",
                 block_time_ms: 1000,
                 reference_ms: 1_000_500, // 1000.5 seconds
                 payload_timestamp: 1001,
-                expected_remaining_ms: Some(Duration::from_millis(500)),
+                expected_remaining_ms: Duration::from_millis(500),
             },
         ];
 
@@ -567,85 +578,220 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_target_flashblocks() {
-        let now = tokio::time::Instant::now();
-
-        // Zero target → 0
-        let scheduler = FlashblockScheduler {
-            reference_system: std::time::SystemTime::now(),
-            reference_instant: now,
-            target_flashblocks: 0,
-            send_times: vec![],
-        };
-        assert_eq!(scheduler.target_flashblocks(), 0);
-
-        // Single target, no send_times (immediate only) → 1
-        let scheduler = FlashblockScheduler {
-            reference_system: std::time::SystemTime::now(),
-            reference_instant: now,
-            target_flashblocks: 1,
-            send_times: vec![],
-        };
-        assert_eq!(scheduler.target_flashblocks(), 1);
-
-        // Multiple targets
-        let scheduler = FlashblockScheduler {
-            reference_system: std::time::SystemTime::now(),
-            reference_instant: now,
-            target_flashblocks: 3,
-            send_times: vec![
-                now + Duration::from_millis(100),
-                now + Duration::from_millis(200),
-                now + Duration::from_millis(300),
-            ],
-        };
-        assert_eq!(scheduler.target_flashblocks(), 3);
+    /// Returns a payload timestamp far enough in the future that
+    /// `compute_remaining_time` will cap to `block_time`.
+    fn future_payload_timestamp() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            + 100
     }
 
-    #[tokio::test]
-    async fn test_scheduler_run_none_returns_immediately() {
-        let (tx, rx) = std::sync::mpsc::sync_channel(16);
-        let block_cancel = CancellationToken::new();
-        let fb_cancel = block_cancel.child_token();
-        let payload_id = PayloadId::new([0; 8]);
+    /// Returns a payload timestamp in the past to simulate a late FCU.
+    fn past_payload_timestamp() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .saturating_sub(10)
+    }
 
-        let scheduler = FlashblockScheduler {
-            reference_system: std::time::SystemTime::now(),
-            reference_instant: tokio::time::Instant::now(),
-            target_flashblocks: 0,
-            send_times: vec![],
+    fn send_time_intervals(scheduler: &FlashblockScheduler) -> Vec<Duration> {
+        scheduler.send_times.iter().map(|t| *t - scheduler.reference_instant).collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_new_fcu_timing_scenarios() {
+        // Setup: block_time=1000ms, interval=250ms (always a multiple)
+        // Block starts at T=1000.000s, payload_timestamp = 1001s
+        const PAYLOAD_TS: u64 = 1001;
+        const BLOCK_START_MS: u64 = 1_000_000;
+        let block_time = Duration::from_millis(1000);
+        let config =
+            FlashblocksConfig { interval: Duration::from_millis(250), ..Default::default() };
+        let now = tokio::time::Instant::now();
+
+        let reference_at = |delay_ms: u64| -> std::time::SystemTime {
+            std::time::UNIX_EPOCH + Duration::from_millis(BLOCK_START_MS + delay_ms)
         };
 
-        // Should return immediately without sending any triggers
-        scheduler.run(tx, block_cancel, fb_cancel, payload_id).await;
-        assert!(rx.try_recv().is_err());
+        // Case 1: FCU arrives on time (0ms delay)
+        // remaining = 1001.0 - 1000.0 = 1000ms → target = 4
+        let scheduler = FlashblockScheduler::from_reference(
+            &config,
+            block_time,
+            PAYLOAD_TS,
+            reference_at(0),
+            now,
+        );
+        assert_eq!(scheduler.target_flashblocks(), 4);
+        assert_eq!(send_time_intervals(&scheduler), durations_ms(&[250, 500, 750, 1000]));
+
+        // Case 2: FCU arrives 500ms into block (mid-block)
+        // remaining = 1001.0 - 1000.5 = 500ms → target = 2
+        let scheduler = FlashblockScheduler::from_reference(
+            &config,
+            block_time,
+            PAYLOAD_TS,
+            reference_at(500),
+            now,
+        );
+        assert_eq!(scheduler.target_flashblocks(), 2);
+        assert_eq!(send_time_intervals(&scheduler), durations_ms(&[250, 500]));
+
+        // Case 3: FCU arrives 350ms into block (first half, non-aligned)
+        // remaining = 650ms → target = ceil(650/250) = 3
+        // first_timing = (650-1) % 250 + 1 = 150
+        let scheduler = FlashblockScheduler::from_reference(
+            &config,
+            block_time,
+            PAYLOAD_TS,
+            reference_at(350),
+            now,
+        );
+        assert_eq!(scheduler.target_flashblocks(), 3);
+        assert_eq!(send_time_intervals(&scheduler), durations_ms(&[150, 400, 650]));
+
+        // Case 4: FCU arrives 750ms into block (second half, non-aligned)
+        // remaining = 250ms → target = 1
+        let scheduler = FlashblockScheduler::from_reference(
+            &config,
+            block_time,
+            PAYLOAD_TS,
+            reference_at(750),
+            now,
+        );
+        assert_eq!(scheduler.target_flashblocks(), 1);
+        assert_eq!(send_time_intervals(&scheduler), durations_ms(&[250]));
+
+        // Case 5: FCU arrives exactly at payload timestamp (1000ms delay)
+        // remaining = 0ms → is_zero → backwards compat → 1000ms → target = 4
+        let scheduler = FlashblockScheduler::from_reference(
+            &config,
+            block_time,
+            PAYLOAD_TS,
+            reference_at(1000),
+            now,
+        );
+        assert_eq!(scheduler.target_flashblocks(), 4);
+        assert_eq!(send_time_intervals(&scheduler), durations_ms(&[250, 500, 750, 1000]));
+
+        // Case 6: FCU arrives 10ms after payload timestamp (1010ms delay)
+        // remaining = negative → backwards compat → 1000ms → target = 4
+        let scheduler = FlashblockScheduler::from_reference(
+            &config,
+            block_time,
+            PAYLOAD_TS,
+            reference_at(1010),
+            now,
+        );
+        assert_eq!(scheduler.target_flashblocks(), 4);
+        assert_eq!(send_time_intervals(&scheduler), durations_ms(&[250, 500, 750, 1000]));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_new_with_offset_and_buffer() {
+        const PAYLOAD_TS: u64 = 1001;
+        const BLOCK_START_MS: u64 = 1_000_000;
+        let block_time = Duration::from_millis(1000);
+        let now = tokio::time::Instant::now();
+        let reference = std::time::UNIX_EPOCH + Duration::from_millis(BLOCK_START_MS);
+
+        // block_time=1000ms, interval=250ms, offset=-20ms, buffer=50ms
+        // remaining=1000ms, target=4, deadline=950ms
+        // first_timing=250, intervals: 230, 480, 730, 930
+        let config = FlashblocksConfig {
+            interval: Duration::from_millis(250),
+            send_offset_ms: -20,
+            end_buffer_ms: 50,
+            ..Default::default()
+        };
+        let scheduler =
+            FlashblockScheduler::from_reference(&config, block_time, PAYLOAD_TS, reference, now);
+        assert_eq!(scheduler.target_flashblocks(), 4);
+        assert_eq!(send_time_intervals(&scheduler), durations_ms(&[230, 480, 730, 930]));
+
+        // Same config but FCU arrives 500ms late → remaining=500ms, target=2
+        // deadline=450ms, first_timing=250
+        // i=0: apply_offset(250.min(450), -20).min(450) = 230
+        // i=1: apply_offset(500.min(450), -20).min(450) = apply_offset(450, -20).min(450) = 430
+        let reference_late = std::time::UNIX_EPOCH + Duration::from_millis(BLOCK_START_MS + 500);
+        let scheduler = FlashblockScheduler::from_reference(
+            &config,
+            block_time,
+            PAYLOAD_TS,
+            reference_late,
+            now,
+        );
+        assert_eq!(scheduler.target_flashblocks(), 2);
+        assert_eq!(send_time_intervals(&scheduler), durations_ms(&[230, 430]));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_new_different_block_times() {
+        const PAYLOAD_TS: u64 = 1001;
+        let now = tokio::time::Instant::now();
+        // On-time reference: 1000.000s
+        let reference = std::time::UNIX_EPOCH + Duration::from_millis(1_000_000);
+        let config =
+            FlashblocksConfig { interval: Duration::from_millis(250), ..Default::default() };
+
+        // block_time=500ms, interval=250ms → remaining capped at 500ms, target=2
+        let scheduler = FlashblockScheduler::from_reference(
+            &config,
+            Duration::from_millis(500),
+            PAYLOAD_TS,
+            reference,
+            now,
+        );
+        assert_eq!(scheduler.target_flashblocks(), 2);
+        assert_eq!(send_time_intervals(&scheduler), durations_ms(&[250, 500]));
+
+        // block_time=250ms, interval=250ms → target=1
+        let scheduler = FlashblockScheduler::from_reference(
+            &config,
+            Duration::from_millis(250),
+            PAYLOAD_TS,
+            reference,
+            now,
+        );
+        assert_eq!(scheduler.target_flashblocks(), 1);
+        assert_eq!(send_time_intervals(&scheduler), durations_ms(&[250]));
+
+        // block_time=0 → target=0, no send_times
+        let scheduler = FlashblockScheduler::from_reference(
+            &config,
+            Duration::ZERO,
+            PAYLOAD_TS,
+            reference,
+            now,
+        );
+        assert_eq!(scheduler.target_flashblocks(), 0);
+        assert!(scheduler.send_times.is_empty());
     }
 
     #[tokio::test(start_paused = true)]
     async fn test_scheduler_run_sends_all_triggers() {
+        let config =
+            FlashblocksConfig { interval: Duration::from_millis(200), ..Default::default() };
+        let scheduler = FlashblockScheduler::new(
+            &config,
+            Duration::from_millis(600),
+            future_payload_timestamp(),
+        );
+        assert_eq!(scheduler.target_flashblocks(), 3);
+
         let (tx, rx) = std::sync::mpsc::sync_channel(16);
         let block_cancel = CancellationToken::new();
         let fb_cancel = block_cancel.child_token();
         let payload_id = PayloadId::new([0; 8]);
-        let now = tokio::time::Instant::now();
-
-        let scheduler = FlashblockScheduler {
-            reference_system: std::time::SystemTime::now(),
-            reference_instant: now,
-            target_flashblocks: 3,
-            send_times: vec![
-                now + Duration::from_millis(200),
-                now + Duration::from_millis(400),
-                now + Duration::from_millis(600),
-            ],
-        };
 
         let handle = tokio::spawn(async move {
             scheduler.run(tx, block_cancel, fb_cancel, payload_id).await;
         });
 
-        // Advance past all send times
+        // Advance past all send times (600ms + margin)
         tokio::time::advance(Duration::from_millis(700)).await;
         handle.await.unwrap();
 
@@ -659,30 +805,27 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn test_scheduler_run_block_cancellation() {
+        let config =
+            FlashblocksConfig { interval: Duration::from_millis(200), ..Default::default() };
+        let scheduler = FlashblockScheduler::new(
+            &config,
+            Duration::from_millis(1000),
+            future_payload_timestamp(),
+        );
+        assert_eq!(scheduler.target_flashblocks(), 5);
+
         let (tx, rx) = std::sync::mpsc::sync_channel(16);
         let block_cancel = CancellationToken::new();
         let fb_cancel = block_cancel.child_token();
         let payload_id = PayloadId::new([0; 8]);
-        let now = tokio::time::Instant::now();
-
-        let scheduler = FlashblockScheduler {
-            reference_system: std::time::SystemTime::now(),
-            reference_instant: now,
-            target_flashblocks: 3,
-            send_times: vec![
-                now + Duration::from_millis(200),
-                now + Duration::from_millis(400),
-                now + Duration::from_millis(600),
-            ],
-        };
 
         let cancel = block_cancel.clone();
         let handle = tokio::spawn(async move {
             scheduler.run(tx, block_cancel, fb_cancel, payload_id).await;
         });
 
-        // Advance past first scheduled trigger only
-        tokio::time::advance(Duration::from_millis(250)).await;
+        // Advance past first 3 scheduled triggers (600ms) but not the 4th trigger (800ms)
+        tokio::time::advance(Duration::from_millis(650)).await;
         tokio::task::yield_now().await;
 
         // Cancel before remaining triggers
@@ -694,22 +837,24 @@ mod tests {
         while rx.try_recv().is_ok() {
             count += 1;
         }
-        assert_eq!(count, 2, "Expected 1 immediate + 1 scheduled trigger before cancel");
+        assert_eq!(count, 4, "Expected 1 immediate + 3 scheduled triggers before cancel");
     }
 
     #[tokio::test(start_paused = true)]
     async fn test_scheduler_run_dropped_receiver() {
+        let config =
+            FlashblocksConfig { interval: Duration::from_millis(200), ..Default::default() };
+        let scheduler = FlashblockScheduler::new(
+            &config,
+            Duration::from_millis(200),
+            future_payload_timestamp(),
+        );
+        assert_eq!(scheduler.target_flashblocks(), 1);
+
         let (tx, rx) = std::sync::mpsc::sync_channel::<CancellationToken>(16);
         let block_cancel = CancellationToken::new();
         let fb_cancel = block_cancel.child_token();
         let payload_id = PayloadId::new([0; 8]);
-
-        let scheduler = FlashblockScheduler {
-            reference_system: std::time::SystemTime::now(),
-            reference_instant: tokio::time::Instant::now(),
-            target_flashblocks: 1,
-            send_times: vec![tokio::time::Instant::now() + Duration::from_millis(200)],
-        };
 
         // Drop receiver before running — first send should fail
         drop(rx);
@@ -720,24 +865,25 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn test_scheduler_run_cancellation_token_lifecycle() {
+        let config =
+            FlashblocksConfig { interval: Duration::from_millis(200), ..Default::default() };
+        let scheduler = FlashblockScheduler::new(
+            &config,
+            Duration::from_millis(1000),
+            future_payload_timestamp(),
+        );
+        assert_eq!(scheduler.target_flashblocks(), 5);
+
         let (tx, rx) = std::sync::mpsc::sync_channel(16);
         let block_cancel = CancellationToken::new();
         let fb_cancel = block_cancel.child_token();
         let payload_id = PayloadId::new([0; 8]);
-        let now = tokio::time::Instant::now();
-
-        let scheduler = FlashblockScheduler {
-            reference_system: std::time::SystemTime::now(),
-            reference_instant: now,
-            target_flashblocks: 2,
-            send_times: vec![now + Duration::from_millis(200), now + Duration::from_millis(400)],
-        };
 
         let handle = tokio::spawn(async move {
             scheduler.run(tx, block_cancel, fb_cancel, payload_id).await;
         });
 
-        tokio::time::advance(Duration::from_millis(500)).await;
+        tokio::time::advance(Duration::from_millis(1100)).await;
         handle.await.unwrap();
 
         // Collect all tokens
@@ -746,8 +892,8 @@ mod tests {
             tokens.push(token);
         }
 
-        // 1 immediate + 2 scheduled = 3 tokens
-        assert_eq!(tokens.len(), 3);
+        // 1 immediate + 5 scheduled = 6 tokens
+        assert_eq!(tokens.len(), 6);
 
         // Each scheduled trigger cancels the previous token:
         // - tokens[0] (immediate) cancelled by first scheduled trigger
@@ -755,6 +901,45 @@ mod tests {
         // - tokens[2] (last) is NOT cancelled — no subsequent trigger
         assert!(tokens[0].is_cancelled(), "Immediate token should be cancelled by first trigger");
         assert!(tokens[1].is_cancelled(), "First trigger token should be cancelled by second");
-        assert!(!tokens[2].is_cancelled(), "Last token should not be cancelled by scheduler");
+        assert!(tokens[2].is_cancelled(), "Second trigger token should be cancelled by third");
+        assert!(tokens[3].is_cancelled(), "Third trigger token should be cancelled by fourth");
+        assert!(tokens[4].is_cancelled(), "Fourth trigger token should be cancelled by fifth");
+        assert!(
+            !tokens[5].is_cancelled(),
+            "Last trigger token should not be cancelled by scheduler"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_scheduler_run_late_fcu_backwards_compat() {
+        let config =
+            FlashblocksConfig { interval: Duration::from_millis(200), ..Default::default() };
+        let scheduler = FlashblockScheduler::new(
+            &config,
+            Duration::from_millis(1000),
+            past_payload_timestamp(),
+        );
+
+        // Late FCU: remaining_time = block_time = 1000ms → 5 flashblocks
+        assert_eq!(scheduler.target_flashblocks(), 5);
+
+        let (tx, rx) = std::sync::mpsc::sync_channel(16);
+        let block_cancel = CancellationToken::new();
+        let fb_cancel = block_cancel.child_token();
+        let payload_id = PayloadId::new([0; 8]);
+
+        let handle = tokio::spawn(async move {
+            scheduler.run(tx, block_cancel, fb_cancel, payload_id).await;
+        });
+
+        tokio::time::advance(Duration::from_millis(1100)).await;
+        handle.await.unwrap();
+
+        // Count: 1 immediate + 5 scheduled = 6, even with late FCU
+        let mut count = 0;
+        while rx.try_recv().is_ok() {
+            count += 1;
+        }
+        assert_eq!(count, 6, "Expected 1 immediate + 5 scheduled triggers even with late FCU");
     }
 }
