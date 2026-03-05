@@ -246,9 +246,7 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
 
         // On failure, remove any partially written output files to avoid leaving corrupt data
         if let Err(e) = write_result {
-            for path in
-                std::iter::once(&self.output_path).chain(self.output_chainspec.as_ref())
-            {
+            for path in std::iter::once(&self.output_path).chain(self.output_chainspec.as_ref()) {
                 if path.exists() {
                     warn!(
                         target: "reth::cli",
@@ -289,11 +287,8 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
 
             let (address, account) = result?;
 
-            let storage = Self::read_account_storage_with_cursor(
-                &mut storage_cursor,
-                address,
-                shutdown,
-            )?;
+            let storage =
+                Self::read_account_storage_with_cursor(&mut storage_cursor, address, shutdown)?;
 
             if shutdown.load(Ordering::SeqCst) {
                 warn!(target: "reth::cli", "Interrupted after processing {} accounts", processed_accounts);
