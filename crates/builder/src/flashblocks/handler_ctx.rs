@@ -1,5 +1,5 @@
 use crate::{
-    flashblocks::{BuilderConfig, OpPayloadBuilderCtx},
+    flashblocks::{BuilderConfig, FlashblocksBuilderCtx},
     metrics::BuilderMetrics,
     traits::ClientBounds,
 };
@@ -69,14 +69,14 @@ impl FlashblockHandlerContext {
         self.chain_spec.is_canyon_active_at_timestamp(timestamp)
     }
 
-    pub(super) fn into_op_payload_builder_ctx(
+    pub(super) fn into_flashblocks_builder_ctx(
         self,
         payload_config: PayloadConfig<OpPayloadBuilderAttributes<OpTransactionSigned>>,
         evm_env: EvmEnv<OpSpecId>,
         block_env_attributes: OpNextBlockEnvAttributes,
         cancel: CancellationToken,
-    ) -> OpPayloadBuilderCtx {
-        OpPayloadBuilderCtx {
+    ) -> FlashblocksBuilderCtx {
+        FlashblocksBuilderCtx {
             evm_config: self.evm_config,
             da_config: self.da_config,
             gas_limit_config: OpGasLimitConfig::default(),

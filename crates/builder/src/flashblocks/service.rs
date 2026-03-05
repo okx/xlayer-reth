@@ -1,8 +1,8 @@
 use super::{
-    handler::PayloadHandler,
-    handler_context::FlashblockHandlerContext,
+    handler::FlashblocksPayloadHandler,
+    handler_ctx::FlashblockHandlerContext,
     p2p::{Message, AGENT_VERSION, FLASHBLOCKS_STREAM_PROTOCOL},
-    payload_builder::OpPayloadBuilder,
+    payload_builder::FlashblocksBuilder,
     utils::cache::FlashblockPayloadsCache,
     wspub::WebSocketPublisher,
     BuilderConfig,
@@ -115,7 +115,7 @@ impl FlashblocksServiceBuilder {
         )
         .wrap_err("failed to create ws publisher")?
         .into();
-        let payload_builder = OpPayloadBuilder::new(
+        let payload_builder = FlashblocksBuilder::new(
             OpEvmConfig::optimism(ctx.chain_spec()),
             pool,
             ctx.provider().clone(),
@@ -151,7 +151,7 @@ impl FlashblocksServiceBuilder {
         )
         .wrap_err("failed to create flashblocks payload builder context")?;
 
-        let payload_handler = PayloadHandler::new(
+        let payload_handler = FlashblocksPayloadHandler::new(
             handler_ctx,
             built_fb_payload_rx,
             built_payload_rx,

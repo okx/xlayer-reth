@@ -1,8 +1,7 @@
 use crate::{
     flashblocks::{
-        handler_context::FlashblockHandlerContext, p2p::Message,
-        utils::cache::FlashblockPayloadsCache, utils::execution::ExecutionInfo,
-        wspub::WebSocketPublisher,
+        handler_ctx::FlashblockHandlerContext, p2p::Message, utils::cache::FlashblockPayloadsCache,
+        utils::execution::ExecutionInfo, wspub::WebSocketPublisher,
     },
     traits::ClientBounds,
 };
@@ -34,7 +33,7 @@ use tracing::warn;
 ///
 /// In the case of a payload built by this node, it is broadcast to peers and an event is sent to the payload builder.
 /// In the case of a payload received from a peer, it is executed and if successful, an event is sent to the payload builder.
-pub(crate) struct PayloadHandler<Client, Tasks> {
+pub(crate) struct FlashblocksPayloadHandler<Client, Tasks> {
     // handler context for external flashblock execution
     ctx: FlashblockHandlerContext,
     // receives new flashblock payloads built by this builder.
@@ -60,7 +59,7 @@ pub(crate) struct PayloadHandler<Client, Tasks> {
     p2p_process_full_payload_flag: bool,
 }
 
-impl<Client, Tasks> PayloadHandler<Client, Tasks>
+impl<Client, Tasks> FlashblocksPayloadHandler<Client, Tasks>
 where
     Client: ClientBounds + 'static,
     Tasks: TaskSpawner + Clone + Unpin + 'static,
@@ -322,7 +321,7 @@ where
     )
     .wrap_err("failed to execute best transactions")?;
 
-    let builder_ctx = ctx.into_op_payload_builder_ctx(
+    let builder_ctx = ctx.into_flashblocks_builder_ctx(
         payload_config,
         evm_env.clone(),
         block_env_attributes,

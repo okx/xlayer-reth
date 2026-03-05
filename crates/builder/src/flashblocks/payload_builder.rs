@@ -2,7 +2,7 @@ use crate::{
     flashblocks::{
         best_txs::BestFlashblocksTxs,
         builder_tx::FlashblocksBuilderTx,
-        context::OpPayloadBuilderCtx,
+        context::FlashblocksBuilderCtx,
         generator::{BlockCell, BuildArguments, PayloadBuilder},
         timing::FlashblockScheduler,
         utils::cache::FlashblockPayloadsCache,
@@ -180,7 +180,7 @@ impl FlashblocksState {
 
 /// Optimism's payload builder
 #[derive(Debug, Clone)]
-pub(super) struct OpPayloadBuilder<Pool, Client, Tasks> {
+pub(super) struct FlashblocksBuilder<Pool, Client, Tasks> {
     /// The type responsible for creating the evm.
     pub evm_config: OpEvmConfig,
     /// The transaction pool
@@ -210,8 +210,8 @@ pub(super) struct OpPayloadBuilder<Pool, Client, Tasks> {
     pub task_metrics: Arc<FlashblocksTaskMetrics>,
 }
 
-impl<Pool, Client, Tasks> OpPayloadBuilder<Pool, Client, Tasks> {
-    /// `OpPayloadBuilder` constructor.
+impl<Pool, Client, Tasks> FlashblocksBuilder<Pool, Client, Tasks> {
+    /// `FlashblocksBuilder` constructor.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         evm_config: OpEvmConfig,
@@ -245,7 +245,7 @@ impl<Pool, Client, Tasks> OpPayloadBuilder<Pool, Client, Tasks> {
 }
 
 impl<Pool, Client, Tasks> reth_basic_payload_builder::PayloadBuilder
-    for OpPayloadBuilder<Pool, Client, Tasks>
+    for FlashblocksBuilder<Pool, Client, Tasks>
 where
     Pool: Clone + Send + Sync,
     Client: Clone + Send + Sync,
@@ -272,7 +272,7 @@ where
     }
 }
 
-impl<Pool, Client, Tasks> OpPayloadBuilder<Pool, Client, Tasks>
+impl<Pool, Client, Tasks> FlashblocksBuilder<Pool, Client, Tasks>
 where
     Pool: PoolBounds,
     Client: ClientBounds,
@@ -284,7 +284,7 @@ where
             OpPayloadBuilderAttributes<op_alloy_consensus::OpTxEnvelope>,
         >,
         cancel: CancellationToken,
-    ) -> eyre::Result<OpPayloadBuilderCtx> {
+    ) -> eyre::Result<FlashblocksBuilderCtx> {
         let chain_spec = self.client.chain_spec();
         let timestamp = config.attributes.timestamp();
 
@@ -317,7 +317,7 @@ where
             .next_evm_env(&config.parent_header, &block_env_attributes)
             .wrap_err("failed to create next evm env")?;
 
-        Ok(OpPayloadBuilderCtx {
+        Ok(FlashblocksBuilderCtx {
             evm_config: self.evm_config.clone(),
             chain_spec,
             config,
@@ -614,7 +614,7 @@ where
         P: StateRootProvider + HashedPostStateProvider + StorageRootProvider,
     >(
         &self,
-        ctx: &OpPayloadBuilderCtx,
+        ctx: &FlashblocksBuilderCtx,
         fb_state: &mut FlashblocksState,
         info: &mut ExecutionInfo,
         state: &mut State<DB>,
@@ -813,7 +813,7 @@ where
 
     fn resolve_best_payload(
         &self,
-        ctx: &OpPayloadBuilderCtx,
+        ctx: &FlashblocksBuilderCtx,
         best_payload: (OpBuiltPayload, BundleState),
         fallback_payload: OpBuiltPayload,
         resolve_payload: &BlockCell<OpBuiltPayload>,
@@ -879,7 +879,7 @@ where
     /// Do some logging and metric recording when we stop build flashblocks
     fn record_flashblocks_metrics(
         &self,
-        ctx: &OpPayloadBuilderCtx,
+        ctx: &FlashblocksBuilderCtx,
         fb_state: &FlashblocksState,
         info: &ExecutionInfo,
         flashblocks_per_block: u64,
@@ -904,7 +904,7 @@ where
 }
 
 #[async_trait::async_trait]
-impl<Pool, Client, Tasks> PayloadBuilder for OpPayloadBuilder<Pool, Client, Tasks>
+impl<Pool, Client, Tasks> PayloadBuilder for FlashblocksBuilder<Pool, Client, Tasks>
 where
     Pool: PoolBounds,
     Client: ClientBounds,
@@ -924,7 +924,7 @@ where
 
 fn execute_pre_steps<DB>(
     state: &mut State<DB>,
-    ctx: &OpPayloadBuilderCtx,
+    ctx: &FlashblocksBuilderCtx,
 ) -> Result<ExecutionInfo, PayloadBuilderError>
 where
     DB: Database<Error = ProviderError> + std::fmt::Debug,
@@ -943,7 +943,7 @@ where
 
 pub(super) fn build_block<DB, P>(
     state: &mut State<DB>,
-    ctx: &OpPayloadBuilderCtx,
+    ctx: &FlashblocksBuilderCtx,
     info: &mut ExecutionInfo,
     fb_state: Option<&mut FlashblocksState>,
     calculate_state_root: bool,

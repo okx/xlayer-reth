@@ -44,7 +44,7 @@ use alloy_eips::eip2718::WithEncoded;
 
 /// Container type that holds all necessities to build a new payload.
 #[derive(Debug)]
-pub struct OpPayloadBuilderCtx {
+pub struct FlashblocksBuilderCtx {
     /// The type that knows how to perform system calls and configure the evm.
     pub evm_config: OpEvmConfig,
     /// The DA config for the payload builder
@@ -69,7 +69,7 @@ pub struct OpPayloadBuilderCtx {
     pub max_gas_per_txn: Option<u64>,
 }
 
-impl OpPayloadBuilderCtx {
+impl FlashblocksBuilderCtx {
     pub(super) fn with_cancel(self, cancel: CancellationToken) -> Self {
         Self { cancel, ..self }
     }
@@ -218,7 +218,7 @@ impl OpPayloadBuilderCtx {
     }
 }
 
-impl OpPayloadBuilderCtx {
+impl FlashblocksBuilderCtx {
     /// Constructs a receipt for the given transaction.
     pub fn build_receipt<E: Evm>(
         &self,

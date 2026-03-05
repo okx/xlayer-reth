@@ -26,7 +26,7 @@ use revm::{
 };
 use tracing::{trace, warn};
 
-use super::{context::OpPayloadBuilderCtx, utils::execution::ExecutionInfo};
+use super::{context::FlashblocksBuilderCtx, utils::execution::ExecutionInfo};
 use crate::tx::signer::Signer;
 
 sol!(
@@ -164,7 +164,7 @@ impl FlashblocksBuilderTx {
     // changes to the db so call `new_simulation_state` to simulate on a new copy of the state.
     fn simulate_builder_txs(
         &self,
-        ctx: &OpPayloadBuilderCtx,
+        ctx: &FlashblocksBuilderCtx,
         db: &mut State<impl Database + DatabaseRef>,
         is_first_flashblock: bool,
         is_last_flashblock: bool,
@@ -192,7 +192,7 @@ impl FlashblocksBuilderTx {
 
     fn simulate_base_builder_txs(
         base: &BuilderTxBase,
-        ctx: &OpPayloadBuilderCtx,
+        ctx: &FlashblocksBuilderCtx,
         db: &mut State<impl Database + DatabaseRef>,
         is_first_flashblock: bool,
         is_last_flashblock: bool,
@@ -215,7 +215,7 @@ impl FlashblocksBuilderTx {
         signer: Signer,
         flashblock_number_address: Address,
         base: &BuilderTxBase,
-        ctx: &OpPayloadBuilderCtx,
+        ctx: &FlashblocksBuilderCtx,
         db: &mut State<impl Database + DatabaseRef>,
         is_first_flashblock: bool,
     ) -> Result<Vec<BuilderTransactionCtx>, BuilderTransactionError> {
@@ -256,7 +256,7 @@ impl FlashblocksBuilderTx {
     fn signed_increment_flashblocks_tx(
         signer: Signer,
         flashblock_number_address: Address,
-        ctx: &OpPayloadBuilderCtx,
+        ctx: &FlashblocksBuilderCtx,
         evm: &mut OpEvm<impl Database + DatabaseRef, NoOpInspector, PrecompilesMap>,
     ) -> Result<BuilderTransactionCtx, BuilderTransactionError> {
         let calldata = IFlashblockNumber::incrementFlashblockNumberCall {};
@@ -267,7 +267,7 @@ impl FlashblocksBuilderTx {
         signer: Signer,
         flashblock_number_address: Address,
         calldata: T,
-        ctx: &OpPayloadBuilderCtx,
+        ctx: &FlashblocksBuilderCtx,
         evm: &mut OpEvm<impl Database + DatabaseRef, NoOpInspector, PrecompilesMap>,
     ) -> Result<BuilderTransactionCtx, BuilderTransactionError> {
         let gas_used = Self::simulate_flashblocks_call(
@@ -296,7 +296,7 @@ impl FlashblocksBuilderTx {
         flashblock_number_address: Address,
         calldata: T,
         expected_logs: Vec<B256>,
-        ctx: &OpPayloadBuilderCtx,
+        ctx: &FlashblocksBuilderCtx,
         evm: &mut OpEvm<impl Database + DatabaseRef, NoOpInspector, PrecompilesMap>,
     ) -> Result<u64, BuilderTransactionError> {
         let tx_req = OpTransactionRequest::default()
@@ -316,7 +316,7 @@ impl FlashblocksBuilderTx {
     fn simulate_builder_txs_with_state_copy(
         &self,
         state_provider: impl StateProvider + Clone,
-        ctx: &OpPayloadBuilderCtx,
+        ctx: &FlashblocksBuilderCtx,
         db: &State<impl Database>,
         is_first_flashblock: bool,
         is_last_flashblock: bool,
@@ -335,7 +335,7 @@ impl FlashblocksBuilderTx {
         &self,
         state_provider: impl StateProvider + Clone,
         info: &mut ExecutionInfo,
-        builder_ctx: &OpPayloadBuilderCtx,
+        builder_ctx: &FlashblocksBuilderCtx,
         db: &mut State<impl Database>,
         top_of_block: bool,
         is_first_flashblock: bool,
@@ -438,7 +438,7 @@ impl FlashblocksBuilderTx {
         from: Signer,
         gas_used: u64,
         calldata: Bytes,
-        ctx: &OpPayloadBuilderCtx,
+        ctx: &FlashblocksBuilderCtx,
         db: impl DatabaseRef,
     ) -> Result<Recovered<OpTransactionSigned>, BuilderTransactionError> {
         let nonce = get_nonce(db, from.address)?;
@@ -525,7 +525,7 @@ impl BuilderTxBase {
 
     fn simulate_builder_tx(
         &self,
-        ctx: &OpPayloadBuilderCtx,
+        ctx: &FlashblocksBuilderCtx,
         db: impl DatabaseRef,
     ) -> Result<Option<BuilderTransactionCtx>, BuilderTransactionError> {
         match self.signer {
@@ -570,7 +570,7 @@ impl BuilderTxBase {
 
     fn signed_builder_tx(
         &self,
-        ctx: &OpPayloadBuilderCtx,
+        ctx: &FlashblocksBuilderCtx,
         db: impl DatabaseRef,
         signer: Signer,
         gas_used: u64,

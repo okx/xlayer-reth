@@ -13,7 +13,7 @@ pub(crate) mod builder_tx;
 mod context;
 mod generator;
 mod handler;
-mod handler_context;
+mod handler_ctx;
 mod p2p;
 mod payload_builder;
 mod service;
@@ -21,7 +21,7 @@ mod timing;
 pub(crate) mod utils;
 mod wspub;
 
-pub use context::OpPayloadBuilderCtx;
+pub use context::FlashblocksBuilderCtx;
 pub use service::FlashblocksServiceBuilder;
 pub use utils::cache::FlashblockPayloadsCache;
 pub use wspub::WebSocketPublisher;
