@@ -6,12 +6,12 @@ use reth::{core::primitives::SealedBlock, payload::PayloadId};
 use reth_optimism_payload_builder::OpBuiltPayload as RethOpBuiltPayload;
 use reth_optimism_primitives::OpBlock;
 
-pub const AGENT_VERSION: &str = "flashblock-builder/1.0.0";
-pub const FLASHBLOCKS_STREAM_PROTOCOL: crate::p2p::StreamProtocol =
+pub(crate) const AGENT_VERSION: &str = "flashblock-builder/1.0.0";
+pub(crate) const FLASHBLOCKS_STREAM_PROTOCOL: crate::p2p::StreamProtocol =
     crate::p2p::StreamProtocol::new("/flashblocks/1.0.0");
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
-pub enum Message {
+pub(crate) enum Message {
     OpBuiltPayload(OpBuiltPayload),
     OpFlashblockPayload(OpFlashblockPayload),
 }
@@ -25,21 +25,21 @@ impl crate::p2p::Message for Message {
 /// Internal type analogous to [`reth_optimism_payload_builder::OpBuiltPayload`]
 /// which additionally implements `Serialize` and `Deserialize` for p2p transmission.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
-pub struct OpBuiltPayload {
+pub(crate) struct OpBuiltPayload {
     /// Identifier of the payload
-    pub id: PayloadId,
+    pub(crate) id: PayloadId,
     /// Sealed block
-    pub block: SealedBlock<OpBlock>,
+    pub(crate) block: SealedBlock<OpBlock>,
     /// The fees of the block
-    pub fees: U256,
+    pub(crate) fees: U256,
 }
 
 impl Message {
-    pub fn from_built_payload(value: RethOpBuiltPayload) -> Self {
+    pub(crate) fn from_built_payload(value: RethOpBuiltPayload) -> Self {
         Message::OpBuiltPayload(value.into())
     }
 
-    pub fn from_flashblock_payload(value: OpFlashblockPayload) -> Self {
+    pub(crate) fn from_flashblock_payload(value: OpFlashblockPayload) -> Self {
         Message::OpFlashblockPayload(value)
     }
 }
