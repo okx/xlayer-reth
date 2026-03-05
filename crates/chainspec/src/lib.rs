@@ -115,7 +115,7 @@ pub static XLAYER_TESTNET_HARDFORKS: Lazy<ChainHardforks> = Lazy::new(|| {
     ])
 });
 
-/// X Layer testnet list of hardforks.
+/// X Layer devnet list of hardforks.
 ///
 /// All time-based hardforks are activated at genesis (timestamp 0).
 pub static XLAYER_DEVNET_HARDFORKS: Lazy<ChainHardforks> = Lazy::new(|| {
