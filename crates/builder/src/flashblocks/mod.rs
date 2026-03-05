@@ -1,4 +1,4 @@
-use crate::{args::BuilderArgs, tx::signer::Signer};
+use crate::{args::BuilderArgs, signer::Signer};
 use alloy_primitives::Address;
 use core::{
     convert::TryFrom,

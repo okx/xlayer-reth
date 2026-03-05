@@ -1,11 +1,11 @@
 use crate::{
     args::BuilderArgs,
     flashblocks::{BuilderConfig, FlashblocksServiceBuilder},
+    signer::Signer,
     tests::{
         builder_signer, create_test_db, framework::driver::ChainDriver, EngineApi, Ipc,
         TransactionPoolObserver,
     },
-    tx::signer::Signer,
 };
 use alloy_primitives::B256;
 use alloy_provider::{Identity, ProviderBuilder, RootProvider};

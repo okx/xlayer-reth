@@ -68,9 +68,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        flashblocks::best_txs::BestFlashblocksTxs,
-        tx::mock::{MockFbTransaction, MockFbTransactionFactory},
+    use crate::flashblocks::{
+        best_txs::BestFlashblocksTxs,
+        utils::mock::{MockFbTransaction, MockFbTransactionFactory},
     };
     use alloy_consensus::Transaction;
     use reth_payload_util::{BestPayloadTransactions, PayloadTransactions};

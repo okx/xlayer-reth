@@ -1,6 +1,6 @@
 use crate::{
     flashblocks::{context::FlashblocksBuilderCtx, utils::execution::ExecutionInfo},
-    tx::signer::Signer,
+    signer::Signer,
 };
 use core::fmt::Debug;
 use tracing::{trace, warn};

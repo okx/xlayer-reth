@@ -1,7 +1,7 @@
 use super::signers::{builder_signer, flashblocks_number_signer};
 use crate::{
+    signer::Signer,
     tests::{flashblocks_number_contract::FlashblocksNumber, ChainDriver, Protocol},
-    tx::signer::Signer,
 };
 use alloy_eips::Encodable2718;
 use alloy_primitives::{hex, Address, BlockHash, TxHash, TxKind, B256, U256};

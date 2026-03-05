@@ -1,8 +1,8 @@
 use crate::{
     flashblocks::utils::execution::{ExecutionInfo, TxnExecutionResult},
     metrics::BuilderMetrics,
+    signer::Signer,
     traits::PayloadTxsBounds,
-    tx::signer::Signer,
 };
 use std::{sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
