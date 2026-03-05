@@ -1,10 +1,10 @@
 use crate::{
     flashblocks::{
+        builder::FlashblocksBuilder,
         builder_tx::FlashblocksBuilderTx,
         generator::BlockPayloadJobGenerator,
         handler::FlashblocksPayloadHandler,
         handler_ctx::FlashblockHandlerContext,
-        payload_builder::FlashblocksBuilder,
         utils::{
             cache::FlashblockPayloadsCache,
             p2p::{Message, AGENT_VERSION, FLASHBLOCKS_STREAM_PROTOCOL},

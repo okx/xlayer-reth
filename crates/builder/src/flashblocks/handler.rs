@@ -333,14 +333,9 @@ where
         cancel,
     );
 
-    let (built_payload, fb_payload, _, _) = crate::flashblocks::payload_builder::build_block(
-        &mut state,
-        &builder_ctx,
-        &mut info,
-        None,
-        true,
-    )
-    .wrap_err("failed to build flashblock")?;
+    let (built_payload, fb_payload, _, _) =
+        crate::flashblocks::builder::build_block(&mut state, &builder_ctx, &mut info, None, true)
+            .wrap_err("failed to build flashblock")?;
 
     builder_ctx.metrics.flashblock_sync_duration.record(start.elapsed());
 

@@ -9,12 +9,12 @@ use core::{
 use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
 
 mod best_txs;
+mod builder;
 pub(crate) mod builder_tx;
 mod context;
 mod generator;
 mod handler;
 mod handler_ctx;
-mod payload_builder;
 mod service;
 mod timing;
 pub(crate) mod utils;
