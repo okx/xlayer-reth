@@ -51,7 +51,7 @@ pub(crate) static XLAYER_DEVNET_STATE_ROOT: Lazy<B256> = Lazy::new(|| {
 
     if !state_root_path.exists() {
         // Create the file with hash of empty hash
-        let empty_hash = "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470";
+        let empty_hash = "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470";
         if let Some(parent) = state_root_path.parent() {
             std::fs::create_dir_all(parent).expect("Failed to create genesis directory");
         }
@@ -241,7 +241,7 @@ mod tests {
         assert_eq!(genesis.timestamp, 0x699d723d);
         assert_eq!(
             genesis.extra_data.as_ref(),
-            hex!("01000000fa000000060000000000000000").as_ref()
+            hex!("0x01000000fa000000060000000000000000").as_ref()
         );
         assert_eq!(genesis.gas_limit, 0xbebc200);
         assert_eq!(genesis.difficulty, U256::ZERO);
@@ -250,7 +250,7 @@ mod tests {
         assert_eq!(genesis.coinbase.to_string(), "0x4200000000000000000000000000000000000011");
         assert_eq!(
             genesis.parent_hash,
-            Some(b256!("a3a639b09fea244d577c7e7ed7bcc4eb1adb0c5b54441cd29d9949e417dfa355"))
+            Some(b256!("0xa3a639b09fea244d577c7e7ed7bcc4eb1adb0c5b54441cd29d9949e417dfa355"))
         );
         assert_eq!(genesis.base_fee_per_gas.map(|fee| fee as u64), Some(0x5fc01c5u64));
         assert_eq!(genesis.excess_blob_gas, Some(0));
@@ -381,8 +381,8 @@ mod tests {
 
     #[test]
     fn test_xlayer_devnet_state_root_file_path() {
-        let state_root_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("res/genesis/xlayer-devnet-state-root.txt");
+        let state_root_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("res/genesis/xlayer-devnet-state-root.txt");
         // Verify the path is constructed correctly
         assert!(state_root_path.to_string_lossy().contains("xlayer-devnet-state-root.txt"));
     }
@@ -392,8 +392,8 @@ mod tests {
         // This test verifies that after initialization, the files either exist or have been created
         let genesis_hash_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("res/genesis/xlayer-devnet-genesis-hash.txt");
-        let state_root_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("res/genesis/xlayer-devnet-state-root.txt");
+        let state_root_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("res/genesis/xlayer-devnet-state-root.txt");
 
         // Force initialization by accessing the lazy statics
         let _ = *XLAYER_DEVNET_GENESIS_HASH;
