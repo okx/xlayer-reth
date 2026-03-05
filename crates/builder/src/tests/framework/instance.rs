@@ -1,6 +1,6 @@
 use crate::{
     args::BuilderArgs,
-    payload::{BuilderConfig, FlashblocksServiceBuilder},
+    flashblocks::{BuilderConfig, FlashblocksServiceBuilder},
     tests::{
         builder_signer, create_test_db, framework::driver::ChainDriver, EngineApi, Ipc,
         TransactionPoolObserver,

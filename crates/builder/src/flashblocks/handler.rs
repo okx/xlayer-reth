@@ -1,10 +1,8 @@
 use crate::{
-    payload::{
-        flashblocks::{
-            cache::FlashblockPayloadsCache, context::FlashblockHandlerContext, p2p::Message,
-            wspub::WebSocketPublisher,
-        },
-        utils::execution::ExecutionInfo,
+    flashblocks::{
+        handler_context::FlashblockHandlerContext, p2p::Message,
+        utils::cache::FlashblockPayloadsCache, utils::execution::ExecutionInfo,
+        wspub::WebSocketPublisher,
     },
     traits::ClientBounds,
 };
@@ -331,7 +329,7 @@ where
         cancel,
     );
 
-    let (built_payload, fb_payload, _, _) = crate::payload::flashblocks::payload::build_block(
+    let (built_payload, fb_payload, _, _) = crate::flashblocks::payload_builder::build_block(
         &mut state,
         &builder_ctx,
         &mut info,

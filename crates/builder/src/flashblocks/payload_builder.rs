@@ -1,17 +1,17 @@
 use crate::{
-    metrics::tokio::FlashblocksTaskMetrics,
-    metrics::BuilderMetrics,
-    payload::{
-        builder_tx::BuilderTransactions,
+    flashblocks::{
+        best_txs::BestFlashblocksTxs,
+        builder_tx::FlashblocksBuilderTx,
         context::OpPayloadBuilderCtx,
-        flashblocks::{
-            best_txs::BestFlashblocksTxs, cache::FlashblockPayloadsCache,
-            timing::FlashblockScheduler, wspub::WebSocketPublisher,
-        },
         generator::{BlockCell, BuildArguments, PayloadBuilder},
+        timing::FlashblockScheduler,
+        utils::cache::FlashblockPayloadsCache,
         utils::execution::ExecutionInfo,
+        wspub::WebSocketPublisher,
         BuilderConfig,
     },
+    metrics::tokio::FlashblocksTaskMetrics,
+    metrics::BuilderMetrics,
     traits::{ClientBounds, PoolBounds},
 };
 use alloy_consensus::{
@@ -180,7 +180,7 @@ impl FlashblocksState {
 
 /// Optimism's payload builder
 #[derive(Debug, Clone)]
-pub(super) struct OpPayloadBuilder<Pool, Client, BuilderTx, Tasks> {
+pub(super) struct OpPayloadBuilder<Pool, Client, Tasks> {
     /// The type responsible for creating the evm.
     pub evm_config: OpEvmConfig,
     /// The transaction pool
@@ -205,12 +205,12 @@ pub(super) struct OpPayloadBuilder<Pool, Client, BuilderTx, Tasks> {
     /// The metrics for the builder
     pub metrics: Arc<BuilderMetrics>,
     /// The end of builder transaction type
-    pub builder_tx: BuilderTx,
+    pub builder_tx: FlashblocksBuilderTx,
     /// Tokio task metrics for monitoring spawned tasks
     pub task_metrics: Arc<FlashblocksTaskMetrics>,
 }
 
-impl<Pool, Client, BuilderTx, Tasks> OpPayloadBuilder<Pool, Client, BuilderTx, Tasks> {
+impl<Pool, Client, Tasks> OpPayloadBuilder<Pool, Client, Tasks> {
     /// `OpPayloadBuilder` constructor.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
@@ -219,7 +219,7 @@ impl<Pool, Client, BuilderTx, Tasks> OpPayloadBuilder<Pool, Client, BuilderTx, T
         client: Client,
         task_executor: Tasks,
         config: BuilderConfig,
-        builder_tx: BuilderTx,
+        builder_tx: FlashblocksBuilderTx,
         built_fb_payload_tx: mpsc::Sender<OpFlashblockPayload>,
         built_payload_tx: mpsc::Sender<OpBuiltPayload>,
         p2p_cache: FlashblockPayloadsCache,
@@ -244,12 +244,11 @@ impl<Pool, Client, BuilderTx, Tasks> OpPayloadBuilder<Pool, Client, BuilderTx, T
     }
 }
 
-impl<Pool, Client, BuilderTx, Tasks> reth_basic_payload_builder::PayloadBuilder
-    for OpPayloadBuilder<Pool, Client, BuilderTx, Tasks>
+impl<Pool, Client, Tasks> reth_basic_payload_builder::PayloadBuilder
+    for OpPayloadBuilder<Pool, Client, Tasks>
 where
     Pool: Clone + Send + Sync,
     Client: Clone + Send + Sync,
-    BuilderTx: Clone + Send + Sync,
     Tasks: Clone + Send + Sync,
 {
     type Attributes = OpPayloadBuilderAttributes<OpTransactionSigned>;
@@ -273,11 +272,10 @@ where
     }
 }
 
-impl<Pool, Client, BuilderTx, Tasks> OpPayloadBuilder<Pool, Client, BuilderTx, Tasks>
+impl<Pool, Client, Tasks> OpPayloadBuilder<Pool, Client, Tasks>
 where
     Pool: PoolBounds,
     Client: ClientBounds,
-    BuilderTx: BuilderTransactions + Send + Sync,
     Tasks: TaskSpawner + Clone + Unpin + 'static,
 {
     fn get_op_payload_builder_ctx(
@@ -437,7 +435,7 @@ where
             ctx.metrics.flashblock_byte_size_histogram.record(flashblock_byte_size as f64);
 
             // For X Layer, full link monitoring support
-            crate::payload::utils::monitor::monitor(
+            crate::flashblocks::utils::monitor::monitor(
                 best_payload.0.block().header().number,
                 new_tx_hashes,
             );
@@ -767,7 +765,7 @@ where
                     .record(info.executed_transactions.len() as f64);
 
                 // For X Layer, full link monitoring support
-                crate::payload::utils::monitor::monitor(
+                crate::flashblocks::utils::monitor::monitor(
                     best_payload.0.block().header().number,
                     new_tx_hashes,
                 );
@@ -906,12 +904,10 @@ where
 }
 
 #[async_trait::async_trait]
-impl<Pool, Client, BuilderTx, Tasks> PayloadBuilder
-    for OpPayloadBuilder<Pool, Client, BuilderTx, Tasks>
+impl<Pool, Client, Tasks> PayloadBuilder for OpPayloadBuilder<Pool, Client, Tasks>
 where
     Pool: PoolBounds,
     Client: ClientBounds,
-    BuilderTx: BuilderTransactions + Clone + Send + Sync,
     Tasks: TaskSpawner + Clone + Unpin + 'static,
 {
     type Attributes = OpPayloadBuilderAttributes<OpTransactionSigned>;

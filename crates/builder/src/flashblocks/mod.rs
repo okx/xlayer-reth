@@ -8,18 +8,23 @@ use core::{
 };
 use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
 
-mod builder_tx;
+mod best_txs;
+pub(crate) mod builder_tx;
 mod context;
-mod flashblocks;
 mod generator;
+mod handler;
+mod handler_context;
+mod p2p;
+mod payload_builder;
+mod service;
+mod timing;
 pub(crate) mod utils;
+mod wspub;
 
-pub use builder_tx::{
-    get_balance, get_nonce, BuilderTransactionCtx, BuilderTransactionError, BuilderTransactions,
-    InvalidContractDataError, SimulationSuccessResult,
-};
 pub use context::OpPayloadBuilderCtx;
-pub use flashblocks::{FlashblockPayloadsCache, FlashblocksServiceBuilder, WebSocketPublisher};
+pub use service::FlashblocksServiceBuilder;
+pub use utils::cache::FlashblockPayloadsCache;
+pub use wspub::WebSocketPublisher;
 
 /// Configuration values that are specific to the flashblocks builder.
 #[derive(Debug, Clone)]

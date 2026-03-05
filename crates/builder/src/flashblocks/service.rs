@@ -1,17 +1,16 @@
 use super::{
-    builder_tx::{FlashblocksBuilderTx, FlashblocksNumberBuilderTx},
-    cache::FlashblockPayloadsCache,
     handler::PayloadHandler,
+    handler_context::FlashblockHandlerContext,
     p2p::{Message, AGENT_VERSION, FLASHBLOCKS_STREAM_PROTOCOL},
-    payload::OpPayloadBuilder,
+    payload_builder::OpPayloadBuilder,
+    utils::cache::FlashblockPayloadsCache,
     wspub::WebSocketPublisher,
+    BuilderConfig,
 };
 use crate::{
+    flashblocks::{builder_tx::FlashblocksBuilderTx, generator::BlockPayloadJobGenerator},
     metrics::tokio::FlashblocksTaskMetrics,
     metrics::BuilderMetrics,
-    payload::{
-        builder_tx::BuilderTransactions, generator::BlockPayloadJobGenerator, BuilderConfig,
-    },
     traits::{NodeBounds, PoolBounds},
 };
 use eyre::WrapErr as _;
@@ -26,16 +25,15 @@ use std::{sync::Arc, time::Duration};
 pub struct FlashblocksServiceBuilder(pub BuilderConfig);
 
 impl FlashblocksServiceBuilder {
-    fn spawn_payload_builder_service<Node, Pool, BuilderTx>(
+    fn spawn_payload_builder_service<Node, Pool>(
         self,
         ctx: &BuilderContext<Node>,
         pool: Pool,
-        builder_tx: BuilderTx,
+        builder_tx: FlashblocksBuilderTx,
     ) -> eyre::Result<PayloadBuilderHandle<<Node::Types as NodeTypes>::Payload>>
     where
         Node: NodeBounds,
         Pool: PoolBounds,
-        BuilderTx: BuilderTransactions + Unpin + Clone + Send + Sync + 'static,
     {
         // TODO: is there a different global token?
         // this is effectively unused right now due to the usage of reth's `task_executor`.
@@ -145,7 +143,7 @@ impl FlashblocksServiceBuilder {
         let (payload_service, payload_builder_handle) =
             PayloadBuilderService::new(payload_generator, ctx.provider().canonical_state_stream());
 
-        let handler_ctx = super::context::FlashblockHandlerContext::new(
+        let handler_ctx = FlashblockHandlerContext::new(
             &ctx.provider().clone(),
             self.0.clone(),
             OpEvmConfig::optimism(ctx.chain_spec()),
@@ -199,20 +197,18 @@ where
     ) -> eyre::Result<PayloadBuilderHandle<<Node::Types as NodeTypes>::Payload>> {
         let signer = self.0.builder_signer;
 
-        if let Some(builder_signer) = signer
+        let builder_tx = if let Some(builder_signer) = signer
             && let Some(flashblocks_number_contract_address) =
                 self.0.flashblocks.number_contract_address
         {
-            self.spawn_payload_builder_service(
-                ctx,
-                pool,
-                FlashblocksNumberBuilderTx::new(
-                    builder_signer,
-                    flashblocks_number_contract_address,
-                ),
+            FlashblocksBuilderTx::new_number_contract(
+                builder_signer,
+                flashblocks_number_contract_address,
             )
         } else {
-            self.spawn_payload_builder_service(ctx, pool, FlashblocksBuilderTx::new(signer))
-        }
+            FlashblocksBuilderTx::new_base(signer)
+        };
+
+        self.spawn_payload_builder_service(ctx, pool, builder_tx)
     }
 }
