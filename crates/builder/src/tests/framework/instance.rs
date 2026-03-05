@@ -1,6 +1,6 @@
 use crate::{
     args::BuilderArgs,
-    payload::{BuilderConfig, FlashblocksBuilder, PayloadBuilder},
+    payload::{BuilderConfig, FlashblocksServiceBuilder},
     tests::{
         builder_signer, create_test_db, framework::driver::ChainDriver, EngineApi, Ipc,
         TransactionPoolObserver,
@@ -66,8 +66,8 @@ impl LocalInstance {
     ///
     /// This method does not prefund any accounts, so before sending any transactions
     /// make sure that sender accounts are funded.
-    pub async fn new<P: PayloadBuilder>(args: BuilderArgs) -> eyre::Result<Self> {
-        Box::pin(Self::new_with_config::<P>(args, default_node_config())).await
+    pub async fn new(args: BuilderArgs) -> eyre::Result<Self> {
+        Box::pin(Self::new_with_config(args, default_node_config())).await
     }
 
     /// Creates a new local instance of the OP builder node with the given arguments,
@@ -75,7 +75,7 @@ impl LocalInstance {
     ///
     /// This method does not prefund any accounts, so before sending any transactions
     /// make sure that sender accounts are funded.
-    pub async fn new_with_config<P: PayloadBuilder>(
+    pub async fn new_with_config(
         args: BuilderArgs,
         config: NodeConfig<OpChainSpec>,
     ) -> eyre::Result<Self> {
@@ -96,7 +96,7 @@ impl LocalInstance {
         let signer = args.builder_signer.unwrap_or(builder_signer());
         args.builder_signer = Some(signer);
 
-        let builder_config = BuilderConfig::<P::Config>::try_from(args.clone())
+        let builder_config = BuilderConfig::try_from(args.clone())
             .expect("Failed to convert builder args to builder config");
         let da_config = builder_config.da_config.clone();
         let gas_limit_config = builder_config.gas_limit_config.clone();
@@ -117,7 +117,7 @@ impl LocalInstance {
                 op_node
                     .components()
                     .pool(pool_component(&rollup_args))
-                    .payload(P::new_service(builder_config)?),
+                    .payload(FlashblocksServiceBuilder(builder_config)),
             )
             .with_add_ons(addons)
             .on_rpc_started(move |_, _| {
@@ -159,7 +159,7 @@ impl LocalInstance {
         let Commands::Node(ref mut node_command) = args.command else { unreachable!() };
         node_command.ext.flashblocks.enabled = true;
         node_command.ext.flashblocks.flashblocks_port = 0; // use random os assigned port
-        Self::new::<FlashblocksBuilder>(node_command.ext.clone()).await
+        Self::new(node_command.ext.clone()).await
     }
 
     pub const fn config(&self) -> &NodeConfig<OpChainSpec> {

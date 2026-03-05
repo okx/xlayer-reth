@@ -5,11 +5,8 @@ use crate::{
         builder_tx::BuilderTransactions,
         context::OpPayloadBuilderCtx,
         flashblocks::{
-            best_txs::BestFlashblocksTxs,
-            cache::FlashblockPayloadsCache,
-            config::{FlashBlocksConfigExt, FlashblocksConfig},
-            timing::FlashblockScheduler,
-            wspub::WebSocketPublisher,
+            best_txs::BestFlashblocksTxs, cache::FlashblockPayloadsCache,
+            timing::FlashblockScheduler, wspub::WebSocketPublisher,
         },
         generator::{BlockCell, BuildArguments, PayloadBuilder},
         utils::execution::ExecutionInfo,
@@ -204,7 +201,7 @@ pub(super) struct OpPayloadBuilder<Pool, Client, BuilderTx, Tasks> {
     /// to all connected subscribers.
     pub ws_pub: Arc<WebSocketPublisher>,
     /// System configuration for the builder
-    pub config: BuilderConfig<FlashblocksConfig>,
+    pub config: BuilderConfig,
     /// The metrics for the builder
     pub metrics: Arc<BuilderMetrics>,
     /// The end of builder transaction type
@@ -221,7 +218,7 @@ impl<Pool, Client, BuilderTx, Tasks> OpPayloadBuilder<Pool, Client, BuilderTx, T
         pool: Pool,
         client: Client,
         task_executor: Tasks,
-        config: BuilderConfig<FlashblocksConfig>,
+        config: BuilderConfig,
         builder_tx: BuilderTx,
         built_fb_payload_tx: mpsc::Sender<OpFlashblockPayload>,
         built_payload_tx: mpsc::Sender<OpBuiltPayload>,
@@ -353,7 +350,7 @@ where
         let block_build_start_time = Instant::now();
         let BuildArguments { mut cached_reads, config, cancel: block_cancel } = args;
 
-        let disable_state_root = self.config.specific.disable_state_root;
+        let disable_state_root = self.config.flashblocks.disable_state_root;
         let ctx = self
             .get_op_payload_builder_ctx(config.clone(), block_cancel.clone())
             .map_err(|e| PayloadBuilderError::Other(e.into()))?;
@@ -467,7 +464,7 @@ where
         // We adjust our flashblocks timings based on time the fcu block building signal arrived
         let timestamp = config.attributes.timestamp();
         let flashblock_scheduler =
-            FlashblockScheduler::new(&self.config.specific, self.config.block_time, timestamp);
+            FlashblockScheduler::new(&self.config.flashblocks, self.config.block_time, timestamp);
         info!(
             target: "payload_builder",
             id = %fb_payload.payload_id,
@@ -831,7 +828,7 @@ where
             B256::ZERO => {
                 // Get the fallback payload for payload resolution
                 let fallback_payload_for_resolve =
-                    if self.config.specific.disable_async_calculate_state_root {
+                    if self.config.flashblocks.disable_async_calculate_state_root {
                         // Use the fallback payload with state root calculated to ensure the full payload is valid
                         fallback_payload
                     } else {
@@ -849,7 +846,7 @@ where
                 // Async calculate state root
                 match self.client.state_by_block_hash(ctx.parent().hash()) {
                     Ok(state_provider) => {
-                        if self.config.specific.disable_async_calculate_state_root {
+                        if self.config.flashblocks.disable_async_calculate_state_root {
                             resolve_zero_state_root(state_root_ctx, state_provider)
                                 .unwrap_or_else(|err| {
                                     warn!(

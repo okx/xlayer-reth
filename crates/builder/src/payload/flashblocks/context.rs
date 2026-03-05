@@ -1,6 +1,6 @@
 use crate::{
     metrics::BuilderMetrics,
-    payload::{flashblocks::FlashblocksConfig, BuilderConfig, OpPayloadBuilderCtx},
+    payload::{BuilderConfig, OpPayloadBuilderCtx},
     traits::ClientBounds,
 };
 use op_revm::OpSpecId;
@@ -34,7 +34,7 @@ pub(super) struct FlashblockHandlerContext {
 impl FlashblockHandlerContext {
     pub(super) fn new<Client>(
         client: &Client,
-        builder_config: BuilderConfig<FlashblocksConfig>,
+        builder_config: BuilderConfig,
         evm_config: OpEvmConfig,
         metrics: Arc<BuilderMetrics>,
     ) -> eyre::Result<Self>
