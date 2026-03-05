@@ -4,6 +4,9 @@ use crate::{
     traits::ClientBounds,
 };
 use op_revm::OpSpecId;
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
+
 use reth_basic_payload_builder::PayloadConfig;
 use reth_evm::EvmEnv;
 use reth_optimism_chainspec::OpChainSpec;
@@ -14,8 +17,6 @@ use reth_optimism_payload_builder::{
     OpPayloadBuilderAttributes,
 };
 use reth_optimism_primitives::OpTransactionSigned;
-use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone)]
 pub(super) struct FlashblockHandlerContext {

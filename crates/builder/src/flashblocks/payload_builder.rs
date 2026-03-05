@@ -5,9 +5,9 @@ use crate::{
         context::FlashblocksBuilderCtx,
         generator::{BlockCell, BuildArguments, PayloadBuilder},
         timing::FlashblockScheduler,
-        utils::cache::FlashblockPayloadsCache,
-        utils::execution::ExecutionInfo,
-        wspub::WebSocketPublisher,
+        utils::{
+            cache::FlashblockPayloadsCache, execution::ExecutionInfo, wspub::WebSocketPublisher,
+        },
         BuilderConfig,
     },
     metrics::tokio::FlashblocksTaskMetrics,

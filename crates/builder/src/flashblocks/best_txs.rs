@@ -1,7 +1,8 @@
+use std::{collections::HashSet, sync::Arc};
+
 use alloy_primitives::{Address, TxHash};
 use reth_payload_util::PayloadTransactions;
 use reth_transaction_pool::{PoolTransaction, ValidPoolTransaction};
-use std::{collections::HashSet, sync::Arc};
 
 pub(super) struct BestFlashblocksTxs<T, I>
 where

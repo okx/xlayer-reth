@@ -1,26 +1,29 @@
-use super::{
-    handler::FlashblocksPayloadHandler,
-    handler_ctx::FlashblockHandlerContext,
-    p2p::{Message, AGENT_VERSION, FLASHBLOCKS_STREAM_PROTOCOL},
-    payload_builder::FlashblocksBuilder,
-    utils::cache::FlashblockPayloadsCache,
-    wspub::WebSocketPublisher,
-    BuilderConfig,
-};
 use crate::{
-    flashblocks::{builder_tx::FlashblocksBuilderTx, generator::BlockPayloadJobGenerator},
-    metrics::tokio::FlashblocksTaskMetrics,
-    metrics::BuilderMetrics,
+    flashblocks::{
+        builder_tx::FlashblocksBuilderTx,
+        generator::BlockPayloadJobGenerator,
+        handler::FlashblocksPayloadHandler,
+        handler_ctx::FlashblockHandlerContext,
+        payload_builder::FlashblocksBuilder,
+        utils::{
+            cache::FlashblockPayloadsCache,
+            p2p::{Message, AGENT_VERSION, FLASHBLOCKS_STREAM_PROTOCOL},
+            wspub::WebSocketPublisher,
+        },
+        BuilderConfig,
+    },
+    metrics::{tokio::FlashblocksTaskMetrics, BuilderMetrics},
     traits::{NodeBounds, PoolBounds},
 };
 use eyre::WrapErr as _;
+use std::{sync::Arc, time::Duration};
+
 use reth_basic_payload_builder::BasicPayloadJobGeneratorConfig;
 use reth_node_api::NodeTypes;
 use reth_node_builder::{components::PayloadServiceBuilder, BuilderContext};
 use reth_optimism_evm::OpEvmConfig;
 use reth_payload_builder::{PayloadBuilderHandle, PayloadBuilderService};
 use reth_provider::CanonStateSubscriptions;
-use std::{sync::Arc, time::Duration};
 
 pub struct FlashblocksServiceBuilder(pub BuilderConfig);
 

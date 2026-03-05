@@ -1,15 +1,23 @@
 use crate::{
     flashblocks::{
-        handler_ctx::FlashblockHandlerContext, p2p::Message, utils::cache::FlashblockPayloadsCache,
-        utils::execution::ExecutionInfo, wspub::WebSocketPublisher,
+        handler_ctx::FlashblockHandlerContext,
+        utils::{
+            cache::FlashblockPayloadsCache, execution::ExecutionInfo, p2p::Message,
+            wspub::WebSocketPublisher,
+        },
     },
     traits::ClientBounds,
 };
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tracing::warn;
+
 use alloy_evm::eth::receipt_builder::ReceiptBuilderCtx;
 use alloy_primitives::B64;
 use eyre::{bail, WrapErr as _};
 use op_alloy_rpc_types_engine::OpFlashblockPayload;
 use op_revm::L1BlockInfo;
+
 use reth::{
     revm::{database::StateProviderDatabase, State},
     tasks::TaskSpawner,
@@ -25,9 +33,6 @@ use reth_optimism_payload_builder::OpBuiltPayload;
 use reth_optimism_primitives::{OpReceipt, OpTransactionSigned};
 use reth_payload_builder::EthPayloadBuilderAttributes;
 use reth_primitives_traits::SealedHeader;
-use std::sync::Arc;
-use tokio::sync::mpsc;
-use tracing::warn;
 
 /// Handles newly built or received flashblock payloads.
 ///

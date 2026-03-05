@@ -1,3 +1,10 @@
+use crate::{
+    flashblocks::{context::FlashblocksBuilderCtx, utils::execution::ExecutionInfo},
+    tx::signer::Signer,
+};
+use core::fmt::Debug;
+use tracing::{trace, warn};
+
 use alloy_consensus::TxEip1559;
 use alloy_eips::{eip7623::TOTAL_COST_FLOOR_PER_TOKEN, Encodable2718};
 use alloy_evm::{rpc::TryIntoTxEnv, Database};
@@ -5,10 +12,15 @@ use alloy_op_evm::OpEvm;
 use alloy_primitives::{map::HashSet, Address, Bytes, TxKind, B256};
 use alloy_rpc_types_eth::TransactionInput;
 use alloy_sol_types::{sol, ContractError, Revert, SolCall, SolError, SolEvent, SolInterface};
-use core::fmt::Debug;
 use op_alloy_consensus::OpTypedTransaction;
 use op_alloy_rpc_types::OpTransactionRequest;
 use op_revm::{OpHaltReason, OpTransactionError};
+use revm::{
+    context::result::{EVMError, ExecutionResult, ResultAndState},
+    inspector::NoOpInspector,
+    DatabaseCommit, DatabaseRef,
+};
+
 use reth_evm::{
     eth::receipt_builder::ReceiptBuilderCtx, precompiles::PrecompilesMap, ConfigureEvm, Evm,
     EvmError, InvalidTxError,
@@ -19,15 +31,6 @@ use reth_primitives::Recovered;
 use reth_provider::{ProviderError, StateProvider};
 use reth_revm::{database::StateProviderDatabase, State};
 use reth_rpc_api::eth::EthTxEnvError;
-use revm::{
-    context::result::{EVMError, ExecutionResult, ResultAndState},
-    inspector::NoOpInspector,
-    DatabaseCommit, DatabaseRef,
-};
-use tracing::{trace, warn};
-
-use super::{context::FlashblocksBuilderCtx, utils::execution::ExecutionInfo};
-use crate::tx::signer::Signer;
 
 sol!(
     // From https://github.com/Uniswap/flashblocks_number_contract/blob/main/src/FlashblockNumber.sol

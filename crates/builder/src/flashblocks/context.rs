@@ -1,4 +1,15 @@
+use crate::{
+    flashblocks::utils::execution::{ExecutionInfo, TxnExecutionResult},
+    metrics::BuilderMetrics,
+    traits::PayloadTxsBounds,
+    tx::signer::Signer,
+};
+use std::{sync::Arc, time::Instant};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, info, trace};
+
 use alloy_consensus::{conditional::BlockConditionalAttributes, Eip658Value, Transaction};
+use alloy_eips::eip2718::WithEncoded;
 use alloy_eips::{Encodable2718, Typed2718};
 use alloy_evm::Database;
 use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
@@ -6,6 +17,7 @@ use alloy_primitives::{BlockHash, Bytes, U256};
 use alloy_rpc_types_eth::Withdrawals;
 use op_alloy_consensus::OpDepositReceipt;
 use op_revm::OpSpecId;
+
 use reth::payload::PayloadBuilderAttributes;
 use reth_basic_payload_builder::PayloadConfig;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
@@ -34,13 +46,6 @@ use reth_primitives_traits::{InMemorySize, SignedTransaction};
 use reth_revm::{context::Block, State};
 use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction};
 use revm::{context::result::ResultAndState, interpreter::as_u64_saturated, DatabaseCommit};
-use std::{sync::Arc, time::Instant};
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace};
-
-use super::utils::execution::{ExecutionInfo, TxnExecutionResult};
-use crate::{metrics::BuilderMetrics, traits::PayloadTxsBounds, tx::signer::Signer};
-use alloy_eips::eip2718::WithEncoded;
 
 /// Container type that holds all necessities to build a new payload.
 #[derive(Debug)]
