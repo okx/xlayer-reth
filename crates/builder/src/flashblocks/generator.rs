@@ -1,5 +1,16 @@
 use alloy_primitives::B256;
 use futures_util::{Future, FutureExt};
+use std::{
+    sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
+};
+use tokio::{
+    sync::{oneshot, Notify},
+    time::{Duration, Sleep},
+};
+use tokio_util::sync::CancellationToken;
+use tracing::info;
+
 use reth::{
     providers::{BlockReaderIdExt, StateProviderFactory},
     tasks::TaskSpawner,
@@ -15,16 +26,6 @@ use reth_payload_primitives::BuiltPayload;
 use reth_primitives_traits::HeaderTy;
 use reth_provider::CanonStateNotification;
 use reth_revm::cached::CachedReads;
-use std::{
-    sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
-};
-use tokio::{
-    sync::{oneshot, Notify},
-    time::{Duration, Sleep},
-};
-use tokio_util::sync::CancellationToken;
-use tracing::info;
 
 /// A trait for building payloads that encapsulate Ethereum transactions.
 ///

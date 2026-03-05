@@ -7,8 +7,8 @@ use reth_optimism_flashblocks::{FlashBlock, FlashBlockRx};
 
 use xlayer_builder::{
     args::FlashblocksArgs,
+    flashblocks::{FlashblockPayloadsCache, WebSocketPublisher},
     metrics::{tokio::FlashblocksTaskMetrics, BuilderMetrics},
-    payload::{FlashblockPayloadsCache, WebSocketPublisher},
 };
 
 pub struct FlashblocksService<Node>

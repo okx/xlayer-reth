@@ -1,20 +1,17 @@
 use crate::{
-    metrics::tokio::FlashblocksTaskMetrics,
-    metrics::BuilderMetrics,
-    payload::{
-        builder_tx::BuilderTransactions,
-        context::OpPayloadBuilderCtx,
-        flashblocks::{
-            best_txs::BestFlashblocksTxs,
-            cache::FlashblockPayloadsCache,
-            config::{FlashBlocksConfigExt, FlashblocksConfig},
-            timing::FlashblockScheduler,
-            wspub::WebSocketPublisher,
-        },
+    flashblocks::{
+        best_txs::BestFlashblocksTxs,
+        builder_tx::FlashblocksBuilderTx,
+        context::FlashblocksBuilderCtx,
         generator::{BlockCell, BuildArguments, PayloadBuilder},
-        utils::execution::ExecutionInfo,
+        timing::FlashblockScheduler,
+        utils::{
+            cache::FlashblockPayloadsCache, execution::ExecutionInfo, wspub::WebSocketPublisher,
+        },
         BuilderConfig,
     },
+    metrics::tokio::FlashblocksTaskMetrics,
+    metrics::BuilderMetrics,
     traits::{ClientBounds, PoolBounds},
 };
 use alloy_consensus::{
@@ -183,7 +180,7 @@ impl FlashblocksState {
 
 /// Optimism's payload builder
 #[derive(Debug, Clone)]
-pub(super) struct OpPayloadBuilder<Pool, Client, BuilderTx, Tasks> {
+pub(super) struct FlashblocksBuilder<Pool, Client, Tasks> {
     /// The type responsible for creating the evm.
     pub evm_config: OpEvmConfig,
     /// The transaction pool
@@ -204,25 +201,25 @@ pub(super) struct OpPayloadBuilder<Pool, Client, BuilderTx, Tasks> {
     /// to all connected subscribers.
     pub ws_pub: Arc<WebSocketPublisher>,
     /// System configuration for the builder
-    pub config: BuilderConfig<FlashblocksConfig>,
+    pub config: BuilderConfig,
     /// The metrics for the builder
     pub metrics: Arc<BuilderMetrics>,
     /// The end of builder transaction type
-    pub builder_tx: BuilderTx,
+    pub builder_tx: FlashblocksBuilderTx,
     /// Tokio task metrics for monitoring spawned tasks
     pub task_metrics: Arc<FlashblocksTaskMetrics>,
 }
 
-impl<Pool, Client, BuilderTx, Tasks> OpPayloadBuilder<Pool, Client, BuilderTx, Tasks> {
-    /// `OpPayloadBuilder` constructor.
+impl<Pool, Client, Tasks> FlashblocksBuilder<Pool, Client, Tasks> {
+    /// `FlashblocksBuilder` constructor.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         evm_config: OpEvmConfig,
         pool: Pool,
         client: Client,
         task_executor: Tasks,
-        config: BuilderConfig<FlashblocksConfig>,
-        builder_tx: BuilderTx,
+        config: BuilderConfig,
+        builder_tx: FlashblocksBuilderTx,
         built_fb_payload_tx: mpsc::Sender<OpFlashblockPayload>,
         built_payload_tx: mpsc::Sender<OpBuiltPayload>,
         p2p_cache: FlashblockPayloadsCache,
@@ -247,12 +244,11 @@ impl<Pool, Client, BuilderTx, Tasks> OpPayloadBuilder<Pool, Client, BuilderTx, T
     }
 }
 
-impl<Pool, Client, BuilderTx, Tasks> reth_basic_payload_builder::PayloadBuilder
-    for OpPayloadBuilder<Pool, Client, BuilderTx, Tasks>
+impl<Pool, Client, Tasks> reth_basic_payload_builder::PayloadBuilder
+    for FlashblocksBuilder<Pool, Client, Tasks>
 where
     Pool: Clone + Send + Sync,
     Client: Clone + Send + Sync,
-    BuilderTx: Clone + Send + Sync,
     Tasks: Clone + Send + Sync,
 {
     type Attributes = OpPayloadBuilderAttributes<OpTransactionSigned>;
@@ -276,11 +272,10 @@ where
     }
 }
 
-impl<Pool, Client, BuilderTx, Tasks> OpPayloadBuilder<Pool, Client, BuilderTx, Tasks>
+impl<Pool, Client, Tasks> FlashblocksBuilder<Pool, Client, Tasks>
 where
     Pool: PoolBounds,
     Client: ClientBounds,
-    BuilderTx: BuilderTransactions + Send + Sync,
     Tasks: TaskSpawner + Clone + Unpin + 'static,
 {
     fn get_op_payload_builder_ctx(
@@ -289,7 +284,7 @@ where
             OpPayloadBuilderAttributes<op_alloy_consensus::OpTxEnvelope>,
         >,
         cancel: CancellationToken,
-    ) -> eyre::Result<OpPayloadBuilderCtx> {
+    ) -> eyre::Result<FlashblocksBuilderCtx> {
         let chain_spec = self.client.chain_spec();
         let timestamp = config.attributes.timestamp();
 
@@ -322,7 +317,7 @@ where
             .next_evm_env(&config.parent_header, &block_env_attributes)
             .wrap_err("failed to create next evm env")?;
 
-        Ok(OpPayloadBuilderCtx {
+        Ok(FlashblocksBuilderCtx {
             evm_config: self.evm_config.clone(),
             chain_spec,
             config,
@@ -353,7 +348,7 @@ where
         let block_build_start_time = Instant::now();
         let BuildArguments { mut cached_reads, config, cancel: block_cancel } = args;
 
-        let disable_state_root = self.config.specific.disable_state_root;
+        let disable_state_root = self.config.flashblocks.disable_state_root;
         let ctx = self
             .get_op_payload_builder_ctx(config.clone(), block_cancel.clone())
             .map_err(|e| PayloadBuilderError::Other(e.into()))?;
@@ -440,7 +435,7 @@ where
             ctx.metrics.flashblock_byte_size_histogram.record(flashblock_byte_size as f64);
 
             // For X Layer, full link monitoring support
-            crate::payload::utils::monitor::monitor(
+            crate::flashblocks::utils::monitor::monitor(
                 best_payload.0.block().header().number,
                 new_tx_hashes,
             );
@@ -467,7 +462,7 @@ where
         // We adjust our flashblocks timings based on time the fcu block building signal arrived
         let timestamp = config.attributes.timestamp();
         let flashblock_scheduler =
-            FlashblockScheduler::new(&self.config.specific, self.config.block_time, timestamp);
+            FlashblockScheduler::new(&self.config.flashblocks, self.config.block_time, timestamp);
         info!(
             target: "payload_builder",
             id = %fb_payload.payload_id,
@@ -619,7 +614,7 @@ where
         P: StateRootProvider + HashedPostStateProvider + StorageRootProvider,
     >(
         &self,
-        ctx: &OpPayloadBuilderCtx,
+        ctx: &FlashblocksBuilderCtx,
         fb_state: &mut FlashblocksState,
         info: &mut ExecutionInfo,
         state: &mut State<DB>,
@@ -770,7 +765,7 @@ where
                     .record(info.executed_transactions.len() as f64);
 
                 // For X Layer, full link monitoring support
-                crate::payload::utils::monitor::monitor(
+                crate::flashblocks::utils::monitor::monitor(
                     best_payload.0.block().header().number,
                     new_tx_hashes,
                 );
@@ -818,7 +813,7 @@ where
 
     fn resolve_best_payload(
         &self,
-        ctx: &OpPayloadBuilderCtx,
+        ctx: &FlashblocksBuilderCtx,
         best_payload: (OpBuiltPayload, BundleState),
         fallback_payload: OpBuiltPayload,
         resolve_payload: &BlockCell<OpBuiltPayload>,
@@ -831,7 +826,7 @@ where
             B256::ZERO => {
                 // Get the fallback payload for payload resolution
                 let fallback_payload_for_resolve =
-                    if self.config.specific.disable_async_calculate_state_root {
+                    if self.config.flashblocks.disable_async_calculate_state_root {
                         // Use the fallback payload with state root calculated to ensure the full payload is valid
                         fallback_payload
                     } else {
@@ -849,7 +844,7 @@ where
                 // Async calculate state root
                 match self.client.state_by_block_hash(ctx.parent().hash()) {
                     Ok(state_provider) => {
-                        if self.config.specific.disable_async_calculate_state_root {
+                        if self.config.flashblocks.disable_async_calculate_state_root {
                             resolve_zero_state_root(state_root_ctx, state_provider)
                                 .unwrap_or_else(|err| {
                                     warn!(
@@ -884,7 +879,7 @@ where
     /// Do some logging and metric recording when we stop build flashblocks
     fn record_flashblocks_metrics(
         &self,
-        ctx: &OpPayloadBuilderCtx,
+        ctx: &FlashblocksBuilderCtx,
         fb_state: &FlashblocksState,
         info: &ExecutionInfo,
         flashblocks_per_block: u64,
@@ -909,12 +904,10 @@ where
 }
 
 #[async_trait::async_trait]
-impl<Pool, Client, BuilderTx, Tasks> PayloadBuilder
-    for OpPayloadBuilder<Pool, Client, BuilderTx, Tasks>
+impl<Pool, Client, Tasks> PayloadBuilder for FlashblocksBuilder<Pool, Client, Tasks>
 where
     Pool: PoolBounds,
     Client: ClientBounds,
-    BuilderTx: BuilderTransactions + Clone + Send + Sync,
     Tasks: TaskSpawner + Clone + Unpin + 'static,
 {
     type Attributes = OpPayloadBuilderAttributes<OpTransactionSigned>;
@@ -931,7 +924,7 @@ where
 
 fn execute_pre_steps<DB>(
     state: &mut State<DB>,
-    ctx: &OpPayloadBuilderCtx,
+    ctx: &FlashblocksBuilderCtx,
 ) -> Result<ExecutionInfo, PayloadBuilderError>
 where
     DB: Database<Error = ProviderError> + std::fmt::Debug,
@@ -950,7 +943,7 @@ where
 
 pub(super) fn build_block<DB, P>(
     state: &mut State<DB>,
-    ctx: &OpPayloadBuilderCtx,
+    ctx: &FlashblocksBuilderCtx,
     info: &mut ExecutionInfo,
     fb_state: Option<&mut FlashblocksState>,
     calculate_state_root: bool,

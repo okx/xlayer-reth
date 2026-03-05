@@ -1,7 +1,8 @@
+use std::{collections::HashSet, sync::Arc};
+
 use alloy_primitives::{Address, TxHash};
 use reth_payload_util::PayloadTransactions;
 use reth_transaction_pool::{PoolTransaction, ValidPoolTransaction};
-use std::{collections::HashSet, sync::Arc};
 
 pub(super) struct BestFlashblocksTxs<T, I>
 where
@@ -67,9 +68,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        payload::flashblocks::best_txs::BestFlashblocksTxs,
-        tx::mock::{MockFbTransaction, MockFbTransactionFactory},
+    use crate::flashblocks::{
+        best_txs::BestFlashblocksTxs,
+        utils::mock::{MockFbTransaction, MockFbTransactionFactory},
     };
     use alloy_consensus::Transaction;
     use reth_payload_util::{BestPayloadTransactions, PayloadTransactions};

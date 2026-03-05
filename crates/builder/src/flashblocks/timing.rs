@@ -1,11 +1,10 @@
+use crate::flashblocks::FlashblocksConfig;
 use core::time::Duration;
 use std::sync::mpsc::SyncSender;
-
-use reth_payload_builder::PayloadId;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
-use super::config::FlashblocksConfig;
+use reth_payload_builder::PayloadId;
 
 /// Schedules and triggers flashblock builds at predetermined times during a
 /// block slot. This should be created at the start of each payload building

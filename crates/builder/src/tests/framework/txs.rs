@@ -1,4 +1,4 @@
-use crate::{tests::funded_signer, tx::signer::Signer};
+use crate::{signer::Signer, tests::funded_signer};
 use alloy_consensus::TxEip1559;
 use alloy_eips::{eip2718::Encodable2718, BlockNumberOrTag};
 use alloy_primitives::{hex, Address, Bytes, TxHash, TxKind, B256, U256};
