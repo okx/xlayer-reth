@@ -32,9 +32,14 @@ reth-tracing.workspace = true
 reth-node-core.workspace = true
 reth-node-types.workspace = true
 reth-chainspec.workspace = true
-reth-provider.workspace = true
+reth-provider = { workspace = true, features = ["rocksdb"] }
+reth-stages = { workspace = true, features = ["rocksdb"] }
 reth-storage-api.workspace = true
 reth-db-api.workspace = true
+reth-db.workspace = true
+reth-node-builder.workspace = true
+reth-primitives-traits.workspace = true
+reth-static-file-types.workspace = true
 
 # alloy
 alloy-consensus.workspace = true

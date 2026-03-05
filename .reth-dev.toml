@@ -50,6 +50,8 @@ reth-rpc-eth-api = { path = "RETH_PATH_PLACEHOLDER/crates/rpc/rpc-eth-api" }
 reth-rpc-eth-types = { path = "RETH_PATH_PLACEHOLDER/crates/rpc/rpc-eth-types" }
 reth-rpc-layer = { path = "RETH_PATH_PLACEHOLDER/crates/rpc/rpc-layer" }
 reth-rpc-server-types = { path = "RETH_PATH_PLACEHOLDER/crates/rpc/rpc-server-types" }
+reth-stages = { path = "RETH_PATH_PLACEHOLDER/crates/stages/stages" }
+reth-static-file-types = { path = "RETH_PATH_PLACEHOLDER/crates/static-file/types" }
 reth-storage-api = { path = "RETH_PATH_PLACEHOLDER/crates/storage/storage-api" }
 reth-tasks = { path = "RETH_PATH_PLACEHOLDER/crates/tasks" }
 reth-testing-utils = { path = "RETH_PATH_PLACEHOLDER/testing/testing-utils" }
@@ -105,6 +107,8 @@ reth-rpc-api = { path = "RETH_PATH_PLACEHOLDER/crates/rpc/rpc-api" }
 reth-rpc-engine-api = { path = "RETH_PATH_PLACEHOLDER/crates/rpc/rpc-engine-api" }
 reth-rpc-eth-types = { path = "RETH_PATH_PLACEHOLDER/crates/rpc/rpc-eth-types" }
 reth-rpc-layer = { path = "RETH_PATH_PLACEHOLDER/crates/rpc/rpc-layer" }
+reth-stages = { path = "RETH_PATH_PLACEHOLDER/crates/stages/stages" }
+reth-static-file-types = { path = "RETH_PATH_PLACEHOLDER/crates/static-file/types" }
 reth-storage-api = { path = "RETH_PATH_PLACEHOLDER/crates/storage/storage-api" }
 reth-tasks = { path = "RETH_PATH_PLACEHOLDER/crates/tasks" }
 reth-testing-utils = { path = "RETH_PATH_PLACEHOLDER/testing/testing-utils" }
