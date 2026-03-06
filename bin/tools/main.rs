@@ -13,9 +13,13 @@ use xlayer_chainspec::XLayerChainSpecParser;
 mod export;
 mod gen_genesis;
 mod import;
+mod migrate;
+mod migrate_command;
+mod progress;
 use export::ExportCommand;
 use gen_genesis::GenGenesisCommand;
 use import::ImportCommand;
+use migrate_command::MigrateCommand;
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
@@ -37,6 +41,8 @@ enum Commands {
     Export(ExportCommand<XLayerChainSpecParser>),
     /// Generate a genesis file from an existing database
     GenGenesis(GenGenesisCommand<XLayerChainSpecParser>),
+    /// Migrate from legacy MDBX storage to new RocksDB + static files
+    Migrate(MigrateCommand<XLayerChainSpecParser>),
 }
 
 #[tokio::main]
@@ -92,6 +98,17 @@ async fn main() -> ExitCode {
                 Ok(_) => ExitCode::SUCCESS,
                 Err(e) => {
                     error!(target: "xlayer::gen_genesis", "Error: {:#?}", e);
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Commands::Migrate(cmd) => {
+            info!(target: "xlayer::migrate", "XLayer Legacy Data Migration starting");
+
+            match cmd.execute::<OpNode>().await {
+                Ok(_) => ExitCode::SUCCESS,
+                Err(e) => {
+                    error!(target: "xlayer::migrate", "Error: {:#?}", e);
                     ExitCode::FAILURE
                 }
             }
