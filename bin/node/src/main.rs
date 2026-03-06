@@ -8,7 +8,7 @@ use payload::XLayerPayloadServiceBuilder;
 use args::XLayerArgs;
 use clap::Parser;
 use either::Either;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tracing::info;
 
 use op_alloy_network::Optimism;
@@ -104,11 +104,16 @@ fn main() {
                 LegacyRpcRouterLayer::new(legacy_config), // Execute second
             ));
 
+            // Get the payload events tx for pre-warming the engine tree with locally built
+            // pending flashblocks sequence.
+            let events_sender = Arc::new(OnceLock::new());
+
             // Create the X Layer payload service builder
             // It handles both flashblocks and default modes internally
             let payload_builder = XLayerPayloadServiceBuilder::new(
                 args.xlayer_args.builder.clone(),
                 args.rollup_args.compute_pending_block,
+                events_sender.clone(),
             )?;
 
             let NodeHandle { node, node_exit_future } = builder
@@ -131,6 +136,7 @@ fn main() {
                                 flashblock_rx,
                                 args.xlayer_args.builder.flashblocks,
                                 args.rollup_args.flashblocks_url.is_some(),
+                                events_sender.get().cloned(),
                                 datadir,
                             )?;
                             service.spawn();

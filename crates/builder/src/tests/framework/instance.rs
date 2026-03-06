@@ -7,8 +7,6 @@ use crate::{
         TransactionPoolObserver,
     },
 };
-use alloy_primitives::B256;
-use alloy_provider::{Identity, ProviderBuilder, RootProvider};
 use clap::Parser;
 use core::{
     any::Any,
@@ -21,9 +19,20 @@ use core::{
 use futures::{FutureExt, StreamExt};
 use moka::future::Cache;
 use nanoid::nanoid;
+use parking_lot::Mutex;
+use std::{
+    sync::{Arc, LazyLock, OnceLock},
+    time::Instant,
+};
+use tokio::{sync::oneshot, task::JoinHandle};
+use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_util::sync::CancellationToken;
+
+use alloy_primitives::B256;
+use alloy_provider::{Identity, ProviderBuilder, RootProvider};
 use op_alloy_network::Optimism;
 use op_alloy_rpc_types_engine::OpFlashblockPayload;
-use parking_lot::Mutex;
+
 use reth::{
     args::{DatadirArgs, NetworkArgs, RpcServerArgs},
     core::exit::NodeExitFuture,
@@ -40,13 +49,6 @@ use reth_optimism_node::{
 use reth_optimism_rpc::OpEthApiBuilder;
 use reth_optimism_txpool::OpPooledTransaction;
 use reth_transaction_pool::{AllTransactionsEvents, TransactionPool};
-use std::{
-    sync::{Arc, LazyLock},
-    time::Instant,
-};
-use tokio::{sync::oneshot, task::JoinHandle};
-use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tokio_util::sync::CancellationToken;
 
 /// Represents a type that emulates a local in-process instance of the OP builder node.
 /// This node uses IPC as the communication channel for the RPC server Engine API.
@@ -113,12 +115,12 @@ impl LocalInstance {
             .with_database(create_test_db(config.clone()))
             .with_launch_context(task_manager.executor())
             .with_types::<OpNode>()
-            .with_components(
-                op_node
-                    .components()
-                    .pool(pool_component(&rollup_args))
-                    .payload(FlashblocksServiceBuilder(builder_config)),
-            )
+            .with_components(op_node.components().pool(pool_component(&rollup_args)).payload(
+                FlashblocksServiceBuilder {
+                    config: builder_config,
+                    events_sender: Arc::new(OnceLock::new()),
+                },
+            ))
             .with_add_ons(addons)
             .on_rpc_started(move |_, _| {
                 let _ = rpc_ready_tx.send(());

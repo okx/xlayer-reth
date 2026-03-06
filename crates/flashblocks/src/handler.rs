@@ -7,7 +7,7 @@ use reth_optimism_flashblocks::{FlashBlock, FlashBlockRx};
 
 use xlayer_builder::{
     args::FlashblocksArgs,
-    flashblocks::{FlashblockPayloadsCache, WebSocketPublisher},
+    flashblocks::{FlashblockPayloadsCache, PayloadEventsSender, WebSocketPublisher},
     metrics::{tokio::FlashblocksTaskMetrics, BuilderMetrics},
 };
 
@@ -31,6 +31,7 @@ where
         flashblock_rx: FlashBlockRx,
         args: FlashblocksArgs,
         relay_flashblocks: bool,
+        _events_sender: Option<PayloadEventsSender>,
         datadir: ChainPath<DataDirPath>,
     ) -> Result<Self, eyre::Report> {
         let ws_addr = SocketAddr::new(args.flashblocks_addr.parse()?, args.flashblocks_port);

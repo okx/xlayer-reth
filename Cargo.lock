@@ -14130,6 +14130,7 @@ dependencies = [
  "reth-optimism-rpc",
  "reth-optimism-txpool",
  "reth-payload-builder",
+ "reth-payload-builder-primitives",
  "reth-payload-primitives",
  "reth-payload-util",
  "reth-primitives",
@@ -14348,11 +14349,9 @@ name = "xlayer-rpc"
 version = "0.1.0"
 dependencies = [
  "jsonrpsee",
- "reth-chainspec",
  "reth-optimism-rpc",
  "reth-rpc",
  "reth-rpc-eth-api",
- "reth-storage-api",
  "serde",
  "tokio",
 ]
