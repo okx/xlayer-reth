@@ -216,3 +216,12 @@ url = "2.5"
 libp2p = { version = "0.56", features = ["identify", "ping", "noise", "tcp", "autonat", "mdns", "tokio", "cbor", "macros", "yamux", "dns"] }
 libp2p-stream = "0.4.0-alpha"
 multiaddr = "0.18"
+
+# ==============================================================================
+# Patches - Security fixes for transitive dependencies
+# ==============================================================================
+# Patch discv5 to use upstream master which removed the vulnerable lru 0.12.x
+# dependency (RUSTSEC-2026-0002 / GHSA-rhfx-m35p-ff5j)
+[patch.crates-io]
+discv5 = { git = "https://github.com/sigp/discv5", rev = "0dc2bda028bbcf05af466c5b1f6958bddbc1eaea" }
+ratatui = { path = "patches/ratatui" }
