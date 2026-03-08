@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use alloy_eips::BlockNumberOrTag;
+use alloy_eips::BlockId;
 use alloy_primitives::{
     hex::{FromHex, FromHexError},
     FixedBytes, B256,
@@ -52,7 +52,7 @@ pub trait XlayerInnerTxExtApi<Net: RpcTypes> {
     #[method(name = "getBlockInternalTransactions")]
     async fn get_block_internal_transactions(
         &self,
-        block_number: BlockNumberOrTag,
+        block_id: BlockId,
     ) -> RpcResult<HashMap<String, Vec<InternalTransaction>>>;
 }
 
@@ -128,12 +128,12 @@ where
 
     async fn get_block_internal_transactions(
         &self,
-        block_number: BlockNumberOrTag,
+        block_id: BlockId,
     ) -> RpcResult<HashMap<String, Vec<InternalTransaction>>> {
         let hash: FixedBytes<32> = match self
             .backend
             .provider()
-            .block_hash_for_id(block_number.into())
+            .block_hash_for_id(block_id)
         {
             Ok(Some(hash)) => hash,
             Ok(None) => return Err(ErrorObjectOwned::owned(-32000, "Block not found", None::<()>)),
