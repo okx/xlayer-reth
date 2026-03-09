@@ -4,13 +4,13 @@
 //! and intelligently selects which sequence to build based on the local chain tip.
 
 use crate::{
-    pending_state::PendingBlockState,
-    sequence::{FlashBlockPendingSequence, SequenceExecutionOutcome},
+    types::pending_state::PendingBlockState,
+    types::sequence::{FlashBlockPendingSequence, SequenceExecutionOutcome},
     validation::{
         CanonicalBlockFingerprint, CanonicalBlockReconciler, ReconciliationStrategy, ReorgDetector,
         TrackedBlockFingerprint,
     },
-    worker::BuildArgs,
+    execution::worker::BuildArgs,
     FlashBlock, FlashBlockCompleteSequence, PendingFlashBlock,
 };
 use alloy_eips::eip2718::WithEncoded;
@@ -1046,7 +1046,7 @@ mod tests {
 
     #[test]
     fn test_next_buildable_args_skips_executed_cached_and_advances_speculative() {
-        use crate::pending_state::PendingBlockState;
+        use crate::types::pending_state::PendingBlockState;
         use reth_execution_types::BlockExecutionOutput;
         use reth_revm::cached::CachedReads;
         use std::sync::Arc;
@@ -1151,7 +1151,7 @@ mod tests {
 
     #[test]
     fn test_delayed_canonical_allows_speculative_next_block_index_zero() {
-        use crate::pending_state::PendingBlockState;
+        use crate::types::pending_state::PendingBlockState;
         use reth_execution_types::BlockExecutionOutput;
         use reth_revm::cached::CachedReads;
         use std::sync::Arc;
@@ -1726,7 +1726,7 @@ mod tests {
 
     #[test]
     fn test_speculative_build_with_pending_parent_state() {
-        use crate::pending_state::PendingBlockState;
+        use crate::types::pending_state::PendingBlockState;
         use reth_execution_types::BlockExecutionOutput;
         use reth_revm::cached::CachedReads;
         use std::sync::Arc;
@@ -1769,7 +1769,7 @@ mod tests {
 
     #[test]
     fn test_speculative_build_uses_cached_sequence() {
-        use crate::pending_state::PendingBlockState;
+        use crate::types::pending_state::PendingBlockState;
         use reth_execution_types::BlockExecutionOutput;
         use reth_revm::cached::CachedReads;
         use std::sync::Arc;
@@ -1815,7 +1815,7 @@ mod tests {
 
     #[test]
     fn test_canonical_build_takes_priority_over_speculative() {
-        use crate::pending_state::PendingBlockState;
+        use crate::types::pending_state::PendingBlockState;
         use reth_execution_types::BlockExecutionOutput;
         use reth_revm::cached::CachedReads;
         use std::sync::Arc;

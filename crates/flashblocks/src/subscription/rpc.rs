@@ -1,11 +1,8 @@
-use crate::pubsub::{
+use super::pubsub::{
     EnrichedTransaction, FlashblockParams, FlashblockStreamEvent, FlashblockSubscriptionKind,
     FlashblocksFilter,
 };
-use alloy_consensus::{transaction::TxHashRef, BlockHeader as _, Transaction as _, TxReceipt as _};
-use alloy_json_rpc::RpcObject;
-use alloy_primitives::{Address, TxHash, U256};
-use alloy_rpc_types_eth::{Header, TransactionInfo};
+
 use futures::StreamExt;
 use jsonrpsee::{
     proc_macros::rpc, server::SubscriptionMessage, types::ErrorObject, PendingSubscriptionSink,
@@ -13,6 +10,14 @@ use jsonrpsee::{
 };
 use moka::policy::EvictionPolicy;
 use moka::sync::Cache;
+use std::{collections::HashSet, future::ready, sync::Arc};
+use tokio_stream::{wrappers::WatchStream, Stream};
+
+use alloy_consensus::{transaction::TxHashRef, BlockHeader as _, Transaction as _, TxReceipt as _};
+use alloy_json_rpc::RpcObject;
+use alloy_primitives::{Address, TxHash, U256};
+use alloy_rpc_types_eth::{Header, TransactionInfo};
+
 use reth_optimism_flashblocks::{PendingBlockRx, PendingFlashBlock};
 use reth_primitives_traits::{
     NodePrimitives, Recovered, RecoveredBlock, SealedBlock, TransactionMeta,
@@ -25,8 +30,6 @@ use reth_rpc_server_types::result::{internal_rpc_err, invalid_params_rpc_err};
 use reth_storage_api::BlockNumReader;
 use reth_tasks::TaskSpawner;
 use reth_tracing::tracing::{trace, warn};
-use std::{collections::HashSet, future::ready, sync::Arc};
-use tokio_stream::{wrappers::WatchStream, Stream};
 
 const MAX_TXHASH_CACHE_SIZE: u64 = 10_000;
 

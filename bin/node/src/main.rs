@@ -23,8 +23,7 @@ use reth_optimism_node::{args::RollupArgs, OpNode};
 use reth_rpc_server_types::RethRpcModule;
 
 use xlayer_chainspec::XLayerChainSpecParser;
-use xlayer_flashblocks::handler::FlashblocksService;
-use xlayer_flashblocks::subscription::FlashblocksPubSub;
+use xlayer_flashblocks::{handle::FlashblocksService, subscription::FlashblocksPubSub};
 use xlayer_legacy_rpc::{layer::LegacyRpcRouterLayer, LegacyRpcRouterConfig};
 use xlayer_monitor::{start_monitor_handle, RpcMonitorLayer, XLayerMonitor};
 use xlayer_rpc::xlayer_ext::{XlayerRpcExt, XlayerRpcExtApiServer};

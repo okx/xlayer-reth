@@ -1,27 +1,18 @@
 //! X-Layer flashblocks crate.
 
-pub mod handler;
-pub mod pubsub;
+pub mod execution;
+pub mod handle;
 pub mod subscription;
+
+pub use execution::FlashblockCachedReceipt;
 
 use reth_primitives_traits::NodePrimitives;
 use std::sync::Arc;
 
-// Included to enable serde feature for `OpReceipt` type used transitively
-use reth_optimism_primitives as _;
-
-// Used by downstream crates
-use alloy_rpc_types_eth as _;
-
-mod consensus;
-pub use consensus::FlashBlockConsensusClient;
-
-mod payload;
-pub use payload::{FlashBlock, PendingFlashBlock};
-
-mod sequence;
-pub use sequence::{
-    FlashBlockCompleteSequence, FlashBlockPendingSequence, SequenceExecutionOutcome,
+pub mod types;
+pub use types::{
+    FlashBlock, FlashBlockCompleteSequence, FlashBlockPendingSequence, PendingBlockState,
+    PendingFlashBlock, PendingStateRegistry, SequenceExecutionOutcome,
 };
 
 mod service;
@@ -30,18 +21,9 @@ pub use service::{
     FlashBlockService,
 };
 
-mod worker;
-pub use worker::FlashblockCachedReceipt;
-
 mod cache;
 
-mod pending_state;
-pub use pending_state::{PendingBlockState, PendingStateRegistry};
-
 pub mod validation;
-
-mod tx_cache;
-pub use tx_cache::TransactionCache;
 
 #[cfg(test)]
 mod test_utils;

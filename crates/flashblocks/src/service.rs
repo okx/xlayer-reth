@@ -1,9 +1,8 @@
 use crate::{
     cache::{BuildApplyOutcome, BuildTicket, SequenceManager},
-    pending_state::PendingStateRegistry,
-    tx_cache::TransactionCache,
+    execution::worker::{BuildResult, FlashBlockBuilder, FlashblockCachedReceipt},
+    types::pending_state::PendingStateRegistry,
     validation::{CanonicalBlockFingerprint, ReconciliationStrategy},
-    worker::{BuildResult, FlashBlockBuilder, FlashblockCachedReceipt},
     FlashBlock, FlashBlockCompleteSequence, FlashBlockCompleteSequenceRx, InProgressFlashBlockRx,
     PendingFlashBlock,
 };
@@ -67,17 +66,15 @@ pub struct FlashBlockService<
     received_flashblocks_tx: tokio::sync::broadcast::Sender<Arc<FlashBlock>>,
 
     /// Executes flashblock sequences to build pending blocks.
-    builder: FlashBlockBuilder<EvmConfig, Provider>,
+    builder: FlashBlockBuilder<N, EvmConfig, Provider>,
     /// Task executor for spawning block build jobs.
     spawner: TaskExecutor,
     /// Currently running block build job with start time and result receiver.
-    job: Option<BuildJob<N>>,
+    job: Option<BuildJob<N, EvmConfig, Provider>>,
     /// Manages flashblock sequences with caching and intelligent build selection.
     sequences: SequenceManager<N::SignedTx>,
     /// Registry for pending block states to enable speculative building.
     pending_states: PendingStateRegistry<N>,
-    /// Transaction execution cache for incremental flashblock building.
-    tx_cache: TransactionCache<N>,
 
     /// Epoch counter for state invalidation.
     ///
@@ -130,7 +127,6 @@ where
             job: None,
             sequences: SequenceManager::new(compute_state_root),
             pending_states: PendingStateRegistry::new(),
-            tx_cache: TransactionCache::new(),
             state_epoch: 0,
             max_depth: DEFAULT_MAX_DEPTH,
             metrics: FlashBlockServiceMetrics::default(),
@@ -209,13 +205,13 @@ where
                     let _ = self.in_progress_tx.send(None);
 
                     // Handle channel error (task panicked or was cancelled)
-                    let Some(Ok((result, returned_cache))) = job_result else {
+                    let Some(Ok((result, returned_builder))) = job_result else {
                         warn!(
                             target: "flashblocks",
                             "Build job channel closed unexpectedly (task may have panicked)"
                         );
                         // Re-initialize transaction cache since we lost the one sent to the task
-                        self.tx_cache = TransactionCache::new();
+                        self.builder.reset_cache();
                         self.schedule_followup_build();
                         continue;
                     };
@@ -238,7 +234,7 @@ where
                     }
 
                     // Restore the transaction cache from the spawned task (only if epoch matched)
-                    self.tx_cache = returned_cache;
+                    self.builder.merge_cache(returned_builder);
 
                     match result {
                         Ok(Some(build_result)) => {
@@ -383,7 +379,7 @@ where
                 | ReconciliationStrategy::DepthLimitExceeded { .. }
         ) {
             self.pending_states.clear();
-            self.tx_cache.clear();
+            self.builder.clear_cache();
             self.state_epoch = self.state_epoch.wrapping_add(1);
             trace!(
                 target: "flashblocks",
@@ -452,14 +448,11 @@ where
         self.metrics.current_index.set(fb_info.index as f64);
         let _ = self.in_progress_tx.send(Some(fb_info));
 
-        // Take ownership of the transaction cache for the spawned task
-        let mut tx_cache = std::mem::take(&mut self.tx_cache);
-
         let (result_tx, result_rx) = oneshot::channel();
-        let builder = self.builder.clone();
+        let mut builder = self.builder.fork_with_cache();
         self.spawner.spawn_blocking(Box::pin(async move {
-            let result = builder.execute(args, Some(&mut tx_cache));
-            let _ = result_tx.send((result, tx_cache));
+            let result = builder.execute(args);
+            let _ = result_tx.send((result, builder));
         }));
         self.job = Some(BuildJob {
             start_time: Instant::now(),
@@ -484,7 +477,7 @@ pub struct FlashBlockBuildInfo {
 
 /// A running build job with metadata for tracking and invalidation.
 #[derive(Debug)]
-struct BuildJob<N: NodePrimitives> {
+struct BuildJob<N: NodePrimitives, EvmConfig, Provider> {
     /// When the job was started.
     start_time: Instant,
     /// The state epoch when this job was started.
@@ -494,9 +487,12 @@ struct BuildJob<N: NodePrimitives> {
     epoch: u64,
     /// Opaque ticket identifying the exact sequence snapshot targeted by this build job.
     ticket: BuildTicket,
-    /// Receiver for the build result and returned transaction cache.
+    /// Receiver for the build result and returned builder (with updated cache).
     #[allow(clippy::type_complexity)]
-    result_rx: oneshot::Receiver<(eyre::Result<Option<BuildResult<N>>>, TransactionCache<N>)>,
+    result_rx: oneshot::Receiver<(
+        eyre::Result<Option<BuildResult<N>>>,
+        FlashBlockBuilder<N, EvmConfig, Provider>,
+    )>,
 }
 
 /// Creates a bounded channel for canonical block notifications.
