@@ -12164,6 +12164,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "test-case"
+version = "3.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb2550dd13afcd286853192af8601920d959b14c401fcece38071d53bf0768a8"
+dependencies = [
+ "test-case-macros",
+]
+
+[[package]]
+name = "test-case-core"
+version = "3.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "adcb7fd841cd518e279be3d5a3eb0636409487998a4aff22f3de87b81e88384f"
+dependencies = [
+ "cfg-if",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "test-case-macros"
+version = "3.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c89e72a01ed4c579669add59014b9a524d609c0c88c6a585ce37485879f6ffb"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+ "test-case-core",
+]
+
+[[package]]
 name = "testcontainers"
 version = "0.27.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14210,18 +14243,42 @@ name = "xlayer-flashblocks"
 version = "0.1.0"
 dependencies = [
  "alloy-consensus",
+ "alloy-eips",
  "alloy-json-rpc",
+ "alloy-network",
  "alloy-primitives",
+ "alloy-rpc-types-engine",
  "alloy-rpc-types-eth",
+ "alloy-signer-local",
  "async-trait",
+ "brotli",
+ "derive_more",
  "eyre",
  "futures",
+ "futures-util",
  "jsonrpsee",
+ "metrics",
  "moka",
+ "op-alloy-consensus",
+ "op-alloy-rpc-types-engine",
+ "op-revm",
+ "reth-chain-state",
+ "reth-engine-primitives",
+ "reth-errors",
+ "reth-evm",
+ "reth-execution-types",
+ "reth-metrics",
  "reth-node-api",
  "reth-node-core",
+ "reth-optimism-chainspec",
+ "reth-optimism-evm",
  "reth-optimism-flashblocks",
+ "reth-optimism-payload-builder",
+ "reth-optimism-primitives",
+ "reth-payload-primitives",
  "reth-primitives-traits",
+ "reth-provider",
+ "reth-revm",
  "reth-rpc",
  "reth-rpc-convert",
  "reth-rpc-eth-api",
@@ -14230,11 +14287,15 @@ dependencies = [
  "reth-storage-api",
  "reth-tasks",
  "reth-tracing",
+ "ringbuffer",
  "serde",
  "serde_json",
+ "test-case",
  "tokio",
  "tokio-stream",
+ "tokio-tungstenite",
  "tracing",
+ "url",
  "xlayer-builder",
 ]
 
@@ -14348,11 +14409,9 @@ name = "xlayer-rpc"
 version = "0.1.0"
 dependencies = [
  "jsonrpsee",
- "reth-chainspec",
  "reth-optimism-rpc",
  "reth-rpc",
  "reth-rpc-eth-api",
- "reth-storage-api",
  "serde",
  "tokio",
 ]
