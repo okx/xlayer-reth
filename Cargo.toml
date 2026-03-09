@@ -127,6 +127,8 @@ reth-testing-utils = { git = "https://github.com/okx/reth", rev = "b6a31f31af91a
 reth-tokio-util = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-tracing = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-transaction-pool = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
+reth-chain-state = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
+reth-errors = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-optimism-flashblocks = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-trie = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 
@@ -211,6 +213,8 @@ humantime = "2.1"
 tracing = { version = "0.1.41" }
 shellexpand = "3.1"
 url = "2.5"
+brotli = "8.0"
+ringbuffer = "0.15"
 
 # p2p
 libp2p = { version = "0.56", features = ["identify", "ping", "noise", "tcp", "autonat", "mdns", "tokio", "cbor", "macros", "yamux", "dns"] }
