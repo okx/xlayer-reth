@@ -4,13 +4,13 @@
 //! and intelligently selects which sequence to build based on the local chain tip.
 
 use crate::{
+    execution::worker::BuildArgs,
     types::pending_state::PendingBlockState,
     types::sequence::{FlashBlockPendingSequence, SequenceExecutionOutcome},
     validation::{
         CanonicalBlockFingerprint, CanonicalBlockReconciler, ReconciliationStrategy, ReorgDetector,
         TrackedBlockFingerprint,
     },
-    execution::worker::BuildArgs,
     FlashBlock, FlashBlockCompleteSequence, PendingFlashBlock,
 };
 use alloy_eips::eip2718::WithEncoded;
