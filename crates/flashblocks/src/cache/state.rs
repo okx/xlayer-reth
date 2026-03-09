@@ -1,11 +1,11 @@
+use crate::cache::{confirm::ConfirmCache, pending::PendingSequence};
+use parking_lot::RwLock;
 use std::sync::Arc;
 
+use alloy_consensus::BlockHeader;
 use alloy_primitives::B256;
-use parking_lot::RwLock;
 use reth_primitives_traits::NodePrimitives;
 use reth_rpc_eth_types::block::BlockAndReceipts;
-
-use super::{confirm::ConfirmCache, pending::PendingSequence};
 
 /// Top-level controller state cache for the flashblocks RPC layer.
 ///
@@ -40,9 +40,24 @@ impl<N: NodePrimitives> StateCache<N> {
         self.inner.write().handle_confirmed_block(block_number, block_hash, block)
     }
 
+    /// Handles updating the pending state with a newly executed pending flashblocks
+    /// sequence. Note that it will replace any existing pending sequence.
+    pub fn handle_pending_sequence(&self, pending_sequence: PendingSequence<N>) {
+        self.inner.write().handle_pending_sequence(pending_sequence)
+    }
+
+    pub fn handle_canonical_block(&self, block_number: u64, block_hash: B256) {
+        self.inner.write().handle_canonical_block(block_number, block_hash)
+    }
+
     /// Returns the current confirmed cache height, if any blocks have been confirmed.
     pub fn get_confirm_height(&self) -> Option<u64> {
         self.inner.read().confirm_height
+    }
+
+    /// Returns the current pending height, if any flashblocks have been executed.
+    pub fn get_pending_height(&self) -> Option<u64> {
+        self.inner.read().pending.as_ref().map(|p| p.pending.block().number())
     }
 }
 
@@ -93,5 +108,17 @@ impl<N: NodePrimitives> StateCacheInner<N> {
             ));
         }
         Ok(())
+    }
+
+    fn handle_pending_sequence(&mut self, pending_sequence: PendingSequence<N>) {
+        self.pending = Some(pending_sequence);
+    }
+
+    fn handle_canonical_block(&mut self, block_number: u64, block_hash: B256) {
+        self.canon_height = block_number;
+        self.confirm_cache.flush_up_to(block_number);
+        if self.pending.as_ref().map(|p| p.block_hash) == Some(block_hash) {
+            self.pending = None;
+        }
     }
 }
