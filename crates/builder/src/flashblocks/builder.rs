@@ -988,9 +988,8 @@ where
     // calculate the state root
     let state_root_start_time = Instant::now();
     let mut state_root = B256::ZERO;
-    let mut trie_output = TrieUpdates::default();
     let mut hashed_state = HashedPostState::default();
-    let mut trie_updates_to_cache: Option<TrieUpdates> = None;
+    let mut trie_updates_to_cache: Option<Arc<TrieUpdates>> = None;
 
     if calculate_state_root {
         let state_provider = state.database.as_ref();
@@ -1001,6 +1000,7 @@ where
 
         hashed_state = state_provider.hashed_post_state(&state.bundle_state);
 
+        let trie_output;
         (state_root, trie_output) = if let Some(prev_trie) = prev_trie {
             // Incremental path: Use cached trie from previous flashblock
             debug!(
@@ -1010,7 +1010,7 @@ where
             );
 
             let trie_input = TrieInput::new(
-                prev_trie.as_ref().clone(),
+                (*prev_trie).clone(),
                 hashed_state.clone(),
                 hashed_state.construct_prefix_sets(),
             );
@@ -1038,7 +1038,8 @@ where
         };
 
         // Cache trie updates to apply in fb_state later (avoids mut on fb_state parameter).
-        trie_updates_to_cache = Some(trie_output.clone());
+        // Wrap in Arc once so the same allocation is reused for both `executed` and fb_state.
+        trie_updates_to_cache = Some(Arc::new(trie_output));
 
         let state_root_calculation_time = state_root_start_time.elapsed();
         ctx.metrics.state_root_calculation_duration.record(state_root_calculation_time);
@@ -1137,7 +1138,11 @@ where
     let executed = BuiltPayloadExecutedBlock {
         recovered_block: Arc::new(recovered_block),
         execution_output: Arc::new(execution_output),
-        trie_updates: either::Either::Left(Arc::new(trie_output)),
+        trie_updates: either::Either::Left(
+            trie_updates_to_cache
+                .clone()
+                .unwrap_or_else(|| Arc::new(TrieUpdates::default())),
+        ),
         hashed_state: either::Either::Left(Arc::new(hashed_state)),
     };
     debug!(
@@ -1169,7 +1174,7 @@ where
     let new_receipts = info.receipts[last_idx..].to_vec();
     if let Some(fb) = fb_state {
         if let Some(updates) = trie_updates_to_cache.take() {
-            fb.prev_trie_updates = Some(Arc::new(updates));
+            fb.prev_trie_updates = Some(updates);
         }
         fb.set_last_flashblock_tx_index(info.executed_transactions.len());
     }
