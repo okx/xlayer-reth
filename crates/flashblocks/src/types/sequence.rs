@@ -1,16 +1,13 @@
-use crate::{FlashBlock, FlashBlockCompleteSequenceRx};
-use alloy_primitives::{Bytes, B256};
-use alloy_rpc_types_engine::PayloadId;
+use crate::FlashBlock;
 use core::mem;
 use eyre::{bail, OptionExt};
-use op_alloy_rpc_types_engine::OpFlashblockPayloadBase;
-use reth_revm::cached::CachedReads;
 use std::{collections::BTreeMap, ops::Deref};
-use tokio::sync::broadcast;
 use tracing::*;
 
-/// The size of the broadcast channel for completed flashblock sequences.
-const FLASHBLOCK_SEQUENCE_CHANNEL_SIZE: usize = 128;
+use alloy_primitives::{Bytes, B256};
+use alloy_rpc_types_engine::PayloadId;
+use op_alloy_rpc_types_engine::OpFlashblockPayloadBase;
+use reth_revm::cached::CachedReads;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FollowupRejectionReason {
@@ -40,12 +37,10 @@ pub struct SequenceExecutionOutcome {
 }
 
 /// An ordered B-tree keeping the track of a sequence of [`FlashBlock`]s by their indices.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct FlashBlockPendingSequence {
     /// tracks the individual flashblocks in order
     inner: BTreeMap<u64, FlashBlock>,
-    /// Broadcasts flashblocks to subscribers.
-    block_broadcaster: broadcast::Sender<FlashBlockCompleteSequence>,
     /// Optional execution outcome from building the current sequence.
     execution_outcome: Option<SequenceExecutionOutcome>,
     /// Cached state reads for the current block.
@@ -56,31 +51,6 @@ pub struct FlashBlockPendingSequence {
 }
 
 impl FlashBlockPendingSequence {
-    /// Create a new pending sequence.
-    pub fn new() -> Self {
-        // Note: if the channel is full, send will not block but rather overwrite the oldest
-        // messages. Order is preserved.
-        let (tx, _) = broadcast::channel(FLASHBLOCK_SEQUENCE_CHANNEL_SIZE);
-        Self {
-            inner: BTreeMap::new(),
-            block_broadcaster: tx,
-            execution_outcome: None,
-            cached_reads: None,
-        }
-    }
-
-    /// Returns the sender half of the [`FlashBlockCompleteSequence`] channel.
-    pub const fn block_sequence_broadcaster(
-        &self,
-    ) -> &broadcast::Sender<FlashBlockCompleteSequence> {
-        &self.block_broadcaster
-    }
-
-    /// Gets a subscriber to the flashblock sequences produced.
-    pub fn subscribe_block_sequence(&self) -> FlashBlockCompleteSequenceRx {
-        self.block_broadcaster.subscribe()
-    }
-
     /// Returns whether this flashblock would be accepted into the current sequence.
     pub fn can_accept(&self, flashblock: &FlashBlock) -> bool {
         if flashblock.index == 0 {
@@ -204,12 +174,6 @@ impl FlashBlockPendingSequence {
     /// Returns an iterator over all flashblocks in the sequence.
     pub fn flashblocks(&self) -> impl Iterator<Item = &FlashBlock> {
         self.inner.values()
-    }
-}
-
-impl Default for FlashBlockPendingSequence {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

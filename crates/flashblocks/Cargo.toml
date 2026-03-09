@@ -62,6 +62,8 @@ async-trait.workspace = true
 brotli = { workspace = true, features = ["std"] }
 derive_more.workspace = true
 eyre.workspace = true
+parking_lot.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 metrics.workspace = true
 moka.workspace = true
