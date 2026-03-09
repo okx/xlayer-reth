@@ -5,14 +5,8 @@ use jsonrpsee::{
     proc_macros::rpc,
 };
 
-use reth_chainspec::{ChainSpecProvider, EthChainSpec};
 use reth_optimism_rpc::SequencerClient;
 use reth_rpc::RpcTypes;
-use reth_rpc_eth_api::{
-    helpers::{EthFees, LoadBlock, LoadFee},
-    EthApiTypes,
-};
-use reth_storage_api::{BlockReaderIdExt, HeaderProvider, ProviderHeader};
 
 /// Trait for accessing sequencer client from backend
 pub trait SequencerClientProvider {
@@ -47,19 +41,7 @@ pub struct XlayerRpcExt<T> {
 #[async_trait]
 impl<T, Net> XlayerRpcExtApiServer<Net> for XlayerRpcExt<T>
 where
-    T: EthFees
-        + LoadFee
-        + LoadBlock
-        + EthApiTypes<NetworkTypes = Net>
-        + SequencerClientProvider
-        + PendingFlashBlockProvider
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-    T::Provider: ChainSpecProvider<ChainSpec: EthChainSpec<Header = ProviderHeader<T::Provider>>>
-        + BlockReaderIdExt
-        + HeaderProvider,
+    T: PendingFlashBlockProvider + Send + Sync + 'static,
     Net: RpcTypes + Send + Sync + 'static,
 {
     async fn flashblocks_enabled(&self) -> RpcResult<bool> {

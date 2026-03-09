@@ -15,5 +15,8 @@ tests/merged.genesis.json
 tests/merged.genesis.json.tar.gz
 tests/genesis-testnet-reth.json
 
+crates/chainspec/res/genesis/xlayer-devnet-genesis-hash.txt
+crates/chainspec/res/genesis/xlayer-devnet-state-root.txt
+
 # Local development: cargo config for debugging with local reth
 .cargo

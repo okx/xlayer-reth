@@ -13,8 +13,8 @@ use reth_optimism_node::OpPayloadAttributes;
 use super::{EngineApi, Ipc, LocalInstance, TransactionBuilder};
 use crate::{
     args::BuilderArgs,
+    signer::Signer,
     tests::{ExternalNode, Protocol, DEFAULT_DENOMINATOR, DEFAULT_ELASTICITY, DEFAULT_GAS_LIMIT},
-    tx::signer::Signer,
 };
 
 /// The ChainDriver is a type that allows driving the op builder node to build new blocks manually

@@ -1,18 +1,23 @@
 use crate::{
-    payload::{
-        flashblocks::{
-            cache::FlashblockPayloadsCache, context::FlashblockHandlerContext, p2p::Message,
+    flashblocks::{
+        handler_ctx::FlashblockHandlerContext,
+        utils::{
+            cache::FlashblockPayloadsCache, execution::ExecutionInfo, p2p::Message,
             wspub::WebSocketPublisher,
         },
-        utils::execution::ExecutionInfo,
     },
     traits::ClientBounds,
 };
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tracing::warn;
+
 use alloy_evm::eth::receipt_builder::ReceiptBuilderCtx;
 use alloy_primitives::B64;
 use eyre::{bail, WrapErr as _};
 use op_alloy_rpc_types_engine::OpFlashblockPayload;
 use op_revm::L1BlockInfo;
+
 use reth::{
     revm::{database::StateProviderDatabase, State},
     tasks::TaskSpawner,
@@ -28,15 +33,12 @@ use reth_optimism_payload_builder::OpBuiltPayload;
 use reth_optimism_primitives::{OpReceipt, OpTransactionSigned};
 use reth_payload_builder::EthPayloadBuilderAttributes;
 use reth_primitives_traits::SealedHeader;
-use std::sync::Arc;
-use tokio::sync::mpsc;
-use tracing::warn;
 
 /// Handles newly built or received flashblock payloads.
 ///
 /// In the case of a payload built by this node, it is broadcast to peers and an event is sent to the payload builder.
 /// In the case of a payload received from a peer, it is executed and if successful, an event is sent to the payload builder.
-pub(crate) struct PayloadHandler<Client, Tasks> {
+pub(crate) struct FlashblocksPayloadHandler<Client, Tasks> {
     // handler context for external flashblock execution
     ctx: FlashblockHandlerContext,
     // receives new flashblock payloads built by this builder.
@@ -62,7 +64,7 @@ pub(crate) struct PayloadHandler<Client, Tasks> {
     p2p_process_full_payload_flag: bool,
 }
 
-impl<Client, Tasks> PayloadHandler<Client, Tasks>
+impl<Client, Tasks> FlashblocksPayloadHandler<Client, Tasks>
 where
     Client: ClientBounds + 'static,
     Tasks: TaskSpawner + Clone + Unpin + 'static,
@@ -324,21 +326,16 @@ where
     )
     .wrap_err("failed to execute best transactions")?;
 
-    let builder_ctx = ctx.into_op_payload_builder_ctx(
+    let builder_ctx = ctx.into_flashblocks_builder_ctx(
         payload_config,
         evm_env.clone(),
         block_env_attributes,
         cancel,
     );
 
-    let (built_payload, fb_payload, _, _) = crate::payload::flashblocks::payload::build_block(
-        &mut state,
-        &builder_ctx,
-        &mut info,
-        None,
-        true,
-    )
-    .wrap_err("failed to build flashblock")?;
+    let (built_payload, fb_payload, _, _) =
+        crate::flashblocks::builder::build_block(&mut state, &builder_ctx, &mut info, None, true)
+            .wrap_err("failed to build flashblock")?;
 
     builder_ctx.metrics.flashblock_sync_duration.record(start.elapsed());
 
