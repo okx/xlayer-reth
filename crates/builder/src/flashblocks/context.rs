@@ -72,6 +72,8 @@ pub struct FlashblocksBuilderCtx {
     pub metrics: Arc<BuilderMetrics>,
     /// Max gas that can be used by a transaction.
     pub max_gas_per_txn: Option<u64>,
+    /// Configuration for bridge transaction interception.
+    pub bridge_intercept_config: xlayer_bridge_intercept::BridgeInterceptConfig,
 }
 
 impl FlashblocksBuilderCtx {
@@ -614,6 +616,19 @@ impl FlashblocksBuilderCtx {
                 && gas_used > max_gas_per_txn
             {
                 log_txn(TxnExecutionResult::MaxGasUsageExceeded);
+                best_txs.mark_invalid(tx.signer(), tx.nonce());
+                continue;
+            }
+
+            // Bridge interception check: if the transaction triggered a bridge event that
+            // should be blocked, skip committing state and mark it for pool removal.
+            if xlayer_bridge_intercept::intercept_bridge_transaction_if_need(
+                result.logs(),
+                tx.signer(),
+                &self.bridge_intercept_config,
+            )
+            .is_err()
+            {
                 best_txs.mark_invalid(tx.signer(), tx.nonce());
                 continue;
             }

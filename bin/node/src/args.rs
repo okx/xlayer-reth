@@ -2,8 +2,95 @@ use clap::Args;
 use std::time::Duration;
 use url::Url;
 
+use xlayer_bridge_intercept::BridgeInterceptConfig;
 use xlayer_builder::args::BuilderArgs;
 use xlayer_monitor::FullLinkMonitorArgs;
+
+/// Bridge intercept CLI arguments
+#[derive(Debug, Clone, Args, PartialEq, Eq, Default)]
+pub struct XLayerInterceptArgs {
+    /// Enable bridge transaction interception for payload builder
+    #[arg(long = "xlayer.intercept.enabled", default_value = "false",
+          help = "Enable bridge transaction interception for payload builder")]
+    pub enabled: bool,
+
+    /// PolygonZkEVMBridge contract address to monitor
+    #[arg(long = "xlayer.intercept.bridge-contract", value_name = "ADDRESS",
+          help = "PolygonZkEVMBridge contract address to monitor")]
+    pub bridge_contract: Option<String>,
+
+    /// Target token address (use '*' or empty for wildcard)
+    #[arg(long = "xlayer.intercept.target-token", value_name = "ADDRESS",
+          help = "Target token address (use '*' or empty for wildcard)")]
+    pub target_token: Option<String>,
+}
+
+impl XLayerInterceptArgs {
+    /// Convert CLI args into a [`BridgeInterceptConfig`].
+    pub fn to_bridge_intercept_config(&self) -> Result<BridgeInterceptConfig, String> {
+        use alloy_primitives::Address;
+
+        let bridge_contract_address = if let Some(addr) = &self.bridge_contract {
+            addr.parse::<Address>().map_err(|e| format!("Invalid bridge contract address: {e}"))?
+        } else if self.enabled {
+            return Err(
+                "--xlayer.intercept.bridge-contract is required when interception is enabled"
+                    .to_string(),
+            );
+        } else {
+            Address::ZERO
+        };
+
+        let (target_token_address, wildcard) = if let Some(token) = &self.target_token {
+            if token.is_empty() || token == "*" {
+                (Address::ZERO, true)
+            } else {
+                let addr = token
+                    .parse::<Address>()
+                    .map_err(|e| format!("Invalid target token address: {e}"))?;
+                (addr, false)
+            }
+        } else if self.enabled {
+            // Default to wildcard when no token specified
+            (Address::ZERO, true)
+        } else {
+            (Address::ZERO, false)
+        };
+
+        Ok(BridgeInterceptConfig {
+            enabled: self.enabled,
+            bridge_contract_address,
+            target_token_address,
+            wildcard,
+        })
+    }
+
+    /// Validate intercept configuration.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.bridge_contract.is_none() {
+            return Err(
+                "--xlayer.intercept.bridge-contract is required when interception is enabled"
+                    .to_string(),
+            );
+        }
+        if let Some(addr) = &self.bridge_contract
+            && addr.parse::<alloy_primitives::Address>().is_err()
+        {
+            return Err(format!("Invalid bridge contract address: {addr}"));
+        }
+        if let Some(token) = &self.target_token
+            && !token.is_empty()
+            && token != "*"
+            && token.parse::<alloy_primitives::Address>().is_err()
+        {
+            return Err(format!("Invalid target token address: {token}"));
+        }
+        Ok(())
+    }
+}
 
 /// X Layer specific configuration flags
 #[derive(Debug, Clone, Args, PartialEq, Eq, Default)]
@@ -20,6 +107,10 @@ pub struct XLayerArgs {
     /// Full link monitor configuration
     #[command(flatten)]
     pub monitor: FullLinkMonitorArgs,
+
+    /// Bridge intercept configuration
+    #[command(flatten)]
+    pub intercept: XLayerInterceptArgs,
 
     /// Enable custom flashblocks subscription
     #[arg(
@@ -50,6 +141,7 @@ impl XLayerArgs {
     pub fn validate(&self) -> Result<(), String> {
         self.legacy.validate()?;
         self.monitor.validate()?;
+        self.intercept.validate()?;
         Ok(())
     }
 

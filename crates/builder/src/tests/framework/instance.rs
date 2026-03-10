@@ -117,7 +117,7 @@ impl LocalInstance {
                 op_node
                     .components()
                     .pool(pool_component(&rollup_args))
-                    .payload(FlashblocksServiceBuilder(builder_config)),
+                    .payload(FlashblocksServiceBuilder(builder_config, Default::default())),
             )
             .with_add_ons(addons)
             .on_rpc_started(move |_, _| {

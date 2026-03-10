@@ -25,9 +25,21 @@ use reth_optimism_evm::OpEvmConfig;
 use reth_payload_builder::{PayloadBuilderHandle, PayloadBuilderService};
 use reth_provider::CanonStateSubscriptions;
 
-pub struct FlashblocksServiceBuilder(pub BuilderConfig);
+pub struct FlashblocksServiceBuilder(
+    pub BuilderConfig,
+    pub xlayer_bridge_intercept::BridgeInterceptConfig,
+);
 
 impl FlashblocksServiceBuilder {
+    /// Set the bridge intercept config to apply to the payload builder.
+    pub fn with_bridge_intercept(
+        &mut self,
+        config: xlayer_bridge_intercept::BridgeInterceptConfig,
+    ) -> &mut Self {
+        self.1 = config;
+        self
+    }
+
     fn spawn_payload_builder_service<Node, Pool>(
         self,
         ctx: &BuilderContext<Node>,
@@ -118,7 +130,7 @@ impl FlashblocksServiceBuilder {
         )
         .wrap_err("failed to create ws publisher")?
         .into();
-        let payload_builder = FlashblocksBuilder::new(
+        let mut payload_builder = FlashblocksBuilder::new(
             OpEvmConfig::optimism(ctx.chain_spec()),
             pool,
             ctx.provider().clone(),
@@ -132,6 +144,7 @@ impl FlashblocksServiceBuilder {
             metrics.clone(),
             task_metrics.clone(),
         );
+        payload_builder.bridge_intercept_config = self.1.clone();
         let payload_job_config = BasicPayloadJobGeneratorConfig::default();
 
         let payload_generator = BlockPayloadJobGenerator::with_builder(
