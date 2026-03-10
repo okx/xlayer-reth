@@ -92,6 +92,47 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> StateCache<N, Provider>
         self.inner.read().pending.as_ref().map(|p| p.pending.block().number())
     }
 
+    /// Collects items from an inclusive block number range `[start..=end]`, using
+    /// the confirm cache as an overlay on top of the provider.
+    ///
+    /// Walks backward from `end`, collecting consecutive cache hits via `from_cache`.
+    /// Delegates the remaining prefix `[start..=provider_end]` to `from_provider`.
+    fn collect_cached_block_range<T>(
+        &self,
+        start: BlockNumber,
+        end: BlockNumber,
+        from_cache: impl Fn(&BlockAndReceipts<N>) -> T,
+        from_provider: impl FnOnce(core::ops::RangeInclusive<BlockNumber>) -> ProviderResult<Vec<T>>,
+    ) -> ProviderResult<Vec<T>> {
+        let inner = self.inner.read();
+        let mut cache_items = Vec::new();
+        let mut provider_end = end;
+        let mut index = end;
+        loop {
+            if let Some(bar) = inner.confirm_cache.get_block_by_number(index) {
+                cache_items.push(from_cache(&bar));
+                provider_end = index.saturating_sub(1);
+            } else {
+                break;
+            }
+            if index == start {
+                break;
+            }
+            index -= 1;
+        }
+        cache_items.reverse();
+        drop(inner);
+
+        let mut result = if provider_end >= start && cache_items.len() < (end - start + 1) as usize
+        {
+            from_provider(start..=provider_end)?
+        } else {
+            Vec::new()
+        };
+        result.extend(cache_items);
+        Ok(result)
+    }
+
     /// Resolves an `impl RangeBounds<BlockNumber>` into an inclusive `(start, end)` pair.
     /// Matches reth's blockchain provider's convert_range_bounds semantics, and unbounded
     /// ends are resolved to `best_block_number`.

@@ -34,38 +34,12 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> HeaderProvider
         if start > end {
             return Ok(Vec::new());
         }
-
-        let inner = self.inner.read();
-
-        // Walk backwards from the end of the inclusive range, collecting
-        // consecutive cache hits from the confirm cache tail.
-        let mut cache_headers = Vec::new();
-        let mut provider_end = end;
-        let mut index = end;
-        loop {
-            if let Some(bar) = inner.confirm_cache.get_block_by_number(index) {
-                cache_headers.push(bar.block.header().clone());
-                provider_end = index.saturating_sub(1);
-            } else {
-                break;
-            }
-            if index == start {
-                break;
-            }
-            index -= 1;
-        }
-        cache_headers.reverse();
-        drop(inner);
-
-        // Delegate the remaining prefix [start..=provider_end] to the provider.
-        let mut result =
-            if provider_end >= start && cache_headers.len() < (end - start + 1) as usize {
-                self.provider.headers_range(start..=provider_end)?
-            } else {
-                Vec::new()
-            };
-        result.extend(cache_headers);
-        Ok(result)
+        self.collect_cached_block_range(
+            start,
+            end,
+            |bar| bar.block.header().clone(),
+            |r| self.provider.headers_range(r),
+        )
     }
 
     fn sealed_header(

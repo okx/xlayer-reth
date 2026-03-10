@@ -94,21 +94,36 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> BlockReader for StateCa
     }
 
     fn block_range(&self, range: RangeInclusive<BlockNumber>) -> ProviderResult<Vec<Self::Block>> {
-        self.provider.block_range(range)
+        self.collect_cached_block_range(
+            *range.start(),
+            *range.end(),
+            |bar| block_from_bar(bar),
+            |r| self.provider.block_range(r),
+        )
     }
 
     fn block_with_senders_range(
         &self,
         range: RangeInclusive<BlockNumber>,
     ) -> ProviderResult<Vec<RecoveredBlock<Self::Block>>> {
-        self.provider.block_with_senders_range(range)
+        self.collect_cached_block_range(
+            *range.start(),
+            *range.end(),
+            |bar| (*bar.block).clone(),
+            |r| self.provider.block_with_senders_range(r),
+        )
     }
 
     fn recovered_block_range(
         &self,
         range: RangeInclusive<BlockNumber>,
     ) -> ProviderResult<Vec<RecoveredBlock<Self::Block>>> {
-        self.provider.recovered_block_range(range)
+        self.collect_cached_block_range(
+            *range.start(),
+            *range.end(),
+            |bar| (*bar.block).clone(),
+            |r| self.provider.recovered_block_range(r),
+        )
     }
 
     fn block_by_transaction_id(&self, id: TxNumber) -> ProviderResult<Option<BlockNumber>> {

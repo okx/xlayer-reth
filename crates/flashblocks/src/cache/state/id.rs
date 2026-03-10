@@ -29,36 +29,17 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> BlockHashReader
             // Aligns with underlying blockchain provider
             return Ok(Vec::new());
         }
-
-        let inner = self.inner.read();
-        let mut cache_hashes = Vec::new();
-        let mut provider_end = end;
-        let mut index = end - 1;
-        loop {
-            if let Some(hash) = inner.confirm_cache.hash_for_number(index) {
-                cache_hashes.push(hash);
-                provider_end = index;
-            } else {
-                break;
-            }
-            // Guard against underflow when index == 0, and stop once we've
-            // covered the full range down to `start`
-            if index == start {
-                break;
-            }
-            index -= 1;
-        }
-        cache_hashes.reverse();
-        drop(inner);
-
-        // Delegate the remaining prefix [start, provider_end) to the provider
-        let mut result = if provider_end > start {
-            self.provider.canonical_hashes_range(start, provider_end)?
-        } else {
-            Vec::new()
-        };
-        result.extend(cache_hashes);
-        Ok(result)
+        // Provider uses half-open [start, end), convert to inclusive for the helper
+        self.collect_cached_block_range(
+            start,
+            end - 1,
+            |bar| bar.block.hash(),
+            |r| {
+                // Convert back to half-open [start, end) for the provider
+                let end_exclusive = r.end().saturating_add(1);
+                self.provider.canonical_hashes_range(*r.start(), end_exclusive)
+            },
+        )
     }
 }
 

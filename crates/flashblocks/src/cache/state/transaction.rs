@@ -59,7 +59,16 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> TransactionsProvider
         &self,
         range: impl RangeBounds<BlockNumber>,
     ) -> ProviderResult<Vec<Vec<Self::Transaction>>> {
-        self.provider.transactions_by_block_range(range)
+        let (start, end) = self.resolve_range_bounds(range)?;
+        if start > end {
+            return Ok(Vec::new());
+        }
+        self.collect_cached_block_range(
+            start,
+            end,
+            |bar| bar.block.body().transactions().to_vec(),
+            |r| self.provider.transactions_by_block_range(r),
+        )
     }
 
     fn transactions_by_tx_range(

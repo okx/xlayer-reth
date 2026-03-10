@@ -48,7 +48,12 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> ReceiptProvider
         &self,
         block_range: RangeInclusive<BlockNumber>,
     ) -> ProviderResult<Vec<Vec<Self::Receipt>>> {
-        self.provider.receipts_by_block_range(block_range)
+        self.collect_cached_block_range(
+            *block_range.start(),
+            *block_range.end(),
+            |bar| (*bar.receipts).clone(),
+            |r| self.provider.receipts_by_block_range(r),
+        )
     }
 }
 
