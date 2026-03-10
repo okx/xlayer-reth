@@ -3,9 +3,8 @@ use tracing::{debug, warn};
 
 /// keccak256("BridgeEvent(uint8,uint32,address,uint32,address,uint256,bytes,uint32)")
 pub const BRIDGE_EVENT_SIGNATURE: B256 = B256::new([
-    0x50, 0x17, 0x81, 0x20, 0x9a, 0x1f, 0x88, 0x99, 0x32, 0x3b, 0x96, 0xb4, 0xef, 0x08, 0xb1,
-    0x68, 0xdf, 0x93, 0xe0, 0xa9, 0x0c, 0x67, 0x3d, 0x1e, 0x4c, 0xce, 0x39, 0x36, 0x6c, 0xb6,
-    0x2f, 0x9b,
+    0x50, 0x17, 0x81, 0x20, 0x9a, 0x1f, 0x88, 0x99, 0x32, 0x3b, 0x96, 0xb4, 0xef, 0x08, 0xb1, 0x68,
+    0xdf, 0x93, 0xe0, 0xa9, 0x0c, 0x67, 0x3d, 0x1e, 0x4c, 0xce, 0x39, 0x36, 0x6c, 0xb6, 0x2f, 0x9b,
 ]);
 
 #[derive(Debug, Default, Clone)]
@@ -278,5 +277,79 @@ mod tests {
                 .expect("valid log data"),
         };
         assert!(matches!(parse_bridge_event(&log), Err(ParseError::InsufficientData)));
+    }
+
+    #[test]
+    fn test_parse_bridge_event_empty_topics() {
+        let log = alloy_primitives::Log {
+            address: BRIDGE,
+            data: LogData::new(vec![], vec![0u8; 256].into()).expect("valid log data"),
+        };
+        assert!(matches!(parse_bridge_event(&log), Err(ParseError::InvalidSignature)));
+    }
+
+    #[test]
+    fn test_intercept_multiple_logs() {
+        let config = BridgeInterceptConfig {
+            enabled: true,
+            bridge_contract_address: BRIDGE,
+            target_token_address: TOKEN,
+            wildcard: false,
+        };
+        // First log from a different contract (ignored), second is the valid target log
+        let mut other_log = make_bridge_log(BRIDGE, DATA1);
+        other_log.address = OTHER;
+        let target_log = make_bridge_log(BRIDGE, DATA1);
+        let result =
+            intercept_bridge_transaction_if_need(&[other_log, target_log], SENDER, &config);
+        assert!(matches!(result, Err(BridgeInterceptError::TargetTokenBlock { .. })));
+    }
+
+    #[test]
+    fn test_intercept_wildcard_ignores_other_contracts() {
+        let config = BridgeInterceptConfig {
+            enabled: true,
+            bridge_contract_address: BRIDGE,
+            target_token_address: TOKEN,
+            wildcard: true,
+        };
+        // All logs are from OTHER, not BRIDGE – wildcard must not fire
+        let mut log1 = make_bridge_log(BRIDGE, DATA1);
+        log1.address = OTHER;
+        let mut log2 = make_bridge_log(BRIDGE, DATA2);
+        log2.address = OTHER;
+        let result = intercept_bridge_transaction_if_need(&[log1, log2], SENDER, &config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_intercept_invalid_event_in_logs() {
+        let config = BridgeInterceptConfig {
+            enabled: true,
+            bridge_contract_address: BRIDGE,
+            target_token_address: TOKEN,
+            wildcard: false,
+        };
+        // First log: wrong signature → parse error → skipped via continue
+        let invalid_log = alloy_primitives::Log {
+            address: BRIDGE,
+            data: LogData::new(vec![B256::ZERO], vec![0u8; 256].into()).expect("valid log data"),
+        };
+        // Second log: valid and matches target token
+        let valid_log = make_bridge_log(BRIDGE, DATA1);
+        let result =
+            intercept_bridge_transaction_if_need(&[invalid_log, valid_log], SENDER, &config);
+        assert!(matches!(result, Err(BridgeInterceptError::TargetTokenBlock { .. })));
+    }
+
+    #[test]
+    fn test_bridge_event_signature_constant() {
+        // keccak256("BridgeEvent(uint8,uint32,address,uint32,address,uint256,bytes,uint32)")
+        let expected = [
+            0x50u8, 0x17, 0x81, 0x20, 0x9a, 0x1f, 0x88, 0x99, 0x32, 0x3b, 0x96, 0xb4, 0xef, 0x08,
+            0xb1, 0x68, 0xdf, 0x93, 0xe0, 0xa9, 0x0c, 0x67, 0x3d, 0x1e, 0x4c, 0xce, 0x39, 0x36,
+            0x6c, 0xb6, 0x2f, 0x9b,
+        ];
+        assert_eq!(BRIDGE_EVENT_SIGNATURE.0, expected);
     }
 }

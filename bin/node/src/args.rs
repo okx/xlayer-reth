@@ -10,18 +10,27 @@ use xlayer_monitor::FullLinkMonitorArgs;
 #[derive(Debug, Clone, Args, PartialEq, Eq, Default)]
 pub struct XLayerInterceptArgs {
     /// Enable bridge transaction interception for payload builder
-    #[arg(long = "xlayer.intercept.enabled", default_value = "false",
-          help = "Enable bridge transaction interception for payload builder")]
+    #[arg(
+        long = "xlayer.intercept.enabled",
+        default_value = "false",
+        help = "Enable bridge transaction interception for payload builder"
+    )]
     pub enabled: bool,
 
     /// PolygonZkEVMBridge contract address to monitor
-    #[arg(long = "xlayer.intercept.bridge-contract", value_name = "ADDRESS",
-          help = "PolygonZkEVMBridge contract address to monitor")]
+    #[arg(
+        long = "xlayer.intercept.bridge-contract",
+        value_name = "ADDRESS",
+        help = "PolygonZkEVMBridge contract address to monitor"
+    )]
     pub bridge_contract: Option<String>,
 
     /// Target token address (use '*' or empty for wildcard)
-    #[arg(long = "xlayer.intercept.target-token", value_name = "ADDRESS",
-          help = "Target token address (use '*' or empty for wildcard)")]
+    #[arg(
+        long = "xlayer.intercept.target-token",
+        value_name = "ADDRESS",
+        help = "Target token address (use '*' or empty for wildcard)"
+    )]
     pub target_token: Option<String>,
 }
 
@@ -394,5 +403,169 @@ mod tests {
         let result = args.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Invalid legacy RPC URL"));
+    }
+
+    // --- XLayerInterceptArgs tests ---
+
+    #[test]
+    fn test_xlayer_intercept_args_disabled() {
+        let args = XLayerInterceptArgs::default();
+        assert!(!args.enabled);
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn test_parse_xlayer_intercept_enabled() {
+        let args = CommandParser::<XLayerInterceptArgs>::parse_from([
+            "reth",
+            "--xlayer.intercept.enabled",
+            "--xlayer.intercept.bridge-contract",
+            "0x2a3dd3eb832af982ec71669e178424b10dca2ede",
+            "--xlayer.intercept.target-token",
+            "0x75231f58b43240c9718dd58b4967c5114342a86c",
+        ])
+        .args;
+        assert!(args.enabled);
+        assert!(args.validate().is_ok());
+        let config = args.to_bridge_intercept_config().unwrap();
+        assert!(config.enabled);
+        assert!(!config.wildcard);
+    }
+
+    #[test]
+    fn test_parse_xlayer_intercept_wildcard() {
+        let args = CommandParser::<XLayerInterceptArgs>::parse_from([
+            "reth",
+            "--xlayer.intercept.enabled",
+            "--xlayer.intercept.bridge-contract",
+            "0x2a3dd3eb832af982ec71669e178424b10dca2ede",
+            "--xlayer.intercept.target-token",
+            "*",
+        ])
+        .args;
+        assert!(args.enabled);
+        assert!(args.validate().is_ok());
+        let config = args.to_bridge_intercept_config().unwrap();
+        assert!(config.enabled);
+        assert!(config.wildcard);
+    }
+
+    #[test]
+    fn test_parse_xlayer_intercept_only_bridge_contract() {
+        let args = CommandParser::<XLayerInterceptArgs>::parse_from([
+            "reth",
+            "--xlayer.intercept.enabled",
+            "--xlayer.intercept.bridge-contract",
+            "0x2a3dd3eb832af982ec71669e178424b10dca2ede",
+        ])
+        .args;
+        assert!(args.enabled);
+        assert!(args.validate().is_ok());
+        let config = args.to_bridge_intercept_config().unwrap();
+        assert!(config.enabled);
+        assert!(config.wildcard); // no token specified → defaults to wildcard
+    }
+
+    #[test]
+    fn test_parse_xlayer_intercept_disabled_with_params() {
+        let args = CommandParser::<XLayerInterceptArgs>::parse_from([
+            "reth",
+            "--xlayer.intercept.bridge-contract",
+            "0x2a3dd3eb832af982ec71669e178424b10dca2ede",
+        ])
+        .args;
+        assert!(!args.enabled);
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn test_xlayer_intercept_args_enabled_without_bridge_contract() {
+        let args = XLayerInterceptArgs { enabled: true, bridge_contract: None, target_token: None };
+        let result = args.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("bridge-contract"));
+    }
+
+    #[test]
+    fn test_xlayer_intercept_to_config_specific_token() {
+        let args = XLayerInterceptArgs {
+            enabled: true,
+            bridge_contract: Some("0x2a3dd3eb832af982ec71669e178424b10dca2ede".to_string()),
+            target_token: Some("0x75231f58b43240c9718dd58b4967c5114342a86c".to_string()),
+        };
+        let config = args.to_bridge_intercept_config().unwrap();
+        assert!(config.enabled);
+        assert!(!config.wildcard);
+        let expected: alloy_primitives::Address =
+            "0x75231f58b43240c9718dd58b4967c5114342a86c".parse().unwrap();
+        assert_eq!(config.target_token_address, expected);
+    }
+
+    #[test]
+    fn test_xlayer_intercept_to_config_wildcard() {
+        let args = XLayerInterceptArgs {
+            enabled: true,
+            bridge_contract: Some("0x2a3dd3eb832af982ec71669e178424b10dca2ede".to_string()),
+            target_token: Some("*".to_string()),
+        };
+        let config = args.to_bridge_intercept_config().unwrap();
+        assert!(config.enabled);
+        assert!(config.wildcard);
+    }
+
+    #[test]
+    fn test_xlayer_intercept_to_config_empty_token() {
+        let args = XLayerInterceptArgs {
+            enabled: true,
+            bridge_contract: Some("0x2a3dd3eb832af982ec71669e178424b10dca2ede".to_string()),
+            target_token: Some("".to_string()),
+        };
+        let config = args.to_bridge_intercept_config().unwrap();
+        assert!(config.enabled);
+        assert!(config.wildcard);
+    }
+
+    #[test]
+    fn test_xlayer_intercept_invalid_bridge_address() {
+        let args = XLayerInterceptArgs {
+            enabled: true,
+            bridge_contract: Some("not-an-address".to_string()),
+            target_token: None,
+        };
+        let result = args.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("bridge contract address"));
+    }
+
+    #[test]
+    fn test_xlayer_intercept_invalid_token_address() {
+        let args = XLayerInterceptArgs {
+            enabled: true,
+            bridge_contract: Some("0x2a3dd3eb832af982ec71669e178424b10dca2ede".to_string()),
+            target_token: Some("not-an-address".to_string()),
+        };
+        let result = args.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("token address"));
+    }
+
+    #[test]
+    fn test_xlayer_intercept_to_config_disabled() {
+        let args = XLayerInterceptArgs::default();
+        let config = args.to_bridge_intercept_config().unwrap();
+        assert!(!config.enabled);
+    }
+
+    #[test]
+    fn test_xlayer_intercept_mixed_case_addresses() {
+        let args = XLayerInterceptArgs {
+            enabled: true,
+            bridge_contract: Some("0x2A3DD3EB832aF982EC71669E178424b10Dca2EdE".to_string()),
+            target_token: Some("0x75231F58B43240C9718DD58B4967C5114342a86c".to_string()),
+        };
+        assert!(args.validate().is_ok());
+        let config = args.to_bridge_intercept_config().unwrap();
+        assert!(config.enabled);
+        assert!(!config.wildcard);
     }
 }
