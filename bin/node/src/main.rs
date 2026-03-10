@@ -8,6 +8,7 @@ use payload::XLayerPayloadServiceBuilder;
 use args::XLayerArgs;
 use clap::Parser;
 use either::Either;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
 
@@ -23,6 +24,7 @@ use reth_optimism_node::{args::RollupArgs, OpNode};
 use reth_rpc_server_types::RethRpcModule;
 
 use xlayer_chainspec::XLayerChainSpecParser;
+use xlayer_trace_monitor::init_global_tracer;
 use xlayer_flashblocks::handler::FlashblocksService;
 use xlayer_flashblocks::subscription::FlashblocksPubSub;
 use xlayer_legacy_rpc::{layer::LegacyRpcRouterLayer, LegacyRpcRouterConfig};
@@ -50,6 +52,8 @@ fn main() {
 
     // Enable backtraces unless a RUST_BACKTRACE value has already been explicitly provided.
     if std::env::var_os("RUST_BACKTRACE").is_none() {
+        // SAFETY: Called before the async runtime starts any worker threads.
+        // No other thread can be reading the environment concurrently at this point.
         unsafe {
             std::env::set_var("RUST_BACKTRACE", "1");
         }
@@ -62,15 +66,12 @@ fn main() {
             info!(message = "starting custom X Layer node");
 
             // Validate X Layer configuration
-            if let Err(e) = args.xlayer_args.validate() {
-                eprintln!("X Layer configuration error: {e}");
-                std::process::exit(1);
-            }
+            args.xlayer_args
+                .validate()
+                .map_err(|e| eyre::eyre!("X Layer configuration error: {e}"))?;
 
             // Initialize global tracer if full link monitor is enabled
             if args.xlayer_args.monitor.enable {
-                use std::path::PathBuf;
-                use xlayer_trace_monitor::init_global_tracer;
                 let output_path = PathBuf::from(&args.xlayer_args.monitor.output_path);
                 init_global_tracer(true, Some(output_path));
                 info!(target: "xlayer::monitor", "Global tracer initialized with output path: {}", args.xlayer_args.monitor.output_path);
@@ -115,15 +116,13 @@ fn main() {
                 .with_types_and_provider::<OpNode, BlockchainProvider<_>>()
                 .with_components(op_node.components().payload(payload_builder))
                 .with_add_ons(add_ons)
-                .on_component_initialized(move |_ctx| {
-                    // TODO: Initialize X Layer components here
-                    Ok(())
-                })
                 .extend_rpc_modules(move |ctx| {
                     let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
 
-                    // Initialize flashblocks RPC service if not in flashblocks sequencer mode
-                    if !args.xlayer_args.builder.flashblocks.enabled {
+                    // Follower nodes (non-sequencer) initialize flashblock reception services.
+                    // Sequencer nodes produce flashblocks instead and skip this initialization.
+                    let is_follower = !args.xlayer_args.builder.flashblocks.enabled;
+                    if is_follower {
                         if let Some(flashblock_rx) = new_op_eth_api.subscribe_received_flashblocks()
                         {
                             let service = FlashblocksService::new(
@@ -163,8 +162,6 @@ fn main() {
                         xlayer_rpc,
                     ))?;
                     info!(target: "reth::cli", "xlayer rpc extension enabled");
-
-                    info!(message = "X Layer RPC modules initialized");
                     Ok(())
                 })
                 .launch_with_fn(|builder| {
