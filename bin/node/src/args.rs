@@ -25,11 +25,12 @@ pub struct XLayerInterceptArgs {
     )]
     pub bridge_contract: Option<String>,
 
-    /// Target token address (use '*' or empty for wildcard)
+    /// Target token address to block (use '*' or empty for wildcard).
+    /// If omitted when interception is enabled, defaults to wildcard (blocks ALL bridge txs).
     #[arg(
         long = "xlayer.intercept.target-token",
         value_name = "ADDRESS",
-        help = "Target token address (use '*' or empty for wildcard)"
+        help = "Token address to block (use '*' or omit to block all bridge txs)"
     )]
     pub target_token: Option<String>,
 }
@@ -60,7 +61,14 @@ impl XLayerInterceptArgs {
                 (addr, false)
             }
         } else if self.enabled {
-            // Default to wildcard when no token specified
+            // --xlayer.intercept.target-token not provided: defaulting to wildcard mode,
+            // which blocks ALL bridge transactions for the configured contract.
+            tracing::warn!(
+                target: "xlayer::intercept",
+                "--xlayer.intercept.target-token not set; defaulting to wildcard mode \
+                 which will block ALL bridge transactions for the configured contract. \
+                 Use --xlayer.intercept.target-token <ADDRESS> to restrict to a specific token."
+            );
             (Address::ZERO, true)
         } else {
             (Address::ZERO, false)

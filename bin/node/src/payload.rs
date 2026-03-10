@@ -46,10 +46,10 @@ impl XLayerPayloadServiceBuilder {
     ) -> eyre::Result<Self> {
         let builder = if xlayer_builder_args.flashblocks.enabled {
             let builder_config = BuilderConfig::try_from(xlayer_builder_args)?;
-            XLayerPayloadServiceBuilderInner::Flashblocks(Box::new(FlashblocksServiceBuilder(
-                builder_config,
-                Default::default(),
-            )))
+            XLayerPayloadServiceBuilderInner::Flashblocks(Box::new(FlashblocksServiceBuilder {
+                config: builder_config,
+                bridge_intercept: Default::default(),
+            }))
         } else {
             let payload_builder = OpPayloadBuilder::new(compute_pending_block)
                 .with_da_config(da_config)

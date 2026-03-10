@@ -25,10 +25,10 @@ use reth_optimism_evm::OpEvmConfig;
 use reth_payload_builder::{PayloadBuilderHandle, PayloadBuilderService};
 use reth_provider::CanonStateSubscriptions;
 
-pub struct FlashblocksServiceBuilder(
-    pub BuilderConfig,
-    pub xlayer_bridge_intercept::BridgeInterceptConfig,
-);
+pub struct FlashblocksServiceBuilder {
+    pub config: BuilderConfig,
+    pub bridge_intercept: xlayer_bridge_intercept::BridgeInterceptConfig,
+}
 
 impl FlashblocksServiceBuilder {
     /// Set the bridge intercept config to apply to the payload builder.
@@ -36,7 +36,7 @@ impl FlashblocksServiceBuilder {
         &mut self,
         config: xlayer_bridge_intercept::BridgeInterceptConfig,
     ) -> &mut Self {
-        self.1 = config;
+        self.bridge_intercept = config;
         self
     }
 
@@ -54,10 +54,10 @@ impl FlashblocksServiceBuilder {
         // this is effectively unused right now due to the usage of reth's `task_executor`.
         let cancel = tokio_util::sync::CancellationToken::new();
 
-        let (incoming_message_rx, outgoing_message_tx) = if self.0.flashblocks.p2p_enabled {
+        let (incoming_message_rx, outgoing_message_tx) = if self.config.flashblocks.p2p_enabled {
             let mut builder = crate::p2p::NodeBuilder::new();
 
-            if let Some(ref private_key_file) = self.0.flashblocks.p2p_private_key_file
+            if let Some(ref private_key_file) = self.config.flashblocks.p2p_private_key_file
                 && !private_key_file.is_empty()
             {
                 let private_key_hex = std::fs::read_to_string(private_key_file)
@@ -70,7 +70,7 @@ impl FlashblocksServiceBuilder {
             }
 
             let known_peers: Vec<crate::p2p::Multiaddr> =
-                if let Some(ref p2p_known_peers) = self.0.flashblocks.p2p_known_peers {
+                if let Some(ref p2p_known_peers) = self.config.flashblocks.p2p_known_peers {
                     p2p_known_peers
                         .split(',')
                         .map(|s| s.to_string())
@@ -85,9 +85,9 @@ impl FlashblocksServiceBuilder {
                     .with_agent_version(AGENT_VERSION.to_string())
                     .with_protocol(FLASHBLOCKS_STREAM_PROTOCOL)
                     .with_known_peers(known_peers)
-                    .with_port(self.0.flashblocks.p2p_port)
+                    .with_port(self.config.flashblocks.p2p_port)
                     .with_cancellation_token(cancel.clone())
-                    .with_max_peer_count(self.0.flashblocks.p2p_max_peer_count)
+                    .with_max_peer_count(self.config.flashblocks.p2p_max_peer_count)
                     .try_build::<Message>()
                     .wrap_err("failed to build flashblocks p2p node")?;
             let multiaddrs = node.multiaddrs();
@@ -116,17 +116,17 @@ impl FlashblocksServiceBuilder {
         // Channels for built full block payloads
         let (built_payload_tx, built_payload_rx) = tokio::sync::mpsc::channel(16);
 
-        let p2p_cache = if self.0.flashblocks.replay_from_persistence_file {
+        let p2p_cache = if self.config.flashblocks.replay_from_persistence_file {
             FlashblockPayloadsCache::new(Some(ctx.config().datadir()))
         } else {
             FlashblockPayloadsCache::new(None)
         };
 
         let ws_pub: Arc<WebSocketPublisher> = WebSocketPublisher::new(
-            self.0.flashblocks.ws_addr,
+            self.config.flashblocks.ws_addr,
             metrics.clone(),
             &task_metrics.websocket_publisher,
-            self.0.flashblocks.ws_subscriber_limit,
+            self.config.flashblocks.ws_subscriber_limit,
         )
         .wrap_err("failed to create ws publisher")?
         .into();
@@ -135,7 +135,7 @@ impl FlashblocksServiceBuilder {
             pool,
             ctx.provider().clone(),
             ctx.task_executor().clone(),
-            self.0.clone(),
+            self.config.clone(),
             builder_tx,
             built_fb_payload_tx,
             built_payload_tx,
@@ -144,7 +144,7 @@ impl FlashblocksServiceBuilder {
             metrics.clone(),
             task_metrics.clone(),
         );
-        payload_builder.bridge_intercept_config = self.1.clone();
+        payload_builder.bridge_intercept_config = self.bridge_intercept.clone();
         let payload_job_config = BasicPayloadJobGeneratorConfig::default();
 
         let payload_generator = BlockPayloadJobGenerator::with_builder(
@@ -153,7 +153,7 @@ impl FlashblocksServiceBuilder {
             payload_job_config,
             payload_builder,
             true,
-            self.0.block_time_leeway,
+            self.config.block_time_leeway,
         );
 
         let (payload_service, payload_builder_handle) =
@@ -161,7 +161,7 @@ impl FlashblocksServiceBuilder {
 
         let handler_ctx = FlashblockHandlerContext::new(
             &ctx.provider().clone(),
-            self.0.clone(),
+            self.config.clone(),
             OpEvmConfig::optimism(ctx.chain_spec()),
             metrics.clone(),
         )
@@ -179,8 +179,8 @@ impl FlashblocksServiceBuilder {
             ctx.provider().clone(),
             ctx.task_executor().clone(),
             cancel,
-            self.0.flashblocks.p2p_send_full_payload,
-            self.0.flashblocks.p2p_process_full_payload,
+            self.config.flashblocks.p2p_send_full_payload,
+            self.config.flashblocks.p2p_process_full_payload,
         );
 
         ctx.task_executor().spawn_critical(
@@ -211,11 +211,11 @@ where
         pool: Pool,
         _: OpEvmConfig,
     ) -> eyre::Result<PayloadBuilderHandle<<Node::Types as NodeTypes>::Payload>> {
-        let signer = self.0.builder_signer;
+        let signer = self.config.builder_signer;
 
         let builder_tx = if let Some(builder_signer) = signer
             && let Some(flashblocks_number_contract_address) =
-                self.0.flashblocks.number_contract_address
+                self.config.flashblocks.number_contract_address
         {
             FlashblocksBuilderTx::new_number_contract(
                 builder_signer,
