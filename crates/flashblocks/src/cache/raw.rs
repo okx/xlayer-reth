@@ -1,207 +1,110 @@
-//! Sequence cache management for flashblocks.
-//!
-//! The `SequenceManager` maintains a ring buffer of recently completed flashblock sequences
-//! and intelligently selects which sequence to build based on the local chain tip.
+use crate::execution::BuildArgs;
+use parking_lot::RwLock;
+use std::{collections::BTreeMap, sync::Arc};
+use tracing::*;
 
-use crate::{
-    execution::worker::BuildArgs,
-    types::pending_state::PendingBlockState,
-    types::sequence::{FlashBlockPendingSequence, SequenceExecutionOutcome},
-    validation::{
-        CanonicalBlockFingerprint, CanonicalBlockReconciler, ReconciliationStrategy, ReorgDetector,
-        TrackedBlockFingerprint,
-    },
-    FlashBlock, FlashBlockCompleteSequence, PendingFlashBlock,
-};
 use alloy_eips::eip2718::WithEncoded;
 use alloy_primitives::B256;
 use alloy_rpc_types_engine::PayloadId;
+use op_alloy_rpc_types_engine::OpFlashblockPayload;
+
 use reth_primitives_traits::{
     transaction::TxHashRef, NodePrimitives, Recovered, SignedTransaction,
 };
-use reth_revm::cached::CachedReads;
-use ringbuffer::{AllocRingBuffer, RingBuffer};
-use std::collections::{BTreeMap, HashSet};
-use tokio::sync::broadcast;
-use tracing::*;
 
-/// Maximum number of cached sequences in the ring buffer.
-const CACHE_SIZE: usize = 3;
-/// 200 ms flashblock time.
-pub(crate) const FLASHBLOCK_BLOCK_TIME: u64 = 200;
-
-/// Stable identity for a tracked flashblock sequence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct SequenceId {
-    pub(crate) block_number: u64,
-    pub(crate) payload_id: PayloadId,
-    pub(crate) parent_hash: B256,
-}
-
-impl SequenceId {
-    fn from_pending(sequence: &FlashBlockPendingSequence) -> Option<Self> {
-        let base = sequence.payload_base()?;
-        let payload_id = sequence.payload_id()?;
-        Some(Self { block_number: base.block_number, payload_id, parent_hash: base.parent_hash })
-    }
-
-    fn from_complete(sequence: &FlashBlockCompleteSequence) -> Self {
-        Self {
-            block_number: sequence.block_number(),
-            payload_id: sequence.payload_id(),
-            parent_hash: sequence.payload_base().parent_hash,
-        }
-    }
-}
-
-/// Snapshot selector for build-completion matching.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum SequenceSnapshot {
-    Pending { revision: u64 },
-    Cached,
-}
-
-/// Opaque ticket that identifies the exact sequence snapshot selected for a build.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct BuildTicket {
-    sequence_id: SequenceId,
-    snapshot: SequenceSnapshot,
-}
-
-impl BuildTicket {
-    const fn pending(sequence_id: SequenceId, revision: u64) -> Self {
-        Self { sequence_id, snapshot: SequenceSnapshot::Pending { revision } }
-    }
-
-    const fn cached(sequence_id: SequenceId) -> Self {
-        Self { sequence_id, snapshot: SequenceSnapshot::Cached }
-    }
-}
-
-/// Result of attempting to apply a build completion to tracked sequence state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BuildApplyOutcome {
-    SkippedNoBuildResult,
-    AppliedPending,
-    AppliedCached {
-        rebroadcasted: bool,
-    },
-    RejectedPendingSequenceMismatch {
-        ticket_sequence_id: SequenceId,
-        current_sequence_id: Option<SequenceId>,
-    },
-    RejectedPendingRevisionStale {
-        sequence_id: SequenceId,
-        ticket_revision: u64,
-        current_revision: u64,
-    },
-    RejectedCachedSequenceMissing {
-        sequence_id: SequenceId,
-    },
-}
-
-impl BuildApplyOutcome {
-    pub(crate) const fn is_applied(self) -> bool {
-        matches!(self, Self::AppliedPending | Self::AppliedCached { .. })
-    }
-}
-
-/// A buildable sequence plus the stable identity that selected it.
-pub(crate) struct BuildCandidate<I, N: NodePrimitives> {
-    pub(crate) ticket: BuildTicket,
-    pub(crate) args: BuildArgs<I, N>,
-}
-
-impl<I, N: NodePrimitives> std::ops::Deref for BuildCandidate<I, N> {
-    type Target = BuildArgs<I, N>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.args
-    }
-}
-
-/// In-progress pending sequence state.
-///
-/// Keeps accepted flashblocks and recovered transactions in lockstep by index.
+/// Raw flashblocks sequence keeps track of the flashblocks sequence based on their
+/// `payload_id`.
 #[derive(Debug)]
-struct PendingSequence<T: SignedTransaction> {
-    sequence: FlashBlockPendingSequence,
+struct RawFlashblocksSequence<T: SignedTransaction> {
+    /// Tracks the individual flashblocks in order
+    inner: BTreeMap<u64, OpFlashblockPayload>,
+    /// Tracks the recovered transactions by index
     recovered_transactions_by_index: BTreeMap<u64, Vec<WithEncoded<Recovered<T>>>>,
+    /// Tracks if the accumulated sequence has received the first base flashblock
+    has_base: bool,
+    /// Tracks the revision of the sequence
     revision: u64,
+    /// Tracks the revision that has been applied to the state cache
     applied_revision: Option<u64>,
 }
 
-impl<T: SignedTransaction> PendingSequence<T> {
+impl<T: SignedTransaction> RawFlashblocksSequence<T> {
     fn new() -> Self {
         Self {
-            sequence: FlashBlockPendingSequence::new(),
+            inner: BTreeMap::new(),
             recovered_transactions_by_index: BTreeMap::new(),
+            has_base: false,
             revision: 0,
             applied_revision: None,
         }
     }
 
-    const fn sequence(&self) -> &FlashBlockPendingSequence {
-        &self.sequence
+    /// Inserts a flashblock into the sequence.
+    fn insert_flashblock(&mut self, flashblock: OpFlashblockPayload) -> eyre::Result<()> {
+        if !self.can_accept(&flashblock) {
+            return Err(eyre::eyre!("flashblock does not match current sequence id"));
+        }
+
+        if flashblock.index == 0 {
+            // Base flashblock received
+            self.has_base = true;
+        }
+
+        // Only recover transactions once we've validated that this flashblock is accepted.
+        let flashblock_index = flashblock.index;
+        let recovered_txs = flashblock.recover_transactions().collect::<Result<Vec<_>, _>>()?;
+        self.inner.insert(flashblock_index, flashblock);
+        self.recovered_transactions_by_index.insert(flashblock_index, recovered_txs);
+        self.bump_revision();
+        Ok(())
+    }
+
+    /// Returns whether this flashblock would be accepted into the current sequence.
+    fn can_accept(&self, flashblock: &OpFlashblockPayload) -> bool {
+        if flashblock.index == 0 && !self.has_base {
+            return true;
+        }
+        return self.block_number() == Some(flashblock.block_number())
+            && self.payload_id() == Some(flashblock.payload_id);
+    }
+
+    /// Returns the first block number
+    pub fn block_number(&self) -> Option<u64> {
+        Some(self.inner.values().next()?.block_number())
+    }
+
+    /// Returns the payload id of the first tracked flashblock in the current sequence.
+    pub fn payload_id(&self) -> Option<PayloadId> {
+        Some(self.inner.values().next()?.payload_id)
     }
 
     fn count(&self) -> usize {
-        self.sequence.count()
+        self.inner.len()
     }
 
     const fn revision(&self) -> u64 {
         self.revision
     }
 
-    fn clear(&mut self) {
-        self.sequence = FlashBlockPendingSequence::new();
-        self.recovered_transactions_by_index.clear();
-        self.applied_revision = None;
-    }
+    fn bump_revision(&mut self) {
+        // Iterate over the inner map and increment the revision for consecutive flashblocks
+        let mut new_revision = 0;
+        for (index, _) in self.inner.iter() {
+            if *index == 0 {
+                continue;
+            }
 
-    const fn bump_revision(&mut self) {
-        self.revision = self.revision.wrapping_add(1);
-    }
-
-    fn is_revision_applied(&self, revision: u64) -> bool {
-        self.applied_revision == Some(revision)
+            // If the index is not consecutive, break the loop
+            if new_revision != *index - 1 {
+                break;
+            }
+            new_revision = *index;
+        }
+        self.revision = new_revision;
     }
 
     const fn mark_revision_applied(&mut self, revision: u64) {
         self.applied_revision = Some(revision);
-    }
-
-    fn insert_flashblock(&mut self, flashblock: FlashBlock) -> eyre::Result<()> {
-        if !self.sequence.can_accept(&flashblock) {
-            self.sequence.insert(flashblock);
-            return Ok(());
-        }
-
-        // Only recover transactions once we've validated that this flashblock is accepted.
-        let recovered_txs = flashblock.recover_transactions().collect::<Result<Vec<_>, _>>()?;
-        let flashblock_index = flashblock.index;
-
-        // Index 0 starts a fresh pending block, so clear any stale in-progress data.
-        if flashblock_index == 0 {
-            self.clear();
-        }
-
-        self.sequence.insert(flashblock);
-        self.recovered_transactions_by_index.insert(flashblock_index, recovered_txs);
-        self.bump_revision();
-        Ok(())
-    }
-
-    fn finalize(
-        &mut self,
-    ) -> eyre::Result<(FlashBlockCompleteSequence, Vec<WithEncoded<Recovered<T>>>)> {
-        let finalized = self.sequence.finalize();
-        let recovered_by_index = std::mem::take(&mut self.recovered_transactions_by_index);
-
-        match finalized {
-            Ok(completed) => Ok((completed, recovered_by_index.into_values().flatten().collect())),
-            Err(err) => Err(err),
-        }
     }
 
     fn transactions(&self) -> Vec<WithEncoded<Recovered<T>>> {
@@ -218,182 +121,31 @@ impl<T: SignedTransaction> PendingSequence<T> {
     }
 }
 
-/// Manages flashblock sequences with caching support.
+type RawFlashblocksCacheInner<T: SignedTransaction> =
+    BTreeMap<PayloadId, RawFlashblocksSequence<T>>;
+
+/// The raw flashblocks sequence cache for new incoming flashblocks from the sequencer.
+/// The cache accumulates last two flashblocks sequences in memory, to handle scenario
+/// when flashblocks received are out-of-order, and committing the previous sequence
+/// state to the state cache is not yet possible due to parent hash mismatch (we still
+/// need the previous flashblocks sequence to compute the state root).
 ///
-/// This struct handles:
-/// - Tracking the current pending sequence
-/// - Caching completed sequences in a fixed-size ring buffer
-/// - Finding the best sequence to build based on local chain tip
-/// - Broadcasting completed sequences to subscribers
-#[derive(Debug)]
-pub(crate) struct SequenceManager<T: SignedTransaction> {
-    /// Current pending sequence being built up from incoming flashblocks
-    pending: PendingSequence<T>,
-    /// Ring buffer of recently completed sequences bundled with their decoded transactions (FIFO,
-    /// size 3)
-    completed_cache: AllocRingBuffer<(FlashBlockCompleteSequence, Vec<WithEncoded<Recovered<T>>>)>,
-    /// Cached sequence identities that already had a build completion applied.
-    applied_cached_sequences: HashSet<SequenceId>,
-    /// Cached minimum block number currently present in `completed_cache`.
-    cached_min_block_number: Option<u64>,
-    /// Broadcast channel for completed sequences
-    block_broadcaster: broadcast::Sender<FlashBlockCompleteSequence>,
-    /// Whether to compute state roots when building blocks
-    compute_state_root: bool,
+/// The raw cache is used to:
+/// 1. Track the next best sequence to build, based on cache state (consecutive flashblocks
+///    required)
+/// 2. Re-org detection when a new flashblock is received
+pub struct RawFlashblocksCache<T: SignedTransaction> {
+    inner: Arc<RwLock<RawFlashblocksCacheInner<T>>>,
 }
 
-impl<T: SignedTransaction> SequenceManager<T> {
-    /// Creates a new sequence manager.
-    pub(crate) fn new(compute_state_root: bool) -> Self {
-        let (block_broadcaster, _) = broadcast::channel(128);
-        Self {
-            pending: PendingSequence::new(),
-            completed_cache: AllocRingBuffer::new(CACHE_SIZE),
-            applied_cached_sequences: HashSet::new(),
-            cached_min_block_number: None,
-            block_broadcaster,
-            compute_state_root,
-        }
-    }
-
-    /// Returns the sender half of the flashblock sequence broadcast channel.
-    pub(crate) const fn block_sequence_broadcaster(
-        &self,
-    ) -> &broadcast::Sender<FlashBlockCompleteSequence> {
-        &self.block_broadcaster
-    }
-
-    /// Gets a subscriber to the flashblock sequences produced.
-    pub(crate) fn subscribe_block_sequence(&self) -> crate::FlashBlockCompleteSequenceRx {
-        self.block_broadcaster.subscribe()
-    }
-
-    /// Inserts a new flashblock into the pending sequence.
-    ///
-    /// When a flashblock with index 0 arrives (indicating a new block), the current
-    /// pending sequence is finalized, cached, and broadcast immediately. If the sequence
-    /// is later built on top of local tip, `on_build_complete()` will broadcast again
-    /// with computed `state_root`.
-    ///
-    /// Transactions are recovered once and cached for reuse during block building.
-    pub(crate) fn insert_flashblock(&mut self, flashblock: FlashBlock) -> eyre::Result<()> {
-        // If this starts a new block, finalize and cache the previous sequence BEFORE inserting
-        if flashblock.index == 0 && self.pending.count() > 0 {
-            let (completed, txs) = self.pending.finalize()?;
-            let block_number = completed.block_number();
-            let parent_hash = completed.payload_base().parent_hash;
-
-            trace!(
-                target: "flashblocks",
-                block_number,
-                %parent_hash,
-                cache_size = self.completed_cache.len(),
-                "Caching completed flashblock sequence"
-            );
-
-            // Broadcast immediately to consensus client (even without state_root)
-            // This ensures sequences are forwarded during catch-up even if not buildable on tip.
-            // ConsensusClient checks execution_outcome and skips newPayload if state_root is zero.
-            if self.block_broadcaster.receiver_count() > 0 {
-                let _ = self.block_broadcaster.send(completed.clone());
-            }
-
-            // Bundle completed sequence with its decoded transactions and push to cache
-            // Ring buffer automatically evicts oldest entry when full
-            self.push_completed_sequence(completed, txs);
-        }
-
-        self.pending.insert_flashblock(flashblock)?;
-        Ok(())
-    }
-
-    /// Pushes a completed sequence into the cache and maintains cached min block-number metadata.
-    fn push_completed_sequence(
-        &mut self,
-        completed: FlashBlockCompleteSequence,
-        txs: Vec<WithEncoded<Recovered<T>>>,
-    ) {
-        let block_number = completed.block_number();
-        let completed_sequence_id = SequenceId::from_complete(&completed);
-        let evicted_block_number = if self.completed_cache.is_full() {
-            self.completed_cache.front().map(|(seq, _)| seq.block_number())
-        } else {
-            None
-        };
-        let evicted_sequence_id = if self.completed_cache.is_full() {
-            self.completed_cache.front().map(|(seq, _)| SequenceId::from_complete(seq))
-        } else {
-            None
-        };
-
-        if let Some(sequence_id) = evicted_sequence_id {
-            self.applied_cached_sequences.remove(&sequence_id);
-        }
-        // Re-tracking a sequence identity should always start as unapplied.
-        self.applied_cached_sequences.remove(&completed_sequence_id);
-
-        self.completed_cache.enqueue((completed, txs));
-
-        self.cached_min_block_number = match self.cached_min_block_number {
-            None => Some(block_number),
-            Some(current_min) if block_number < current_min => Some(block_number),
-            Some(current_min) if Some(current_min) == evicted_block_number => {
-                self.recompute_cache_min_block_number()
-            }
-            Some(current_min) => Some(current_min),
-        };
-    }
-
-    /// Recomputes the minimum block number in `completed_cache`.
-    fn recompute_cache_min_block_number(&self) -> Option<u64> {
-        self.completed_cache.iter().map(|(seq, _)| seq.block_number()).min()
-    }
-
-    /// Returns the newest cached sequence that matches `parent_hash` and still needs execution.
-    ///
-    /// Cached sequences that already had build completion applied are skipped to avoid redundant
-    /// rebuild loops.
-    fn newest_unexecuted_cached_for_parent(
-        &self,
-        parent_hash: B256,
-    ) -> Option<&(FlashBlockCompleteSequence, Vec<WithEncoded<Recovered<T>>>)> {
-        self.completed_cache.iter().rev().find(|(seq, _)| {
-            let sequence_id = SequenceId::from_complete(seq);
-            seq.payload_base().parent_hash == parent_hash
-                && !self.applied_cached_sequences.contains(&sequence_id)
-        })
-    }
-
-    /// Returns a mutable cached sequence entry by exact sequence identity.
-    fn cached_entry_mut_by_id(
-        &mut self,
-        sequence_id: SequenceId,
-    ) -> Option<&mut (FlashBlockCompleteSequence, Vec<WithEncoded<Recovered<T>>>)> {
-        self.completed_cache
-            .iter_mut()
-            .find(|(seq, _)| SequenceId::from_complete(seq) == sequence_id)
-    }
-
-    /// Returns the current pending sequence for inspection.
-    pub(crate) const fn pending(&self) -> &FlashBlockPendingSequence {
-        self.pending.sequence()
-    }
-
-    /// Finds the next sequence to build and returns the selected sequence identity
-    /// with ready-to-use `BuildArgs`.
-    ///
-    /// Priority order:
-    /// 1. Current pending sequence (if parent matches local tip)
-    /// 2. Cached sequence with exact parent match
-    /// 3. Speculative: pending sequence with pending parent state (if provided)
-    ///
-    /// Returns None if nothing is buildable right now.
+impl<T: SignedTransaction> RawFlashblocksCache<T> {
+    /// Gets the next buildable sequence from the cache, returns None if no buildable
+    /// sequence is found.
     pub(crate) fn next_buildable_args<N: NodePrimitives<SignedTx = T>>(
         &mut self,
         local_tip_hash: B256,
         local_tip_timestamp: u64,
-        pending_parent_state: Option<PendingBlockState<N>>,
-    ) -> Option<BuildCandidate<Vec<WithEncoded<Recovered<T>>>, N>> {
+    ) -> Option<BuildArgs<Vec<WithEncoded<Recovered<T>>>, N>> {
         // Try to find a buildable sequence: (ticket, base, last_fb, transactions,
         // cached_state, source_name, pending_parent)
         let (ticket, base, last_flashblock, transactions, cached_state, source_name, pending_parent) =

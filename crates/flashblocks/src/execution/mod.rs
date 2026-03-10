@@ -1,4 +1,5 @@
 mod cache;
-pub(crate) mod worker;
+use cache::{CachedExecutionMeta, TransactionCache};
 
-pub use worker::FlashblockCachedReceipt;
+pub(crate) mod worker;
+pub use worker::{BuildArgs, BuildResult, FlashblockCachedReceipt};

@@ -48,11 +48,11 @@
 //!     .build();
 //! ```
 
-use crate::FlashBlock;
 use alloy_primitives::{Address, Bloom, Bytes, B256, U256};
 use alloy_rpc_types_engine::PayloadId;
 use op_alloy_rpc_types_engine::{
-    OpFlashblockPayloadBase, OpFlashblockPayloadDelta, OpFlashblockPayloadMetadata,
+    OpFlashblockPayload, OpFlashblockPayloadBase, OpFlashblockPayloadDelta,
+    OpFlashblockPayloadMetadata,
 };
 
 /// Factory for creating test flashblocks with automatic timestamp management.
@@ -119,7 +119,7 @@ impl TestFlashBlockFactory {
     /// let fb1 = factory.flashblock_after(&fb0).build(); // Simple
     /// let fb2 = factory.flashblock_after(&fb1).transactions(txs).build(); // With txs
     /// ```
-    pub(crate) fn flashblock_after(&self, previous: &FlashBlock) -> TestFlashBlockBuilder {
+    pub(crate) fn flashblock_after(&self, previous: &OpFlashblockPayload) -> TestFlashBlockBuilder {
         let parent_hash =
             previous.base.as_ref().map(|b| b.parent_hash).unwrap_or(previous.diff.block_hash);
 
@@ -145,7 +145,10 @@ impl TestFlashBlockFactory {
     /// let fb1 = factory.flashblock_for_next_block(&fb0).build(); // Block 101, timestamp 1000002
     /// let fb2 = factory.flashblock_for_next_block(&fb1).transactions(txs).build(); // Customize
     /// ```
-    pub(crate) fn flashblock_for_next_block(&self, previous: &FlashBlock) -> TestFlashBlockBuilder {
+    pub(crate) fn flashblock_for_next_block(
+        &self,
+        previous: &OpFlashblockPayload,
+    ) -> TestFlashBlockBuilder {
         let prev_timestamp =
             previous.base.as_ref().map(|b| b.timestamp).unwrap_or(self.base_timestamp);
 
@@ -290,7 +293,7 @@ impl TestFlashBlockBuilder {
     /// Builds the flashblock.
     ///
     /// If index is 0 and no base was explicitly set, creates a default base.
-    pub(crate) fn build(mut self) -> FlashBlock {
+    pub(crate) fn build(mut self) -> OpFlashblockPayload {
         // Auto-create base for index 0 if not set
         if self.index == 0 && self.base.is_none() {
             self.base = Some(OpFlashblockPayloadBase {
@@ -306,7 +309,7 @@ impl TestFlashBlockBuilder {
             });
         }
 
-        FlashBlock {
+        OpFlashblockPayload {
             index: self.index,
             payload_id: self.payload_id,
             base: self.base,

@@ -1,12 +1,12 @@
 use crate::{
-    execution::cache::{CachedExecutionMeta, TransactionCache},
-    types::pending_state::PendingBlockState,
-    PendingFlashBlock,
+    cache::{PendingSequence, StateCache},
+    execution::{CachedExecutionMeta, TransactionCache},
 };
 use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use tokio_util::sync::CancellationToken;
 use tracing::trace;
 
 use alloy_eips::{eip2718::WithEncoded, BlockNumberOrTag};
@@ -38,19 +38,31 @@ use reth_storage_api::{
     StateRootProvider,
 };
 
-/// The `FlashBlockBuilder` builds [`PendingBlock`] out of a sequence of transactions.
+pub(crate) struct BuildArgs<I> {
+    pub(crate) base: OpFlashblockPayloadBase,
+    pub(crate) transactions: I,
+    pub(crate) cached_state: Option<(B256, CachedReads)>,
+    pub(crate) last_flashblock_index: u64,
+    pub(crate) cancel: CancellationToken,
+}
+
+/// The `FlashblocksValidator` builds [`PendingBlock`] out of a sequence of transactions.
 ///
 /// Owns a [`TransactionCache`] for incremental prefix caching between flashblock builds.
 #[derive(Debug)]
-pub(crate) struct FlashBlockBuilder<N: NodePrimitives, EvmConfig, Provider> {
+pub(crate) struct FlashblocksValidator<N: NodePrimitives, EvmConfig, Provider> {
+    /// The EVM configuration used to build the flashblocks.
     evm_config: EvmConfig,
-    provider: Provider,
+    /// The transaction execution cache for incremental executions.
     tx_cache: TransactionCache<N>,
+    /// The state cache containing the canonical chainstate provider and the flashblocks
+    /// state cache layer.
+    state_cache: StateCache<N, Provider>,
 }
 
-impl<N: NodePrimitives, EvmConfig, Provider> FlashBlockBuilder<N, EvmConfig, Provider> {
-    pub(crate) fn new(evm_config: EvmConfig, provider: Provider) -> Self {
-        Self { evm_config, provider, tx_cache: TransactionCache::new() }
+impl<N: NodePrimitives, EvmConfig, Provider> FlashblocksValidator<N, EvmConfig, Provider> {
+    pub(crate) fn new(evm_config: EvmConfig, state_cache: StateCache<N, Provider>) -> Self {
+        Self { evm_config, state_cache, tx_cache: TransactionCache::new() }
     }
 
     pub(crate) const fn provider(&self) -> &Provider {
@@ -61,56 +73,6 @@ impl<N: NodePrimitives, EvmConfig, Provider> FlashBlockBuilder<N, EvmConfig, Pro
     pub(crate) fn clear_cache(&mut self) {
         self.tx_cache.clear();
     }
-
-    /// Resets the transaction cache to a fresh empty state.
-    pub(crate) fn reset_cache(&mut self) {
-        self.tx_cache = TransactionCache::new();
-    }
-}
-
-impl<N: NodePrimitives, EvmConfig: Clone, Provider: Clone>
-    FlashBlockBuilder<N, EvmConfig, Provider>
-{
-    /// Clones the builder config and moves the transaction cache into the new
-    /// builder, leaving `self` with an empty cache.
-    ///
-    /// Used before spawning a blocking build task.
-    pub(crate) fn fork_with_cache(&mut self) -> Self {
-        Self {
-            evm_config: self.evm_config.clone(),
-            provider: self.provider.clone(),
-            tx_cache: std::mem::take(&mut self.tx_cache),
-        }
-    }
-
-    /// Restores the transaction cache from a completed forked builder.
-    pub(crate) fn merge_cache(&mut self, other: Self) {
-        self.tx_cache = other.tx_cache;
-    }
-}
-
-pub(crate) struct BuildArgs<I, N: NodePrimitives> {
-    pub(crate) base: OpFlashblockPayloadBase,
-    pub(crate) transactions: I,
-    pub(crate) cached_state: Option<(B256, CachedReads)>,
-    pub(crate) last_flashblock_index: u64,
-    pub(crate) last_flashblock_hash: B256,
-    pub(crate) compute_state_root: bool,
-    /// Optional pending parent state for speculative building.
-    /// When set, allows building on top of a pending block that hasn't been
-    /// canonicalized yet.
-    pub(crate) pending_parent: Option<PendingBlockState<N>>,
-}
-
-/// Result of a flashblock build operation.
-#[derive(Debug)]
-pub(crate) struct BuildResult<N: NodePrimitives> {
-    /// The built pending flashblock.
-    pub(crate) pending_flashblock: PendingFlashBlock<N>,
-    /// Cached reads from this build.
-    pub(crate) cached_reads: CachedReads,
-    /// Pending state that can be used for building subsequent blocks.
-    pub(crate) pending_state: PendingBlockState<N>,
 }
 
 /// Cached prefix execution data used to resume canonical builds.
@@ -160,12 +122,10 @@ where
             Receipt = ReceiptTy<N>,
         > + Unpin,
 {
-    /// Returns the [`PendingFlashBlock`] made purely out of transactions and
-    /// [`OpFlashblockPayloadBase`] in `args`.
+    /// Returns the [`PendingSequence`], which contains the full built execution state of
+    /// the flashblocks sequence passed in `BuildArgs`.
     ///
-    /// This method supports two building modes:
-    /// 1. **Canonical mode**: Parent matches local tip - uses state from storage
-    /// 2. **Speculative mode**: Parent is a pending block - uses pending state
+    /// The
     ///
     /// In canonical mode, the internal transaction cache is used to resume from
     /// cached state if the transaction list is a continuation of what was previously
@@ -176,9 +136,13 @@ where
     /// - In speculative mode: no pending parent state provided
     pub(crate) fn execute<I: IntoIterator<Item = WithEncoded<Recovered<N::SignedTx>>>>(
         &mut self,
-        mut args: BuildArgs<I, N>,
-    ) -> eyre::Result<Option<BuildResult<N>>> {
+        mut args: BuildArgs<I>,
+    ) -> eyre::Result<PendingSequence<N>> {
         trace!(target: "flashblocks", "Attempting new pending block from flashblocks");
+
+        let parent_hash = args.base.parent_hash;
+        let parent_header = self.state_cache.latest_header(parent_hash)?;
+        let state_provider = self.state_cache.history_by_block_hash(parent_header.hash())?;
 
         let latest = self
             .provider

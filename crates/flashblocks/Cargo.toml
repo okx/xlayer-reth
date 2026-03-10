@@ -15,6 +15,8 @@ xlayer-builder.workspace = true
 
 # reth
 reth-chain-state = { workspace = true, features = ["serde"] }
+reth-chainspec.workspace = true
+reth-db-models.workspace = true
 reth-errors.workspace = true
 reth-evm.workspace = true
 reth-execution-types = { workspace = true, features = ["serde"] }
@@ -53,6 +55,7 @@ futures-util.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tokio-tungstenite.workspace = true
+tokio-util.workspace = true
 
 # rpc
 jsonrpsee.workspace = true

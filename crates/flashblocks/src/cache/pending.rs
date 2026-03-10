@@ -13,41 +13,47 @@ pub struct PendingSequence<N: NodePrimitives> {
     /// Locally built full pending block of the latest flashblocks sequence.
     #[deref]
     pub pending: PendingBlock<N>,
-    /// The current block hash of the latest flashblocks sequence.
-    pub block_hash: B256,
+    /// Cached reads from execution for reuse.
+    pub cached_reads: CachedReads,
     /// Parent hash of the built block (may be non-canonical or canonical).
     pub parent_hash: B256,
     /// The last flashblock index of the latest flashblocks sequence.
     pub last_flashblock_index: u64,
-    /// Cached reads from execution for reuse.
-    pub cached_reads: CachedReads,
     /// Whether the [`PendingFlashblockSequence`] has a properly computed stateroot.
     pub has_computed_state_root: bool,
+    /// The current block hash of the latest flashblocks sequence. `None` if state
+    /// root is not computed yet.
+    pub block_hash: Option<B256>,
 }
 
 impl<N: NodePrimitives> PendingSequence<N> {
     /// Create new pending flashblock.
     pub const fn new(
         pending: PendingBlock<N>,
-        block_hash: B256,
+        cached_reads: CachedReads,
         parent_hash: B256,
         last_flashblock_index: u64,
-        cached_reads: CachedReads,
-        has_computed_state_root: bool,
     ) -> Self {
         Self {
             pending,
-            block_hash,
+            cached_reads,
             parent_hash,
             last_flashblock_index,
-            cached_reads,
-            has_computed_state_root,
+            has_computed_state_root: false,
+            block_hash: None,
         }
     }
 
     /// Returns the properly calculated state root for that block if it was computed.
     pub fn computed_state_root(&self) -> Option<B256> {
         self.has_computed_state_root.then_some(self.pending.block().state_root())
+    }
+
+    /// Sets the computed state root and block hash for the pending block.
+    pub fn set_state_root_and_block_hash(&mut self, pending: PendingBlock<N>) {
+        self.pending = pending;
+        self.block_hash = Some(self.pending.block().hash());
+        self.has_computed_state_root = true;
     }
 }
 

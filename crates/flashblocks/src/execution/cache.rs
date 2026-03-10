@@ -193,11 +193,12 @@ impl<N: NodePrimitives> TransactionCache<N> {
             .count()
     }
 
-    /// Returns cached state for resuming execution if the incoming transactions
-    /// have a matching prefix with the cache.
+    /// Returns cached state for resuming execution if the incoming transactions have a
+    /// matching prefix with the cache.
     ///
-    /// Returns `Some((bundle, receipts, requests, gas_used, blob_gas_used, skip_count))` if
-    /// there's a non-empty matching prefix, where:
+    /// Returns `Some((bundle, receipts, requests, gas_used, blob_gas_used, skip_count))`
+    /// if there's a non-empty matching prefix, and the full cache matches the incoming
+    /// prefix, where:
     /// - `bundle` is the cumulative state after the matching prefix
     /// - `receipts` is the receipts for the matching prefix
     /// - `skip_count` is the number of transactions to skip
@@ -233,13 +234,13 @@ impl<N: NodePrimitives> TransactionCache<N> {
         ))
     }
 
-    /// Returns cached state and execution metadata for resuming execution if the incoming
-    /// transactions have a matching prefix with the cache and the parent hash matches.
+    /// Returns cached state for resuming execution if the incoming transactions have a
+    /// matching prefix with the cache and the parent hash matches.
     ///
-    /// Returns `Some((bundle, receipts, requests, gas_used, blob_gas_used, skip_count))` if
-    /// there's a non-empty matching prefix, the full cache matches the incoming prefix, and the
+    /// Returns `Some((bundle, receipts, requests, gas_used, blob_gas_used, skip_count))`
+    /// if there's a non-empty matching prefix, where the full cache matches the incoming prefix, and the
     /// `(block_number, parent_hash)` tuple matches the cached scope.
-    pub(crate) fn get_resumable_state_with_execution_meta_for_parent(
+    pub(crate) fn get_resumable_state_for_parent(
         &self,
         block_number: u64,
         parent_hash: B256,
@@ -494,7 +495,7 @@ mod tests {
         let fb1_txs = vec![tx_a, tx_b];
         let result = cache.get_resumable_state(100, &fb1_txs);
         assert!(result.is_some());
-        assert_eq!(result.unwrap().5, 1); // 1 tx covered by cache
+        assert_eq!(result.unwrap().2, 1); // 1 tx covered by cache
 
         cache.update(100, fb1_txs, BundleState::default(), vec![]);
         assert_eq!(cache.len(), 2);

@@ -7,9 +7,9 @@ use reth_rpc_eth_types::block::BlockAndReceipts;
 
 const DEFAULT_CONFIRM_CACHE_SIZE: usize = 5_000;
 
-/// Confirmed flashblocks sequence cache that is ahead of the current
-/// canonical chain. We optimistically commit confirmed flashblocks sequences to
-/// the cache and flush them when the canonical chain catches up.
+/// Confirmed flashblocks sequence cache that is ahead of the current node's canonical
+/// chainstate. We optimistically commit confirmed flashblocks sequences to the cache
+/// and flush them when the canonical chainstate catches up.
 ///
 /// Block data is stored in a `BTreeMap` keyed by block number, enabling O(log n)
 /// range splits in [`flush_up_to`](Self::flush_up_to). A secondary `HashMap`
@@ -69,20 +69,24 @@ impl<N: NodePrimitives> ConfirmCache<N> {
         Ok(())
     }
 
-    /// Returns the confirmed block for the given block hash, if present.
-    pub fn get_by_hash(&self, block_hash: &B256) -> Option<BlockAndReceipts<N>> {
-        let number = self.hash_to_number.get(block_hash)?;
-        self.blocks.get(number).map(|(_, block)| block.clone())
-    }
-
-    /// Returns the confirmed block for the given block number, if present.
-    pub fn get_by_number(&self, block_number: u64) -> Option<BlockAndReceipts<N>> {
-        self.blocks.get(&block_number).map(|(_, block)| block.clone())
+    /// Returns the block number for the given block hash, if cached.
+    pub fn number_for_hash(&self, block_hash: &B256) -> Option<u64> {
+        self.hash_to_number.get(block_hash).copied()
     }
 
     /// Returns the block hash for the given block number, if cached.
     pub fn hash_for_number(&self, block_number: u64) -> Option<B256> {
         self.blocks.get(&block_number).map(|(hash, _)| *hash)
+    }
+
+    /// Returns the confirmed block for the given block hash, if present.
+    pub fn get_block_by_hash(&self, block_hash: &B256) -> Option<BlockAndReceipts<N>> {
+        self.get_block_by_number(self.number_for_hash(block_hash)?)
+    }
+
+    /// Returns the confirmed block for the given block number, if present.
+    pub fn get_block_by_number(&self, block_number: u64) -> Option<BlockAndReceipts<N>> {
+        self.blocks.get(&block_number).map(|(_, block)| block.clone())
     }
 
     /// Returns `true` if the cache contains a block with the given hash.
@@ -132,11 +136,6 @@ impl<N: NodePrimitives> ConfirmCache<N> {
             self.hash_to_number.remove(&hash);
         }
         count
-    }
-
-    /// Returns the highest cached block number, or `None` if empty.
-    pub fn latest_block_number(&self) -> Option<u64> {
-        self.blocks.keys().next_back().copied()
     }
 
     /// Clears all entries.

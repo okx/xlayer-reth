@@ -1,11 +1,22 @@
-use crate::cache::{confirm::ConfirmCache, pending::PendingSequence};
+mod block;
+mod factory;
+mod header;
+mod id;
+mod receipt;
+mod transaction;
+pub(crate) mod utils;
+
+use crate::cache::{ConfirmCache, PendingSequence};
 use parking_lot::RwLock;
 use std::sync::Arc;
+use utils::StateCacheProvider;
 
 use alloy_consensus::BlockHeader;
-use alloy_primitives::B256;
+use alloy_primitives::{BlockNumber, B256};
+use core::ops::RangeBounds;
 use reth_primitives_traits::NodePrimitives;
 use reth_rpc_eth_types::block::BlockAndReceipts;
+use reth_storage_api::{errors::provider::ProviderResult, BlockNumReader};
 
 /// Top-level controller state cache for the flashblocks RPC layer.
 ///
@@ -15,18 +26,39 @@ use reth_rpc_eth_types::block::BlockAndReceipts;
 /// - **Confirmed**: completed flashblock sequences that have been committed but
 ///   are still ahead of the canonical chain.
 ///
+/// Implements all reth provider traits using the flashblocks state cache layer
+/// as an overlay on top of the underlying chainstate `Provider`.
+/// (`BlockReaderIdExt`, `StateProviderFactory`, etc.)
+///
+/// **Lookup strategy:**
+/// - **Confirmed state** (by hash/number): Check the flashblocks state cache
+///   layer first, then fall back to the chainstate provider.
+/// - **Latest**: Compare the flashblocks state cache's highest height vs the
+///   chainstate provider's best height. Return whichever is higher, on tie we
+///   prefer the chainstate provider.
+/// - **Pending**: Returns the pending state from the flashblocks state cache.
+/// - **All other IDs** (safe, finalized, historical, index-based): delegate
+///   directly to the chainstate provider.
+///
 /// Uses `Arc<RwLock>` for thread safety — a single lock protects all inner
 /// state, ensuring atomic operations across pending, confirmed, and height
 /// state (e.g. reorg detection + flush + insert in `handle_confirmed_block`).
 #[derive(Debug, Clone)]
-pub struct StateCache<N: NodePrimitives> {
+pub struct StateCache<N: NodePrimitives, Provider> {
     inner: Arc<RwLock<StateCacheInner<N>>>,
+    provider: Provider,
 }
 
-impl<N: NodePrimitives> StateCache<N> {
+impl<N: NodePrimitives, Provider: StateCacheProvider<N>> StateCache<N, Provider> {
     /// Creates a new [`StateCache`].
-    pub fn new(canon_height: u64) -> Self {
-        Self { inner: Arc::new(RwLock::new(StateCacheInner::new(canon_height))) }
+    pub fn new(provider: Provider) -> eyre::Result<Self> {
+        let canon_height = provider.best_block_number()?;
+        Ok(Self { inner: Arc::new(RwLock::new(StateCacheInner::new(canon_height))), provider })
+    }
+
+    /// Returns a reference to the underlying chainstate provider.
+    pub const fn provider(&self) -> &Provider {
+        &self.provider
     }
 
     /// Handles a newly confirmed block by detecting reorgs, flushing invalidated
@@ -58,6 +90,26 @@ impl<N: NodePrimitives> StateCache<N> {
     /// Returns the current pending height, if any flashblocks have been executed.
     pub fn get_pending_height(&self) -> Option<u64> {
         self.inner.read().pending.as_ref().map(|p| p.pending.block().number())
+    }
+
+    /// Resolves an `impl RangeBounds<BlockNumber>` into an inclusive `(start, end)` pair.
+    /// Matches reth's blockchain provider's convert_range_bounds semantics, and unbounded
+    /// ends are resolved to `best_block_number`.
+    fn resolve_range_bounds(
+        &self,
+        range: impl RangeBounds<BlockNumber>,
+    ) -> ProviderResult<(BlockNumber, BlockNumber)> {
+        let start = match range.start_bound() {
+            core::ops::Bound::Included(&n) => n,
+            core::ops::Bound::Excluded(&n) => n + 1,
+            core::ops::Bound::Unbounded => 0,
+        };
+        let end = match range.end_bound() {
+            core::ops::Bound::Included(&n) => n,
+            core::ops::Bound::Excluded(&n) => n - 1,
+            core::ops::Bound::Unbounded => self.best_block_number()?,
+        };
+        Ok((start, end))
     }
 }
 
@@ -91,22 +143,24 @@ impl<N: NodePrimitives> StateCacheInner<N> {
         block_hash: B256,
         block: BlockAndReceipts<N>,
     ) -> eyre::Result<()> {
+        // Validation checks
         if let Some(confirm_height) = self.confirm_height {
-            // Reorg detection: incoming block is at or behind the last confirmed height.
             if block_number <= confirm_height {
-                self.confirm_cache.flush_from(block_number);
+                // Reorg detected - confirm cache is polluted
+                return Err(eyre::eyre!(
+                    "polluted state cache - trying to commit lower confirm height block"
+                ));
+            }
+            if block_number != confirm_height + 1 {
+                return Err(eyre::eyre!(
+                    "polluted state cache - not next consecutive confirm height block"
+                ));
             }
         }
 
-        self.confirm_cache.insert(block_number, block_hash, block)?;
-
-        // Sanity check: the inserted block must now be the highest in the cache
+        // Commit new confirmed block to state cache
         self.confirm_height = Some(block_number);
-        if self.confirm_height != self.confirm_cache.latest_block_number() {
-            return Err(eyre::eyre!(
-                "confirmed cache latest height mismatch inserted block height: {block_number}"
-            ));
-        }
+        self.confirm_cache.insert(block_number, block_hash, block)?;
         Ok(())
     }
 
@@ -117,7 +171,7 @@ impl<N: NodePrimitives> StateCacheInner<N> {
     fn handle_canonical_block(&mut self, block_number: u64, block_hash: B256) {
         self.canon_height = block_number;
         self.confirm_cache.flush_up_to(block_number);
-        if self.pending.as_ref().map(|p| p.block_hash) == Some(block_hash) {
+        if self.pending.as_ref().and_then(|p| p.block_hash) == Some(block_hash) {
             self.pending = None;
         }
     }
