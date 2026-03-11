@@ -56,8 +56,18 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> HeaderProvider
     fn sealed_headers_while(
         &self,
         range: impl RangeBounds<BlockNumber>,
-        predicate: impl FnMut(&SealedHeader<Self::Header>) -> bool,
+        mut predicate: impl FnMut(&SealedHeader<Self::Header>) -> bool,
     ) -> ProviderResult<Vec<SealedHeader<Self::Header>>> {
-        self.provider.sealed_headers_while(range, predicate)
+        let (start, end) = self.resolve_range_bounds(range)?;
+        if start > end {
+            return Ok(Vec::new());
+        }
+        self.collect_cached_block_range_while(
+            start,
+            end,
+            |bar| bar.block.sealed_header().clone(),
+            |r, pred| self.provider.sealed_headers_while(r, pred),
+            &mut predicate,
+        )
     }
 }

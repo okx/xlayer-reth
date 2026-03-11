@@ -127,6 +127,73 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> FlashblockStateCache<N,
         Ok(result)
     }
 
+    /// Collects items from an inclusive block number range `[start..=end]` while
+    /// a predicate holds, using the confirm cache as an overlay on top of the provider.
+    ///
+    /// Same overlay strategy as [`collect_cached_block_range`](Self::collect_cached_block_range):
+    /// walks backward from `end` to find the consecutive cache tail, delegates the
+    /// provider prefix with the predicate, then continues through cached items.
+    /// Stops as soon as the predicate returns `false`.
+    pub(super) fn collect_cached_block_range_while<T>(
+        &self,
+        start: BlockNumber,
+        end: BlockNumber,
+        from_cache: impl Fn(&BlockAndReceipts<N>) -> T,
+        from_provider: impl FnOnce(
+            core::ops::RangeInclusive<BlockNumber>,
+            &mut dyn FnMut(&T) -> bool,
+        ) -> ProviderResult<Vec<T>>,
+        predicate: &mut dyn FnMut(&T) -> bool,
+    ) -> ProviderResult<Vec<T>> {
+        let inner = self.inner.read();
+        let mut cached_bars = Vec::new();
+        let mut provider_end = end;
+        let mut index = end;
+        loop {
+            if let Some(bar) = inner.confirm_cache.get_block_by_number(index) {
+                cached_bars.push(bar);
+                provider_end = index.saturating_sub(1);
+            } else {
+                break;
+            }
+            if index == start {
+                break;
+            }
+            index -= 1;
+        }
+        cached_bars.reverse();
+        drop(inner);
+
+        // Delegate the provider prefix (if any) with the predicate
+        let has_provider_range =
+            provider_end >= start && cached_bars.len() < (end - start + 1) as usize;
+        let mut predicate_stopped = false;
+        let mut result = if has_provider_range {
+            let items = from_provider(start..=provider_end, predicate)?;
+            // If the provider returned fewer items than the full range, the predicate stopped
+            let expected = (provider_end - start + 1) as usize;
+            if items.len() < expected {
+                predicate_stopped = true;
+            }
+            items
+        } else {
+            Vec::new()
+        };
+
+        // Continue with cached items while predicate holds
+        if !predicate_stopped {
+            for bar in &cached_bars {
+                let item = from_cache(bar);
+                if !predicate(&item) {
+                    break;
+                }
+                result.push(item);
+            }
+        }
+
+        Ok(result)
+    }
+
     /// Resolves an `impl RangeBounds<BlockNumber>` into an inclusive `(start, end)` pair.
     /// Matches reth's blockchain provider's convert_range_bounds semantics, and unbounded
     /// ends are resolved to `best_block_number`.
