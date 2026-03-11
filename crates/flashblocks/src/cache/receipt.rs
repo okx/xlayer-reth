@@ -16,7 +16,7 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> ReceiptProvider
     }
 
     fn receipt_by_hash(&self, hash: TxHash) -> ProviderResult<Option<Self::Receipt>> {
-        if let Some(info) = self.inner.read().confirm_cache.get_tx_info(&hash) {
+        if let Some(info) = self.inner.read().get_tx_info(&hash) {
             return Ok(Some(info.receipt.clone()));
         }
         self.provider.receipt_by_hash(hash)

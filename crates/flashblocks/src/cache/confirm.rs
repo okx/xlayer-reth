@@ -1,31 +1,13 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-};
+use crate::cache::CachedTxInfo;
+use std::collections::{BTreeMap, HashMap};
 
 use alloy_consensus::transaction::TxHashRef;
 use alloy_primitives::{TxHash, B256};
 use eyre::eyre;
-use reth_primitives_traits::{BlockBody, NodePrimitives, ReceiptTy};
+use reth_primitives_traits::{BlockBody, NodePrimitives};
 use reth_rpc_eth_types::block::BlockAndReceipts;
 
 const DEFAULT_CONFIRM_CACHE_SIZE: usize = 1_000;
-
-/// Cached transaction info (block context, receipt and tx data) for O(1) lookups
-/// by transaction hash.
-#[derive(Debug, Clone)]
-pub struct CachedTxInfo<N: NodePrimitives> {
-    /// Block number containing the transaction.
-    pub block_number: u64,
-    /// Block hash containing the transaction.
-    pub block_hash: B256,
-    /// Index of the transaction within the block.
-    pub tx_index: u64,
-    /// The signed transaction.
-    pub tx: N::SignedTx,
-    /// The corresponding receipt.
-    pub receipt: ReceiptTy<N>,
-}
 
 /// Confirmed flashblocks sequence cache that is ahead of the current node's canonical
 /// chainstate. We optimistically commit confirmed flashblocks sequences to the cache
@@ -45,7 +27,7 @@ pub struct ConfirmCache<N: NodePrimitives> {
     /// Reverse index: block hash → block number for O(1) hash-based lookups.
     hash_to_number: HashMap<B256, u64>,
     /// Transaction index: tx hash → cached tx info for O(1) tx/receipt lookups.
-    tx_index: HashMap<TxHash, Arc<CachedTxInfo<N>>>,
+    tx_index: HashMap<TxHash, CachedTxInfo<N>>,
 }
 
 impl<N: NodePrimitives> Default for ConfirmCache<N> {
@@ -95,14 +77,16 @@ impl<N: NodePrimitives> ConfirmCache<N> {
         let receipts = block.receipts.as_ref();
         for (idx, (tx, receipt)) in txs.iter().zip(receipts.iter()).enumerate() {
             let tx_hash = *tx.tx_hash();
-            let info = Arc::new(CachedTxInfo {
-                block_number: height,
-                block_hash: hash,
-                tx_index: idx as u64,
-                tx: tx.clone(),
-                receipt: receipt.clone(),
-            });
-            self.tx_index.insert(tx_hash, info);
+            self.tx_index.insert(
+                tx_hash,
+                CachedTxInfo {
+                    block_number: height,
+                    block_hash: hash,
+                    tx_index: idx as u64,
+                    tx: tx.clone(),
+                    receipt: receipt.clone(),
+                },
+            );
         }
 
         // Build block index entries for block data
@@ -139,7 +123,7 @@ impl<N: NodePrimitives> ConfirmCache<N> {
     }
 
     /// Returns the cached transaction info for the given tx hash, if present.
-    pub fn get_tx_info(&self, tx_hash: &TxHash) -> Option<Arc<CachedTxInfo<N>>> {
+    pub fn get_tx_info(&self, tx_hash: &TxHash) -> Option<CachedTxInfo<N>> {
         self.tx_index.get(tx_hash).cloned()
     }
 

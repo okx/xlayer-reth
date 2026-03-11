@@ -1,7 +1,9 @@
+use crate::cache::CachedTxInfo;
 use derive_more::Deref;
+use std::collections::HashMap;
 
 use alloy_consensus::BlockHeader;
-use alloy_primitives::B256;
+use alloy_primitives::{TxHash, B256};
 use reth_primitives_traits::NodePrimitives;
 use reth_revm::cached::CachedReads;
 use reth_rpc_eth_types::PendingBlock;
@@ -13,6 +15,8 @@ pub struct PendingSequence<N: NodePrimitives> {
     /// Locally built full pending block of the latest flashblocks sequence.
     #[deref]
     pub pending: PendingBlock<N>,
+    /// Transaction index: tx hash → cached tx info for O(1) tx/receipt lookups.
+    tx_index: HashMap<TxHash, CachedTxInfo<N>>,
     /// Cached reads from execution for reuse.
     pub cached_reads: CachedReads,
     /// Parent hash of the built block (may be non-canonical or canonical).
@@ -30,12 +34,14 @@ impl<N: NodePrimitives> PendingSequence<N> {
     /// Create new pending flashblock.
     pub const fn new(
         pending: PendingBlock<N>,
+        tx_index: HashMap<TxHash, CachedTxInfo<N>>,
         cached_reads: CachedReads,
         parent_hash: B256,
         last_flashblock_index: u64,
     ) -> Self {
         Self {
             pending,
+            tx_index,
             cached_reads,
             parent_hash,
             last_flashblock_index,
@@ -54,6 +60,12 @@ impl<N: NodePrimitives> PendingSequence<N> {
         self.pending = pending;
         self.block_hash = Some(self.pending.block().hash());
         self.has_computed_state_root = true;
+    }
+
+    /// Returns the cached transaction info for the given tx hash, if present
+    /// in the pending sequence.
+    pub fn get_tx_info(&self, tx_hash: &TxHash) -> Option<CachedTxInfo<N>> {
+        self.tx_index.get(tx_hash).cloned()
     }
 }
 

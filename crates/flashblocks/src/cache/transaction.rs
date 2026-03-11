@@ -28,7 +28,7 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> TransactionsProvider
     }
 
     fn transaction_by_hash(&self, hash: TxHash) -> ProviderResult<Option<Self::Transaction>> {
-        if let Some(info) = self.inner.read().confirm_cache.get_tx_info(&hash) {
+        if let Some(info) = self.inner.read().get_tx_info(&hash) {
             return Ok(Some(info.tx.clone()));
         }
         self.provider.transaction_by_hash(hash)
@@ -39,13 +39,20 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> TransactionsProvider
         hash: TxHash,
     ) -> ProviderResult<Option<(Self::Transaction, TransactionMeta)>> {
         let inner = self.inner.read();
-        if let Some(info) = inner.confirm_cache.get_tx_info(&hash) {
-            // Resolve block header fields from the confirm cache
-            let bar = inner.confirm_cache.get_block_by_number(info.block_number);
-            let (base_fee, excess_blob_gas, timestamp) = bar
+        if let Some(info) = inner.get_tx_info(&hash) {
+            // Resolve block header fields: try confirm cache first, then pending block
+            let (base_fee, excess_blob_gas, timestamp) = inner
+                .confirm_cache
+                .get_block_by_number(info.block_number)
                 .map(|b| {
                     let h = b.block.header();
                     (h.base_fee_per_gas(), h.excess_blob_gas(), h.timestamp())
+                })
+                .or_else(|| {
+                    inner.pending.as_ref().map(|p| {
+                        let h = p.pending.block().header();
+                        (h.base_fee_per_gas(), h.excess_blob_gas(), h.timestamp())
+                    })
                 })
                 .unwrap_or_default();
 
