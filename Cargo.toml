@@ -19,7 +19,7 @@ members = [
     "crates/legacy-rpc",
     "crates/monitor",
     "crates/rpc",
-    "crates/tests",
+#    "crates/tests",
     "crates/version",
 
     "bin/tools",
