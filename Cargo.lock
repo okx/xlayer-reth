@@ -14410,12 +14410,23 @@ dependencies = [
 name = "xlayer-rpc"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-primitives",
+ "alloy-rpc-types-eth",
+ "async-trait",
  "jsonrpsee",
+ "op-alloy-network",
+ "reth-optimism-primitives",
  "reth-optimism-rpc",
+ "reth-primitives-traits",
  "reth-rpc",
+ "reth-rpc-convert",
  "reth-rpc-eth-api",
- "serde",
+ "reth-rpc-eth-types",
  "tokio",
+ "tracing",
+ "xlayer-flashblocks",
 ]
 
 [[package]]

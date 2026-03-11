@@ -11,12 +11,12 @@ use either::Either;
 use std::sync::Arc;
 use tracing::info;
 
-use op_alloy_network::Optimism;
 use reth::rpc::eth::EthApiTypes;
 use reth::{
     builder::{DebugNodeLauncher, EngineNodeLauncher, Node, NodeHandle, TreeConfig},
     providers::providers::BlockchainProvider,
 };
+use reth::providers::BlockNumReader;
 use reth_node_api::FullNodeComponents;
 use reth_optimism_cli::Cli;
 use reth_optimism_node::{args::RollupArgs, OpNode};
@@ -26,7 +26,10 @@ use xlayer_chainspec::XLayerChainSpecParser;
 use xlayer_flashblocks::{handle::FlashblocksService, subscription::FlashblocksPubSub};
 use xlayer_legacy_rpc::{layer::LegacyRpcRouterLayer, LegacyRpcRouterConfig};
 use xlayer_monitor::{start_monitor_handle, RpcMonitorLayer, XLayerMonitor};
-use xlayer_rpc::xlayer_ext::{XlayerRpcExt, XlayerRpcExtApiServer};
+use xlayer_flashblocks::cache::FlashblockStateCache;
+use xlayer_rpc::{
+    EthApiOverrideServer, XLayerEthApiExt, XlayerRpcExt, XlayerRpcExtApiServer,
+};
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
@@ -156,9 +159,33 @@ fn main() {
                         }
                     }
 
-                    // Register X Layer RPC
-                    let xlayer_rpc = XlayerRpcExt { backend: new_op_eth_api };
-                    ctx.modules.merge_configured(XlayerRpcExtApiServer::<Optimism>::into_rpc(
+                    // Create flashblocks state cache if flashblocks URL is configured.
+                    // Shared between the Eth API override and the ext RPC.
+                    let flash_cache = if args.rollup_args.flashblocks_url.is_some() {
+                        let canon_height = ctx.node().provider().best_block_number()?;
+                        Some(FlashblockStateCache::new(canon_height))
+                    } else {
+                        None
+                    };
+
+                    // Register flashblocks Eth API override (replaces subset of eth_ methods)
+                    if let Some(ref cache) = flash_cache {
+                        let eth_filter = ctx.registry.eth_handlers().filter.clone();
+                        let eth_override = XLayerEthApiExt::new(
+                            ctx.registry.eth_api().clone(),
+                            eth_filter,
+                            cache.clone(),
+                        );
+                        ctx.modules.add_or_replace_if_module_configured(
+                            RethRpcModule::Eth,
+                            EthApiOverrideServer::into_rpc(eth_override),
+                        )?;
+                        info!(target: "reth::cli", "xlayer flashblocks eth api override enabled");
+                    }
+
+                    // Register X Layer RPC (eth_flashblocksEnabled) — always active
+                    let xlayer_rpc = XlayerRpcExt::new(flash_cache);
+                    ctx.modules.merge_configured(XlayerRpcExtApiServer::into_rpc(
                         xlayer_rpc,
                     ))?;
                     info!(target: "reth::cli", "xlayer rpc extension enabled");

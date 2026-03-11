@@ -60,12 +60,7 @@ impl<N: NodePrimitives> ConfirmCache<N> {
     /// before inserting if a reorg is detected.
     ///
     /// Returns an error if the cache is at max capacity.
-    pub fn insert(
-        &mut self,
-        height: u64,
-        hash: B256,
-        block: BlockAndReceipts<N>,
-    ) -> eyre::Result<()> {
+    pub fn insert(&mut self, height: u64, block: BlockAndReceipts<N>) -> eyre::Result<()> {
         if self.blocks.len() >= DEFAULT_CONFIRM_CACHE_SIZE {
             return Err(eyre!(
                 "confirm cache at max capacity ({DEFAULT_CONFIRM_CACHE_SIZE}), cannot insert block: {height}"
@@ -73,6 +68,7 @@ impl<N: NodePrimitives> ConfirmCache<N> {
         }
 
         // Build tx index entries for all transactions in this block
+        let hash = block.block.hash();
         let txs = block.block.body().transactions();
         let receipts = block.receipts.as_ref();
         for (idx, (tx, receipt)) in txs.iter().zip(receipts.iter()).enumerate() {
@@ -158,18 +154,6 @@ impl<N: NodePrimitives> ConfirmCache<N> {
         for tx in bar.block.body().transactions() {
             self.tx_index.remove(&*tx.tx_hash());
         }
-    }
-
-    /// Flushes all entries with block number >= `from` (the reorged range).
-    /// Returns the number of entries flushed.
-    pub fn flush_from(&mut self, from: u64) -> usize {
-        let reorged = self.blocks.split_off(&from);
-        let count = reorged.len();
-        for (hash, bar) in reorged.into_values() {
-            self.hash_to_number.remove(&hash);
-            self.remove_tx_index_for_block(&bar);
-        }
-        count
     }
 
     /// Flushes all entries with block number <= `canonical_number`.

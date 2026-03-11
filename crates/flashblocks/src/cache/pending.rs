@@ -6,7 +6,7 @@ use alloy_consensus::BlockHeader;
 use alloy_primitives::{TxHash, B256};
 use reth_primitives_traits::NodePrimitives;
 use reth_revm::cached::CachedReads;
-use reth_rpc_eth_types::PendingBlock;
+use reth_rpc_eth_types::{block::BlockAndReceipts, PendingBlock};
 
 /// The pending flashblocks sequence built with all received OpFlashblockPayload
 /// alongside the metadata for the last added flashblock.
@@ -60,6 +60,14 @@ impl<N: NodePrimitives> PendingSequence<N> {
         self.pending = pending;
         self.block_hash = Some(self.pending.block().hash());
         self.has_computed_state_root = true;
+    }
+
+    pub fn get_height(&self) -> u64 {
+        self.pending.block().number()
+    }
+
+    pub fn get_block(&self) -> BlockAndReceipts<N> {
+        self.pending.to_block_and_receipts()
     }
 
     /// Returns the cached transaction info for the given tx hash, if present
