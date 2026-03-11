@@ -1,4 +1,4 @@
-use super::{utils::StateCacheProvider, StateCache};
+use crate::cache::{FlashblockStateCache, StateCacheProvider};
 
 use alloy_eips::BlockHashOrNumber;
 use alloy_primitives::{Address, BlockNumber, TxHash, TxNumber};
@@ -7,7 +7,7 @@ use reth_primitives_traits::{BlockBody, NodePrimitives, TransactionMeta};
 use reth_storage_api::{errors::provider::ProviderResult, TransactionsProvider};
 
 impl<N: NodePrimitives, Provider: StateCacheProvider<N>> TransactionsProvider
-    for StateCache<N, Provider>
+    for FlashblockStateCache<N, Provider>
 {
     type Transaction = N::SignedTx;
 

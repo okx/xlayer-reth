@@ -1,4 +1,4 @@
-use super::{utils::StateCacheProvider, StateCache};
+use crate::cache::{FlashblockStateCache, StateCacheProvider};
 
 use alloy_eips::BlockHashOrNumber;
 use alloy_primitives::{BlockNumber, TxHash, TxNumber};
@@ -7,7 +7,7 @@ use reth_primitives_traits::{NodePrimitives, ReceiptTy};
 use reth_storage_api::{errors::provider::ProviderResult, ReceiptProvider, ReceiptProviderIdExt};
 
 impl<N: NodePrimitives, Provider: StateCacheProvider<N>> ReceiptProvider
-    for StateCache<N, Provider>
+    for FlashblockStateCache<N, Provider>
 {
     type Receipt = ReceiptTy<N>;
 
@@ -58,6 +58,6 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> ReceiptProvider
 }
 
 impl<N: NodePrimitives, Provider: StateCacheProvider<N>> ReceiptProviderIdExt
-    for StateCache<N, Provider>
+    for FlashblockStateCache<N, Provider>
 {
 }

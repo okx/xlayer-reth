@@ -1,19 +1,10 @@
-mod block;
-mod factory;
-mod header;
-mod id;
-mod receipt;
-mod transaction;
-pub(crate) mod utils;
-
-use crate::cache::{ConfirmCache, PendingSequence};
+use crate::cache::{ConfirmCache, PendingSequence, StateCacheProvider};
+use core::ops::RangeBounds;
 use parking_lot::RwLock;
 use std::sync::Arc;
-use utils::StateCacheProvider;
 
 use alloy_consensus::BlockHeader;
 use alloy_primitives::{BlockNumber, B256};
-use core::ops::RangeBounds;
 use reth_primitives_traits::NodePrimitives;
 use reth_rpc_eth_types::block::BlockAndReceipts;
 use reth_storage_api::{errors::provider::ProviderResult, BlockNumReader};
@@ -44,16 +35,19 @@ use reth_storage_api::{errors::provider::ProviderResult, BlockNumReader};
 /// state, ensuring atomic operations across pending, confirmed, and height
 /// state (e.g. reorg detection + flush + insert in `handle_confirmed_block`).
 #[derive(Debug, Clone)]
-pub struct StateCache<N: NodePrimitives, Provider> {
-    inner: Arc<RwLock<StateCacheInner<N>>>,
-    provider: Provider,
+pub struct FlashblockStateCache<N: NodePrimitives, Provider> {
+    pub(super) inner: Arc<RwLock<FlashblockStateCacheInner<N>>>,
+    pub(super) provider: Provider,
 }
 
-impl<N: NodePrimitives, Provider: StateCacheProvider<N>> StateCache<N, Provider> {
-    /// Creates a new [`StateCache`].
+impl<N: NodePrimitives, Provider: StateCacheProvider<N>> FlashblockStateCache<N, Provider> {
+    /// Creates a new [`FlashblockStateCache`].
     pub fn new(provider: Provider) -> eyre::Result<Self> {
         let canon_height = provider.best_block_number()?;
-        Ok(Self { inner: Arc::new(RwLock::new(StateCacheInner::new(canon_height))), provider })
+        Ok(Self {
+            inner: Arc::new(RwLock::new(FlashblockStateCacheInner::new(canon_height))),
+            provider,
+        })
     }
 
     /// Returns a reference to the underlying chainstate provider.
@@ -97,7 +91,7 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> StateCache<N, Provider>
     ///
     /// Walks backward from `end`, collecting consecutive cache hits via `from_cache`.
     /// Delegates the remaining prefix `[start..=provider_end]` to `from_provider`.
-    fn collect_cached_block_range<T>(
+    pub(super) fn collect_cached_block_range<T>(
         &self,
         start: BlockNumber,
         end: BlockNumber,
@@ -136,7 +130,7 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> StateCache<N, Provider>
     /// Resolves an `impl RangeBounds<BlockNumber>` into an inclusive `(start, end)` pair.
     /// Matches reth's blockchain provider's convert_range_bounds semantics, and unbounded
     /// ends are resolved to `best_block_number`.
-    fn resolve_range_bounds(
+    pub(super) fn resolve_range_bounds(
         &self,
         range: impl RangeBounds<BlockNumber>,
     ) -> ProviderResult<(BlockNumber, BlockNumber)> {
@@ -156,18 +150,18 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> StateCache<N, Provider>
 
 /// Inner state of the flashblocks state cache.
 #[derive(Debug)]
-struct StateCacheInner<N: NodePrimitives> {
+pub(super) struct FlashblockStateCacheInner<N: NodePrimitives> {
     /// The current in-progress pending flashblock sequence, if any.
-    pending: Option<PendingSequence<N>>,
+    pub(super) pending: Option<PendingSequence<N>>,
     /// Cache of confirmed flashblock sequences ahead of the canonical chain.
-    confirm_cache: ConfirmCache<N>,
+    pub(super) confirm_cache: ConfirmCache<N>,
     /// The highest confirmed block height.
-    confirm_height: Option<u64>,
+    pub(super) confirm_height: Option<u64>,
     /// The highest canonical block height.
-    canon_height: u64,
+    pub(super) canon_height: u64,
 }
 
-impl<N: NodePrimitives> StateCacheInner<N> {
+impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
     fn new(canon_height: u64) -> Self {
         Self {
             pending: None,

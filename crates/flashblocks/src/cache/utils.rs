@@ -2,7 +2,7 @@ use reth_primitives_traits::{Block, BlockTy, HeaderTy, NodePrimitives, ReceiptTy
 use reth_rpc_eth_types::block::BlockAndReceipts;
 use reth_storage_api::{BlockReaderIdExt, StateProviderFactory};
 
-/// Provider trait bound alias used throughout the `StateCache` implementation.
+/// Provider trait bound alias used throughout the `FlashblockStateCache` implementation.
 ///
 /// The provider must implement the full reth block reader + state provider stack.
 pub(crate) trait StateCacheProvider<N: NodePrimitives>:

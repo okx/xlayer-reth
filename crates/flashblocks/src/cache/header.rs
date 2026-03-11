@@ -1,4 +1,4 @@
-use super::{utils::StateCacheProvider, StateCache};
+use crate::cache::{FlashblockStateCache, StateCacheProvider};
 
 use alloy_primitives::{BlockNumber, B256};
 use core::ops::RangeBounds;
@@ -6,7 +6,7 @@ use reth_primitives_traits::{HeaderTy, NodePrimitives, SealedHeader};
 use reth_storage_api::{errors::provider::ProviderResult, HeaderProvider};
 
 impl<N: NodePrimitives, Provider: StateCacheProvider<N>> HeaderProvider
-    for StateCache<N, Provider>
+    for FlashblockStateCache<N, Provider>
 {
     type Header = HeaderTy<N>;
 

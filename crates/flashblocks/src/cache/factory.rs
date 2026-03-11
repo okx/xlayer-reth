@@ -1,4 +1,4 @@
-use super::{utils::StateCacheProvider, StateCache};
+use crate::cache::{FlashblockStateCache, StateCacheProvider};
 
 use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::{BlockNumber, B256};
@@ -6,7 +6,7 @@ use reth_primitives_traits::NodePrimitives;
 use reth_storage_api::{errors::provider::ProviderResult, StateProviderBox, StateProviderFactory};
 
 impl<N: NodePrimitives, Provider: StateCacheProvider<N>> StateProviderFactory
-    for StateCache<N, Provider>
+    for FlashblockStateCache<N, Provider>
 {
     fn latest(&self) -> ProviderResult<StateProviderBox> {
         // Determine effective latest: if confirm cache is strictly ahead of the

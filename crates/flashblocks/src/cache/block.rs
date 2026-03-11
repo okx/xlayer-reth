@@ -1,7 +1,4 @@
-use super::{
-    utils::{block_from_bar, StateCacheProvider},
-    StateCache,
-};
+use crate::cache::{block_from_bar, FlashblockStateCache, StateCacheProvider};
 
 use alloy_eips::{BlockHashOrNumber, BlockId};
 use alloy_primitives::{BlockNumber, TxNumber, B256};
@@ -13,7 +10,9 @@ use reth_storage_api::{
     BlockSource, HeaderProvider, TransactionVariant,
 };
 
-impl<N: NodePrimitives, Provider: StateCacheProvider<N>> BlockReader for StateCache<N, Provider> {
+impl<N: NodePrimitives, Provider: StateCacheProvider<N>> BlockReader
+    for FlashblockStateCache<N, Provider>
+{
     type Block = BlockTy<N>;
 
     fn find_block_by_hash(
@@ -132,7 +131,7 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> BlockReader for StateCa
 }
 
 impl<N: NodePrimitives, Provider: StateCacheProvider<N>> BlockReaderIdExt
-    for StateCache<N, Provider>
+    for FlashblockStateCache<N, Provider>
 {
     fn block_by_id(&self, id: BlockId) -> ProviderResult<Option<Self::Block>> {
         match id {
@@ -160,7 +159,7 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> BlockReaderIdExt
 }
 
 impl<N: NodePrimitives, Provider: StateCacheProvider<N>> BlockBodyIndicesProvider
-    for StateCache<N, Provider>
+    for FlashblockStateCache<N, Provider>
 {
     fn block_body_indices(&self, num: u64) -> ProviderResult<Option<StoredBlockBodyIndices>> {
         self.provider.block_body_indices(num)

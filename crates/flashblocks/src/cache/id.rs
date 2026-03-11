@@ -1,4 +1,4 @@
-use super::{utils::StateCacheProvider, StateCache};
+use crate::cache::{FlashblockStateCache, StateCacheProvider};
 
 use alloy_consensus::BlockHeader;
 use alloy_eips::BlockNumHash;
@@ -10,7 +10,7 @@ use reth_storage_api::{
 };
 
 impl<N: NodePrimitives, Provider: StateCacheProvider<N>> BlockHashReader
-    for StateCache<N, Provider>
+    for FlashblockStateCache<N, Provider>
 {
     fn block_hash(&self, number: BlockNumber) -> ProviderResult<Option<B256>> {
         if let Some(hash) = self.inner.read().confirm_cache.hash_for_number(number) {
@@ -44,7 +44,7 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> BlockHashReader
 }
 
 impl<N: NodePrimitives, Provider: StateCacheProvider<N>> BlockNumReader
-    for StateCache<N, Provider>
+    for FlashblockStateCache<N, Provider>
 {
     fn chain_info(&self) -> ProviderResult<ChainInfo> {
         let mut info = self.provider.chain_info()?;
@@ -78,7 +78,9 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> BlockNumReader
     }
 }
 
-impl<N: NodePrimitives, Provider: StateCacheProvider<N>> BlockIdReader for StateCache<N, Provider> {
+impl<N: NodePrimitives, Provider: StateCacheProvider<N>> BlockIdReader
+    for FlashblockStateCache<N, Provider>
+{
     fn pending_block_num_hash(&self) -> ProviderResult<Option<BlockNumHash>> {
         let inner = self.inner.read();
         if let Some(pending) = &inner.pending {

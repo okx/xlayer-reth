@@ -1,5 +1,5 @@
 use crate::{
-    cache::{PendingSequence, StateCache},
+    cache::{FlashblockStateCache, PendingSequence},
     execution::{CachedExecutionMeta, TransactionCache},
 };
 use std::{
@@ -57,11 +57,14 @@ pub(crate) struct FlashblocksValidator<N: NodePrimitives, EvmConfig, Provider> {
     tx_cache: TransactionCache<N>,
     /// The state cache containing the canonical chainstate provider and the flashblocks
     /// state cache layer.
-    state_cache: StateCache<N, Provider>,
+    state_cache: FlashblockStateCache<N, Provider>,
 }
 
 impl<N: NodePrimitives, EvmConfig, Provider> FlashblocksValidator<N, EvmConfig, Provider> {
-    pub(crate) fn new(evm_config: EvmConfig, state_cache: StateCache<N, Provider>) -> Self {
+    pub(crate) fn new(
+        evm_config: EvmConfig,
+        state_cache: FlashblockStateCache<N, Provider>,
+    ) -> Self {
         Self { evm_config, state_cache, tx_cache: TransactionCache::new() }
     }
 
