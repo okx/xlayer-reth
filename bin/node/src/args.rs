@@ -37,28 +37,25 @@ pub struct XLayerInterceptArgs {
 
 impl XLayerInterceptArgs {
     /// Convert CLI args into a [`BridgeInterceptConfig`].
+    /// Calls [`validate`] first so all error-checking lives in one place.
     pub fn to_bridge_intercept_config(&self) -> Result<BridgeInterceptConfig, String> {
         use alloy_primitives::Address;
 
-        let bridge_contract_address = if let Some(addr) = &self.bridge_contract {
-            addr.parse::<Address>().map_err(|e| format!("Invalid bridge contract address: {e}"))?
-        } else if self.enabled {
-            return Err(
-                "--xlayer.intercept.bridge-contract is required when interception is enabled"
-                    .to_string(),
-            );
-        } else {
-            Address::ZERO
-        };
+        self.validate()?;
+
+        // After validation we know: if enabled, bridge_contract is Some and parseable;
+        // target_token (when Some and not "*"/empty) is also parseable.
+        let bridge_contract_address = self
+            .bridge_contract
+            .as_deref()
+            .map(|a| a.parse::<Address>().expect("validated"))
+            .unwrap_or(Address::ZERO);
 
         let (target_token_address, wildcard) = if let Some(token) = &self.target_token {
             if token.is_empty() || token == "*" {
                 (Address::ZERO, true)
             } else {
-                let addr = token
-                    .parse::<Address>()
-                    .map_err(|e| format!("Invalid target token address: {e}"))?;
-                (addr, false)
+                (token.parse::<Address>().expect("validated"), false)
             }
         } else if self.enabled {
             // --xlayer.intercept.target-token not provided: defaulting to wildcard mode,
