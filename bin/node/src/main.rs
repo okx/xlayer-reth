@@ -11,25 +11,23 @@ use either::Either;
 use std::sync::Arc;
 use tracing::info;
 
+use reth::providers::BlockNumReader;
 use reth::rpc::eth::EthApiTypes;
 use reth::{
     builder::{DebugNodeLauncher, EngineNodeLauncher, Node, NodeHandle, TreeConfig},
     providers::providers::BlockchainProvider,
 };
-use reth::providers::BlockNumReader;
 use reth_node_api::FullNodeComponents;
 use reth_optimism_cli::Cli;
 use reth_optimism_node::{args::RollupArgs, OpNode};
 use reth_rpc_server_types::RethRpcModule;
 
 use xlayer_chainspec::XLayerChainSpecParser;
+use xlayer_flashblocks::cache::FlashblockStateCache;
 use xlayer_flashblocks::{handle::FlashblocksService, subscription::FlashblocksPubSub};
 use xlayer_legacy_rpc::{layer::LegacyRpcRouterLayer, LegacyRpcRouterConfig};
 use xlayer_monitor::{start_monitor_handle, RpcMonitorLayer, XLayerMonitor};
-use xlayer_flashblocks::cache::FlashblockStateCache;
-use xlayer_rpc::{
-    EthApiOverrideServer, XLayerEthApiExt, XlayerRpcExt, XlayerRpcExtApiServer,
-};
+use xlayer_rpc::{EthApiOverrideServer, XLayerEthApiExt, XlayerRpcExt, XlayerRpcExtApiServer};
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();

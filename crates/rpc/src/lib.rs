@@ -5,9 +5,7 @@ pub mod eth;
 pub mod xlayer_ext;
 
 pub use eth::{EthApiOverrideServer, XLayerEthApiExt};
-pub use xlayer_ext::{
-    SequencerClientProvider, XlayerRpcExt, XlayerRpcExtApiServer,
-};
+pub use xlayer_ext::{SequencerClientProvider, XlayerRpcExt, XlayerRpcExtApiServer};
 
 // Implement `SequencerClientProvider` for `OpEthApi`
 use reth_optimism_rpc::{OpEthApi, SequencerClient};
