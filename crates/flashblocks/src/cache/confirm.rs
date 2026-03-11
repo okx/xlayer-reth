@@ -1,19 +1,42 @@
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
-use alloy_primitives::B256;
+use alloy_consensus::transaction::TxHashRef;
+use alloy_primitives::{TxHash, B256};
 use eyre::eyre;
-use reth_primitives_traits::NodePrimitives;
+use reth_primitives_traits::{BlockBody, NodePrimitives, ReceiptTy};
 use reth_rpc_eth_types::block::BlockAndReceipts;
 
-const DEFAULT_CONFIRM_CACHE_SIZE: usize = 5_000;
+const DEFAULT_CONFIRM_CACHE_SIZE: usize = 1_000;
+
+/// Cached transaction info (block context, receipt and tx data) for O(1) lookups
+/// by transaction hash.
+#[derive(Debug, Clone)]
+pub struct CachedTxInfo<N: NodePrimitives> {
+    /// Block number containing the transaction.
+    pub block_number: u64,
+    /// Block hash containing the transaction.
+    pub block_hash: B256,
+    /// Index of the transaction within the block.
+    pub tx_index: u64,
+    /// The signed transaction.
+    pub tx: N::SignedTx,
+    /// The corresponding receipt.
+    pub receipt: ReceiptTy<N>,
+}
 
 /// Confirmed flashblocks sequence cache that is ahead of the current node's canonical
 /// chainstate. We optimistically commit confirmed flashblocks sequences to the cache
 /// and flush them when the canonical chainstate catches up.
 ///
 /// Block data is stored in a `BTreeMap` keyed by block number, enabling O(log n)
-/// range splits in [`flush_up_to`](Self::flush_up_to). A secondary `HashMap`
-/// provides O(1) block hash to block number reverse lookups.
+/// range splits in [`flush_up_to`](Self::flush_up_to).
+/// A secondary `HashMap` provides O(1) block hash to block number reverse lookups.
+///
+/// Transaction data is stored in a `HashMap` which indexes transaction hashes to
+/// [`CachedTxInfo`] for O(1) tx/receipt lookups.
 #[derive(Debug)]
 pub struct ConfirmCache<N: NodePrimitives> {
     /// Primary storage: block number → (block hash, block + receipts).
@@ -21,6 +44,8 @@ pub struct ConfirmCache<N: NodePrimitives> {
     blocks: BTreeMap<u64, (B256, BlockAndReceipts<N>)>,
     /// Reverse index: block hash → block number for O(1) hash-based lookups.
     hash_to_number: HashMap<B256, u64>,
+    /// Transaction index: tx hash → cached tx info for O(1) tx/receipt lookups.
+    tx_index: HashMap<TxHash, Arc<CachedTxInfo<N>>>,
 }
 
 impl<N: NodePrimitives> Default for ConfirmCache<N> {
@@ -32,7 +57,7 @@ impl<N: NodePrimitives> Default for ConfirmCache<N> {
 impl<N: NodePrimitives> ConfirmCache<N> {
     /// Creates a new [`ConfirmCache`].
     pub fn new() -> Self {
-        Self { blocks: BTreeMap::new(), hash_to_number: HashMap::new() }
+        Self { blocks: BTreeMap::new(), hash_to_number: HashMap::new(), tx_index: HashMap::new() }
     }
 
     /// Returns the number of cached entries.
@@ -64,9 +89,33 @@ impl<N: NodePrimitives> ConfirmCache<N> {
                 "confirm cache at max capacity ({DEFAULT_CONFIRM_CACHE_SIZE}), cannot insert block: {height}"
             ));
         }
+
+        // Build tx index entries for all transactions in this block
+        let txs = block.block.body().transactions();
+        let receipts = block.receipts.as_ref();
+        for (idx, (tx, receipt)) in txs.iter().zip(receipts.iter()).enumerate() {
+            let tx_hash = *tx.tx_hash();
+            let info = Arc::new(CachedTxInfo {
+                block_number: height,
+                block_hash: hash,
+                tx_index: idx as u64,
+                tx: tx.clone(),
+                receipt: receipt.clone(),
+            });
+            self.tx_index.insert(tx_hash, info);
+        }
+
+        // Build block index entries for block data
         self.hash_to_number.insert(hash, height);
         self.blocks.insert(height, (hash, block));
         Ok(())
+    }
+
+    /// Clears all entries.
+    pub fn clear(&mut self) {
+        self.tx_index.clear();
+        self.blocks.clear();
+        self.hash_to_number.clear();
     }
 
     /// Returns the block number for the given block hash, if cached.
@@ -89,6 +138,11 @@ impl<N: NodePrimitives> ConfirmCache<N> {
         self.blocks.get(&block_number).map(|(_, block)| block.clone())
     }
 
+    /// Returns the cached transaction info for the given tx hash, if present.
+    pub fn get_tx_info(&self, tx_hash: &TxHash) -> Option<Arc<CachedTxInfo<N>>> {
+        self.tx_index.get(tx_hash).cloned()
+    }
+
     /// Returns `true` if the cache contains a block with the given hash.
     pub fn contains_hash(&self, block_hash: &B256) -> bool {
         self.hash_to_number.contains_key(block_hash)
@@ -100,16 +154,26 @@ impl<N: NodePrimitives> ConfirmCache<N> {
     }
 
     /// Removes and returns the confirmed block for the given block number.
-    pub fn remove_by_number(&mut self, block_number: u64) -> Option<BlockAndReceipts<N>> {
+    pub fn remove_block_by_number(&mut self, block_number: u64) -> Option<BlockAndReceipts<N>> {
         let (hash, block) = self.blocks.remove(&block_number)?;
         self.hash_to_number.remove(&hash);
+        self.remove_tx_index_for_block(&block);
         Some(block)
     }
 
     /// Removes and returns the confirmed block for the given block hash.
-    pub fn remove_by_hash(&mut self, block_hash: &B256) -> Option<BlockAndReceipts<N>> {
+    pub fn remove_block_by_hash(&mut self, block_hash: &B256) -> Option<BlockAndReceipts<N>> {
         let number = self.hash_to_number.remove(block_hash)?;
-        self.blocks.remove(&number).map(|(_, block)| block)
+        let (_, block) = self.blocks.remove(&number)?;
+        self.remove_tx_index_for_block(&block);
+        Some(block)
+    }
+
+    /// Removes all tx index entries for the transactions in the given block.
+    fn remove_tx_index_for_block(&mut self, bar: &BlockAndReceipts<N>) {
+        for tx in bar.block.body().transactions() {
+            self.tx_index.remove(&*tx.tx_hash());
+        }
     }
 
     /// Flushes all entries with block number >= `from` (the reorged range).
@@ -117,8 +181,9 @@ impl<N: NodePrimitives> ConfirmCache<N> {
     pub fn flush_from(&mut self, from: u64) -> usize {
         let reorged = self.blocks.split_off(&from);
         let count = reorged.len();
-        for (hash, _) in reorged.into_values() {
+        for (hash, bar) in reorged.into_values() {
             self.hash_to_number.remove(&hash);
+            self.remove_tx_index_for_block(&bar);
         }
         count
     }
@@ -132,15 +197,10 @@ impl<N: NodePrimitives> ConfirmCache<N> {
         let stale = std::mem::replace(&mut self.blocks, retained);
 
         let count = stale.len();
-        for (hash, _) in stale.into_values() {
+        for (hash, bar) in stale.into_values() {
             self.hash_to_number.remove(&hash);
+            self.remove_tx_index_for_block(&bar);
         }
         count
-    }
-
-    /// Clears all entries.
-    pub fn clear(&mut self) {
-        self.blocks.clear();
-        self.hash_to_number.clear();
     }
 }

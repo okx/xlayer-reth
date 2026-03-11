@@ -1,5 +1,6 @@
 use crate::cache::{FlashblockStateCache, StateCacheProvider};
 
+use alloy_consensus::{transaction::TxHashRef, BlockHeader};
 use alloy_eips::BlockHashOrNumber;
 use alloy_primitives::{Address, BlockNumber, TxHash, TxNumber};
 use core::ops::RangeBounds;
@@ -27,6 +28,9 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> TransactionsProvider
     }
 
     fn transaction_by_hash(&self, hash: TxHash) -> ProviderResult<Option<Self::Transaction>> {
+        if let Some(info) = self.inner.read().confirm_cache.get_tx_info(&hash) {
+            return Ok(Some(info.tx.clone()));
+        }
         self.provider.transaction_by_hash(hash)
     }
 
@@ -34,6 +38,29 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> TransactionsProvider
         &self,
         hash: TxHash,
     ) -> ProviderResult<Option<(Self::Transaction, TransactionMeta)>> {
+        let inner = self.inner.read();
+        if let Some(info) = inner.confirm_cache.get_tx_info(&hash) {
+            // Resolve block header fields from the confirm cache
+            let bar = inner.confirm_cache.get_block_by_number(info.block_number);
+            let (base_fee, excess_blob_gas, timestamp) = bar
+                .map(|b| {
+                    let h = b.block.header();
+                    (h.base_fee_per_gas(), h.excess_blob_gas(), h.timestamp())
+                })
+                .unwrap_or_default();
+
+            let meta = TransactionMeta {
+                tx_hash: *info.tx.tx_hash(),
+                index: info.tx_index,
+                block_hash: info.block_hash,
+                block_number: info.block_number,
+                base_fee,
+                excess_blob_gas,
+                timestamp,
+            };
+            return Ok(Some((info.tx.clone(), meta)));
+        }
+        drop(inner);
         self.provider.transaction_by_hash_with_meta(hash)
     }
 
