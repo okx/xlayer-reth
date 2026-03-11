@@ -19,11 +19,5 @@ Dockerfile*
 docs/
 
 # Tests – exclude test sources but keep manifests/stubs needed by cargo
-crates/tests/src/
+
 tests/
-!**/Cargo.toml
-!Cargo.lock
-# Build outputs
-dist/
-tmp/
-node_modules/
