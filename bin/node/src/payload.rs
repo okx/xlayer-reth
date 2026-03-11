@@ -27,10 +27,12 @@ pub struct XLayerPayloadServiceBuilder {
 impl XLayerPayloadServiceBuilder {
     pub fn new(
         xlayer_builder_args: BuilderArgs,
+        flashblock_rpc: bool,
         compute_pending_block: bool,
     ) -> eyre::Result<Self> {
         Self::with_config(
             xlayer_builder_args,
+            flashblock_rpc,
             compute_pending_block,
             OpDAConfig::default(),
             OpGasLimitConfig::default(),
@@ -39,11 +41,12 @@ impl XLayerPayloadServiceBuilder {
 
     pub fn with_config(
         xlayer_builder_args: BuilderArgs,
+        flashblock_rpc: bool,
         compute_pending_block: bool,
         da_config: OpDAConfig,
         gas_limit_config: OpGasLimitConfig,
     ) -> eyre::Result<Self> {
-        let builder = if xlayer_builder_args.flashblocks.enabled {
+        let builder = if (xlayer_builder_args.flashblocks.enabled || flashblock_rpc) {
             let builder_config = BuilderConfig::try_from(xlayer_builder_args)?;
             XLayerPayloadServiceBuilderInner::Flashblocks(Box::new(FlashblocksServiceBuilder(
                 builder_config,

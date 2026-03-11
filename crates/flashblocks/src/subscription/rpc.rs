@@ -1,6 +1,9 @@
-use super::pubsub::{
-    EnrichedTransaction, FlashblockParams, FlashblockStreamEvent, FlashblockSubscriptionKind,
-    FlashblocksFilter,
+use crate::{
+    subscription::pubsub::{
+        EnrichedTransaction, FlashblockParams, FlashblockStreamEvent, FlashblockSubscriptionKind,
+        FlashblocksFilter,
+    },
+    PendingSequence, PendingSequenceRx,
 };
 
 use futures::StreamExt;
@@ -18,7 +21,6 @@ use alloy_json_rpc::RpcObject;
 use alloy_primitives::{Address, TxHash, U256};
 use alloy_rpc_types_eth::{Header, TransactionInfo};
 
-use reth_optimism_flashblocks::{PendingBlockRx, PendingFlashBlock};
 use reth_primitives_traits::{
     NodePrimitives, Recovered, RecoveredBlock, SealedBlock, TransactionMeta,
 };
@@ -90,7 +92,7 @@ where
     /// Subscription tasks are spawned via [`tokio::task::spawn`]
     pub fn new(
         eth_pubsub: EthPubSub<Eth>,
-        pending_block_rx: PendingBlockRx<N>,
+        pending_block_rx: PendingSequenceRx<N>,
         subscription_task_spawner: Box<dyn TaskSpawner>,
         tx_converter: Eth::RpcConvert,
         max_subscribed_addresses: usize,
@@ -196,7 +198,7 @@ where
 #[derive(Clone)]
 pub struct FlashblocksPubSubInner<Eth: EthApiTypes, N: NodePrimitives> {
     /// Pending block receiver from flashblocks, if available
-    pub(crate) pending_block_rx: PendingBlockRx<N>,
+    pub(crate) pending_block_rx: PendingSequenceRx<N>,
     /// The type that's used to spawn subscription tasks.
     pub(crate) subscription_task_spawner: Box<dyn TaskSpawner>,
     /// RPC transaction converter.
@@ -236,7 +238,7 @@ where
 
     /// Convert a flashblock into a stream of events (header + transaction messages)
     fn flashblock_to_stream_events(
-        pending_block: &PendingFlashBlock<N>,
+        pending_block: &PendingSequence<N>,
         filter: &FlashblocksFilter,
         tx_converter: &Eth::RpcConvert,
         txhash_cache: &Cache<TxHash, ()>,
@@ -485,7 +487,7 @@ where
 
 /// Extract `Header` from `PendingFlashBlock`
 fn extract_header_from_pending_block<N: NodePrimitives>(
-    pending_block: &PendingFlashBlock<N>,
+    pending_block: &PendingSequence<N>,
 ) -> Result<Header<N::BlockHeader>, ErrorObject<'static>> {
     let block = pending_block.block();
     Ok(Header::from_consensus(

@@ -23,8 +23,9 @@ use reth_optimism_node::{args::RollupArgs, OpNode};
 use reth_rpc_server_types::RethRpcModule;
 
 use xlayer_chainspec::XLayerChainSpecParser;
-use xlayer_flashblocks::cache::FlashblockStateCache;
-use xlayer_flashblocks::{handle::FlashblocksService, subscription::FlashblocksPubSub};
+use xlayer_flashblocks::{
+    cache::FlashblockStateCache, FlashblocksPubSub, FlashblocksRpcService, WsFlashBlockStream,
+};
 use xlayer_legacy_rpc::{layer::LegacyRpcRouterLayer, LegacyRpcRouterConfig};
 use xlayer_monitor::{start_monitor_handle, RpcMonitorLayer, XLayerMonitor};
 use xlayer_rpc::{EthApiOverrideServer, XLayerEthApiExt, XlayerRpcExt, XlayerRpcExtApiServer};
@@ -108,6 +109,7 @@ fn main() {
             // It handles both flashblocks and default modes internally
             let payload_builder = XLayerPayloadServiceBuilder::new(
                 args.xlayer_args.builder.clone(),
+                args.xlayer_args.flashblocks_rpc.flashblock_url.is_some(),
                 args.rollup_args.compute_pending_block,
             )?;
 
@@ -123,28 +125,23 @@ fn main() {
                     let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
 
                     // Initialize flashblocks RPC service if not in flashblocks sequencer mode
-                    if !args.xlayer_args.builder.flashblocks.enabled {
-                        if let Some(flashblock_rx) = new_op_eth_api.subscribe_received_flashblocks()
-                        {
-                            let service = FlashblocksService::new(
-                                ctx.node().clone(),
-                                flashblock_rx,
-                                args.xlayer_args.builder.flashblocks,
-                                args.rollup_args.flashblocks_url.is_some(),
-                                datadir,
-                            )?;
-                            service.spawn();
-                            info!(target: "reth::cli", "xlayer flashblocks service initialized");
-                        }
+                    if let Some(flashblock_url) = args.xlayer_args.flashblocks_rpc.flashblock_url {
+                        let stream = WsFlashBlockStream::new(flashblock_url);
+                        let service = FlashblocksRpcService::new(
+                            ctx.node().task_executor().clone(),
+                            stream,
+                            args.xlayer_args.builder.flashblocks,
+                            args.rollup_args.flashblocks_url.is_some(),
+                            datadir,
+                        )?;
+                        service.spawn();
+                        info!(target: "reth::cli", "xlayer flashblocks service initialized");
 
                         if xlayer_args.enable_flashblocks_subscription
-                            && let Some(pending_blocks_rx) = new_op_eth_api.pending_block_rx()
                         {
-                            let eth_pubsub = ctx.registry.eth_handlers().pubsub.clone();
-
                             let flashblocks_pubsub = FlashblocksPubSub::new(
-                                eth_pubsub,
-                                pending_blocks_rx,
+                                ctx.registry.eth_handlers().pubsub.clone(),
+                                service.subscribe_pending_sequence(),
                                 Box::new(ctx.node().task_executor().clone()),
                                 new_op_eth_api.converter().clone(),
                                 xlayer_args.flashblocks_subscription_max_addresses,

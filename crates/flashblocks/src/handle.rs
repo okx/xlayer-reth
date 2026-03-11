@@ -1,130 +1,13 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
-use tracing::{debug, info, trace, warn};
+use crate::ReceivedFlashblocksRx;
+use std::{sync::Arc, time::Duration};
+use tracing::*;
 
-use reth_node_api::FullNodeComponents;
 use reth_node_core::dirs::{ChainPath, DataDirPath};
-use reth_optimism_flashblocks::{FlashBlock, FlashBlockRx};
 
-use xlayer_builder::{
-    args::FlashblocksArgs,
-    flashblocks::{FlashblockPayloadsCache, WebSocketPublisher},
-    metrics::{tokio::FlashblocksTaskMetrics, BuilderMetrics},
-};
-
-pub struct FlashblocksService<Node>
-where
-    Node: FullNodeComponents,
-{
-    node: Node,
-    flashblock_rx: FlashBlockRx,
-    ws_pub: Arc<WebSocketPublisher>,
-    relay_flashblocks: bool,
-    datadir: ChainPath<DataDirPath>,
-}
-
-impl<Node> FlashblocksService<Node>
-where
-    Node: FullNodeComponents,
-{
-    pub fn new(
-        node: Node,
-        flashblock_rx: FlashBlockRx,
-        args: FlashblocksArgs,
-        relay_flashblocks: bool,
-        datadir: ChainPath<DataDirPath>,
-    ) -> Result<Self, eyre::Report> {
-        let ws_addr = SocketAddr::new(args.flashblocks_addr.parse()?, args.flashblocks_port);
-
-        let metrics = Arc::new(BuilderMetrics::default());
-        let task_metrics = Arc::new(FlashblocksTaskMetrics::new());
-        let ws_pub = Arc::new(
-            WebSocketPublisher::new(
-                ws_addr,
-                metrics,
-                &task_metrics.websocket_publisher,
-                args.ws_subscriber_limit,
-            )
-            .map_err(|e| eyre::eyre!("Failed to create WebSocket publisher: {e}"))?,
-        );
-
-        info!(target: "flashblocks", "WebSocket publisher initialized at {}", ws_addr);
-
-        Ok(Self { node, flashblock_rx, ws_pub, relay_flashblocks, datadir })
-    }
-
-    pub fn spawn(mut self) {
-        debug!(target: "flashblocks", "Initializing flashblocks service");
-
-        let task_executor = self.node.task_executor().clone();
-        if self.relay_flashblocks {
-            let datadir = self.datadir.clone();
-            let flashblock_rx = self.flashblock_rx.resubscribe();
-            task_executor.spawn_critical(
-                "xlayer-flashblocks-persistence",
-                Box::pin(async move {
-                    handle_persistence(flashblock_rx, datadir).await;
-                }),
-            );
-
-            task_executor.spawn_critical(
-                "xlayer-flashblocks-publish",
-                Box::pin(async move {
-                    self.publish().await;
-                }),
-            );
-        }
-    }
-
-    async fn publish(&mut self) {
-        info!(
-            target: "flashblocks",
-            "Flashblocks websocket publisher started"
-        );
-
-        loop {
-            match self.flashblock_rx.recv().await {
-                Ok(flashblock) => {
-                    trace!(
-                        target: "flashblocks",
-                        "Received flashblock: index={}, block_hash={}",
-                        flashblock.index,
-                        flashblock.diff.block_hash
-                    );
-                    self.publish_flashblock(&flashblock).await;
-                }
-                Err(e) => {
-                    warn!(target: "flashblocks", "Flashblock receiver error: {:?}", e);
-                    break;
-                }
-            }
-        }
-
-        info!(target: "flashblocks", "Flashblocks service stopped");
-    }
-
-    /// Relays the incoming flashblock to the flashblock websocket subscribers.
-    async fn publish_flashblock(&self, flashblock: &Arc<FlashBlock>) {
-        match self.ws_pub.publish(flashblock) {
-            Ok(_) => {
-                trace!(
-                    target: "flashblocks",
-                    "Published flashblock: index={}, block_hash={}",
-                    flashblock.index,
-                    flashblock.diff.block_hash
-                );
-            }
-            Err(e) => {
-                warn!(
-                    target: "flashblocks",
-                    "Failed to publish flashblock: {:?}", e
-                );
-            }
-        }
-    }
-}
+use xlayer_builder::flashblocks::{FlashblockPayloadsCache, WebSocketPublisher};
 
 /// Handles the persistence of the pending flashblocks sequence to disk.
-async fn handle_persistence(mut rx: FlashBlockRx, datadir: ChainPath<DataDirPath>) {
+pub async fn handle_persistence(mut rx: ReceivedFlashblocksRx, datadir: ChainPath<DataDirPath>) {
     let cache = FlashblockPayloadsCache::new(Some(datadir));
 
     // Set default flush interval to 5 seconds
@@ -165,4 +48,50 @@ async fn handle_persistence(mut rx: FlashBlockRx, datadir: ChainPath<DataDirPath
     }
 
     info!(target: "flashblocks", "Flashblocks persistence handle stopped");
+}
+
+/// Handles the relaying of the flashblocks to the downstream flashblocks
+/// websocket subscribers.
+pub async fn handle_relay_flashblocks(
+    mut rx: ReceivedFlashblocksRx,
+    ws_pub: Arc<WebSocketPublisher>,
+) {
+    info!(
+        target: "flashblocks",
+        "Flashblocks websocket publisher started"
+    );
+
+    loop {
+        match rx.recv().await {
+            Ok(flashblock) => {
+                trace!(
+                    target: "flashblocks",
+                    "Received flashblock: index={}, block_hash={}",
+                    flashblock.index,
+                    flashblock.diff.block_hash
+                );
+                match ws_pub.publish(&flashblock) {
+                    Ok(_) => {
+                        trace!(
+                            target: "flashblocks",
+                            "Published flashblock: index={}, block_hash={}",
+                            flashblock.index,
+                            flashblock.diff.block_hash
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            target: "flashblocks",
+                            "Failed to publish flashblock: {:?}", e
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(target: "flashblocks", "Flashblock receiver error: {:?}", e);
+                break;
+            }
+        }
+    }
+    info!(target: "flashblocks", "Flashblocks service stopped");
 }

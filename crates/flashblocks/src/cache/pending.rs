@@ -19,15 +19,12 @@ pub struct PendingSequence<N: NodePrimitives> {
     tx_index: HashMap<TxHash, CachedTxInfo<N>>,
     /// Cached reads from execution for reuse.
     pub cached_reads: CachedReads,
+    /// The current block hash of the latest flashblocks sequence.
+    pub block_hash: B256,
     /// Parent hash of the built block (may be non-canonical or canonical).
     pub parent_hash: B256,
     /// The last flashblock index of the latest flashblocks sequence.
     pub last_flashblock_index: u64,
-    /// Whether the [`PendingFlashblockSequence`] has a properly computed stateroot.
-    pub has_computed_state_root: bool,
-    /// The current block hash of the latest flashblocks sequence. `None` if state
-    /// root is not computed yet.
-    pub block_hash: Option<B256>,
 }
 
 impl<N: NodePrimitives> PendingSequence<N> {
@@ -36,30 +33,11 @@ impl<N: NodePrimitives> PendingSequence<N> {
         pending: PendingBlock<N>,
         tx_index: HashMap<TxHash, CachedTxInfo<N>>,
         cached_reads: CachedReads,
+        block_hash: B256,
         parent_hash: B256,
         last_flashblock_index: u64,
     ) -> Self {
-        Self {
-            pending,
-            tx_index,
-            cached_reads,
-            parent_hash,
-            last_flashblock_index,
-            has_computed_state_root: false,
-            block_hash: None,
-        }
-    }
-
-    /// Returns the properly calculated state root for that block if it was computed.
-    pub fn computed_state_root(&self) -> Option<B256> {
-        self.has_computed_state_root.then_some(self.pending.block().state_root())
-    }
-
-    /// Sets the computed state root and block hash for the pending block.
-    pub fn set_state_root_and_block_hash(&mut self, pending: PendingBlock<N>) {
-        self.pending = pending;
-        self.block_hash = Some(self.pending.block().hash());
-        self.has_computed_state_root = true;
+        Self { pending, tx_index, cached_reads, block_hash, parent_hash, last_flashblock_index }
     }
 
     pub fn get_height(&self) -> u64 {

@@ -13,6 +13,10 @@ pub struct XLayerArgs {
     #[command(flatten)]
     pub builder: BuilderArgs,
 
+    /// Flashblocks RPC configuration
+    #[command(flatten)]
+    pub flashblocks_rpc: FlashblocksRpcArgs,
+
     /// Enable legacy rpc routing
     #[command(flatten)]
     pub legacy: LegacyRpcArgs,
@@ -20,22 +24,6 @@ pub struct XLayerArgs {
     /// Full link monitor configuration
     #[command(flatten)]
     pub monitor: FullLinkMonitorArgs,
-
-    /// Enable custom flashblocks subscription
-    #[arg(
-        long = "xlayer.flashblocks-subscription",
-        help = "Enable custom flashblocks subscription (disabled by default)",
-        default_value = "false"
-    )]
-    pub enable_flashblocks_subscription: bool,
-
-    /// Set the number of subscribed addresses in flashblocks subscription
-    #[arg(
-        long = "xlayer.flashblocks-subscription-max-addresses",
-        help = "Set the number of subscribed addresses in flashblocks subscription",
-        default_value = "1000"
-    )]
-    pub flashblocks_subscription_max_addresses: usize,
 
     #[arg(
         long = "xlayer.sequencer-mode",
@@ -133,6 +121,31 @@ impl LegacyRpcArgs {
 
         Ok(())
     }
+}
+
+pub struct FlashblocksRpcArgs {
+    /// Enable flashblocks RPC
+    #[arg(
+        long = "xlayer.flashblocks-url",
+        help = "URL of the flashblocks RPC endpoint (disabled by default)"
+    )]
+    pub flashblock_url: Option<Url>,
+
+    /// Enable custom flashblocks subscription
+    #[arg(
+        long = "xlayer.flashblocks-subscription",
+        help = "Enable custom flashblocks subscription (disabled by default)",
+        default_value = "false"
+    )]
+    pub enable_flashblocks_subscription: bool,
+
+    /// Set the number of subscribed addresses in flashblocks subscription
+    #[arg(
+        long = "xlayer.flashblocks-subscription-max-addresses",
+        help = "Set the number of subscribed addresses in flashblocks subscription",
+        default_value = "1000"
+    )]
+    pub flashblocks_subscription_max_addresses: usize,
 }
 
 #[cfg(test)]

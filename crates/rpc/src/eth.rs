@@ -35,7 +35,8 @@ use reth_rpc_eth_api::{
     EthApiTypes, EthFilterApiServer, RpcBlock, RpcReceipt,
 };
 use tracing::debug;
-use xlayer_flashblocks::cache::FlashblockStateCache;
+
+use xlayer_flashblocks::FlashblockStateCache;
 
 // ---------------------------------------------------------------------------
 // EthApiOverride — flashblocks `eth_*` method overrides
