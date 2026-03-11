@@ -34,11 +34,12 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> BlockHashReader
             start,
             end - 1,
             |bar| bar.block.hash(),
-            |r| {
+            |r, _| {
                 // Convert back to half-open [start, end) for the provider
                 let end_exclusive = r.end().saturating_add(1);
                 self.provider.canonical_hashes_range(*r.start(), end_exclusive)
             },
+            None,
         )
     }
 }

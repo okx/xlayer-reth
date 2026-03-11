@@ -97,7 +97,8 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> BlockReader
             *range.start(),
             *range.end(),
             |bar| block_from_bar(bar),
-            |r| self.provider.block_range(r),
+            |r, _| self.provider.block_range(r),
+            None,
         )
     }
 
@@ -109,7 +110,8 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> BlockReader
             *range.start(),
             *range.end(),
             |bar| (*bar.block).clone(),
-            |r| self.provider.block_with_senders_range(r),
+            |r, _| self.provider.block_with_senders_range(r),
+            None,
         )
     }
 
@@ -121,7 +123,8 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> BlockReader
             *range.start(),
             *range.end(),
             |bar| (*bar.block).clone(),
-            |r| self.provider.recovered_block_range(r),
+            |r, _| self.provider.recovered_block_range(r),
+            None,
         )
     }
 

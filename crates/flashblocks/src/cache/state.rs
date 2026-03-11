@@ -91,50 +91,11 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> FlashblockStateCache<N,
     ///
     /// Walks backward from `end`, collecting consecutive cache hits via `from_cache`.
     /// Delegates the remaining prefix `[start..=provider_end]` to `from_provider`.
-    pub(super) fn collect_cached_block_range<T>(
-        &self,
-        start: BlockNumber,
-        end: BlockNumber,
-        from_cache: impl Fn(&BlockAndReceipts<N>) -> T,
-        from_provider: impl FnOnce(core::ops::RangeInclusive<BlockNumber>) -> ProviderResult<Vec<T>>,
-    ) -> ProviderResult<Vec<T>> {
-        let inner = self.inner.read();
-        let mut cache_items = Vec::new();
-        let mut provider_end = end;
-        let mut index = end;
-        loop {
-            if let Some(bar) = inner.confirm_cache.get_block_by_number(index) {
-                cache_items.push(from_cache(&bar));
-                provider_end = index.saturating_sub(1);
-            } else {
-                break;
-            }
-            if index == start {
-                break;
-            }
-            index -= 1;
-        }
-        cache_items.reverse();
-        drop(inner);
-
-        let mut result = if provider_end >= start && cache_items.len() < (end - start + 1) as usize
-        {
-            from_provider(start..=provider_end)?
-        } else {
-            Vec::new()
-        };
-        result.extend(cache_items);
-        Ok(result)
-    }
-
-    /// Collects items from an inclusive block number range `[start..=end]` while
-    /// a predicate holds, using the confirm cache as an overlay on top of the provider.
     ///
-    /// Same overlay strategy as [`collect_cached_block_range`](Self::collect_cached_block_range):
-    /// walks backward from `end` to find the consecutive cache tail, delegates the
-    /// provider prefix with the predicate, then continues through cached items.
-    /// Stops as soon as the predicate returns `false`.
-    pub(super) fn collect_cached_block_range_while<T>(
+    /// When `predicate` is `Some`, items are filtered: the provider receives the
+    /// predicate to stop early, and cached items are checked before appending.
+    /// When `None`, all items in the range are collected unconditionally.
+    pub(super) fn collect_cached_block_range<T>(
         &self,
         start: BlockNumber,
         end: BlockNumber,
@@ -143,7 +104,7 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> FlashblockStateCache<N,
             core::ops::RangeInclusive<BlockNumber>,
             &mut dyn FnMut(&T) -> bool,
         ) -> ProviderResult<Vec<T>>,
-        predicate: &mut dyn FnMut(&T) -> bool,
+        predicate: Option<&mut dyn FnMut(&T) -> bool>,
     ) -> ProviderResult<Vec<T>> {
         let inner = self.inner.read();
         let mut cached_bars = Vec::new();
@@ -164,13 +125,15 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> FlashblockStateCache<N,
         cached_bars.reverse();
         drop(inner);
 
-        // Delegate the provider prefix (if any) with the predicate
         let has_provider_range =
             provider_end >= start && cached_bars.len() < (end - start + 1) as usize;
+
+        let mut always_true = |_: &T| true;
+        let predicate = predicate.unwrap_or(&mut always_true);
+
         let mut predicate_stopped = false;
         let mut result = if has_provider_range {
             let items = from_provider(start..=provider_end, predicate)?;
-            // If the provider returned fewer items than the full range, the predicate stopped
             let expected = (provider_end - start + 1) as usize;
             if items.len() < expected {
                 predicate_stopped = true;
@@ -180,7 +143,6 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> FlashblockStateCache<N,
             Vec::new()
         };
 
-        // Continue with cached items while predicate holds
         if !predicate_stopped {
             for bar in &cached_bars {
                 let item = from_cache(bar);

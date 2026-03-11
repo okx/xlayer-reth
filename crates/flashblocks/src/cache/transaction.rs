@@ -94,7 +94,8 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> TransactionsProvider
             start,
             end,
             |bar| bar.block.body().transactions().to_vec(),
-            |r| self.provider.transactions_by_block_range(r),
+            |r, _| self.provider.transactions_by_block_range(r),
+            None,
         )
     }
 

@@ -38,7 +38,8 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> HeaderProvider
             start,
             end,
             |bar| bar.block.header().clone(),
-            |r| self.provider.headers_range(r),
+            |r, _| self.provider.headers_range(r),
+            None,
         )
     }
 
@@ -62,12 +63,12 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> HeaderProvider
         if start > end {
             return Ok(Vec::new());
         }
-        self.collect_cached_block_range_while(
+        self.collect_cached_block_range(
             start,
             end,
             |bar| bar.block.sealed_header().clone(),
             |r, pred| self.provider.sealed_headers_while(r, pred),
-            &mut predicate,
+            Some(&mut predicate),
         )
     }
 }

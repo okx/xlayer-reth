@@ -55,7 +55,8 @@ impl<N: NodePrimitives, Provider: StateCacheProvider<N>> ReceiptProvider
             *block_range.start(),
             *block_range.end(),
             |bar| (*bar.receipts).clone(),
-            |r| self.provider.receipts_by_block_range(r),
+            |r, _| self.provider.receipts_by_block_range(r),
+            None,
         )
     }
 }
