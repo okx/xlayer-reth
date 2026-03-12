@@ -35,4 +35,40 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          custom_instructions: "Skills are available in .claude/skills/. Users can invoke them with /review or /commit in comments."
+
+  claude-review:
+    if: |
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@review')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@review'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Load review skill
+        id: skill
+        run: |
+          if [ -f ".claude/skills/review.md" ]; then
+            SKILL_CONTENT=$(cat .claude/skills/review.md)
+            echo "skill_content<<EOF" >> $GITHUB_OUTPUT
+            echo "$SKILL_CONTENT" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "skill_content=Perform a thorough code review." >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run Claude Review
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            ${{ steps.skill.outputs.skill_content }}
