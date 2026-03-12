@@ -67,31 +67,25 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Load review skill
-        id: skill
+      - name: Install project skills globally
         run: |
-          if [ -f ".claude/skills/review.md" ]; then
-            SKILL_CONTENT=$(cat .claude/skills/review.md)
-            echo "skill_content<<EOF" >> $GITHUB_OUTPUT
-            echo "$SKILL_CONTENT" >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
-          else
-            echo "skill_content=Perform a thorough code review." >> $GITHUB_OUTPUT
-          fi
-
+          mkdir -p ~/.claude/skills
+          cp -rfv .claude/skills/* ~/.claude/skills/
+    
       - name: Run Claude Review
         id: claude
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           track_progress: true
+          show_full_output: true
           prompt: |
             REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.issue.number }}
+            PR NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
 
-            ${{ steps.skill.outputs.skill_content }}
+            Use the pr-review skill to perform a code review of this PR.
 
             When done, post your full review summary as a PR comment using:
-            gh pr comment ${{ github.event.issue.number }} --body "<your review>"
-          claude_args: |
-            --allowedTools "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Glob,Grep"
+            gh pr comment ${{ github.event.pull_request.number || github.event.issue.number }} --body "<your review>"
+          claude_args: "--allowedTools Skill,SlashCommand,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Glob,Grep"
