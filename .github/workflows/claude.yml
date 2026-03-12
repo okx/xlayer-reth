@@ -35,3 +35,4 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          custom_instructions: "Skills are available in .claude/skills/. Users can invoke them with /review or /commit in comments."
