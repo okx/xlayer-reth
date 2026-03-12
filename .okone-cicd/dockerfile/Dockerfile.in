@@ -1,4 +1,4 @@
-FROM office-registry-vpc.cn-hongkong.cr.aliyuncs.com/okbase/lukemathwalker/cargo-chef:latest-rust-1.92-okg1-sec20251110 AS chef
+FROM office-registry-vpc.cn-hongkong.cr.aliyuncs.com/inner-public/cargo-chef/latest-rust-1.92/cargo-chef:latest AS chef
 WORKDIR /app
 
 LABEL org.opencontainers.image.source=https://github.com/xlayer/xlayer-reth
