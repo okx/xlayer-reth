@@ -19,7 +19,7 @@ permissions:
 
 concurrency:
   group: claude-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   authorize:
