@@ -11,7 +11,21 @@ on:
     types: [submitted]
 
 jobs:
+  authorize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check actor authorization
+        run: |
+          ASSOCIATION="${{ github.event.comment.author_association || github.event.review.author_association || github.event.issue.author_association }}"
+          echo "Author association: $ASSOCIATION"
+          if [[ "$ASSOCIATION" != "OWNER" && "$ASSOCIATION" != "MEMBER" && "$ASSOCIATION" != "COLLABORATOR" ]]; then
+            echo "Unauthorized: actor '${{ github.actor }}' has association '$ASSOCIATION'"
+            exit 1
+          fi
+          echo "Authorized: actor '${{ github.actor }}'"
+
   claude:
+    needs: authorize
     if: |
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
@@ -37,6 +51,7 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
 
   claude-review:
+    needs: authorize
     if: |
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@review')) ||
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@review'))
