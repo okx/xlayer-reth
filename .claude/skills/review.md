@@ -1,3 +1,11 @@
+---
+name: review
+description: >
+  Perform a thorough code review of changed files. Use when the user asks
+  to "review" code, requests a code review, or uses @review. Do NOT trigger
+  when the user only asks a question about code without requesting a review.
+---
+
 # Skill: review
 
 Perform a thorough code review of changed files, checking for correctness, Rust best practices, XLayer-specific conventions, security issues, and test coverage.
