@@ -156,30 +156,23 @@ fn main() {
 
                     // Create flashblocks state cache if flashblocks URL is configured.
                     // Shared between the Eth API override and the ext RPC.
-                    let flash_cache = if args.rollup_args.flashblocks_url.is_some() {
-                        let canon_height = ctx.node().provider().best_block_number()?;
-                        Some(FlashblockStateCache::new(canon_height))
-                    } else {
-                        None
-                    };
+                    let flashblocks_state = args.rollup_args.flashblocks_url.map(|_| FlashblockStateCache::new());
 
                     // Register flashblocks Eth API override (replaces subset of eth_ methods)
-                    if let Some(ref cache) = flash_cache {
-                        let eth_filter = ctx.registry.eth_handlers().filter.clone();
-                        let eth_override = XLayerEthApiExt::new(
+                    if let Some(fb_cache) = flashblocks_state.as_ref() {
+                        let flashblocks_eth = XLayerEthApiExt::new(
                             ctx.registry.eth_api().clone(),
-                            eth_filter,
-                            cache.clone(),
+                            fb_cache.clone(),
                         );
                         ctx.modules.add_or_replace_if_module_configured(
                             RethRpcModule::Eth,
-                            EthApiOverrideServer::into_rpc(eth_override),
+                            EthApiOverrideServer::into_rpc(flashblocks_eth),
                         )?;
                         info!(target: "reth::cli", "xlayer flashblocks eth api override enabled");
                     }
 
                     // Register X Layer RPC (eth_flashblocksEnabled) — always active
-                    let xlayer_rpc = XlayerRpcExt::new(flash_cache);
+                    let xlayer_rpc = XlayerRpcExt::new(flashblocks_state);
                     ctx.modules.merge_configured(XlayerRpcExtApiServer::into_rpc(
                         xlayer_rpc,
                     ))?;

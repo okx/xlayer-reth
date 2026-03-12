@@ -1,4 +1,4 @@
-use crate::cache::CachedTxInfo;
+use crate::CachedTxInfo;
 use std::collections::{BTreeMap, HashMap};
 
 use alloy_consensus::transaction::TxHashRef;
@@ -119,8 +119,11 @@ impl<N: NodePrimitives> ConfirmCache<N> {
     }
 
     /// Returns the cached transaction info for the given tx hash, if present.
-    pub fn get_tx_info(&self, tx_hash: &TxHash) -> Option<CachedTxInfo<N>> {
-        self.tx_index.get(tx_hash).cloned()
+    /// Returns the cached transaction info for the given tx hash, if present.
+    pub fn get_tx_info(&self, tx_hash: &TxHash) -> Option<(CachedTxInfo<N>, BlockAndReceipts<N>)> {
+        let tx_info = self.tx_index.get(tx_hash).cloned()?;
+        let block = self.get_block_by_number(tx_info.block_number)?;
+        Some((tx_info, block))
     }
 
     /// Returns `true` if the cache contains a block with the given hash.

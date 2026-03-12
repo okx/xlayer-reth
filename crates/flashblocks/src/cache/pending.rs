@@ -40,18 +40,25 @@ impl<N: NodePrimitives> PendingSequence<N> {
         Self { pending, tx_index, cached_reads, block_hash, parent_hash, last_flashblock_index }
     }
 
+    pub fn get_hash(&self) -> B256 {
+        self.block_hash
+    }
+
     pub fn get_height(&self) -> u64 {
         self.pending.block().number()
     }
 
-    pub fn get_block(&self) -> BlockAndReceipts<N> {
+    pub fn get_block_and_receipts(&self) -> BlockAndReceipts<N> {
         self.pending.to_block_and_receipts()
     }
 
     /// Returns the cached transaction info for the given tx hash, if present
     /// in the pending sequence.
-    pub fn get_tx_info(&self, tx_hash: &TxHash) -> Option<CachedTxInfo<N>> {
-        self.tx_index.get(tx_hash).cloned()
+    pub fn get_tx_info(&self, tx_hash: &TxHash) -> Option<(CachedTxInfo<N>, BlockAndReceipts<N>)> {
+        self.tx_index
+            .get(tx_hash)
+            .cloned()
+            .map(|tx_info| (tx_info, self.pending.to_block_and_receipts()))
     }
 }
 

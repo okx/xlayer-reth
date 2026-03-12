@@ -2,6 +2,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod eth;
+pub mod helper;
 pub mod xlayer_ext;
 
 pub use eth::{EthApiOverrideServer, XLayerEthApiExt};

@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tracing::*;
 
 use alloy_primitives::{TxHash, B256};
+use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag};
 use reth_primitives_traits::{NodePrimitives, ReceiptTy};
 use reth_rpc_eth_types::block::BlockAndReceipts;
 
@@ -66,65 +67,42 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
         self.inner.read().confirm_height
     }
 
-    /// Returns the current pending height.
-    pub fn get_pending_height(&self) -> u64 {
-        let inner = self.inner.read();
-        inner.pending_cache.as_ref().map_or(inner.confirm_height, |p| p.get_height())
+    /// Returns the current pending height, if any.
+    pub fn get_pending_height(&self) -> Option<u64> {
+        self.inner.read().pending_cache.as_ref().map(|p| p.get_height())
+    }
+
+    pub fn get_rpc_block_by_id(&self, block_id: Option<BlockId>) -> Option<BlockAndReceipts<N>> {
+        match block_id.unwrap_or(BlockId::Number(BlockNumberOrTag::Latest)) {
+            BlockId::Number(id) => self.get_rpc_block(id),
+            BlockId::Hash(hash) => self.get_block_by_hash(&hash.block_hash),
+        }
+    }
+
+    /// Returns the current pending block and receipts, if any.
+    pub fn get_rpc_block(&self, block_id: BlockNumberOrTag) -> Option<BlockAndReceipts<N>> {
+        match block_id {
+            BlockNumberOrTag::Pending => self.inner.read().get_pending_block(),
+            BlockNumberOrTag::Latest => self.inner.read().get_confirmed_block(),
+            BlockNumberOrTag::Number(num) => self.get_block_by_number(num),
+            _ => None,
+        }
     }
 
     /// Returns the block for the given block number, if cached.
     pub fn get_block_by_number(&self, num: u64) -> Option<BlockAndReceipts<N>> {
-        self.inner.read().confirm_cache.get_block_by_number(num)
+        self.inner.read().get_block_by_number(num)
     }
 
     /// Returns the confirmed block for the given block hash, if cached.
     pub fn get_block_by_hash(&self, hash: &B256) -> Option<BlockAndReceipts<N>> {
-        self.inner.read().confirm_cache.get_block_by_hash(hash)
+        self.inner.read().get_block_by_hash(hash)
     }
-
-    // --- Pending block ---
-
-    /// Returns the current pending block and receipts, if any.
-    pub fn get_pending_block(&self) -> Option<BlockAndReceipts<N>> {
-        self.inner.read().pending_cache.as_ref().map(|p| p.get_block())
-    }
-
-    // --- Transaction/receipt lookup (pending + confirm) ---
 
     /// Looks up cached transaction info by hash: pending sequence first, then
     /// confirm cache. Returns `None` if the tx is not in either cache layer.
-    pub fn get_tx_info(&self, tx_hash: &TxHash) -> Option<CachedTxInfo<N>> {
+    pub fn get_tx_info(&self, tx_hash: &TxHash) -> Option<(CachedTxInfo<N>, BlockAndReceipts<N>)> {
         self.inner.read().get_tx_info(tx_hash)
-    }
-
-    // --- Hash/number mapping ---
-
-    /// Returns the block hash for the given block number, if cached in the
-    /// confirm cache.
-    pub fn get_block_hash(&self, num: u64) -> Option<B256> {
-        self.inner.read().confirm_cache.hash_for_number(num)
-    }
-
-    /// Returns the block number for the given block hash, if cached in the
-    /// confirm cache.
-    pub fn get_block_number(&self, hash: &B256) -> Option<u64> {
-        self.inner.read().confirm_cache.number_for_hash(hash)
-    }
-
-    // --- Range queries (for `eth_getLogs`) ---
-
-    /// Returns all cached confirmed blocks in the inclusive range `[start..=end]`.
-    /// Blocks not present in the cache are skipped (the caller must fill gaps
-    /// from the provider).
-    pub fn get_blocks_in_range(&self, start: u64, end: u64) -> Vec<BlockAndReceipts<N>> {
-        let inner = self.inner.read();
-        let mut result = Vec::new();
-        for num in start..=end {
-            if let Some(bar) = inner.confirm_cache.get_block_by_number(num) {
-                result.push(bar);
-            }
-        }
-        result
     }
 }
 
@@ -139,10 +117,10 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
     /// If the pending sequence to be updated is the same as the current pending
     /// sequence, it will replace the existing with the incoming pending sequence.
     ///
-    /// Note that this state update is fallible as it detects potential reorgs, and
-    /// triggers cache flush on invalidate entries. An entry is invalidated if the
-    /// incoming pending sequence height is not the next pending height or current
-    /// pending height.
+    /// Note that this state update is fallible if something goes really wrong here
+    /// as it detects potential reorgs and flashblocks state cache pollution. An entry
+    /// is invalidated if the incoming pending sequence height is not the next pending
+    /// height or current pending height.
     pub fn handle_pending_sequence(
         &self,
         pending_sequence: PendingSequence<N>,
@@ -150,10 +128,15 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
         self.inner.write().handle_pending_sequence(pending_sequence)
     }
 
-    /// Handles a canonical block commit by flushing stale confirmed entries and
-    /// the pending state if it matches the committed block.
+    /// Handles a canonical block committed to the canonical chainstate.
     ///
-    /// If reorg flag is set, the flashblocks state cache will be default be flushed.
+    /// This method will flush the confirm cache up to the canonical block height and
+    /// the pending state if it matches the committed block to ensure flashblocks state
+    /// cache memory does not grow unbounded.
+    ///
+    /// It also detects chainstate re-orgs (set with re-org arg flag) and flashblocks
+    /// state cache pollution. By default once error is detected, we will automatically
+    /// flush the flashblocks state cache.
     pub fn handle_canonical_block(&self, block_number: u64, reorg: bool) {
         self.inner.write().handle_canonical_block(block_number, reorg)
     }
@@ -166,23 +149,14 @@ struct FlashblockStateCacheInner<N: NodePrimitives> {
     pending_cache: Option<PendingSequence<N>>,
     /// Cache of confirmed flashblock sequences ahead of the canonical chain.
     confirm_cache: ConfirmCache<N>,
-    /// The highest confirmed block height of from both the confirm cache or
-    /// the pending cache.
+    /// Highest confirmed block height in the confirm cache. If flashblocks state cache
+    /// is uninitialized, the confirm height is set to 0.
     confirm_height: u64,
 }
 
 impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
     fn new() -> Self {
         Self { pending_cache: None, confirm_cache: ConfirmCache::new(), confirm_height: 0 }
-    }
-
-    /// Looks up cached transaction info by hash: pending sequence first, then
-    /// confirm cache. Returns `None` if the tx is not in either cache layer.
-    fn get_tx_info(&self, tx_hash: &TxHash) -> Option<CachedTxInfo<N>> {
-        self.pending_cache
-            .as_ref()
-            .and_then(|p| p.get_tx_info(tx_hash))
-            .or_else(|| self.confirm_cache.get_tx_info(tx_hash))
     }
 
     /// Handles flushing a newly confirmed block to the confirm cache. Note that
@@ -228,7 +202,7 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
                     "polluted state cache - trying to advance pending tip but no current pending"
                 )
             })?;
-            self.handle_confirmed_block(expected_height, sequence.get_block())?;
+            self.handle_confirmed_block(expected_height, sequence.get_block_and_receipts())?;
             self.pending_cache = Some(pending_sequence);
         } else if pending_height == expected_height {
             // Replace the existing pending sequence
@@ -270,5 +244,38 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
         self.confirm_height = 0;
         self.pending_cache = None;
         self.confirm_cache.clear();
+    }
+
+    pub fn get_confirmed_block(&self) -> Option<BlockAndReceipts<N>> {
+        self.get_block_by_number(self.confirm_height)
+    }
+
+    pub fn get_pending_block(&self) -> Option<BlockAndReceipts<N>> {
+        self.pending_cache.as_ref().map(|p| p.get_block_and_receipts())
+    }
+
+    pub fn get_block_by_number(&self, num: u64) -> Option<BlockAndReceipts<N>> {
+        if let Some(pending_sequence) = self.pending_cache.as_ref()
+            && pending_sequence.get_height() == num
+        {
+            return Some(pending_sequence.get_block_and_receipts());
+        }
+        self.confirm_cache.get_block_by_number(num)
+    }
+
+    pub fn get_block_by_hash(&self, hash: &B256) -> Option<BlockAndReceipts<N>> {
+        if let Some(pending_sequence) = self.pending_cache.as_ref()
+            && pending_sequence.get_hash() == *hash
+        {
+            return Some(pending_sequence.get_block_and_receipts());
+        }
+        self.confirm_cache.get_block_by_hash(hash)
+    }
+
+    fn get_tx_info(&self, tx_hash: &TxHash) -> Option<(CachedTxInfo<N>, BlockAndReceipts<N>)> {
+        self.pending_cache
+            .as_ref()
+            .and_then(|p| p.get_tx_info(tx_hash))
+            .or_else(|| self.confirm_cache.get_tx_info(tx_hash))
     }
 }

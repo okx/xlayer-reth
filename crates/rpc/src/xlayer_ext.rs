@@ -2,9 +2,11 @@ use jsonrpsee::{
     core::{async_trait, RpcResult},
     proc_macros::rpc,
 };
+
 use reth_optimism_primitives::OpPrimitives;
 use reth_optimism_rpc::SequencerClient;
-use xlayer_flashblocks::cache::FlashblockStateCache;
+
+use xlayer_flashblocks::FlashblockStateCache;
 
 /// Trait for accessing sequencer client from backend
 pub trait SequencerClientProvider {
@@ -15,37 +17,34 @@ pub trait SequencerClientProvider {
 /// `XLayer`-specific RPC API trait.
 #[rpc(server, namespace = "eth")]
 pub trait XlayerRpcExtApi {
-    /// Returns boolean indicating if the node's flashblocks functionality is
-    /// enabled and working.
+    /// Returns boolean indicating if the node's flashblocks RPC functionality is enabled,
+    /// and if the flashblocks state cache is initialized.
     ///
-    /// Returns `true` when the flashblocks state cache has been initialized
-    /// (i.e. confirm height > 0), meaning the node is actively receiving and
-    /// caching flashblock data.
+    /// Returns `true` if the flashblocks state cache is not `None`, and when the flashblocks
+    /// state cache has been initialized (i.e. confirm height > 0), meaning the node is actively
+    /// receiving and caching flashblock data.
     #[method(name = "flashblocksEnabled")]
     async fn flashblocks_enabled(&self) -> RpcResult<bool>;
 }
 
 /// `XLayer` RPC extension implementation.
-///
-/// Checks the [`FlashblockStateCache`] confirm height to determine if
-/// flashblocks are active. A non-zero confirm height means the cache has been
-/// initialized and is actively tracking flashblock state.
 #[derive(Debug, Clone)]
 pub struct XlayerRpcExt {
-    flash_cache: Option<FlashblockStateCache<OpPrimitives>>,
+    flashblocks_state: Option<FlashblockStateCache<OpPrimitives>>,
 }
 
 impl XlayerRpcExt {
     /// Creates a new [`XlayerRpcExt`].
-    pub fn new(flash_cache: Option<FlashblockStateCache<OpPrimitives>>) -> Self {
-        Self { flash_cache }
+    pub fn new(flashblocks_state: Option<FlashblockStateCache<OpPrimitives>>) -> Self {
+        Self { flashblocks_state }
     }
 }
 
 #[async_trait]
 impl XlayerRpcExtApiServer for XlayerRpcExt {
+    /// Handler for: `eth_flashblocksEnabled`
     async fn flashblocks_enabled(&self) -> RpcResult<bool> {
-        Ok(self.flash_cache.as_ref().is_some_and(|cache| cache.get_confirm_height() > 0))
+        Ok(self.flashblocks_state.as_ref().is_some_and(|cache| cache.get_confirm_height() > 0))
     }
 }
 

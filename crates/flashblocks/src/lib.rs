@@ -10,7 +10,7 @@ mod ws;
 #[cfg(test)]
 mod test_utils;
 
-pub use cache::PendingSequence;
+pub use cache::{CachedTxInfo, FlashblockStateCache, PendingSequence};
 pub use service::FlashblocksRpcService;
 pub use subscription::FlashblocksPubSub;
 pub use ws::WsFlashBlockStream;
