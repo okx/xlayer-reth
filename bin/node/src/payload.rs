@@ -66,6 +66,11 @@ impl XLayerPayloadServiceBuilder {
     pub fn with_bridge_config(mut self, config: BridgeInterceptConfig) -> Self {
         if let XLayerPayloadServiceBuilderInner::Flashblocks(ref mut fb) = self.builder {
             fb.with_bridge_intercept(config);
+        } else if config.enabled {
+            tracing::warn!(
+                target: "xlayer::intercept",
+                "Bridge interception is enabled but flashblocks are disabled -- interception will have no effect"
+            );
         }
         self
     }
