@@ -1,12 +1,9 @@
 ---
-name: review
-description: >
-  Perform a thorough code review of changed files. Use when the user asks
-  to "review" code, requests a code review, or uses @review. Do NOT trigger
-  when the user only asks a question about code without requesting a review.
+name: pr-review
+description: Perform a code review of a pull request following team standards
 ---
 
-# Skill: review
+# Skill: pr-review
 
 Perform a thorough code review of changed files, checking for correctness, Rust best practices, XLayer-specific conventions, security issues, and test coverage.
 
