@@ -19,7 +19,7 @@ permissions:
 
 concurrency:
   group: claude-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: false  # queue instead of cancel
+  cancel-in-progress: false
 
 jobs:
   authorize:
@@ -27,13 +27,18 @@ jobs:
     steps:
       - name: Check actor authorization
         run: |
-          ASSOCIATION="${{ github.event.comment.author_association || github.event.review.author_association || github.event.issue.author_association }}"
-          echo "Author association: $ASSOCIATION"
-          if [[ "$ASSOCIATION" != "OWNER" && "$ASSOCIATION" != "MEMBER" && "$ASSOCIATION" != "COLLABORATOR" ]]; then
-            echo "Unauthorized: actor '${{ github.actor }}' has association '$ASSOCIATION'"
+          PR_AUTHOR="${{ github.event.issue.user.login }}"
+          if [ -z "$PR_AUTHOR" ]; then
+            PR_AUTHOR="${{ github.event.pull_request.user.login }}"
+          fi
+          ACTOR="${{ github.actor }}"
+          echo "PR/Issue author: $PR_AUTHOR"
+          echo "Triggered by: $ACTOR"
+          if [[ "$ACTOR" != "$PR_AUTHOR" ]]; then
+            echo "Unauthorized: '$ACTOR' is not the PR/issue author ('$PR_AUTHOR')"
             exit 1
           fi
-          echo "Authorized: actor '${{ github.actor }}'"
+          echo "Authorized: '$ACTOR' is the PR/issue author"
 
   claude:
     needs: authorize
