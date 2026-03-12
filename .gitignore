@@ -1,7 +1,6 @@
 /target
-.claude
+.claude/*
 !.claude/skills/
-!.claude/skills/*.md
 .vscode
 
 tests/data
