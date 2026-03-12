@@ -124,8 +124,11 @@ fn main() {
                 .extend_rpc_modules(move |ctx| {
                     let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
 
-                    // Initialize flashblocks RPC service if not in flashblocks sequencer mode
-                    if let Some(flashblock_url) = args.xlayer_args.flashblocks_rpc.flashblock_url {
+                    // Initialize flashblocks RPC service and cache if flashblocks URL is configured.
+                    let flashblocks_state = if let Some(flashblock_url) =
+                        args.xlayer_args.flashblocks_rpc.flashblock_url
+                    {
+                        let flashblocks_state = FlashblockStateCache::new();
                         let stream = WsFlashBlockStream::new(flashblock_url);
                         let service = FlashblocksRpcService::new(
                             ctx.node().task_executor().clone(),
@@ -137,8 +140,7 @@ fn main() {
                         service.spawn();
                         info!(target: "reth::cli", "xlayer flashblocks service initialized");
 
-                        if xlayer_args.enable_flashblocks_subscription
-                        {
+                        if args.xlayer_args.flashblocks_rpc.enable_flashblocks_subscription {
                             let flashblocks_pubsub = FlashblocksPubSub::new(
                                 ctx.registry.eth_handlers().pubsub.clone(),
                                 service.subscribe_pending_sequence(),
@@ -152,24 +154,21 @@ fn main() {
                             )?;
                             info!(target: "reth::cli", "xlayer eth pubsub initialized");
                         }
-                    }
 
-                    // Create flashblocks state cache if flashblocks URL is configured.
-                    // Shared between the Eth API override and the ext RPC.
-                    let flashblocks_state = args.rollup_args.flashblocks_url.map(|_| FlashblockStateCache::new());
-
-                    // Register flashblocks Eth API override (replaces subset of eth_ methods)
-                    if let Some(fb_cache) = flashblocks_state.as_ref() {
                         let flashblocks_eth = XLayerEthApiExt::new(
                             ctx.registry.eth_api().clone(),
-                            fb_cache.clone(),
+                            flashblocks_state.clone(),
                         );
                         ctx.modules.add_or_replace_if_module_configured(
                             RethRpcModule::Eth,
                             EthApiOverrideServer::into_rpc(flashblocks_eth),
                         )?;
                         info!(target: "reth::cli", "xlayer flashblocks eth api override enabled");
-                    }
+
+                        Some(flashblocks_state)
+                    } else {
+                        None
+                    };
 
                     // Register X Layer RPC (eth_flashblocksEnabled) — always active
                     let xlayer_rpc = XlayerRpcExt::new(flashblocks_state);
