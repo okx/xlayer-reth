@@ -13,6 +13,7 @@ use tracing::*;
 
 use alloy_primitives::{TxHash, B256};
 use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag};
+use reth_chain_state::ExecutedBlock;
 use reth_primitives_traits::{NodePrimitives, ReceiptTy};
 use reth_rpc_eth_types::block::BlockAndReceipts;
 
@@ -169,7 +170,8 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
     fn handle_confirmed_block(
         &mut self,
         block_number: u64,
-        block: BlockAndReceipts<N>,
+        executed_block: ExecutedBlock<N>,
+        receipts: Arc<Vec<ReceiptTy<N>>>,
     ) -> eyre::Result<()> {
         if block_number <= self.confirm_height {
             return Err(eyre::eyre!(
@@ -183,7 +185,7 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
         }
 
         self.confirm_height = block_number;
-        self.confirm_cache.insert(block_number, block)?;
+        self.confirm_cache.insert(block_number, executed_block, receipts)?;
         Ok(())
     }
 
@@ -202,7 +204,11 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
                     "polluted state cache - trying to advance pending tip but no current pending"
                 )
             })?;
-            self.handle_confirmed_block(expected_height, sequence.get_block_and_receipts())?;
+            self.handle_confirmed_block(
+                expected_height,
+                sequence.pending.executed_block,
+                sequence.pending.receipts,
+            )?;
             self.pending_cache = Some(pending_sequence);
         } else if pending_height == expected_height {
             // Replace the existing pending sequence

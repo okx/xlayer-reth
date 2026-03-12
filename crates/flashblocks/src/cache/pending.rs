@@ -16,7 +16,7 @@ pub struct PendingSequence<N: NodePrimitives> {
     #[deref]
     pub pending: PendingBlock<N>,
     /// Transaction index: tx hash → cached tx info for O(1) tx/receipt lookups.
-    tx_index: HashMap<TxHash, CachedTxInfo<N>>,
+    pub tx_index: HashMap<TxHash, CachedTxInfo<N>>,
     /// Cached reads from execution for reuse.
     pub cached_reads: CachedReads,
     /// The current block hash of the latest flashblocks sequence.

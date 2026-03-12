@@ -495,7 +495,7 @@ mod tests {
         let fb1_txs = vec![tx_a, tx_b];
         let result = cache.get_resumable_state(100, &fb1_txs);
         assert!(result.is_some());
-        assert_eq!(result.unwrap().2, 1); // 1 tx covered by cache
+        assert_eq!(result.unwrap().4, 1); // 1 tx covered by cache
 
         cache.update(100, fb1_txs, BundleState::default(), vec![]);
         assert_eq!(cache.len(), 2);
@@ -665,19 +665,11 @@ mod tests {
         );
 
         // Matching block + parent should hit.
-        let hit = cache.get_resumable_state_with_execution_meta_for_parent(
-            100,
-            parent_a,
-            &[tx_a, tx_b, tx_c],
-        );
+        let hit = cache.get_resumable_state_for_parent(100, parent_a, &[tx_a, tx_b, tx_c]);
         assert!(hit.is_some());
 
         // Same block but different parent should miss.
-        let miss = cache.get_resumable_state_with_execution_meta_for_parent(
-            100,
-            parent_b,
-            &[tx_a, tx_b, tx_c],
-        );
+        let miss = cache.get_resumable_state_for_parent(100, parent_b, &[tx_a, tx_b, tx_c]);
         assert!(miss.is_none());
     }
 }
