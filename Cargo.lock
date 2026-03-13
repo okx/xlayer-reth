@@ -14415,7 +14415,9 @@ dependencies = [
  "alloy-primitives",
  "alloy-rpc-types-eth",
  "async-trait",
+ "futures",
  "jsonrpsee",
+ "jsonrpsee-types",
  "op-alloy-network",
  "reth-chain-state",
  "reth-optimism-primitives",
@@ -14428,6 +14430,7 @@ dependencies = [
  "reth-rpc-server-types",
  "reth-storage-api",
  "tokio",
+ "tokio-stream",
  "tracing",
  "xlayer-flashblocks",
 ]

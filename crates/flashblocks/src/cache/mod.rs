@@ -7,8 +7,10 @@ pub use confirm::ConfirmCache;
 pub use pending::PendingSequence;
 pub use raw::RawFlashblocksCache;
 
+use crate::PendingSequenceRx;
 use parking_lot::RwLock;
 use std::sync::Arc;
+use tokio::sync::watch;
 use tracing::*;
 
 use alloy_consensus::BlockHeader;
@@ -106,6 +108,12 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
     /// confirm cache. Returns `None` if the tx is not in either cache layer.
     pub fn get_tx_info(&self, tx_hash: &TxHash) -> Option<(CachedTxInfo<N>, BlockAndReceipts<N>)> {
         self.inner.read().get_tx_info(tx_hash)
+    }
+
+    /// Returns a cloned watch receiver for pending sequence updates.
+    /// Used by `eth_sendRawTransactionSync` to watch for sub-block preconfirmation.
+    pub fn subscribe_pending_sequence(&self) -> PendingSequenceRx<N> {
+        self.inner.read().subscribe_pending_sequence()
     }
 
     /// Creates a `StateProviderBox` that overlays the flashblock execution state on top of the
@@ -229,15 +237,25 @@ struct FlashblockStateCacheInner<N: NodePrimitives> {
     confirm_height: u64,
     /// Highest confirmed block height in the canonical chainstate.
     canon_height: u64,
+    /// Receiver of the most recent executed [`PendingSequence`] built from the latest
+    /// flashblocks sequence.
+    pending_sequence_rx: PendingSequenceRx<N>,
+    /// Sender of the most recent executed [`PendingSequence`] built from the latest
+    /// flashblocks sequence.
+    pending_sequence_tx: watch::Sender<Option<PendingSequence<N>>>,
 }
 
 impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
     fn new() -> Self {
+        let (tx, rx) = watch::channel(None);
+
         Self {
             pending_cache: None,
             confirm_cache: ConfirmCache::new(),
             confirm_height: 0,
             canon_height: 0,
+            pending_sequence_rx: rx,
+            pending_sequence_tx: tx,
         }
     }
 
@@ -291,10 +309,12 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
                 sequence.pending.executed_block,
                 sequence.pending.receipts,
             )?;
-            self.pending_cache = Some(pending_sequence);
+            self.pending_cache = Some(pending_sequence.clone());
+            self.pending_sequence_tx.send(Some(pending_sequence));
         } else if pending_height == expected_height {
             // Replace the existing pending sequence
-            self.pending_cache = Some(pending_sequence);
+            self.pending_cache = Some(pending_sequence.clone());
+            self.pending_sequence_tx.send(Some(pending_sequence));
         } else {
             return Err(eyre::eyre!(
                 "polluted state cache - not next consecutive pending height block"
@@ -387,5 +407,9 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
                 .get_executed_blocks_up_to_height(target_height, self.canon_height)?,
         );
         Ok(Some(blocks))
+    }
+
+    pub fn subscribe_pending_sequence(&self) -> PendingSequenceRx<N> {
+        self.pending_sequence_rx.clone()
     }
 }

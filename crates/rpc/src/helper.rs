@@ -101,35 +101,7 @@ where
         })
         .collect::<Vec<_>>();
 
-    Ok(converter.convert_receipts(inputs)?)
-}
-
-/// Converts a single `CachedTxInfo` into an RPC receipt, using the full block receipts
-/// from `BlockAndReceipts` to correctly calculate gas used and log index offsets.
-pub(crate) fn to_rpc_receipt<Eth: EthApiTypes<NetworkTypes = Optimism>>(
-    info: &CachedTxInfo<OpPrimitives>,
-    bar: &BlockAndReceipts<OpPrimitives>,
-    converter: &Eth::RpcConvert,
-) -> Result<RpcReceipt<Optimism>, Eth::Error>
-where
-    Eth::RpcConvert: RpcConvert<Primitives = OpPrimitives>,
-    Eth::Error: From<<Eth::RpcConvert as RpcConvert>::Error>,
-{
-    let (prev_cumulative_gas, next_log_index) =
-        calculate_gas_used_and_next_log_index(info.tx_index, bar.receipts.as_ref());
-
-    let meta = build_tx_meta(bar, info.tx.tx_hash(), info.tx_index);
-    let recovered = info.tx.try_into_recovered_unchecked()?;
-    Ok(converter
-        .convert_receipts(vec![ConvertReceiptInput {
-            tx: recovered.as_recovered_ref(),
-            gas_used: info.receipt.cumulative_gas_used() - prev_cumulative_gas,
-            next_log_index,
-            meta,
-            receipt: info.receipt.clone(),
-        }])?
-        .pop()
-        .unwrap())
+    Ok(converter.convert_receipts_with_block(inputs, bar.sealed_block())?)
 }
 
 /// Converts a `CachedTxInfo` and `BlockAndReceipts` into an RPC transaction.

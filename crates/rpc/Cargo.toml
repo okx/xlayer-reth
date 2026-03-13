@@ -37,8 +37,12 @@ op-alloy-network.workspace = true
 # rpc
 async-trait.workspace = true
 jsonrpsee.workspace = true
+jsonrpsee-types.workspace = true
 
 # misc
+futures.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

@@ -1,10 +1,12 @@
 use crate::helper::{
-    to_block_receipts, to_rpc_block, to_rpc_receipt, to_rpc_transaction_from_bar_and_index,
+    to_block_receipts, to_rpc_block, to_rpc_transaction, to_rpc_transaction_from_bar_and_index,
 };
+use futures::StreamExt;
 use jsonrpsee::{
     core::{async_trait, RpcResult},
     proc_macros::rpc,
 };
+use tokio_stream::wrappers::WatchStream;
 use tracing::*;
 
 use alloy_consensus::BlockHeader;
@@ -17,6 +19,7 @@ use alloy_rpc_types_eth::{
 use op_alloy_network::Optimism;
 use op_alloy_rpc_types::OpTransactionRequest;
 
+use reth_chain_state::CanonStateSubscriptions;
 use reth_optimism_primitives::OpPrimitives;
 use reth_optimism_rpc::eth::OpEthApi;
 use reth_primitives_traits::{BlockBody, NodePrimitives, SignerRecoverable};
@@ -26,6 +29,7 @@ use reth_rpc_eth_api::{
     helpers::{EthBlocks, EthCall, EthState, EthTransactions, FullEthApi},
     EthApiServer, EthApiTypes, RpcBlock, RpcNodeCore, RpcReceipt,
 };
+use reth_rpc_eth_types::{block::convert_transaction_receipt, EthApiError};
 use reth_rpc_server_types::result::ToRpcResult;
 use reth_storage_api::{StateProvider, StateProviderBox, StateProviderFactory};
 
@@ -135,7 +139,7 @@ pub trait FlashblocksEthApiOverride {
     ///
     /// This will return a timeout error if the transaction isn't included within some time period.
     #[method(name = "sendRawTransactionSync")]
-    async fn send_raw_transaction_sync(&self, bytes: Bytes) -> RpcResult<R>;
+    async fn send_raw_transaction_sync(&self, bytes: Bytes) -> RpcResult<RpcReceipt<Optimism>>;
 
     // ----------------- State apis -----------------
     /// Executes a new message call immediately without creating a transaction on the block chain,
@@ -310,8 +314,11 @@ where
     /// Handler for: `eth_getTransactionReceipt`
     async fn transaction_receipt(&self, hash: TxHash) -> RpcResult<Option<RpcReceipt<Optimism>>> {
         trace!(target: "rpc::eth", ?hash, "Serving eth_getTransactionReceipt");
-        if let Some((info, bar)) = self.flashblocks_state.get_tx_info(&hash) {
-            return Ok(Some(to_rpc_receipt::<Eth>(&info, &bar, self.eth_api.converter())?));
+        if let Some((_, bar)) = self.flashblocks_state.get_tx_info(&hash)
+            && let Some(Ok(receipt)) =
+                bar.find_and_convert_transaction_receipt(hash, self.eth_api.converter())
+        {
+            return Ok(Some(receipt));
         }
         self.eth_api.transaction_receipt(hash).await
     }
@@ -383,10 +390,67 @@ where
     }
 
     /// Handler for: `eth_sendRawTransactionSync`
-    async fn send_raw_transaction_sync(&self, tx: Bytes) -> RpcResult<RpcReceipt<T::NetworkTypes>> {
+    async fn send_raw_transaction_sync(&self, tx: Bytes) -> RpcResult<RpcReceipt<Optimism>> {
         trace!(target: "rpc::eth", ?tx, "Serving eth_sendRawTransactionSync");
-        // TODO: Implement
-        self.eth_api.send_raw_transaction_sync(tx).await
+        let timeout_duration = EthTransactions::send_raw_transaction_sync_timeout(&self.eth_api);
+        let hash =
+            EthTransactions::send_raw_transaction(&self.eth_api, tx).await.map_err(Into::into)?;
+        let converter = self.eth_api.converter();
+
+        let mut canonical_stream = self.eth_api.provider().canonical_state_stream();
+        let mut flashblock_stream =
+            WatchStream::new(self.flashblocks_state.subscribe_pending_sequence());
+
+        tokio::time::timeout(timeout_duration, async {
+            loop {
+                tokio::select! {
+                    biased;
+                    // check if the tx was preconfirmed in the latest flashblocks pending sequence
+                    pending = flashblock_stream.next() => {
+                        if let Some(pending_sequence) = pending.flatten() {
+                            let bar = pending_sequence.get_block_and_receipts();
+                            if let Some(receipt) =
+                                bar.find_and_convert_transaction_receipt(hash, converter)
+                            {
+                                return receipt;
+                            }
+                        }
+                    }
+                    // Listen for regular canonical block updates for inclusion
+                    canonical_notification = canonical_stream.next() => {
+                        if let Some(notification) = canonical_notification {
+                            let chain = notification.committed();
+                            if let Some((block, tx, receipt, all_receipts)) =
+                                chain.find_transaction_and_receipt_by_hash(hash)
+                            {
+                                if let Some(receipt) = convert_transaction_receipt(
+                                    block,
+                                    all_receipts,
+                                    tx,
+                                    receipt,
+                                    converter,
+                                )
+                                .transpose()
+                                .map_err(Into::into)?
+                                {
+                                    return Ok(receipt);
+                                }
+                            }
+                        } else {
+                            // Canonical stream ended
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(EthApiError::TransactionConfirmationTimeout { hash, duration: timeout_duration }
+                .into())
+        })
+        .await
+        .unwrap_or_else(|_elapsed| {
+            Err(EthApiError::TransactionConfirmationTimeout { hash, duration: timeout_duration }
+                .into())
+        })
     }
 
     // ----------------- State apis -----------------
