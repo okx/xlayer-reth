@@ -26,3 +26,9 @@ tests/
 dist/
 tmp/
 node_modules/
+
+# Unused submodule subdirectories (only rust/ path deps are needed)
+deps/optimism/rust/kona
+deps/optimism/rust/docs
+deps/optimism/rust/justfile
+deps/optimism/rust/package-lock.json
