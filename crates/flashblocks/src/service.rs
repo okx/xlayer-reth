@@ -82,7 +82,7 @@ where
         // Spawn persistence handle
         let datadir = self.datadir.clone();
         let rx = self.subscribe_received_flashblocks();
-        self.task_executor.spawn_critical(
+        self.task_executor.spawn_critical_task(
             "xlayer-flashblocks-persistence",
             Box::pin(async move {
                 handle_persistence(rx, datadir).await;
@@ -93,7 +93,7 @@ where
         if self.relay_flashblocks {
             let rx = self.subscribe_received_flashblocks();
             let ws_pub = self.ws_pub.clone();
-            self.task_executor.spawn_critical(
+            self.task_executor.spawn_critical_task(
                 "xlayer-flashblocks-publish",
                 Box::pin(async move {
                     handle_relay_flashblocks(rx, ws_pub).await;
