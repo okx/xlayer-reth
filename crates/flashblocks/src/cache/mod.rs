@@ -17,7 +17,7 @@ use alloy_consensus::BlockHeader;
 use alloy_primitives::{TxHash, B256};
 use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag};
 use reth_chain_state::{ExecutedBlock, MemoryOverlayStateProvider};
-use reth_primitives_traits::{NodePrimitives, ReceiptTy};
+use reth_primitives_traits::{NodePrimitives, ReceiptTy, SealedHeaderFor};
 use reth_rpc_eth_types::block::BlockAndReceipts;
 use reth_storage_api::StateProviderBox;
 
@@ -159,33 +159,36 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
         &self,
         block_id: Option<BlockId>,
         canonical_state: StateProviderBox,
-    ) -> Option<StateProviderBox> {
-        let in_memory = {
-            let guard = self.inner.read();
-            let block_num = match block_id.unwrap_or(BlockId::Number(BlockNumberOrTag::Latest)) {
-                BlockId::Number(id) => match id {
-                    BlockNumberOrTag::Pending => guard.get_pending_block(),
-                    BlockNumberOrTag::Latest => guard.get_confirmed_block(),
-                    BlockNumberOrTag::Number(num) => guard.get_block_by_number(num),
-                    _ => None,
-                },
-                BlockId::Hash(hash) => guard.get_block_by_hash(&hash.block_hash),
-            }?
-            .block
-            .number();
+    ) -> Option<(StateProviderBox, SealedHeaderFor<N>)> {
+        let guard = self.inner.read();
+        let block = match block_id.unwrap_or(BlockId::Number(BlockNumberOrTag::Latest)) {
+            BlockId::Number(id) => match id {
+                BlockNumberOrTag::Pending => guard.get_pending_block(),
+                BlockNumberOrTag::Latest => guard.get_confirmed_block(),
+                BlockNumberOrTag::Number(num) => guard.get_block_by_number(num),
+                _ => None,
+            },
+            BlockId::Hash(hash) => guard.get_block_by_hash(&hash.block_hash),
+        }?
+        .block;
+        let block_num = block.number();
 
-            match guard.get_executed_blocks_up_to_height(block_num) {
-                Ok(Some(blocks)) => blocks,
-                Ok(None) => return None,
-                Err(e) => {
-                    warn!(target: "flashblocks", "Failed to get flashblocks state provider: {e}. Flushing cache");
-                    drop(guard);
-                    self.inner.write().flush();
-                    return None;
-                }
+        let in_memory = guard.get_executed_blocks_up_to_height(block_num);
+        drop(guard);
+
+        let in_memory = match in_memory {
+            Ok(Some(blocks)) => blocks,
+            Ok(None) => return None,
+            Err(e) => {
+                warn!(target: "flashblocks", "Failed to get flashblocks state provider: {e}. Flushing cache");
+                self.inner.write().flush();
+                return None;
             }
         };
-        Some(Box::new(MemoryOverlayStateProvider::new(canonical_state, in_memory)))
+        Some((
+            Box::new(MemoryOverlayStateProvider::new(canonical_state, in_memory)),
+            block.clone_sealed_header(),
+        ))
     }
 }
 
