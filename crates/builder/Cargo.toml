@@ -48,6 +48,8 @@ reth-node-builder = { workspace = true, features = ["test-utils"] }
 reth-storage-api.workspace = true
 reth-rpc-api.workspace = true
 reth-optimism-rpc.workspace = true
+reth-optimism-storage.workspace = true
+reth-tasks.workspace = true
 reth-ipc = { workspace = true, optional = true }
 
 # alloy

@@ -12,6 +12,7 @@ repository = "https://github.com/okx/xlayer-reth.git"
 
 [workspace]
 resolver = "2"
+exclude = ["deps"]
 members = [
     "crates/builder",
     "crates/chainspec",
@@ -75,7 +76,9 @@ xlayer-version = { path = "crates/version" }
 xlayer-trace-monitor = { git = "https://github.com/okx/xlayer-toolkit", rev = "d6af8edac7cf179241af1688f7741e260ba48b79" }
 
 # ==============================================================================
-# Reth Dependencies (points to our fork)
+# Reth Base Dependencies (paradigmxyz/reth v1.11.0)
+# These are chain-agnostic crates from the base reth framework.
+# https://github.com/paradigmxyz/reth/tree/v1.11.0
 # ==============================================================================
 reth = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-basic-payload-builder = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
@@ -131,6 +134,7 @@ reth-transaction-pool = { git = "https://github.com/okx/reth", rev = "b6a31f31af
 reth-chain-state = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-errors = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-optimism-flashblocks = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
+reth-optimism-storage = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 reth-trie = { git = "https://github.com/okx/reth", rev = "b6a31f31af91abdecb475f2a991906bff9bbef7f" }
 
 # ==============================================================================
@@ -144,27 +148,37 @@ revm = { version = "34.0.0", features = [
 op-revm = { version = "15.0.0", default-features = false }
 
 # ==============================================================================
-# Alloy Dependencies
+# Alloy Dependencies (versions pinned to ~1.6 to match paradigm reth v1.11.0)
+# Using ~1.6 to prevent Cargo from upgrading to 1.7.x which has
+# incompatible secp256k1 version requirements.
 # ==============================================================================
-alloy-chains = { version = "0.2.20", default-features = false }
-alloy-contract = { version = "1.4.3" }
-alloy-consensus = { version = "1.4.3" }
-alloy-eips = { version = "1.4.3", default-features = false }
-alloy-evm = { version = "0.26.3", default-features = false }
-alloy-genesis = { version = "1.4.3", default-features = false }
-alloy-json-rpc = { version = "1.4.3" }
-alloy-network = { version = "1.4.3", default-features = false }
-alloy-primitives = { version = "1.5.2", default-features = false, features = [
+alloy-chains = { version = "0.2.30", default-features = false }
+alloy-contract = { version = "~1.6" }
+alloy-consensus = { version = "~1.6", default-features = false }
+alloy-eips = { version = "~1.6", default-features = false }
+alloy-evm = { version = "~0.27", default-features = false }
+alloy-genesis = { version = "~1.6", default-features = false }
+alloy-json-rpc = { version = "~1.6" }
+alloy-network = { version = "~1.6", default-features = false }
+alloy-primitives = { version = "~1.5", default-features = false, features = [
     "map-foldhash",
-] }
-alloy-provider = { version = "1.4.3" }
-alloy-rlp = { version = "0.3.10", default-features = false, features = [
+] } # pinned to ~1.5 (not ~1.6) to avoid secp256k1 version conflict introduced in alloy-primitives 1.6
+alloy-provider = { version = "~1.6" }
+alloy-rlp = { version = "~0.3", default-features = false, features = [
     "core-net",
 ] }
-alloy-rpc-types-engine = { version = "1.4.3", default-features = false }
-alloy-rpc-types-eth = { version = "1.4.3" }
-alloy-signer-local = { version = "1.4.3", default-features = false }
-alloy-sol-types = { version = "1.5.0", default-features = false }
+alloy-rpc-client = { version = "~1.6" }
+alloy-rpc-types-beacon = { version = "~1.6", features = ["ssz"] }
+alloy-rpc-types-engine = { version = "~1.6", default-features = false }
+alloy-rpc-types-eth = { version = "~1.6" }
+alloy-serde = { version = "~1.6" }
+alloy-signer-local = { version = "~1.6", default-features = false }
+alloy-sol-types = { version = "~1.5", default-features = false }
+alloy-transport-http = { version = "~1.6", features = [
+    "reqwest-rustls-tls",
+], default-features = false }
+alloy-transport = { version = "~1.6" }
+alloy-hardforks = { version = "~0.4", default-features = false }
 
 # op-alloy
 alloy-op-evm = { version = "0.26.3", default-features = false }
@@ -204,12 +218,14 @@ eyre = { version = "0.6.12" }
 hex = "0.4"
 metrics = "0.24.1"
 moka = { version = "0.12.11", features = ["sync"] }
+criterion = { version = "0.5", features = ["html_reports"] }
 once_cell = "1.19"
 parking_lot = { version = "0.12.3" }
-secp256k1 = { version = "0.30" }
+secp256k1 = { version = "0.30", default-features = false }
 serde = "1"
 serde_json = "1.0"
-thiserror = { version = "1.0.64" }
+serde_with = { version = "3.8.1" }
+thiserror = { version = "2.0.18" }
 humantime = "2.1"
 tracing = { version = "0.1.41" }
 shellexpand = "3.1"
@@ -221,3 +237,6 @@ ringbuffer = "0.15"
 libp2p = { version = "0.56", features = ["identify", "ping", "noise", "tcp", "autonat", "mdns", "tokio", "cbor", "macros", "yamux", "dns"] }
 libp2p-stream = "0.4.0-alpha"
 multiaddr = "0.18"
+
+# ==============================================================================
+# Patch Section

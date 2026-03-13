@@ -400,7 +400,7 @@ impl FlashblocksBuilderTx {
             info.cumulative_da_bytes_used += builder_tx.da_size;
 
             let ctx = ReceiptBuilderCtx {
-                tx: builder_tx.signed_tx.inner(),
+                tx_type: builder_tx.signed_tx.inner().tx_type(),
                 evm: &evm,
                 result,
                 state: &state,
