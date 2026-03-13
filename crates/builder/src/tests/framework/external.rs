@@ -10,13 +10,12 @@ use op_alloy_network::Optimism;
 use op_alloy_rpc_types_engine::OpExecutionPayloadV4;
 use std::path::{Path, PathBuf};
 use testcontainers::bollard::{
-    container::{
-        AttachContainerOptions, Config, CreateContainerOptions, RemoveContainerOptions,
+    exec::{CreateExecOptions, StartExecResults},
+    models::{ContainerCreateBody, ContainerCreateResponse, HostConfig},
+    query_parameters::{
+        AttachContainerOptions, CreateContainerOptions, CreateImageOptions, RemoveContainerOptions,
         StartContainerOptions, StopContainerOptions,
     },
-    exec::{CreateExecOptions, StartExecResults},
-    image::CreateImageOptions,
-    secret::{ContainerCreateResponse, HostConfig},
     Docker,
 };
 use tokio::signal;
@@ -29,7 +28,7 @@ const RPC_CONTAINER_IPC_PATH: &str = "/home/op-reth-shared/rpc.ipc";
 
 /// This type represents an Optimism execution client node that is running inside a
 /// docker container. This node is used to validate the correctness of the blocks built
-/// by op-rbuilder.
+/// by the flashblock-builder.
 ///
 /// When this node is attached to a `ChainDriver`, it will automatically catch up with the
 /// provided chain and will transparently ingest all newly built blocks by the driver.
@@ -67,7 +66,7 @@ impl ExternalNode {
         // Create Docker container with reth EL client
         let container = create_container(&tempdir, &docker, version_tag).await?;
 
-        docker.start_container(&container.id, None::<StartContainerOptions<String>>).await?;
+        docker.start_container(&container.id, None::<StartContainerOptions>).await?;
 
         // Wait for the container to be ready and IPCs to be created
         await_ipc_readiness(&docker, &container.id).await?;
@@ -260,8 +259,8 @@ async fn create_container(
     // first pull the image locally
     let mut pull_stream = docker.create_image(
         Some(CreateImageOptions {
-            from_image: "ghcr.io/paradigmxyz/op-reth".to_string(),
-            tag: version_tag.into(),
+            from_image: Some("ghcr.io/paradigmxyz/op-reth".to_string()),
+            tag: Some(version_tag.to_string()),
             ..Default::default()
         }),
         None,
@@ -273,7 +272,7 @@ async fn create_container(
     }
 
     // Don't expose any ports, as we will only use IPC for communication.
-    let container_config = Config {
+    let container_config = ContainerCreateBody {
         image: Some(format!("ghcr.io/paradigmxyz/op-reth:{version_tag}")),
         entrypoint: Some(vec!["op-reth".to_string()]),
         cmd: Some(
@@ -297,9 +296,7 @@ async fn create_container(
         ..Default::default()
     };
 
-    Ok(docker
-        .create_container(Some(CreateContainerOptions::<String>::default()), container_config)
-        .await?)
+    Ok(docker.create_container(Some(CreateContainerOptions::default()), container_config).await?)
 }
 
 async fn relax_permissions(docker: &Docker, container: &str, path: &str) -> eyre::Result<()> {
@@ -340,11 +337,11 @@ async fn await_ipc_readiness(docker: &Docker, container: &str) -> eyre::Result<(
     let mut attach_stream = docker
         .attach_container(
             container,
-            Some(AttachContainerOptions::<String> {
-                stdout: Some(true),
-                stderr: Some(true),
-                stream: Some(true),
-                logs: Some(true),
+            Some(AttachContainerOptions {
+                stdout: true,
+                stderr: true,
+                stream: true,
+                logs: true,
                 ..Default::default()
             }),
         )

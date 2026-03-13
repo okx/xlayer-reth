@@ -1,5 +1,5 @@
 use crate::{
-    args::{FlashblocksArgs, OpRbuilderArgs},
+    args::{BuilderArgs, FlashblocksArgs},
     tests::{BuilderTxValidation, LocalInstance, TransactionBuilderExt},
 };
 use alloy_primitives::TxHash;
@@ -8,7 +8,7 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
-use macros::{if_flashblocks, if_standard, rb_test};
+use macros::rb_test;
 use std::collections::HashSet;
 use tokio::{join, task::yield_now};
 use tracing::info;
@@ -18,7 +18,7 @@ use tracing::info;
 ///
 /// Generated blocks are also validated against an external op-reth node to
 /// ensure their correctness.
-#[rb_test(args = OpRbuilderArgs {
+#[rb_test(args = BuilderArgs {
     flashblocks: FlashblocksArgs {
         enabled: true,
         flashblocks_port: 0,
@@ -42,32 +42,12 @@ async fn chain_produces_blocks(rbuilder: LocalInstance) -> eyre::Result<()> {
         let block = driver.build_new_block_with_current_timestamp(None).await?;
 
         // Validate builder transactions are present (must be done before moving transactions)
-        if_standard! {
-            block.assert_builder_tx_count(1);
-        }
-        if_flashblocks! {
-            block.assert_builder_tx_count(2);
-        }
+        block.assert_builder_tx_count(2);
 
         let transactions = block.transactions;
 
-        if_standard! {
-            assert_eq!(
-                transactions.len(),
-                2,
-                "Empty blocks should have exactly two transactions"
-            );
-        }
-
-        if_flashblocks! {
-            // in flashblocks we add an additional transaction on the first
-            // flashblocks and then one on the last flashblock
-            assert_eq!(
-                transactions.len(),
-                3,
-                "Empty blocks should have exactly three transactions"
-            );
-        }
+        // deposit + 2 builder txs (fallback + flashblock number)
+        assert_eq!(transactions.len(), 3, "Empty blocks should have exactly three transactions");
     }
 
     // ensure that transactions are included in blocks and each block has all the transactions
@@ -89,35 +69,12 @@ async fn chain_produces_blocks(rbuilder: LocalInstance) -> eyre::Result<()> {
         let block = driver.build_new_block_with_current_timestamp(None).await?;
 
         // Validate builder transactions are present (must be done before moving transactions)
-        if_standard! {
-            block.assert_builder_tx_count(1);
-        }
-        if_flashblocks! {
-            block.assert_builder_tx_count(2);
-        }
+        block.assert_builder_tx_count(2);
 
         let txs = block.transactions;
 
-        if_standard! {
-            assert_eq!(
-                txs.len(),
-                2 + count,
-                "Block should have {} transactions",
-                2 + count
-            );
-        }
-
-        if_flashblocks! {
-            // in flashblocks we add an additional transaction on the first
-            // flashblocks and then one on the last flashblock, so it will have
-            // one more transaction than the standard builder
-            assert_eq!(
-                txs.len(),
-                3 + count,
-                "Block should have {} transactions",
-                3 + count
-            );
-        }
+        // deposit + 2 builder txs + user txs
+        assert_eq!(txs.len(), 3 + count, "Block should have {} transactions", 3 + count);
 
         for tx_hash in tx_hashes {
             assert!(
@@ -212,7 +169,7 @@ async fn test_no_tx_pool(rbuilder: LocalInstance) -> eyre::Result<()> {
     Ok(())
 }
 
-#[rb_test(args = OpRbuilderArgs {
+#[rb_test(args = BuilderArgs {
     max_gas_per_txn: Some(25000),
     ..Default::default()
 })]
@@ -241,30 +198,12 @@ async fn chain_produces_big_tx_with_gas_limit(rbuilder: LocalInstance) -> eyre::
     let block = driver.build_new_block_with_current_timestamp(None).await?;
 
     // Validate builder transactions are present (must be done before moving transactions)
-    if_standard! {
-        block.assert_builder_tx_count(1);
-    }
-    if_flashblocks! {
-        block.assert_builder_tx_count(2);
-    }
+    block.assert_builder_tx_count(2);
 
     let txs = block.transactions;
 
-    if_standard! {
-        assert_eq!(
-            txs.len(),
-            3,
-            "Should have 3 transactions"
-        );
-    }
-
-    if_flashblocks! {
-        assert_eq!(
-            txs.len(),
-            4,
-            "Should have 4 transactions"
-        );
-    }
+    // deposit + 2 builder txs + 1 valid tx (high gas tx excluded)
+    assert_eq!(txs.len(), 4, "Should have 4 transactions");
 
     // assert we included the tx with gas under limit
     let inclusion_result = txs.hashes().find(|hash| hash == tx.tx_hash());
@@ -277,7 +216,7 @@ async fn chain_produces_big_tx_with_gas_limit(rbuilder: LocalInstance) -> eyre::
     Ok(())
 }
 
-#[rb_test(args = OpRbuilderArgs {
+#[rb_test(args = BuilderArgs {
     ..Default::default()
 })]
 async fn chain_produces_big_tx_without_gas_limit(rbuilder: LocalInstance) -> eyre::Result<()> {
@@ -297,12 +236,7 @@ async fn chain_produces_big_tx_without_gas_limit(rbuilder: LocalInstance) -> eyr
     let block = driver.build_new_block_with_current_timestamp(None).await?;
 
     // Validate builder transactions are present (must be done before moving transactions)
-    if_standard! {
-        block.assert_builder_tx_count(1);
-    }
-    if_flashblocks! {
-        block.assert_builder_tx_count(2);
-    }
+    block.assert_builder_tx_count(2);
 
     let txs = block.transactions;
 
@@ -310,28 +244,15 @@ async fn chain_produces_big_tx_without_gas_limit(rbuilder: LocalInstance) -> eyr
     let inclusion_result = txs.hashes().find(|hash| hash == tx.tx_hash());
     assert!(inclusion_result.is_some());
 
-    if_standard! {
-        assert_eq!(
-            txs.len(),
-            3,
-            "Should have 3 transactions"
-        );
-    }
-
-    if_flashblocks! {
-        assert_eq!(
-            txs.len(),
-            4,
-            "Should have 4 transactions"
-        );
-    }
+    // deposit + 2 builder txs + 1 user tx
+    assert_eq!(txs.len(), 4, "Should have 4 transactions");
 
     Ok(())
 }
 
 /// Validates that each block contains builder transactions using the
 /// BuilderTxValidation utility.
-#[rb_test(args = OpRbuilderArgs {
+#[rb_test(args = BuilderArgs {
     flashblocks: FlashblocksArgs {
         enabled: true,
         flashblocks_port: 0,
@@ -351,15 +272,8 @@ async fn block_includes_builder_transaction(rbuilder: LocalInstance) -> eyre::Re
         // Validate that the block contains builder transactions
         assert!(block.has_builder_tx(), "Block should contain at least one builder transaction");
 
-        // Standard builder: 1 builder tx
-        // Flashblocks builder: 2 builder txs (fallback + flashblock number)
-        if_standard! {
-            block.assert_builder_tx_count(1);
-        }
-
-        if_flashblocks! {
-            block.assert_builder_tx_count(2);
-        }
+        // 2 builder txs (fallback + flashblock number)
+        block.assert_builder_tx_count(2);
     }
 
     Ok(())

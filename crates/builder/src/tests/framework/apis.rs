@@ -1,22 +1,24 @@
-use super::DEFAULT_JWT_TOKEN;
-use alloy_eips::{eip7685::Requests, BlockNumberOrTag};
-use alloy_primitives::B256;
+use crate::tests::DEFAULT_JWT_TOKEN;
 
-use alloy_rpc_types_engine::{ForkchoiceUpdated, PayloadStatus};
 use core::{future::Future, marker::PhantomData};
 use jsonrpsee::{
     core::{client::SubscriptionClientT, RpcResult},
     proc_macros::rpc,
 };
+use serde_json::Value;
+use tracing::debug;
+
+use alloy_eips::{eip7685::Requests, BlockNumberOrTag};
+use alloy_primitives::B256;
+use alloy_rpc_types_engine::{ForkchoiceUpdated, PayloadStatus};
 use op_alloy_rpc_types_engine::OpExecutionPayloadV4;
+
 use reth::rpc::types::engine::ForkchoiceState;
 use reth_node_api::{EngineTypes, PayloadTypes};
 use reth_optimism_node::OpEngineTypes;
 use reth_optimism_rpc::engine::OpEngineApiClient;
 use reth_payload_builder::PayloadId;
 use reth_rpc_layer::{AuthClientLayer, JwtSecret};
-use serde_json::Value;
-use tracing::debug;
 
 #[derive(Clone, Debug)]
 pub enum Address {

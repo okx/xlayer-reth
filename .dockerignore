@@ -18,5 +18,11 @@ Dockerfile*
 *.md
 docs/
 
-# Tests
+# Tests – exclude test sources but keep manifests/stubs needed by cargo
+crates/tests/
 tests/
+
+# Build outputs
+dist/
+tmp/
+node_modules/

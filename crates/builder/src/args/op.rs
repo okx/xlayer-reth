@@ -1,27 +1,18 @@
-//! Additional Node command arguments.
+//! Flashblock builder command arguments.
 //!
-//! Copied from OptimismNode to allow easy extension.
+//! Builder-specific configuration for the flashblock payload builder.
 
-//! clap [Args](clap::Args) for optimism rollup configuration
-
-use crate::{
-    flashtestations::args::FlashtestationsArgs, gas_limiter::args::GasLimiterArgs,
-    tx_signer::Signer,
-};
+use crate::signer::Signer;
 use alloy_primitives::Address;
 use anyhow::{anyhow, Result};
 use clap::Parser;
-use reth_optimism_cli::commands::Commands;
-use reth_optimism_node::args::RollupArgs;
 use std::path::PathBuf;
 
-/// Parameters for rollup configuration
+use reth_optimism_cli::commands::Commands;
+
+/// Parameters for the flashblock builder configuration.
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
-#[command(next_help_heading = "Rollup")]
-pub struct OpRbuilderArgs {
-    /// Rollup configuration
-    #[command(flatten)]
-    pub rollup_args: RollupArgs,
+pub struct BuilderArgs {
     /// Builder secret key for signing last transaction in block
     #[arg(long = "rollup.builder-secret-key", env = "BUILDER_SECRET_KEY")]
     pub builder_signer: Option<Signer>,
@@ -41,11 +32,8 @@ pub struct OpRbuilderArgs {
     /// How much time extra to wait for the block building job to complete and not get garbage collected
     #[arg(long = "builder.extra-block-deadline-secs", default_value = "20")]
     pub extra_block_deadline_secs: u64,
-    /// Whether to enable revert protection by default
-    #[arg(long = "builder.enable-revert-protection", default_value = "false")]
-    pub enable_revert_protection: bool,
 
-    /// Path to builder playgorund to automatically start up the node connected to it
+    /// Path to builder playground to automatically start up the node connected to it
     #[arg(
         long = "builder.playground",
         num_args = 0..=1,
@@ -56,15 +44,9 @@ pub struct OpRbuilderArgs {
     pub playground: Option<PathBuf>,
     #[command(flatten)]
     pub flashblocks: FlashblocksArgs,
-    #[command(flatten)]
-    pub telemetry: TelemetryArgs,
-    #[command(flatten)]
-    pub flashtestations: FlashtestationsArgs,
-    #[command(flatten)]
-    pub gas_limiter: GasLimiterArgs,
 }
 
-impl Default for OpRbuilderArgs {
+impl Default for BuilderArgs {
     fn default() -> Self {
         let args = crate::args::Cli::parse_from(["dummy", "node"]);
         let Commands::Node(node_command) = args.command else { unreachable!() };
@@ -83,7 +65,7 @@ fn expand_path(s: &str) -> Result<PathBuf> {
 /// Parameters for Flashblocks configuration
 /// The names in the struct are prefixed with `flashblocks` to avoid conflicts
 /// with the standard block building configuration since these args are flattened
-/// into the main `OpRbuilderArgs` struct with the other rollup/node args.
+/// into the main `BuilderArgs` struct with the other rollup/node args.
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
 pub struct FlashblocksArgs {
     /// When set to true, the builder will build flashblocks
@@ -120,14 +102,6 @@ pub struct FlashblocksArgs {
     )]
     pub flashblocks_disable_state_root: bool,
 
-    /// Whether to builder running with rollup boost
-    #[arg(
-        long = "flashblocks.disable-rollup-boost",
-        default_value = "false",
-        env = "FLASHBLOCK_DISABLE_ROLLUP_BOOST"
-    )]
-    pub flashblocks_disable_rollup_boost: bool,
-
     /// Whether to disable async state root calculation on full payload resolution
     #[arg(
         long = "flashblocks.disable-async-calculate-state-root",
@@ -145,15 +119,6 @@ pub struct FlashblocksArgs {
         env = "FLASHBLOCK_NUMBER_CONTRACT_ADDRESS"
     )]
     pub flashblocks_number_contract_address: Option<Address>,
-
-    /// Use permit signatures if flashtestations is enabled with the flashtestation key
-    /// to increment the flashblocks number
-    #[arg(
-        long = "flashblocks.number-contract-use-permit",
-        env = "FLASHBLOCK_NUMBER_CONTRACT_USE_PERMIT",
-        default_value = "false"
-    )]
-    pub flashblocks_number_contract_use_permit: bool,
 
     /// Offset in milliseconds for when to send flashblocks.
     /// Positive values send late, negative values send early.
@@ -187,6 +152,14 @@ pub struct FlashblocksArgs {
         default_value = "256"
     )]
     pub ws_subscriber_limit: Option<u16>,
+
+    /// Enable replay from the persistence file on startup
+    #[arg(
+        long = "flashblocks.replay-from-persistence-file",
+        env = "FLASHBLOCKS_REPLAY_FROM_PERSISTENCE_FILE",
+        default_value = "false"
+    )]
+    pub replay_from_persistence_file: bool,
 }
 
 impl Default for FlashblocksArgs {
@@ -244,20 +217,4 @@ pub struct FlashblocksP2pArgs {
         default_value = "false"
     )]
     pub p2p_process_full_payload: bool,
-}
-
-/// Parameters for telemetry configuration
-#[derive(Debug, Clone, Default, PartialEq, Eq, clap::Args)]
-pub struct TelemetryArgs {
-    /// OpenTelemetry endpoint for traces
-    #[arg(long = "telemetry.otlp-endpoint", env = "OTEL_EXPORTER_OTLP_ENDPOINT")]
-    pub otlp_endpoint: Option<String>,
-
-    /// OpenTelemetry headers for authentication
-    #[arg(long = "telemetry.otlp-headers", env = "OTEL_EXPORTER_OTLP_HEADERS")]
-    pub otlp_headers: Option<String>,
-
-    /// Inverted sampling frequency in blocks. 1 - each block, 100 - every 100th block.
-    #[arg(long = "telemetry.sampling-ratio", env = "SAMPLING_RATIO", default_value = "100")]
-    pub sampling_ratio: u64,
 }

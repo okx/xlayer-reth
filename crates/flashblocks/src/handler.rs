@@ -1,11 +1,14 @@
-use reth_node_api::FullNodeComponents;
-use reth_optimism_flashblocks::FlashBlockRx;
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tracing::{debug, info, trace, warn};
+
+use reth_node_api::FullNodeComponents;
+use reth_node_core::dirs::{ChainPath, DataDirPath};
+use reth_optimism_flashblocks::{FlashBlock, FlashBlockRx};
+
 use xlayer_builder::{
-    args::OpRbuilderArgs, builders::WebSocketPublisher, metrics::OpRBuilderMetrics,
-    tokio_metrics::FlashblocksTaskMetrics,
+    args::FlashblocksArgs,
+    flashblocks::{FlashblockPayloadsCache, WebSocketPublisher},
+    metrics::{tokio::FlashblocksTaskMetrics, BuilderMetrics},
 };
 
 pub struct FlashblocksService<Node>
@@ -15,7 +18,8 @@ where
     node: Node,
     flashblock_rx: FlashBlockRx,
     ws_pub: Arc<WebSocketPublisher>,
-    op_args: OpRbuilderArgs,
+    relay_flashblocks: bool,
+    datadir: ChainPath<DataDirPath>,
 }
 
 impl<Node> FlashblocksService<Node>
@@ -25,45 +29,53 @@ where
     pub fn new(
         node: Node,
         flashblock_rx: FlashBlockRx,
-        op_args: OpRbuilderArgs,
+        args: FlashblocksArgs,
+        relay_flashblocks: bool,
+        datadir: ChainPath<DataDirPath>,
     ) -> Result<Self, eyre::Report> {
-        let ws_addr = SocketAddr::new(
-            op_args.flashblocks.flashblocks_addr.parse()?,
-            op_args.flashblocks.flashblocks_port,
-        );
+        let ws_addr = SocketAddr::new(args.flashblocks_addr.parse()?, args.flashblocks_port);
 
-        let metrics = Arc::new(OpRBuilderMetrics::default());
+        let metrics = Arc::new(BuilderMetrics::default());
         let task_metrics = Arc::new(FlashblocksTaskMetrics::new());
         let ws_pub = Arc::new(
             WebSocketPublisher::new(
                 ws_addr,
                 metrics,
                 &task_metrics.websocket_publisher,
-                op_args.flashblocks.ws_subscriber_limit,
+                args.ws_subscriber_limit,
             )
             .map_err(|e| eyre::eyre!("Failed to create WebSocket publisher: {e}"))?,
         );
 
         info!(target: "flashblocks", "WebSocket publisher initialized at {}", ws_addr);
 
-        Ok(Self { node, flashblock_rx, ws_pub, op_args })
+        Ok(Self { node, flashblock_rx, ws_pub, relay_flashblocks, datadir })
     }
 
     pub fn spawn(mut self) {
         debug!(target: "flashblocks", "Initializing flashblocks service");
 
         let task_executor = self.node.task_executor().clone();
-        if self.op_args.rollup_args.flashblocks_url.is_some() {
+        if self.relay_flashblocks {
+            let datadir = self.datadir.clone();
+            let flashblock_rx = self.flashblock_rx.resubscribe();
             task_executor.spawn_critical_task(
-                "xlayer-flashblocks-service",
+                "xlayer-flashblocks-persistence",
                 Box::pin(async move {
-                    self.run().await;
+                    handle_persistence(flashblock_rx, datadir).await;
+                }),
+            );
+
+            task_executor.spawn_critical_task(
+                "xlayer-flashblocks-publish",
+                Box::pin(async move {
+                    self.publish().await;
                 }),
             );
         }
     }
 
-    async fn run(&mut self) {
+    async fn publish(&mut self) {
         info!(
             target: "flashblocks",
             "Flashblocks websocket publisher started"
@@ -90,7 +102,8 @@ where
         info!(target: "flashblocks", "Flashblocks service stopped");
     }
 
-    async fn publish_flashblock(&self, flashblock: &Arc<reth_optimism_flashblocks::FlashBlock>) {
+    /// Relays the incoming flashblock to the flashblock websocket subscribers.
+    async fn publish_flashblock(&self, flashblock: &Arc<FlashBlock>) {
         match self.ws_pub.publish(flashblock) {
             Ok(_) => {
                 trace!(
@@ -108,4 +121,48 @@ where
             }
         }
     }
+}
+
+/// Handles the persistence of the pending flashblocks sequence to disk.
+async fn handle_persistence(mut rx: FlashBlockRx, datadir: ChainPath<DataDirPath>) {
+    let cache = FlashblockPayloadsCache::new(Some(datadir));
+
+    // Set default flush interval to 5 seconds
+    let mut flush_interval = tokio::time::interval(Duration::from_secs(5));
+    let mut dirty = false;
+
+    loop {
+        tokio::select! {
+            result = rx.recv() => {
+                match result {
+                    Ok(flashblock) => {
+                        if let Err(e) = cache.add_flashblock_payload(flashblock.as_ref().clone()) {
+                            warn!(target: "flashblocks", "Failed to cache flashblock payload: {e}");
+                            continue;
+                        }
+                        dirty = true;
+                    }
+                    Err(e) => {
+                        warn!(target: "flashblocks", "Persistence handle receiver error: {e:?}");
+                        break;
+                    }
+                }
+            }
+            _ = flush_interval.tick() => {
+                if dirty {
+                    if let Err(e) = cache.persist().await {
+                        warn!(target: "flashblocks", "Failed to persist pending sequence: {e}");
+                    }
+                    dirty = false;
+                }
+            }
+        }
+    }
+
+    // Flush again on shutdown
+    if dirty && let Err(e) = cache.persist().await {
+        warn!(target: "flashblocks", "Failed final persist of pending sequence: {e}");
+    }
+
+    info!(target: "flashblocks", "Flashblocks persistence handle stopped");
 }

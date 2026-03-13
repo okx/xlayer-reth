@@ -7,39 +7,82 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 
-[features]
-default = []
+[lints]
+workspace = true
 
 [dependencies]
 xlayer-builder.workspace = true
+
+# reth
+reth-chain-state = { workspace = true, features = ["serde"] }
+reth-engine-primitives = { workspace = true, features = ["std"] }
+reth-errors.workspace = true
+reth-evm.workspace = true
+reth-execution-types = { workspace = true, features = ["serde"] }
+reth-metrics.workspace = true
 reth-node-api.workspace = true
-reth-primitives-traits.workspace = true
-reth-tracing.workspace = true
-reth-optimism-flashblocks.workspace = true
-
-alloy-primitives.workspace = true
-alloy-consensus.workspace = true
-alloy-rpc-types-eth.workspace = true
-alloy-json-rpc.workspace = true
-
+reth-node-core.workspace = true
+reth-optimism-payload-builder.workspace = true
+reth-optimism-primitives = { workspace = true, features = ["serde"] }
+reth-payload-primitives.workspace = true
+reth-primitives-traits = { workspace = true, features = ["serde"] }
+reth-revm.workspace = true
 reth-rpc.workspace = true
 reth-rpc-convert.workspace = true
 reth-rpc-eth-api.workspace = true
 reth-rpc-eth-types.workspace = true
 reth-rpc-server-types.workspace = true
+reth-optimism-flashblocks.workspace = true
 reth-storage-api.workspace = true
 reth-tasks = { workspace = true, features = ["rayon"] }
+reth-tracing.workspace = true
 
+# alloy
+alloy-consensus.workspace = true
+alloy-eips = { workspace = true, features = ["serde"] }
+alloy-json-rpc.workspace = true
+alloy-primitives = { workspace = true, features = ["serde"] }
+alloy-rpc-types-engine = { workspace = true, features = ["serde"] }
+alloy-rpc-types-eth.workspace = true
+
+# op
+op-alloy-rpc-types-engine = { workspace = true, features = ["k256"] }
+
+# async
+futures.workspace = true
+futures-util.workspace = true
+
+# tokio
 tokio.workspace = true
 tokio-stream.workspace = true
-futures.workspace = true
+tokio-tungstenite.workspace = true
+
+# rpc
+jsonrpsee.workspace = true
+async-trait.workspace = true
+
+# misc
+brotli = { workspace = true, features = ["std"] }
+derive_more.workspace = true
+eyre.workspace = true
+tracing.workspace = true
+metrics.workspace = true
+moka.workspace = true
+ringbuffer.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-eyre.workspace = true
-jsonrpsee.workspace = true
-tracing.workspace = true
-async-trait.workspace = true
-moka.workspace = true
+url.workspace = true
 
-[lints]
-workspace = true
+[dev-dependencies]
+test-case = "3"
+alloy-consensus.workspace = true
+alloy-network.workspace = true
+alloy-signer-local.workspace = true
+op-alloy-consensus.workspace = true
+op-revm.workspace = true
+reth-optimism-chainspec.workspace = true
+reth-optimism-evm.workspace = true
+reth-provider = { workspace = true, features = ["test-utils"] }
+
+[features]
+default = []

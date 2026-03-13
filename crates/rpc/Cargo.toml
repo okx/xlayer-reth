@@ -11,11 +11,9 @@ repository.workspace = true
 default = []
 
 [dependencies]
-reth-chainspec.workspace = true
 reth-optimism-rpc.workspace = true
 reth-rpc.workspace = true
 reth-rpc-eth-api.workspace = true
-reth-storage-api.workspace = true
 
 jsonrpsee.workspace = true
 serde.workspace = true
