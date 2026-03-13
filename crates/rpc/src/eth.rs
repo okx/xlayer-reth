@@ -27,7 +27,7 @@ use reth_revm::{database::StateProviderDatabase, db::State};
 use reth_rpc::eth::EthFilter;
 use reth_rpc_convert::RpcTransaction;
 use reth_rpc_eth_api::{
-    helpers::{EthBlocks, EthCall, EthState, EthTransactions, FullEthApi},
+    helpers::{estimate::EstimateCall, EthBlocks, EthCall, EthState, EthTransactions, FullEthApi},
     EthApiServer, EthApiTypes, RpcBlock, RpcNodeCore, RpcReceipt,
 };
 use reth_rpc_eth_types::{block::convert_transaction_receipt, error::FromEvmError, EthApiError};
@@ -465,19 +465,19 @@ where
     ) -> RpcResult<Bytes> {
         trace!(target: "rpc::eth", ?transaction, ?block_number, ?state_overrides, ?block_overrides, "Serving eth_call");
         if let Some((state, header)) = self.get_flashblock_state_provider_by_id(block_number)? {
-            let evm_env =
-                EthState::evm_env_for_header(&self.eth_api, &header).map_err(Into::into)?;
+            let evm_env = self.eth_api.evm_env_for_header(&header).map_err(Into::into)?;
             let mut db = State::builder().with_database(StateProviderDatabase::new(state)).build();
-            let (evm_env, tx_env) = EthCall::prepare_call_env(
-                &self.eth_api,
-                evm_env,
-                transaction,
-                &mut db,
-                EvmOverrides::new(state_overrides, block_overrides),
-            )
-            .map_err(Into::into)?;
+            let (evm_env, tx_env) = self
+                .eth_api
+                .prepare_call_env(
+                    evm_env,
+                    transaction,
+                    &mut db,
+                    EvmOverrides::new(state_overrides, block_overrides),
+                )
+                .map_err(Into::into)?;
             let res = EthCall::transact(&self.eth_api, db, evm_env, tx_env).map_err(Into::into)?;
-            return <Eth::Error as FromEvmError<_>>::ensure_success(res.result).map_err(Into::into);
+            return <Eth as EthApiTypes>::Error::ensure_success(res.result).map_err(Into::into);
         }
         self.eth_api.call(transaction, block_number, state_overrides, block_overrides).await
     }
@@ -491,16 +491,11 @@ where
     ) -> RpcResult<U256> {
         trace!(target: "rpc::eth", ?transaction, ?block_number, "Serving eth_estimateGas");
         if let Some((state, header)) = self.get_flashblock_state_provider_by_id(block_number)? {
-            let evm_env =
-                EthState::evm_env_for_header(&self.eth_api, &header).map_err(Into::into)?;
-            return EthCall::estimate_gas_with(
-                &self.eth_api,
-                evm_env,
-                transaction,
-                state,
-                overrides,
-            )
-            .map_err(Into::into);
+            let evm_env = self.eth_api.evm_env_for_header(&header).map_err(Into::into)?;
+            return self
+                .eth_api
+                .estimate_gas_with(evm_env, transaction, state, overrides)
+                .map_err(Into::into);
         }
         self.eth_api.estimate_gas(transaction, block_number, overrides).await
     }
