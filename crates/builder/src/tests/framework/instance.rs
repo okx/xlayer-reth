@@ -81,7 +81,10 @@ impl LocalInstance {
     ) -> eyre::Result<Self> {
         let mut args = args;
         let runtime = runtime();
-        let rollup_args = reth_optimism_node::args::RollupArgs::default();
+        let rollup_args = reth_optimism_node::args::RollupArgs {
+            enable_tx_conditional: true,
+            ..Default::default()
+        };
         let op_node = OpNode::new(rollup_args.clone());
         let reverted_cache = Cache::builder().max_capacity(100).build();
         let reverted_cache_clone = reverted_cache.clone();
