@@ -30,7 +30,7 @@ use reth_optimism_evm::OpNextBlockEnvAttributes;
 use reth_optimism_forks::OpHardforks;
 use reth_optimism_node::{OpEngineTypes, OpPayloadBuilderAttributes};
 use reth_optimism_payload_builder::OpBuiltPayload;
-use reth_optimism_primitives::{OpReceipt, OpTransactionSigned};
+use reth_optimism_primitives::OpReceipt;
 use reth_payload_builder::EthPayloadBuilderAttributes;
 use reth_primitives_traits::SealedHeader;
 
@@ -166,7 +166,7 @@ where
 
                             // execute the built full payload on a thread where blocking is acceptable,
                             // as it's potentially a heavy operation
-                            task_executor.spawn_blocking(Box::pin(async move {
+                            task_executor.spawn_blocking_task(Box::pin(async move {
                                 let res = execute_built_payload(
                                     payload,
                                     ctx,
@@ -411,7 +411,7 @@ fn execute_transactions(
         }
 
         let receipt_ctx = ReceiptBuilderCtx {
-            tx: &tx,
+            tx_type: tx.tx_type(),
             evm: &evm,
             result,
             state: &state,
@@ -439,7 +439,7 @@ fn execute_transactions(
 
 fn build_receipt<E: alloy_evm::Evm>(
     ctx: &FlashblockHandlerContext,
-    receipt_ctx: ReceiptBuilderCtx<'_, OpTransactionSigned, E>,
+    receipt_ctx: ReceiptBuilderCtx<'_, op_alloy_consensus::OpTxType, E>,
     deposit_nonce: Option<u64>,
     timestamp: u64,
 ) -> OpReceipt {

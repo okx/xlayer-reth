@@ -182,7 +182,7 @@ where
 
         let sink = pending.accept().await?;
         let pubsub = self.clone();
-        self.inner.subscription_task_spawner.spawn(Box::pin(async move {
+        self.inner.subscription_task_spawner.spawn_task(Box::pin(async move {
             let _ = pubsub.handle_accepted(sink, kind, params).await;
         }));
 

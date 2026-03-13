@@ -5,6 +5,17 @@ pub mod utils;
 pub use framework::*;
 pub use utils::*;
 
+/// All tests run in flashblocks mode; expand the body unconditionally.
+macro_rules! if_flashblocks {
+    ($($body:tt)*) => { $($body)* };
+}
+
+/// All tests run in flashblocks mode; discard standard-only code.
+#[allow(unused)]
+macro_rules! if_standard {
+    ($($body:tt)*) => {};
+}
+
 #[cfg(test)]
 mod flashblocks;
 

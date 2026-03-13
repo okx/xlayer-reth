@@ -859,7 +859,7 @@ where
                                     fallback_payload_for_resolve
                                 })
                         } else {
-                            self.task_executor.spawn_blocking(Box::pin(async move {
+                            self.task_executor.spawn_blocking_task(Box::pin(async move {
                                 let _ = resolve_zero_state_root(state_root_ctx, state_provider);
                             }));
                             fallback_payload_for_resolve
@@ -1139,9 +1139,7 @@ where
         recovered_block: Arc::new(recovered_block),
         execution_output: Arc::new(execution_output),
         trie_updates: either::Either::Left(
-            trie_updates_to_cache
-                .clone()
-                .unwrap_or_else(|| Arc::new(TrieUpdates::default())),
+            trie_updates_to_cache.clone().unwrap_or_else(|| Arc::new(TrieUpdates::default())),
         ),
         hashed_state: either::Either::Left(Arc::new(hashed_state)),
     };
