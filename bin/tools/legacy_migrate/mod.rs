@@ -25,7 +25,7 @@ pub struct LegacyMigrateCommand<C: ChainSpecParser> {
     env: EnvironmentArgs<C>,
 
     /// Block batch size for processing.
-    #[arg(long, default_value = "10000")]
+    #[arg(long, default_value = "10000", value_parser = clap::value_parser!(u64).range(1..))]
     batch_size: u64,
 
     /// Skip static file migration.

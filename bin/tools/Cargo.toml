@@ -55,7 +55,6 @@ tracing.workspace = true
 eyre.workspace = true
 serde_json.workspace = true
 rayon = "1.10"
-num-traits = "0.2"
 flate2 = "1.0"
 ctrlc = "3.4"
 
