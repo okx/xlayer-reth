@@ -10,19 +10,35 @@ on:
   pull_request_review:
     types: [submitted]
 
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+  actions: write
+
+concurrency:
+  group: claude-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
 jobs:
   authorize:
     runs-on: ubuntu-latest
     steps:
       - name: Check actor authorization
         run: |
-          ASSOCIATION="${{ github.event.comment.author_association || github.event.review.author_association || github.event.issue.author_association }}"
-          echo "Author association: $ASSOCIATION"
-          if [[ "$ASSOCIATION" != "OWNER" && "$ASSOCIATION" != "MEMBER" && "$ASSOCIATION" != "COLLABORATOR" ]]; then
-            echo "Unauthorized: actor '${{ github.actor }}' has association '$ASSOCIATION'"
+          PR_AUTHOR="${{ github.event.issue.user.login }}"
+          if [ -z "$PR_AUTHOR" ]; then
+            PR_AUTHOR="${{ github.event.pull_request.user.login }}"
+          fi
+          ACTOR="${{ github.actor }}"
+          echo "PR/Issue author: $PR_AUTHOR"
+          echo "Triggered by: $ACTOR"
+          if [[ "$ACTOR" != "$PR_AUTHOR" ]]; then
+            echo "Unauthorized: '$ACTOR' is not the PR/issue author ('$PR_AUTHOR')"
             exit 1
           fi
-          echo "Authorized: actor '${{ github.actor }}'"
+          echo "Authorized: '$ACTOR' is the PR/issue author"
 
   claude:
     needs: authorize
@@ -32,12 +48,6 @@ jobs:
       (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
       (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
-      issues: write
-      id-token: write
-      actions: read # Required for Claude to read CI results on PRs
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -56,12 +66,6 @@ jobs:
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@review')) ||
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@review'))
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-      issues: write
-      id-token: write
-      actions: read
     steps:
       - name: Acknowledge trigger
         uses: actions/github-script@v7
