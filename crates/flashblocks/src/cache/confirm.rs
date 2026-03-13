@@ -227,3 +227,484 @@ impl<N: NodePrimitives> ConfirmCache<N> {
         count
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_consensus::{BlockHeader, Header, Receipt, TxEip7702};
+    use alloy_primitives::{Address, Bytes, PrimitiveSignature, B256, U256};
+    use op_alloy_consensus::OpTypedTransaction;
+    use reth_chain_state::{ComputedTrieData, ExecutedBlock};
+    use reth_execution_types::{BlockExecutionOutput, BlockExecutionResult};
+    use reth_optimism_primitives::{
+        OpBlock, OpBlockBody, OpPrimitives, OpReceipt, OpTransactionSigned,
+    };
+    use reth_primitives_traits::{RecoveredBlock, SealedBlock, SealedHeader};
+    use std::sync::Arc;
+
+    type TestConfirmCache = ConfirmCache<OpPrimitives>;
+
+    fn make_executed_block(block_number: u64, parent_hash: B256) -> ExecutedBlock<OpPrimitives> {
+        let header = Header { number: block_number, parent_hash, ..Default::default() };
+        let sealed_header = SealedHeader::seal_slow(header);
+        let block = OpBlock::new(sealed_header.unseal(), Default::default());
+        let sealed_block = SealedBlock::seal_slow(block);
+        let recovered_block = RecoveredBlock::new_sealed(sealed_block, vec![]);
+        let execution_output = Arc::new(BlockExecutionOutput {
+            result: BlockExecutionResult {
+                receipts: vec![],
+                requests: Default::default(),
+                gas_used: 0,
+                blob_gas_used: 0,
+            },
+            state: Default::default(),
+        });
+        ExecutedBlock::new(Arc::new(recovered_block), execution_output, ComputedTrieData::default())
+    }
+
+    fn empty_receipts() -> Arc<Vec<OpReceipt>> {
+        Arc::new(vec![])
+    }
+
+    fn mock_tx(nonce: u64) -> OpTransactionSigned {
+        let tx = TxEip7702 {
+            chain_id: 1u64,
+            nonce,
+            max_fee_per_gas: 0x28f000fff,
+            max_priority_fee_per_gas: 0x28f000fff,
+            gas_limit: 21_000,
+            to: Address::default(),
+            value: U256::ZERO,
+            input: Bytes::new(),
+            access_list: Default::default(),
+            authorization_list: Default::default(),
+        };
+        let signature = PrimitiveSignature::new(U256::default(), U256::default(), true);
+        OpTransactionSigned::new_unhashed(OpTypedTransaction::Eip7702(tx), signature)
+    }
+
+    fn make_executed_block_with_txs(
+        block_number: u64,
+        parent_hash: B256,
+        nonce_start: u64,
+        count: usize,
+    ) -> (ExecutedBlock<OpPrimitives>, Arc<Vec<OpReceipt>>) {
+        let txs: Vec<OpTransactionSigned> =
+            (0..count).map(|i| mock_tx(nonce_start + i as u64)).collect();
+        let senders: Vec<Address> = (0..count).map(|_| Address::default()).collect();
+        let receipts: Vec<OpReceipt> = (0..count)
+            .map(|i| {
+                OpReceipt::Eip7702(Receipt {
+                    status: true.into(),
+                    cumulative_gas_used: 21_000 * (i as u64 + 1),
+                    logs: vec![],
+                })
+            })
+            .collect();
+
+        let header = Header { number: block_number, parent_hash, ..Default::default() };
+        let sealed_header = SealedHeader::seal_slow(header);
+        let body = OpBlockBody { transactions: txs, ..Default::default() };
+        let block = OpBlock::new(sealed_header.unseal(), body);
+        let sealed_block = SealedBlock::seal_slow(block);
+        let recovered_block = RecoveredBlock::new_sealed(sealed_block, senders);
+        let execution_output = Arc::new(BlockExecutionOutput {
+            result: BlockExecutionResult {
+                receipts: receipts.clone(),
+                requests: Default::default(),
+                gas_used: 21_000 * count as u64,
+                blob_gas_used: 0,
+            },
+            state: Default::default(),
+        });
+        let executed = ExecutedBlock::new(
+            Arc::new(recovered_block),
+            execution_output,
+            ComputedTrieData::default(),
+        );
+        (executed, Arc::new(receipts))
+    }
+
+    #[test]
+    fn test_confirm_cache_new_is_empty() {
+        let cache = TestConfirmCache::new();
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn test_confirm_cache_insert_single_block_increases_len() {
+        let mut cache = TestConfirmCache::new();
+        let block = make_executed_block(1, B256::ZERO);
+        cache.insert(1, block, empty_receipts()).expect("insert should succeed");
+        assert_eq!(cache.len(), 1);
+        assert!(!cache.is_empty());
+    }
+
+    #[test]
+    fn test_confirm_cache_insert_fails_at_max_capacity() {
+        let mut cache = TestConfirmCache::new();
+        let mut parent = B256::ZERO;
+        for height in 1..=(DEFAULT_CONFIRM_BLOCK_CACHE_SIZE as u64) {
+            let block = make_executed_block(height, parent);
+            let hash = block.recovered_block.hash();
+            cache.insert(height, block, empty_receipts()).expect("insert within capacity");
+            parent = hash;
+        }
+        let overflow = make_executed_block(DEFAULT_CONFIRM_BLOCK_CACHE_SIZE as u64 + 1, parent);
+        let result =
+            cache.insert(DEFAULT_CONFIRM_BLOCK_CACHE_SIZE as u64 + 1, overflow, empty_receipts());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_confirm_cache_get_block_by_number_returns_correct_block() {
+        let mut cache = TestConfirmCache::new();
+        let block = make_executed_block(42, B256::ZERO);
+        cache.insert(42, block, empty_receipts()).expect("insert");
+        let result = cache.get_block_by_number(42);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().block.number(), 42);
+    }
+
+    #[test]
+    fn test_confirm_cache_get_block_by_number_returns_none_for_wrong_number() {
+        let mut cache = TestConfirmCache::new();
+        let block = make_executed_block(42, B256::ZERO);
+        cache.insert(42, block, empty_receipts()).expect("insert");
+        assert!(cache.get_block_by_number(43).is_none());
+        assert!(cache.get_block_by_number(0).is_none());
+    }
+
+    #[test]
+    fn test_confirm_cache_get_block_by_hash_returns_correct_block() {
+        let mut cache = TestConfirmCache::new();
+        let block = make_executed_block(42, B256::ZERO);
+        let block_hash = block.recovered_block.hash();
+        cache.insert(42, block, empty_receipts()).expect("insert");
+        let result = cache.get_block_by_hash(&block_hash);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().block.number(), 42);
+    }
+
+    #[test]
+    fn test_confirm_cache_get_block_by_hash_returns_none_for_unknown_hash() {
+        let mut cache = TestConfirmCache::new();
+        let block = make_executed_block(42, B256::ZERO);
+        cache.insert(42, block, empty_receipts()).expect("insert");
+        assert!(cache.get_block_by_hash(&B256::repeat_byte(0xFF)).is_none());
+    }
+
+    #[test]
+    fn test_confirm_cache_number_for_hash_returns_correct_mapping() {
+        let mut cache = TestConfirmCache::new();
+        let block = make_executed_block(10, B256::ZERO);
+        let hash = block.recovered_block.hash();
+        cache.insert(10, block, empty_receipts()).expect("insert");
+        assert_eq!(cache.number_for_hash(&hash), Some(10));
+    }
+
+    #[test]
+    fn test_confirm_cache_hash_for_number_returns_correct_mapping() {
+        let mut cache = TestConfirmCache::new();
+        let block = make_executed_block(10, B256::ZERO);
+        let expected_hash = block.recovered_block.hash();
+        cache.insert(10, block, empty_receipts()).expect("insert");
+        assert_eq!(cache.hash_for_number(10), Some(expected_hash));
+    }
+
+    #[test]
+    fn test_confirm_cache_clear_removes_all_entries() {
+        let mut cache = TestConfirmCache::new();
+        let block = make_executed_block(1, B256::ZERO);
+        cache.insert(1, block, empty_receipts()).expect("insert");
+        cache.clear();
+        assert!(cache.is_empty());
+        assert!(cache.get_block_by_number(1).is_none());
+    }
+
+    #[test]
+    fn test_confirm_cache_flush_up_to_height_removes_entries_at_or_below_height() {
+        let mut cache = TestConfirmCache::new();
+        let mut parent = B256::ZERO;
+        for height in 1..=5 {
+            let block = make_executed_block(height, parent);
+            parent = block.recovered_block.hash();
+            cache.insert(height, block, empty_receipts()).expect("insert");
+        }
+        let count = cache.flush_up_to_height(3);
+        assert_eq!(count, 3);
+        assert_eq!(cache.len(), 2);
+        assert!(cache.get_block_by_number(3).is_none());
+        assert!(cache.get_block_by_number(4).is_some());
+        assert!(cache.get_block_by_number(5).is_some());
+    }
+
+    #[test]
+    fn test_confirm_cache_flush_up_to_height_higher_than_all_removes_all() {
+        let mut cache = TestConfirmCache::new();
+        let mut parent = B256::ZERO;
+        for height in 1..=3 {
+            let block = make_executed_block(height, parent);
+            parent = block.recovered_block.hash();
+            cache.insert(height, block, empty_receipts()).expect("insert");
+        }
+        let count = cache.flush_up_to_height(100);
+        assert_eq!(count, 3);
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn test_confirm_cache_flush_up_to_height_zero_removes_nothing() {
+        let mut cache = TestConfirmCache::new();
+        let block = make_executed_block(1, B256::ZERO);
+        cache.insert(1, block, empty_receipts()).expect("insert");
+        let count = cache.flush_up_to_height(0);
+        assert_eq!(count, 0);
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn test_confirm_cache_flush_removes_hash_indices_for_all_flushed_blocks() {
+        let mut cache = TestConfirmCache::new();
+        let mut parent = B256::ZERO;
+        let mut hashes = vec![];
+        for height in 1..=3 {
+            let block = make_executed_block(height, parent);
+            let hash = block.recovered_block.hash();
+            hashes.push(hash);
+            cache.insert(height, block, empty_receipts()).expect("insert");
+            parent = hash;
+        }
+        cache.flush_up_to_height(2);
+        assert!(cache.number_for_hash(&hashes[0]).is_none());
+        assert!(cache.number_for_hash(&hashes[1]).is_none());
+        assert!(cache.number_for_hash(&hashes[2]).is_some());
+    }
+
+    #[test]
+    fn test_confirm_cache_remove_block_by_number_returns_block_and_cleans_indices() {
+        let mut cache = TestConfirmCache::new();
+        let block = make_executed_block(5, B256::ZERO);
+        let block_hash = block.recovered_block.hash();
+        cache.insert(5, block, empty_receipts()).expect("insert");
+        let removed = cache.remove_block_by_number(5);
+        assert!(removed.is_some());
+        assert_eq!(cache.len(), 0);
+        assert!(cache.get_block_by_number(5).is_none());
+        assert!(cache.number_for_hash(&block_hash).is_none());
+    }
+
+    #[test]
+    fn test_confirm_cache_remove_block_by_hash_returns_block_and_cleans_indices() {
+        let mut cache = TestConfirmCache::new();
+        let block = make_executed_block(7, B256::ZERO);
+        let block_hash = block.recovered_block.hash();
+        cache.insert(7, block, empty_receipts()).expect("insert");
+        let removed = cache.remove_block_by_hash(&block_hash);
+        assert!(removed.is_some());
+        assert_eq!(cache.len(), 0);
+        assert!(cache.get_block_by_hash(&block_hash).is_none());
+        assert!(cache.get_block_by_number(7).is_none());
+    }
+
+    #[test]
+    fn test_confirm_cache_get_executed_blocks_up_to_height_returns_contiguous_blocks_newest_first()
+    {
+        let mut cache = TestConfirmCache::new();
+        let block2 = make_executed_block(2, B256::repeat_byte(0x01));
+        let block3 = make_executed_block(3, block2.recovered_block.hash());
+        let block4 = make_executed_block(4, block3.recovered_block.hash());
+        cache.insert(2, block2, empty_receipts()).expect("insert 2");
+        cache.insert(3, block3, empty_receipts()).expect("insert 3");
+        cache.insert(4, block4, empty_receipts()).expect("insert 4");
+        let blocks = cache.get_executed_blocks_up_to_height(4, 1).unwrap();
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0].recovered_block.number(), 4);
+        assert_eq!(blocks[1].recovered_block.number(), 3);
+        assert_eq!(blocks[2].recovered_block.number(), 2);
+    }
+
+    #[test]
+    fn test_confirm_cache_get_executed_blocks_up_to_height_returns_empty_on_empty_cache() {
+        let cache = TestConfirmCache::new();
+        let result = cache.get_executed_blocks_up_to_height(5, 1);
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_confirm_cache_get_executed_blocks_detects_gap_between_canonical_and_overlay() {
+        let mut cache = TestConfirmCache::new();
+        let block3 = make_executed_block(3, B256::ZERO);
+        cache.insert(3, block3, empty_receipts()).expect("insert 3");
+        assert!(cache.get_executed_blocks_up_to_height(3, 1).is_err());
+    }
+
+    #[test]
+    fn test_confirm_cache_get_executed_blocks_detects_non_contiguous_overlay() {
+        let mut cache = TestConfirmCache::new();
+        let block2 = make_executed_block(2, B256::repeat_byte(0x01));
+        let block4 = make_executed_block(4, B256::repeat_byte(0x03));
+        cache.insert(2, block2, empty_receipts()).expect("insert 2");
+        cache.insert(4, block4, empty_receipts()).expect("insert 4");
+        assert!(cache.get_executed_blocks_up_to_height(4, 1).is_err());
+    }
+
+    #[test]
+    fn test_confirm_cache_get_executed_blocks_allows_redundant_overlap_with_canonical() {
+        let mut cache = TestConfirmCache::new();
+        let block2 = make_executed_block(2, B256::repeat_byte(0x01));
+        let block3 = make_executed_block(3, block2.recovered_block.hash());
+        cache.insert(2, block2, empty_receipts()).expect("insert 2");
+        cache.insert(3, block3, empty_receipts()).expect("insert 3");
+        let blocks = cache.get_executed_blocks_up_to_height(3, 2).unwrap();
+        assert_eq!(blocks.len(), 2);
+    }
+
+    #[test]
+    fn test_confirm_cache_get_executed_blocks_single_block_contiguous_with_canonical() {
+        let mut cache = TestConfirmCache::new();
+        let block5 = make_executed_block(5, B256::repeat_byte(0x04));
+        cache.insert(5, block5, empty_receipts()).expect("insert 5");
+        let blocks = cache.get_executed_blocks_up_to_height(5, 4).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].recovered_block.number(), 5);
+    }
+
+    #[test]
+    fn test_confirm_cache_get_executed_blocks_returns_subset_up_to_target() {
+        let mut cache = TestConfirmCache::new();
+        let block2 = make_executed_block(2, B256::repeat_byte(0x01));
+        let block3 = make_executed_block(3, block2.recovered_block.hash());
+        let block4 = make_executed_block(4, block3.recovered_block.hash());
+        let block5 = make_executed_block(5, block4.recovered_block.hash());
+        cache.insert(2, block2, empty_receipts()).expect("insert 2");
+        cache.insert(3, block3, empty_receipts()).expect("insert 3");
+        cache.insert(4, block4, empty_receipts()).expect("insert 4");
+        cache.insert(5, block5, empty_receipts()).expect("insert 5");
+        let blocks = cache.get_executed_blocks_up_to_height(3, 1).unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].recovered_block.number(), 3);
+        assert_eq!(blocks[1].recovered_block.number(), 2);
+    }
+
+    #[test]
+    fn test_confirm_cache_insert_same_height_twice_keeps_cache_len_at_one() {
+        let mut cache = TestConfirmCache::new();
+        let block_a = make_executed_block(10, B256::ZERO);
+        let block_b = make_executed_block(10, B256::repeat_byte(0xFF));
+        cache.insert(10, block_a, empty_receipts()).expect("first insert");
+        cache.insert(10, block_b, empty_receipts()).expect("second insert");
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn test_confirm_cache_get_tx_info_returns_none_for_unknown_hash() {
+        let cache = TestConfirmCache::new();
+        assert!(cache.get_tx_info(&B256::repeat_byte(0xAA)).is_none());
+    }
+
+    #[test]
+    fn test_confirm_cache_insert_builds_tx_index_correctly() {
+        let mut cache = TestConfirmCache::new();
+        let (block, receipts) = make_executed_block_with_txs(1, B256::ZERO, 0, 3);
+        let block_hash = block.recovered_block.hash();
+        let tx_hashes: Vec<_> =
+            block.recovered_block.body().transactions().map(|tx| *tx.tx_hash()).collect();
+        cache.insert(1, block, receipts).expect("insert");
+
+        for (i, tx_hash) in tx_hashes.iter().enumerate() {
+            let (info, bar) = cache.get_tx_info(tx_hash).expect("tx should be in tx_index");
+            assert_eq!(info.block_number, 1);
+            assert_eq!(info.block_hash, block_hash);
+            assert_eq!(info.tx_index, i as u64);
+            assert_eq!(bar.block.number(), 1);
+        }
+    }
+
+    #[test]
+    fn test_confirm_cache_flush_cleans_tx_index() {
+        let mut cache = TestConfirmCache::new();
+        let (block, receipts) = make_executed_block_with_txs(1, B256::ZERO, 0, 2);
+        let tx_hashes: Vec<_> =
+            block.recovered_block.body().transactions().map(|tx| *tx.tx_hash()).collect();
+        cache.insert(1, block, receipts).expect("insert");
+
+        cache.flush_up_to_height(1);
+        for tx_hash in &tx_hashes {
+            assert!(cache.get_tx_info(tx_hash).is_none());
+        }
+    }
+
+    #[test]
+    fn test_confirm_cache_remove_block_by_number_cleans_tx_index() {
+        let mut cache = TestConfirmCache::new();
+        let (block, receipts) = make_executed_block_with_txs(5, B256::ZERO, 0, 2);
+        let tx_hashes: Vec<_> =
+            block.recovered_block.body().transactions().map(|tx| *tx.tx_hash()).collect();
+        cache.insert(5, block, receipts).expect("insert");
+
+        cache.remove_block_by_number(5);
+        for tx_hash in &tx_hashes {
+            assert!(cache.get_tx_info(tx_hash).is_none());
+        }
+    }
+
+    #[test]
+    fn test_confirm_cache_insert_duplicate_height_leaks_stale_hash_index() {
+        let mut cache = TestConfirmCache::new();
+        let block_a = make_executed_block(10, B256::ZERO);
+        let hash_a = block_a.recovered_block.hash();
+        let block_b = make_executed_block(10, B256::repeat_byte(0xFF));
+        let hash_b = block_b.recovered_block.hash();
+
+        cache.insert(10, block_a, empty_receipts()).expect("first insert");
+        cache.insert(10, block_b, empty_receipts()).expect("second insert");
+
+        assert_eq!(cache.number_for_hash(&hash_b), Some(10));
+        // Documents known limitation: BTreeMap::insert overwrites the value
+        // but doesn't clean the old hash_to_number entry.
+        assert_eq!(
+            cache.number_for_hash(&hash_a),
+            Some(10),
+            "stale hash_to_number entry remains (known limitation)"
+        );
+    }
+
+    #[test]
+    fn test_confirm_cache_flush_cleans_tx_index_for_partial_flush() {
+        let mut cache = TestConfirmCache::new();
+        let (block1, receipts1) = make_executed_block_with_txs(1, B256::ZERO, 0, 2);
+        let tx_hashes_1: Vec<_> =
+            block1.recovered_block.body().transactions().map(|tx| *tx.tx_hash()).collect();
+        let parent = block1.recovered_block.hash();
+        cache.insert(1, block1, receipts1).expect("insert 1");
+
+        let (block2, receipts2) = make_executed_block_with_txs(2, parent, 100, 2);
+        let tx_hashes_2: Vec<_> =
+            block2.recovered_block.body().transactions().map(|tx| *tx.tx_hash()).collect();
+        cache.insert(2, block2, receipts2).expect("insert 2");
+
+        cache.flush_up_to_height(1);
+        for tx_hash in &tx_hashes_1 {
+            assert!(cache.get_tx_info(tx_hash).is_none(), "block 1 tx should be gone");
+        }
+        for tx_hash in &tx_hashes_2 {
+            assert!(cache.get_tx_info(tx_hash).is_some(), "block 2 tx should remain");
+        }
+    }
+
+    #[test]
+    fn test_confirm_cache_clear_cleans_tx_index() {
+        let mut cache = TestConfirmCache::new();
+        let (block, receipts) = make_executed_block_with_txs(1, B256::ZERO, 0, 2);
+        let tx_hashes: Vec<_> =
+            block.recovered_block.body().transactions().map(|tx| *tx.tx_hash()).collect();
+        cache.insert(1, block, receipts).expect("insert");
+
+        cache.clear();
+        for tx_hash in &tx_hashes {
+            assert!(cache.get_tx_info(tx_hash).is_none());
+        }
+    }
+}
