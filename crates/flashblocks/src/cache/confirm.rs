@@ -81,14 +81,7 @@ impl<N: NodePrimitives> ConfirmCache<N> {
         self.blocks.is_empty()
     }
 
-    /// Inserts a confirmed block into the cache, indexed by both block number
-    /// and block hash.
-    ///
-    /// This is a raw insert with no reorg detection — callers are responsible
-    /// for flushing invalidated entries via [`flush_from`](Self::flush_from)
-    /// before inserting if a reorg is detected.
-    ///
-    /// Returns an error if the cache is at max capacity.
+    /// Inserts a confirmed block into the cache, indexed by block number and block hash.
     pub fn insert(
         &mut self,
         height: u64,
@@ -152,21 +145,48 @@ impl<N: NodePrimitives> ConfirmCache<N> {
     }
 
     /// Returns the cached transaction info for the given tx hash, if present.
-    /// Returns the cached transaction info for the given tx hash, if present.
     pub fn get_tx_info(&self, tx_hash: &TxHash) -> Option<(CachedTxInfo<N>, BlockAndReceipts<N>)> {
         let tx_info = self.tx_index.get(tx_hash).cloned()?;
         let block = self.get_block_by_number(tx_info.block_number)?;
         Some((tx_info, block))
     }
 
-    /// Returns `true` if the cache contains a block with the given hash.
-    pub fn contains_hash(&self, block_hash: &B256) -> bool {
-        self.hash_to_number.contains_key(block_hash)
-    }
-
-    /// Returns `true` if the cache contains a block with the given number.
-    pub fn contains_number(&self, block_number: u64) -> bool {
-        self.blocks.contains_key(&block_number)
+    /// Returns all `ExecutedBlock`s in the cache up to and including `target_height`,
+    /// ordered newest to oldest (for use with `MemoryOverlayStateProvider`).
+    ///
+    /// Returns an error if state cache pollution detected (non-contiguous blocks).
+    pub fn get_executed_blocks_up_to_height(
+        &self,
+        target_height: u64,
+        canon_height: u64,
+    ) -> eyre::Result<Vec<ExecutedBlock<N>>> {
+        // Validation checks
+        let entries: Vec<_> = self.blocks.range(..=target_height).collect();
+        if !entries.is_empty() {
+            // Verify lowest overlay block must be at most `canon_height + 1` to ensure
+            // no gap between canonical state and the overlay
+            let lowest = *entries[0].0;
+            if lowest > canon_height + 1 {
+                return Err(eyre!(
+                    "gap between canonical height {canon_height} and lowest overlay block {lowest}"
+                ));
+            }
+            // Verify contiguity
+            for window in entries.windows(2) {
+                let (a, _) = window[0];
+                let (b, _) = window[1];
+                if *b != *a + 1 {
+                    return Err(eyre!(
+                        "non-contiguous confirm cache: gap between blocks {a} and {b}"
+                    ));
+                }
+            }
+        }
+        Ok(entries
+            .into_iter()
+            .rev()
+            .map(|(_, (_, confirmed))| confirmed.executed_block.clone())
+            .collect())
     }
 
     /// Removes and returns the confirmed block for the given block number.
@@ -194,12 +214,11 @@ impl<N: NodePrimitives> ConfirmCache<N> {
 
     /// Flushes all entries with block number <= `canonical_number`.
     ///
-    /// Called when the canonical chain catches up to the confirmed cache.
-    /// Returns the number of entries flushed.
-    pub fn flush_up_to(&mut self, canonical_number: u64) -> usize {
-        let retained = self.blocks.split_off(&(canonical_number + 1));
+    /// Called when the canonical chain catches up to the confirmed cache. Returns
+    /// the number of entries flushed.
+    pub fn flush_up_to_height(&mut self, canon_height: u64) -> usize {
+        let retained = self.blocks.split_off(&(canon_height + 1));
         let stale = std::mem::replace(&mut self.blocks, retained);
-
         let count = stale.len();
         for (hash, bar) in stale.into_values() {
             self.hash_to_number.remove(&hash);

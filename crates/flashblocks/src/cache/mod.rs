@@ -11,11 +11,13 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 use tracing::*;
 
+use alloy_consensus::BlockHeader;
 use alloy_primitives::{TxHash, B256};
 use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag};
-use reth_chain_state::ExecutedBlock;
+use reth_chain_state::{ExecutedBlock, MemoryOverlayStateProvider};
 use reth_primitives_traits::{NodePrimitives, ReceiptTy};
 use reth_rpc_eth_types::block::BlockAndReceipts;
+use reth_storage_api::StateProviderBox;
 
 /// Cached transaction info (block context, receipt and tx data) for O(1) lookups
 /// by transaction hash.
@@ -105,6 +107,78 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
     pub fn get_tx_info(&self, tx_hash: &TxHash) -> Option<(CachedTxInfo<N>, BlockAndReceipts<N>)> {
         self.inner.read().get_tx_info(tx_hash)
     }
+
+    /// Creates a `StateProviderBox` that overlays the flashblock execution state on top of the
+    /// canonical state for the given block ID. Instantiates a `MemoryOverlayStateProvider` by
+    /// getting the ordered `ExecutedBlock`s from the cache, and overlaying them on top of the
+    /// canonical state provider.
+    ///
+    /// For a specific block number/hash, returns all confirm cache blocks up to that height.
+    /// For `Pending`, it also includes the current pending executed block state.
+    /// For `Latest`, resolves to the confirm height.
+    /// Returns `None` if the target block is not in the flashblocks cache.
+    ///
+    /// # Safety of the overlay
+    /// The returned blocks are meant to be layered on top of a canonical `StateProviderBox`
+    /// via `MemoryOverlayStateProvider`. This is correct **if and only if** the overlay
+    /// blocks form a contiguous chain from some height down to `canonical_height + 1`
+    /// (or `canonical_height` itself in the redundant-but-safe race case).
+    ///
+    /// **Safe (redundant overlap)**: Due to a race between canonical commit and confirm
+    /// cache flush, the lowest overlay block may equal the canonical height. For example,
+    /// canonical is at height `x` and the overlay contains `[x+2, x+1, x]`. This is safe
+    /// because `MemoryOverlayStateProvider` checks overlay blocks first (newest-to-oldest)
+    /// — the duplicate `BundleState` at height `x` contains changes identical to what
+    /// canonical already applied, so the result is correct regardless of which source
+    /// resolves the query.
+    ///
+    /// **State inconsistency (gap in overlay)**: If an intermediate block is missing (e.g.
+    /// overlay has `[x+2, x]` but not `x+1`), any account modified only at height `x+1`
+    /// would be invisible — the query falls through to canonical, returning stale state.
+    ///
+    /// **State inconsistency (canonical too far behind)**: If the canonical height is more
+    /// than one block below the lowest overlay block (e.g. canonical at `x-2`, lowest overlay
+    /// at `x`), changes at height `x-1` are not covered by either source.
+    ///
+    /// Both failure modes reduce to: every height between `canonical_height + 1` and the
+    /// target must be present in the overlay. This invariant is naturally maintained by
+    /// `handle_confirmed_block` (rejects non-consecutive heights) and the pending block always
+    /// being `confirm_height + 1`.
+    ///
+    /// On validation failure (non-contiguous overlay or gap to canonical), the cache is
+    /// flushed and `None` is returned.
+    pub fn get_state_provider_by_id(
+        &self,
+        block_id: Option<BlockId>,
+        canonical_state: StateProviderBox,
+    ) -> Option<StateProviderBox> {
+        let in_memory = {
+            let guard = self.inner.read();
+            let block_num = match block_id.unwrap_or(BlockId::Number(BlockNumberOrTag::Latest)) {
+                BlockId::Number(id) => match id {
+                    BlockNumberOrTag::Pending => guard.get_pending_block(),
+                    BlockNumberOrTag::Latest => guard.get_confirmed_block(),
+                    BlockNumberOrTag::Number(num) => guard.get_block_by_number(num),
+                    _ => None,
+                },
+                BlockId::Hash(hash) => guard.get_block_by_hash(&hash.block_hash),
+            }?
+            .block
+            .number();
+
+            match guard.get_executed_blocks_up_to_height(block_num) {
+                Ok(Some(blocks)) => blocks,
+                Ok(None) => return None,
+                Err(e) => {
+                    warn!(target: "flashblocks", "Failed to get flashblocks state provider: {e}. Flushing cache");
+                    drop(guard);
+                    self.inner.write().flush();
+                    return None;
+                }
+            }
+        };
+        Some(Box::new(MemoryOverlayStateProvider::new(canonical_state, in_memory)))
+    }
 }
 
 // FlashblockStateCache state mutation interfaces.
@@ -153,11 +227,25 @@ struct FlashblockStateCacheInner<N: NodePrimitives> {
     /// Highest confirmed block height in the confirm cache. If flashblocks state cache
     /// is uninitialized, the confirm height is set to 0.
     confirm_height: u64,
+    /// Highest confirmed block height in the canonical chainstate.
+    canon_height: u64,
 }
 
 impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
     fn new() -> Self {
-        Self { pending_cache: None, confirm_cache: ConfirmCache::new(), confirm_height: 0 }
+        Self {
+            pending_cache: None,
+            confirm_cache: ConfirmCache::new(),
+            confirm_height: 0,
+            canon_height: 0,
+        }
+    }
+
+    fn flush(&mut self) {
+        warn!(target: "flashblocks", "Flushing flashblocks state cache");
+        self.pending_cache = None;
+        self.confirm_height = 0;
+        self.confirm_cache.clear();
     }
 
     /// Handles flushing a newly confirmed block to the confirm cache. Note that
@@ -173,17 +261,11 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
         executed_block: ExecutedBlock<N>,
         receipts: Arc<Vec<ReceiptTy<N>>>,
     ) -> eyre::Result<()> {
-        if block_number <= self.confirm_height {
-            return Err(eyre::eyre!(
-                "polluted state cache - trying to commit lower confirm height block"
-            ));
-        }
         if block_number != self.confirm_height + 1 {
             return Err(eyre::eyre!(
-                "polluted state cache - not next consecutive confirm height block"
+                "polluted state cache - not next consecutive target confirm height block"
             ));
         }
-
         self.confirm_height = block_number;
         self.confirm_cache.insert(block_number, executed_block, receipts)?;
         Ok(())
@@ -224,14 +306,14 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
     fn handle_canonical_block(&mut self, canon_height: u64, reorg: bool) {
         let pending_stale =
             self.pending_cache.as_ref().is_some_and(|p| p.get_height() <= canon_height);
-
         if pending_stale || reorg {
             warn!(
                 target: "flashblocks",
                 canonical_height = canon_height,
                 cache_height = self.confirm_height,
-                reorg,
-                "Flushing flashblocks state cache",
+                canonical_reorg = reorg,
+                pending_stale = pending_stale,
+                "Reorg or pending stale detected on handle canonical block",
             );
             self.flush();
         } else {
@@ -241,15 +323,11 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
                 cache_height = self.confirm_height,
                 "Flashblocks state cache received canonical block, flushing confirm cache up to canonical height"
             );
-            self.confirm_cache.flush_up_to(canon_height);
+            self.confirm_cache.flush_up_to_height(canon_height);
         }
+        // Update state heights
+        self.canon_height = canon_height;
         self.confirm_height = self.confirm_height.max(canon_height);
-    }
-
-    fn flush(&mut self) {
-        self.confirm_height = 0;
-        self.pending_cache = None;
-        self.confirm_cache.clear();
     }
 
     pub fn get_confirmed_block(&self) -> Option<BlockAndReceipts<N>> {
@@ -283,5 +361,31 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
             .as_ref()
             .and_then(|p| p.get_tx_info(tx_hash))
             .or_else(|| self.confirm_cache.get_tx_info(tx_hash))
+    }
+
+    /// Returns all `ExecutedBlock`s up to `target_height`.
+    fn get_executed_blocks_up_to_height(
+        &self,
+        target_height: u64,
+    ) -> eyre::Result<Option<Vec<ExecutedBlock<N>>>> {
+        if self.confirm_height == 0
+            || self.canon_height == 0
+            || target_height > self.confirm_height + 1
+            || target_height <= self.canon_height
+        {
+            // Cache not initialized or target height is outside the cache range
+            return Ok(None);
+        }
+        let mut blocks = Vec::new();
+        if let Some(p) = self.pending_cache.as_ref()
+            && p.get_height() == target_height
+        {
+            blocks.push(p.pending.executed_block.clone());
+        }
+        blocks.extend(
+            self.confirm_cache
+                .get_executed_blocks_up_to_height(target_height, self.canon_height)?,
+        );
+        Ok(Some(blocks))
     }
 }

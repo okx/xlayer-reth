@@ -24,8 +24,10 @@ use reth_rpc::eth::EthFilter;
 use reth_rpc_convert::RpcTransaction;
 use reth_rpc_eth_api::{
     helpers::{EthBlocks, EthCall, EthState, EthTransactions, FullEthApi},
-    EthApiServer, EthApiTypes, RpcBlock, RpcReceipt,
+    EthApiServer, EthApiTypes, RpcBlock, RpcNodeCore, RpcReceipt,
 };
+use reth_rpc_server_types::result::ToRpcResult;
+use reth_storage_api::{StateProvider, StateProviderBox, StateProviderFactory};
 
 use xlayer_flashblocks::FlashblockStateCache;
 
@@ -320,7 +322,7 @@ where
         block_hash: B256,
         index: Index,
     ) -> RpcResult<Option<RpcTransaction<Optimism>>> {
-        trace!(target: "rpc::eth", ?hash, ?index, "Serving eth_getRawTransactionByBlockHashAndIndex");
+        trace!(target: "rpc::eth", ?block_hash, ?index, "Serving eth_getTransactionByBlockHashAndIndex");
         if let Some(bar) = self.flashblocks_state.get_block_by_hash(&block_hash) {
             return to_rpc_transaction_from_bar_and_index::<Eth>(
                 &bar,
@@ -347,7 +349,7 @@ where
             )
             .map_err(Into::into);
         }
-        self.eth_api.transaction_by_block_number_and_index(block_number, index).await
+        self.eth_api.transaction_by_block_number_and_index(number, index).await
     }
 
     /// Handler for: `eth_getRawTransactionByBlockHashAndIndex`
@@ -377,7 +379,7 @@ where
         {
             return Ok(Some(tx.encoded_2718().into()));
         }
-        self.eth_api.raw_transaction_by_block_number_and_index(hash, index).await
+        self.eth_api.raw_transaction_by_block_number_and_index(number, index).await
     }
 
     /// Handler for: `eth_sendRawTransactionSync`
@@ -396,28 +398,28 @@ where
         state_overrides: Option<StateOverride>,
         block_overrides: Option<Box<BlockOverrides>>,
     ) -> RpcResult<Bytes> {
-        trace!(target: "rpc::eth", ?request, ?block_number, ?state_overrides, ?block_overrides, "Serving eth_call");
-        // TODO: Implement state provider
+        trace!(target: "rpc::eth", ?transaction, ?block_number, ?state_overrides, ?block_overrides, "Serving eth_call");
+        // Phase 1: delegate to eth_api. Phase 2 enhancement: merge flashblock state overrides.
         self.eth_api.call(transaction, block_number, state_overrides, block_overrides).await
     }
 
     /// Handler for: `eth_estimateGas`
     async fn estimate_gas(
         &self,
-        transaction: alloy_rpc_types_eth::OpTransactionRequest,
+        transaction: OpTransactionRequest,
         block_number: Option<BlockId>,
         overrides: Option<StateOverride>,
     ) -> RpcResult<U256> {
-        trace!(target: "rpc::eth", ?request, ?block_number, "Serving eth_estimateGas");
-        // TODO: Implement state provider
+        trace!(target: "rpc::eth", ?transaction, ?block_number, "Serving eth_estimateGas");
+        // Phase 1: delegate to eth_api. Phase 2 enhancement: merge flashblock state overrides.
         self.eth_api.estimate_gas(transaction, block_number, overrides).await
     }
 
     /// Handler for: `eth_getBalance`
     async fn balance(&self, address: Address, block_number: Option<BlockId>) -> RpcResult<U256> {
         trace!(target: "rpc::eth", ?address, ?block_number, "Serving eth_getBalance");
-        if let Some(_bar) = self.flashblocks_state.get_rpc_block_by_id(block_number) {
-            // TODO: Implement state provider
+        if let Some(state) = self.get_flashblock_state_provider_by_id(block_number)? {
+            return Ok(state.account_balance(&address).to_rpc_result()?.unwrap_or_default());
         }
         self.eth_api.balance(address, block_number).await
     }
@@ -428,13 +430,25 @@ where
         address: Address,
         block_number: Option<BlockId>,
     ) -> RpcResult<U256> {
-        if let Some(_bar) = self.flashblocks_state.get_rpc_block_by_id(block_number) {
-            // TODO: Implement state provider
+        trace!(target: "rpc::eth", ?address, ?block_number, "Serving eth_getTransactionCount");
+        if let Some(state) = self.get_flashblock_state_provider_by_id(block_number)? {
+            return Ok(U256::from(
+                state.account_nonce(&address).to_rpc_result()?.unwrap_or_default(),
+            ));
         }
         self.eth_api.transaction_count(address, block_number).await
     }
 
+    /// Handler for: `eth_getCode`
     async fn get_code(&self, address: Address, block_number: Option<BlockId>) -> RpcResult<Bytes> {
+        trace!(target: "rpc::eth", ?address, ?block_number, "Serving eth_getCode");
+        if let Some(state) = self.get_flashblock_state_provider_by_id(block_number)? {
+            return Ok(state
+                .account_code(&address)
+                .to_rpc_result()?
+                .map(|code| code.original_bytes())
+                .unwrap_or_default());
+        }
         self.eth_api.get_code(address, block_number).await
     }
 
@@ -445,9 +459,32 @@ where
         slot: U256,
         block_number: Option<BlockId>,
     ) -> RpcResult<B256> {
-        if let Some(_bar) = self.flashblocks_state.get_rpc_block_by_id(block_number) {
-            // TODO: Implement state provider
+        trace!(target: "rpc::eth", ?address, ?slot, ?block_number, "Serving eth_getStorageAt");
+        if let Some(state) = self.get_flashblock_state_provider_by_id(block_number)? {
+            let storage_key = B256::new(slot.to_be_bytes());
+            return Ok(B256::new(
+                state
+                    .storage(address, storage_key)
+                    .to_rpc_result()?
+                    .unwrap_or_default()
+                    .to_be_bytes(),
+            ));
         }
         self.eth_api.storage_at(address, slot, block_number).await
+    }
+}
+
+impl<Eth> XLayerEthApiExt<Eth>
+where
+    Eth: FullEthApi<NetworkTypes = Optimism> + Send + Sync + 'static,
+{
+    /// Returns a `StateProvider` overlaying flashblock execution state on top of canonical state
+    /// for the given block ID. Returns `None` if the block is not in the flashblocks cache.
+    fn get_flashblock_state_provider_by_id(
+        &self,
+        block_id: Option<BlockId>,
+    ) -> RpcResult<Option<StateProviderBox>> {
+        let canon_state = self.eth_api.provider().latest().to_rpc_result()?;
+        Ok(self.flashblocks_state.get_state_provider_by_id(block_id, canon_state))
     }
 }
