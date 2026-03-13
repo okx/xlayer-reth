@@ -150,23 +150,10 @@ async fn da_footprint_fills_to_limit(rbuilder: LocalInstance) -> eyre::Result<()
     );
 
     // Verify the block fills up to the DA footprint limit
-    // accounting for builder tx DA contribution
-    if_standard! {
-        for (i, tx_hash) in tx_hashes.iter().enumerate().take(8) {
-            assert!(
-                block.includes(tx_hash),
-                "tx {} should be included in the block",
-                i
-            );
-        }
-
-        // Verify the last tx doesn't fit due to DA footprint limit
-        assert!(
-            !block.includes(&tx_hashes[9]),
-            "tx 9 should not fit in the block due to DA footprint limit"
-        );
-    }
-
+    // accounting for builder tx DA contribution.
+    // Note: standard-mode assertions (8 txs included, tx[9] excluded) are omitted here
+    // because all tests currently run in flashblocks mode (if_standard! always discards).
+    // Flashblocks splits the DA quota across sub-blocks, so only 7 txs fit instead of 8.
     if_flashblocks! {
             for (i, tx_hash) in tx_hashes.iter().enumerate().take(7) {
                 assert!(
