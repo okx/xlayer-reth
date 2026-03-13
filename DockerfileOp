@@ -15,6 +15,7 @@ RUN cargo chef prepare --recipe-path recipe.json --bin xlayer-reth-node
 
 FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
+COPY deps/ deps/
 
 ARG BUILD_PROFILE=release
 ENV BUILD_PROFILE=$BUILD_PROFILE

@@ -2,6 +2,7 @@
 .claude/*
 !.claude/skills/
 .vscode
+.idea
 
 tests/data
 tests/op-reth-seq

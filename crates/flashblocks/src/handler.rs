@@ -59,14 +59,14 @@ where
         if self.relay_flashblocks {
             let datadir = self.datadir.clone();
             let flashblock_rx = self.flashblock_rx.resubscribe();
-            task_executor.spawn_critical(
+            task_executor.spawn_critical_task(
                 "xlayer-flashblocks-persistence",
                 Box::pin(async move {
                     handle_persistence(flashblock_rx, datadir).await;
                 }),
             );
 
-            task_executor.spawn_critical(
+            task_executor.spawn_critical_task(
                 "xlayer-flashblocks-publish",
                 Box::pin(async move {
                     self.publish().await;

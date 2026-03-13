@@ -97,5 +97,5 @@ pub fn start_monitor_handle<N, T, Provider>(
         info!(target: "xlayer::monitor", "monitor handle stopped");
     };
 
-    task_executor.spawn_critical("xlayer monitor handle", Box::pin(monitor_handle));
+    task_executor.spawn_critical_task("xlayer monitor handle", Box::pin(monitor_handle));
 }

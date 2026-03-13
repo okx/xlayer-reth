@@ -3,6 +3,7 @@ use reth_node_api::{FullNodeComponents, FullNodeTypes, NodeTypes};
 use reth_optimism_chainspec::OpChainSpec;
 use reth_optimism_node::OpEngineTypes;
 use reth_optimism_primitives::{OpPrimitives, OpTransactionSigned};
+use reth_optimism_storage::OpStorage;
 use reth_optimism_txpool::OpPooledTx;
 use reth_payload_util::PayloadTransactions;
 use reth_provider::{BlockReaderIdExt, ChainSpecProvider, StateProviderFactory};
@@ -10,7 +11,12 @@ use reth_transaction_pool::TransactionPool;
 
 pub trait NodeBounds:
     FullNodeTypes<
-    Types: NodeTypes<Payload = OpEngineTypes, ChainSpec = OpChainSpec, Primitives = OpPrimitives>,
+    Types: NodeTypes<
+        Payload = OpEngineTypes,
+        ChainSpec = OpChainSpec,
+        Primitives = OpPrimitives,
+        Storage = OpStorage,
+    >,
 >
 {
 }
@@ -21,6 +27,7 @@ impl<T> NodeBounds for T where
             Payload = OpEngineTypes,
             ChainSpec = OpChainSpec,
             Primitives = OpPrimitives,
+            Storage = OpStorage,
         >,
     >
 {
@@ -28,7 +35,12 @@ impl<T> NodeBounds for T where
 
 pub trait NodeComponents:
     FullNodeComponents<
-    Types: NodeTypes<Payload = OpEngineTypes, ChainSpec = OpChainSpec, Primitives = OpPrimitives>,
+    Types: NodeTypes<
+        Payload = OpEngineTypes,
+        ChainSpec = OpChainSpec,
+        Primitives = OpPrimitives,
+        Storage = OpStorage,
+    >,
 >
 {
 }
@@ -39,6 +51,7 @@ impl<T> NodeComponents for T where
             Payload = OpEngineTypes,
             ChainSpec = OpChainSpec,
             Primitives = OpPrimitives,
+            Storage = OpStorage,
         >,
     >
 {
