@@ -1,59 +1,70 @@
-use alloy_consensus::BlockHeader;
-use alloy_primitives::B256;
+use crate::cache::CachedTxInfo;
 use derive_more::Deref;
+use std::collections::HashMap;
+
+use alloy_consensus::BlockHeader;
+use alloy_primitives::{TxHash, B256};
 use reth_primitives_traits::NodePrimitives;
-use reth_rpc_eth_types::PendingBlock;
+use reth_revm::cached::CachedReads;
+use reth_rpc_eth_types::{block::BlockAndReceipts, PendingBlock};
 
-/// Type alias for the Optimism flashblock payload.
-pub type FlashBlock = op_alloy_rpc_types_engine::OpFlashblockPayload;
-
-/// The pending block built with all received Flashblocks alongside the metadata for the last added
-/// Flashblock.
+/// The pending flashblocks sequence built with all received OpFlashblockPayload
+/// alongside the metadata for the last added flashblock.
 #[derive(Debug, Clone, Deref)]
-pub struct PendingFlashBlock<N: NodePrimitives> {
-    /// The complete pending block built out of all received Flashblocks.
+pub struct PendingSequence<N: NodePrimitives> {
+    /// Locally built full pending block of the latest flashblocks sequence.
     #[deref]
     pub pending: PendingBlock<N>,
-    /// Canonical anchor hash used for state lookups when this block was built.
-    ///
-    /// For canonical builds this equals `pending.block().parent_hash()`.
-    /// For speculative builds this points to the canonical ancestor used for storage reads.
-    pub canonical_anchor_hash: B256,
-    /// A sequential index that identifies the last Flashblock added to this block.
+    /// Transaction index: tx hash → cached tx info for O(1) tx/receipt lookups.
+    pub tx_index: HashMap<TxHash, CachedTxInfo<N>>,
+    /// Cached reads from execution for reuse.
+    pub cached_reads: CachedReads,
+    /// The current block hash of the latest flashblocks sequence.
+    pub block_hash: B256,
+    /// Parent hash of the built block (may be non-canonical or canonical).
+    pub parent_hash: B256,
+    /// The last flashblock index of the latest flashblocks sequence.
     pub last_flashblock_index: u64,
-    /// The last Flashblock block hash,
-    pub last_flashblock_hash: B256,
-    /// Whether the [`PendingBlock`] has a properly computed stateroot.
-    pub has_computed_state_root: bool,
 }
 
-impl<N: NodePrimitives> PendingFlashBlock<N> {
+impl<N: NodePrimitives> PendingSequence<N> {
     /// Create new pending flashblock.
     pub const fn new(
         pending: PendingBlock<N>,
-        canonical_anchor_hash: B256,
+        tx_index: HashMap<TxHash, CachedTxInfo<N>>,
+        cached_reads: CachedReads,
+        block_hash: B256,
+        parent_hash: B256,
         last_flashblock_index: u64,
-        last_flashblock_hash: B256,
-        has_computed_state_root: bool,
     ) -> Self {
-        Self {
-            pending,
-            canonical_anchor_hash,
-            last_flashblock_index,
-            last_flashblock_hash,
-            has_computed_state_root,
-        }
+        Self { pending, tx_index, cached_reads, block_hash, parent_hash, last_flashblock_index }
     }
 
-    /// Returns the properly calculated state root for that block if it was computed.
-    pub fn computed_state_root(&self) -> Option<B256> {
-        self.has_computed_state_root.then_some(self.pending.block().state_root())
+    pub fn get_hash(&self) -> B256 {
+        self.block_hash
+    }
+
+    pub fn get_height(&self) -> u64 {
+        self.pending.block().number()
+    }
+
+    pub fn get_block_and_receipts(&self) -> BlockAndReceipts<N> {
+        self.pending.to_block_and_receipts()
+    }
+
+    /// Returns the cached transaction info for the given tx hash, if present
+    /// in the pending sequence.
+    pub fn get_tx_info(&self, tx_hash: &TxHash) -> Option<(CachedTxInfo<N>, BlockAndReceipts<N>)> {
+        self.tx_index
+            .get(tx_hash)
+            .cloned()
+            .map(|tx_info| (tx_info, self.pending.to_block_and_receipts()))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use op_alloy_rpc_types_engine::OpFlashblockPayload;
 
     #[test]
     fn test_flashblock_serde_roundtrip() {
@@ -246,9 +257,9 @@ mod tests {
   "payload_id": "0x0316ecb1aa1671b5"
 }"#;
 
-        let flashblock: FlashBlock = serde_json::from_str(raw).expect("deserialize");
+        let flashblock: OpFlashblockPayload = serde_json::from_str(raw).expect("deserialize");
         let serialized = serde_json::to_string(&flashblock).expect("serialize");
-        let roundtrip: FlashBlock = serde_json::from_str(&serialized).expect("roundtrip");
+        let roundtrip: OpFlashblockPayload = serde_json::from_str(&serialized).expect("roundtrip");
 
         assert_eq!(flashblock, roundtrip);
     }

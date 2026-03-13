@@ -1,8 +1,10 @@
-//! Transaction execution caching for flashblock building.
+//! Execution caching for flashblock building.
 //!
 //! When flashblocks arrive incrementally, each new flashblock triggers a rebuild of pending
-//! state from all transactions in the sequence. Without caching, this means re-reading
-//! state from disk for accounts/storage that were already loaded in previous builds.
+//! state from all transactions in the sequence. To ensure that the incoming flashblocks
+//! are incrementally re-built, from their sequence, the execution cache stores the cumulative
+//! bundle state from previous executions. This ensures that states are not re-read from disk
+//! for accounts/storage that were already loaded in previous builds.
 //!
 //! # Approach
 //!
@@ -10,10 +12,6 @@
 //! flashblock arrives, if its transaction list is a continuation of the cached list, the
 //! cached bundle can be used as a **prestate** for the State builder. This avoids redundant
 //! disk reads for accounts/storage that were already modified.
-//!
-//! **Important**: Prefix transaction skipping is only safe when the incoming transaction list
-//! fully extends the cached list. In that case, callers can execute only the uncached suffix
-//! and stitch in the cached prefix receipts/metadata.
 //!
 //! The cache stores:
 //! - Ordered list of executed transaction hashes (for prefix matching)
@@ -56,12 +54,8 @@ pub(crate) struct CachedExecutionMeta {
     pub blob_gas_used: u64,
 }
 
-/// Resumable cached state: bundle + receipts + cached prefix length.
-pub(crate) type ResumableState<'a, N> =
-    (&'a BundleState, &'a [<N as NodePrimitives>::Receipt], usize);
-
 /// Resumable cached state plus execution metadata for the cached prefix.
-pub(crate) type ResumableStateWithExecutionMeta<'a, N> =
+pub(crate) type ResumableState<'a, N> =
     (&'a BundleState, &'a [<N as NodePrimitives>::Receipt], &'a Requests, u64, u64, usize);
 
 /// Cache of transaction execution results for a single block.
@@ -199,10 +193,11 @@ impl<N: NodePrimitives> TransactionCache<N> {
             .count()
     }
 
-    /// Returns cached state for resuming execution if the incoming transactions
-    /// have a matching prefix with the cache.
+    /// Returns cached state for resuming execution if the incoming transactions have a
+    /// matching prefix with the cache.
     ///
-    /// Returns `Some((bundle, receipts, skip_count))` if there's a non-empty matching
+    /// Returns `Some((bundle, receipts, requests, gas_used, blob_gas_used, skip_count))`
+    /// if there's a non-empty matching prefix, and the full cache matches the incoming
     /// prefix, where:
     /// - `bundle` is the cumulative state after the matching prefix
     /// - `receipts` is the receipts for the matching prefix
@@ -212,25 +207,11 @@ impl<N: NodePrimitives> TransactionCache<N> {
     /// - The cache is empty
     /// - No prefix matches (first transaction differs)
     /// - Block number doesn't match
-    pub fn get_resumable_state(
+    pub(crate) fn get_resumable_state(
         &self,
         block_number: u64,
         tx_hashes: &[B256],
     ) -> Option<ResumableState<'_, N>> {
-        self.get_resumable_state_with_execution_meta(block_number, tx_hashes)
-            .map(|(bundle, receipts, .., skip_count)| (bundle, receipts, skip_count))
-    }
-
-    /// Returns cached state and execution metadata for resuming execution if the incoming
-    /// transactions have a matching prefix with the cache.
-    ///
-    /// Returns `Some((bundle, receipts, requests, gas_used, blob_gas_used, skip_count))` if
-    /// there's a non-empty matching prefix and the entire cache matches the incoming prefix.
-    pub(crate) fn get_resumable_state_with_execution_meta(
-        &self,
-        block_number: u64,
-        tx_hashes: &[B256],
-    ) -> Option<ResumableStateWithExecutionMeta<'_, N>> {
         if !self.is_valid_for_block(block_number) || self.is_empty() {
             return None;
         }
@@ -253,18 +234,18 @@ impl<N: NodePrimitives> TransactionCache<N> {
         ))
     }
 
-    /// Returns cached state and execution metadata for resuming execution if the incoming
-    /// transactions have a matching prefix with the cache and the parent hash matches.
+    /// Returns cached state for resuming execution if the incoming transactions have a
+    /// matching prefix with the cache and the parent hash matches.
     ///
-    /// Returns `Some((bundle, receipts, requests, gas_used, blob_gas_used, skip_count))` if
-    /// there's a non-empty matching prefix, the full cache matches the incoming prefix, and the
+    /// Returns `Some((bundle, receipts, requests, gas_used, blob_gas_used, skip_count))`
+    /// if there's a non-empty matching prefix, where the full cache matches the incoming prefix, and the
     /// `(block_number, parent_hash)` tuple matches the cached scope.
-    pub(crate) fn get_resumable_state_with_execution_meta_for_parent(
+    pub(crate) fn get_resumable_state_for_parent(
         &self,
         block_number: u64,
         parent_hash: B256,
         tx_hashes: &[B256],
-    ) -> Option<ResumableStateWithExecutionMeta<'_, N>> {
+    ) -> Option<ResumableState<'_, N>> {
         if !self.is_valid_for_block_parent(block_number, parent_hash) || self.is_empty() {
             return None;
         }
@@ -422,13 +403,13 @@ mod tests {
         // Exact match returns state
         let result = cache.get_resumable_state(100, &[tx_a, tx_b]);
         assert!(result.is_some());
-        let (_, _, skip) = result.unwrap();
+        let (_, _, _, _, _, skip) = result.unwrap();
         assert_eq!(skip, 2);
 
         // Continuation returns state (can skip cached txs)
         let result = cache.get_resumable_state(100, &[tx_a, tx_b, tx_c]);
         assert!(result.is_some());
-        let (_, _, skip) = result.unwrap();
+        let (_, _, _, _, _, skip) = result.unwrap();
         assert_eq!(skip, 2);
 
         // Partial match (reorg) returns None - can't use partial cache
@@ -459,7 +440,7 @@ mod tests {
         let fb1_txs = vec![tx_a, tx_b, tx_c];
         let result = cache.get_resumable_state(100, &fb1_txs);
         assert!(result.is_some());
-        let (bundle, receipts, skip) = result.unwrap();
+        let (bundle, receipts, _, _, _, skip) = result.unwrap();
 
         // skip=2 indicates 2 txs are covered by cached state (for logging)
         // Note: All transactions are still executed, skip is informational only
@@ -514,7 +495,7 @@ mod tests {
         let fb1_txs = vec![tx_a, tx_b];
         let result = cache.get_resumable_state(100, &fb1_txs);
         assert!(result.is_some());
-        assert_eq!(result.unwrap().2, 1); // 1 tx covered by cache
+        assert_eq!(result.unwrap().4, 1); // 1 tx covered by cache
 
         cache.update(100, fb1_txs, BundleState::default(), vec![]);
         assert_eq!(cache.len(), 2);
@@ -523,7 +504,7 @@ mod tests {
         let fb2_txs = vec![tx_a, tx_b, tx_c];
         let result = cache.get_resumable_state(100, &fb2_txs);
         assert!(result.is_some());
-        assert_eq!(result.unwrap().2, 2); // 2 txs covered by cache
+        assert_eq!(result.unwrap().5, 2); // 2 txs covered by cache
 
         cache.update(100, fb2_txs, BundleState::default(), vec![]);
         assert_eq!(cache.len(), 3);
@@ -583,7 +564,7 @@ mod tests {
         // get_resumable_state returns skip=2 for prefix [A, B]
         let result = cache.get_resumable_state(100, &[tx_a, tx_b, tx_c]);
         assert!(result.is_some());
-        let (bundle, _receipts, skip_count) = result.unwrap();
+        let (bundle, _receipts, _, _, _, skip_count) = result.unwrap();
 
         // skip_count indicates cached prefix length
         assert_eq!(skip_count, 2);
@@ -624,7 +605,7 @@ mod tests {
         let tx_c = B256::repeat_byte(0xCC);
         let result = cache.get_resumable_state(100, &[tx_a, tx_b, tx_c]);
         assert!(result.is_some());
-        let (_, receipts, _) = result.unwrap();
+        let (_, receipts, _, _, _, _) = result.unwrap();
         assert_eq!(receipts.len(), 2);
     }
 
@@ -651,7 +632,7 @@ mod tests {
             },
         );
 
-        let resumable = cache.get_resumable_state_with_execution_meta(100, &[tx_a, tx_b, tx_c]);
+        let resumable = cache.get_resumable_state(100, &[tx_a, tx_b, tx_c]);
         assert!(resumable.is_some());
         let (_, _, cached_requests, gas_used, blob_gas_used, skip_count) = resumable.unwrap();
         assert_eq!(skip_count, 2);
@@ -684,19 +665,11 @@ mod tests {
         );
 
         // Matching block + parent should hit.
-        let hit = cache.get_resumable_state_with_execution_meta_for_parent(
-            100,
-            parent_a,
-            &[tx_a, tx_b, tx_c],
-        );
+        let hit = cache.get_resumable_state_for_parent(100, parent_a, &[tx_a, tx_b, tx_c]);
         assert!(hit.is_some());
 
         // Same block but different parent should miss.
-        let miss = cache.get_resumable_state_with_execution_meta_for_parent(
-            100,
-            parent_b,
-            &[tx_a, tx_b, tx_c],
-        );
+        let miss = cache.get_resumable_state_for_parent(100, parent_b, &[tx_a, tx_b, tx_c]);
         assert!(miss.is_none());
     }
 }

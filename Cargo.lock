@@ -12962,9 +12962,9 @@ dependencies = [
 
 [[package]]
 name = "unicode-width"
-version = "0.2.2"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
+checksum = "1fc81956842c57dac11422a97c3b8195a1ff727f06e85c84ed2e8aa277c9a0fd"
 
 [[package]]
 name = "unicode-xid"
@@ -14196,8 +14196,10 @@ dependencies = [
  "op-alloy-consensus",
  "op-alloy-rpc-types-engine",
  "op-revm",
+ "parking_lot",
  "reth-chain-state",
- "reth-engine-primitives",
+ "reth-chainspec",
+ "reth-db-models",
  "reth-errors",
  "reth-evm",
  "reth-execution-types",
@@ -14207,9 +14209,7 @@ dependencies = [
  "reth-optimism-chainspec",
  "reth-optimism-evm",
  "reth-optimism-flashblocks",
- "reth-optimism-payload-builder",
  "reth-optimism-primitives",
- "reth-payload-primitives",
  "reth-primitives-traits",
  "reth-provider",
  "reth-revm",
@@ -14225,9 +14225,11 @@ dependencies = [
  "serde",
  "serde_json",
  "test-case",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
  "tokio-tungstenite 0.26.2",
+ "tokio-util",
  "tracing",
  "url",
  "xlayer-builder",
@@ -14342,12 +14344,30 @@ dependencies = [
 name = "xlayer-rpc"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-primitives",
+ "alloy-rpc-types-eth",
+ "async-trait",
+ "futures",
  "jsonrpsee",
+ "jsonrpsee-types",
+ "op-alloy-network",
+ "reth-chain-state",
+ "reth-optimism-primitives",
  "reth-optimism-rpc",
+ "reth-primitives-traits",
+ "reth-revm",
  "reth-rpc",
+ "reth-rpc-convert",
  "reth-rpc-eth-api",
- "serde",
+ "reth-rpc-eth-types",
+ "reth-rpc-server-types",
+ "reth-storage-api",
  "tokio",
+ "tokio-stream",
+ "tracing",
+ "xlayer-flashblocks",
 ]
 
 [[package]]

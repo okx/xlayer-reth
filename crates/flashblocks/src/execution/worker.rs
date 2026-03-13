@@ -1,11 +1,18 @@
 use crate::{
-    pending_state::PendingBlockState,
-    tx_cache::{CachedExecutionMeta, TransactionCache},
-    PendingFlashBlock,
+    cache::{FlashblockStateCache, PendingSequence},
+    execution::{CachedExecutionMeta, TransactionCache},
 };
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio_util::sync::CancellationToken;
+use tracing::trace;
+
 use alloy_eips::{eip2718::WithEncoded, BlockNumberOrTag};
 use alloy_primitives::B256;
 use op_alloy_rpc_types_engine::OpFlashblockPayloadBase;
+
 use reth_chain_state::{ComputedTrieData, ExecutedBlock};
 use reth_errors::RethError;
 use reth_evm::{
@@ -30,51 +37,45 @@ use reth_storage_api::{
     noop::NoopProvider, BlockReaderIdExt, HashedPostStateProvider, StateProviderFactory,
     StateRootProvider,
 };
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
-use tracing::trace;
 
-/// The `FlashBlockBuilder` builds [`PendingBlock`] out of a sequence of transactions.
-#[derive(Debug)]
-pub(crate) struct FlashBlockBuilder<EvmConfig, Provider> {
-    evm_config: EvmConfig,
-    provider: Provider,
+pub(crate) struct BuildArgs<I> {
+    pub(crate) base: OpFlashblockPayloadBase,
+    pub(crate) transactions: I,
+    pub(crate) cached_state: Option<(B256, CachedReads)>,
+    pub(crate) last_flashblock_index: u64,
+    pub(crate) cancel: CancellationToken,
 }
 
-impl<EvmConfig, Provider> FlashBlockBuilder<EvmConfig, Provider> {
-    pub(crate) const fn new(evm_config: EvmConfig, provider: Provider) -> Self {
-        Self { evm_config, provider }
+/// The `FlashblocksValidator` builds [`PendingBlock`] out of a sequence of transactions.
+///
+/// Owns a [`TransactionCache`] for incremental prefix caching between flashblock builds.
+#[derive(Debug)]
+pub(crate) struct FlashblocksValidator<N: NodePrimitives, EvmConfig, Provider> {
+    /// The EVM configuration used to build the flashblocks.
+    evm_config: EvmConfig,
+    /// The transaction execution cache for incremental executions.
+    tx_cache: TransactionCache<N>,
+    /// The state cache containing the canonical chainstate provider and the flashblocks
+    /// state cache layer.
+    state_cache: FlashblockStateCache<N, Provider>,
+}
+
+impl<N: NodePrimitives, EvmConfig, Provider> FlashblocksValidator<N, EvmConfig, Provider> {
+    pub(crate) fn new(
+        evm_config: EvmConfig,
+        state_cache: FlashblockStateCache<N, Provider>,
+    ) -> Self {
+        Self { evm_config, state_cache, tx_cache: TransactionCache::new() }
     }
 
     pub(crate) const fn provider(&self) -> &Provider {
         &self.provider
     }
-}
 
-pub(crate) struct BuildArgs<I, N: NodePrimitives> {
-    pub(crate) base: OpFlashblockPayloadBase,
-    pub(crate) transactions: I,
-    pub(crate) cached_state: Option<(B256, CachedReads)>,
-    pub(crate) last_flashblock_index: u64,
-    pub(crate) last_flashblock_hash: B256,
-    pub(crate) compute_state_root: bool,
-    /// Optional pending parent state for speculative building.
-    /// When set, allows building on top of a pending block that hasn't been
-    /// canonicalized yet.
-    pub(crate) pending_parent: Option<PendingBlockState<N>>,
-}
-
-/// Result of a flashblock build operation.
-#[derive(Debug)]
-pub(crate) struct BuildResult<N: NodePrimitives> {
-    /// The built pending flashblock.
-    pub(crate) pending_flashblock: PendingFlashBlock<N>,
-    /// Cached reads from this build.
-    pub(crate) cached_reads: CachedReads,
-    /// Pending state that can be used for building subsequent blocks.
-    pub(crate) pending_state: PendingBlockState<N>,
+    /// Clears the transaction cache (used on reorg/catch-up).
+    pub(crate) fn clear_cache(&mut self) {
+        self.tx_cache.clear();
+    }
 }
 
 /// Cached prefix execution data used to resume canonical builds.
@@ -111,7 +112,7 @@ impl FlashblockCachedReceipt for OpReceipt {
     }
 }
 
-impl<N, EvmConfig, Provider> FlashBlockBuilder<EvmConfig, Provider>
+impl<N, EvmConfig, Provider> FlashBlockBuilder<N, EvmConfig, Provider>
 where
     N: NodePrimitives,
     N::Receipt: FlashblockCachedReceipt,
@@ -124,26 +125,27 @@ where
             Receipt = ReceiptTy<N>,
         > + Unpin,
 {
-    /// Returns the [`PendingFlashBlock`] made purely out of transactions and
-    /// [`OpFlashblockPayloadBase`] in `args`.
+    /// Returns the [`PendingSequence`], which contains the full built execution state of
+    /// the flashblocks sequence passed in `BuildArgs`.
     ///
-    /// This method supports two building modes:
-    /// 1. **Canonical mode**: Parent matches local tip - uses state from storage
-    /// 2. **Speculative mode**: Parent is a pending block - uses pending state
+    /// The
     ///
-    /// When a `tx_cache` is provided and we're in canonical mode, the builder will
-    /// attempt to resume from cached state if the transaction list is a continuation
-    /// of what was previously executed.
+    /// In canonical mode, the internal transaction cache is used to resume from
+    /// cached state if the transaction list is a continuation of what was previously
+    /// executed.
     ///
     /// Returns `None` if:
     /// - In canonical mode: flashblock doesn't attach to the latest header
     /// - In speculative mode: no pending parent state provided
     pub(crate) fn execute<I: IntoIterator<Item = WithEncoded<Recovered<N::SignedTx>>>>(
-        &self,
-        mut args: BuildArgs<I, N>,
-        tx_cache: Option<&mut TransactionCache<N>>,
-    ) -> eyre::Result<Option<BuildResult<N>>> {
+        &mut self,
+        mut args: BuildArgs<I>,
+    ) -> eyre::Result<PendingSequence<N>> {
         trace!(target: "flashblocks", "Attempting new pending block from flashblocks");
+
+        let parent_hash = args.base.parent_hash;
+        let parent_header = self.state_cache.latest_header(parent_hash)?;
+        let state_provider = self.state_cache.history_by_block_hash(parent_header.hash())?;
 
         let latest = self
             .provider
@@ -233,38 +235,27 @@ where
         // Check for resumable canonical execution state.
         let canonical_parent_hash = args.base.parent_hash;
         let cached_prefix = if is_canonical {
-            tx_cache.as_ref().and_then(|cache| {
-                cache
-                    .get_resumable_state_with_execution_meta_for_parent(
-                        args.base.block_number,
-                        canonical_parent_hash,
-                        &tx_hashes,
-                    )
-                    .map(
-                        |(
-                            bundle,
-                            receipts,
-                            _requests,
-                            gas_used,
-                            blob_gas_used,
-                            cached_tx_count,
-                        )| {
-                            trace!(
-                                target: "flashblocks",
-                                cached_tx_count,
-                                total_txs = tx_hashes.len(),
-                                "Cache hit (executing only uncached suffix)"
-                            );
-                            CachedPrefixExecutionResult {
-                                cached_tx_count,
-                                bundle: bundle.clone(),
-                                receipts: receipts.to_vec(),
-                                gas_used,
-                                blob_gas_used,
-                            }
-                        },
-                    )
-            })
+            self.tx_cache
+                .get_resumable_state_with_execution_meta_for_parent(
+                    args.base.block_number,
+                    canonical_parent_hash,
+                    &tx_hashes,
+                )
+                .map(|(bundle, receipts, _requests, gas_used, blob_gas_used, cached_tx_count)| {
+                    trace!(
+                        target: "flashblocks",
+                        cached_tx_count,
+                        total_txs = tx_hashes.len(),
+                        "Cache hit (executing only uncached suffix)"
+                    );
+                    CachedPrefixExecutionResult {
+                        cached_tx_count,
+                        bundle: bundle.clone(),
+                        receipts: receipts.to_vec(),
+                        gas_used,
+                        blob_gas_used,
+                    }
+                })
         } else {
             None
         };
@@ -388,11 +379,9 @@ where
             (execution_result, block, hashed_state, bundle)
         };
 
-        // Update transaction cache if provided (only in canonical mode)
-        if let Some(cache) = tx_cache
-            && is_canonical
-        {
-            cache.update_with_execution_meta_for_parent(
+        // Update internal transaction cache (only in canonical mode)
+        if is_canonical {
+            self.tx_cache.update_with_execution_meta_for_parent(
                 args.base.block_number,
                 canonical_parent_hash,
                 tx_hashes,
@@ -488,16 +477,10 @@ fn is_consistent_speculative_parent_hashes(
     incoming_parent_hash == pending_block_hash && pending_block_hash == pending_sealed_hash
 }
 
-impl<EvmConfig: Clone, Provider: Clone> Clone for FlashBlockBuilder<EvmConfig, Provider> {
-    fn clone(&self) -> Self {
-        Self { evm_config: self.evm_config.clone(), provider: self.provider.clone() }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{is_consistent_speculative_parent_hashes, BuildArgs, FlashBlockBuilder};
-    use crate::{tx_cache::CachedExecutionMeta, TransactionCache};
+    use crate::execution::cache::CachedExecutionMeta;
     use alloy_consensus::{SignableTransaction, TxEip1559};
     use alloy_eips::eip2718::Encodable2718;
     use alloy_network::TxSignerSync;
@@ -618,29 +601,26 @@ mod tests {
         let tx_c = into_encoded_recovered(tx_c, signer);
 
         let evm_config = OpEvmConfig::optimism(OP_MAINNET.clone());
-        let builder = FlashBlockBuilder::new(evm_config, provider);
-        let mut tx_cache = TransactionCache::<OpPrimitives>::new();
+        let mut builder = FlashBlockBuilder::<OpPrimitives, _, _>::new(evm_config, provider);
 
         let first = builder
-            .execute(
-                BuildArgs {
-                    base: base.clone(),
-                    transactions: vec![tx_a.clone(), tx_b.clone()],
-                    cached_state: None,
-                    last_flashblock_index: 0,
-                    last_flashblock_hash: B256::repeat_byte(0xA0),
-                    compute_state_root: false,
-                    pending_parent: None,
-                },
-                Some(&mut tx_cache),
-            )
+            .execute(BuildArgs {
+                base: base.clone(),
+                transactions: vec![tx_a.clone(), tx_b.clone()],
+                cached_state: None,
+                last_flashblock_index: 0,
+                last_flashblock_hash: B256::repeat_byte(0xA0),
+                compute_state_root: false,
+                pending_parent: None,
+            })
             .expect("first build succeeds")
             .expect("first build is canonical");
 
         assert_eq!(first.pending_state.execution_outcome.result.receipts.len(), 2);
 
         let cached_hashes = vec![tx_a_hash, tx_b_hash];
-        let (bundle, receipts, requests, gas_used, blob_gas_used, skip) = tx_cache
+        let (bundle, receipts, requests, gas_used, blob_gas_used, skip) = builder
+            .tx_cache
             .get_resumable_state_with_execution_meta_for_parent(
                 base.block_number,
                 base_parent_hash,
@@ -654,7 +634,7 @@ mod tests {
             tampered_receipts[0].as_receipt().cumulative_gas_used.saturating_add(17);
         let expected_tampered_gas = tampered_receipts[0].as_receipt().cumulative_gas_used;
 
-        tx_cache.update_with_execution_meta_for_parent(
+        builder.tx_cache.update_with_execution_meta_for_parent(
             base.block_number,
             base_parent_hash,
             cached_hashes,
@@ -664,7 +644,8 @@ mod tests {
         );
 
         let second_hashes = vec![tx_a_hash, tx_b_hash, tx_c_hash];
-        let (_, _, _, _, _, skip) = tx_cache
+        let (_, _, _, _, _, skip) = builder
+            .tx_cache
             .get_resumable_state_with_execution_meta_for_parent(
                 base.block_number,
                 base_parent_hash,
@@ -674,18 +655,15 @@ mod tests {
         assert_eq!(skip, 2);
 
         let second = builder
-            .execute(
-                BuildArgs {
-                    base,
-                    transactions: vec![tx_a, tx_b, tx_c],
-                    cached_state: None,
-                    last_flashblock_index: 1,
-                    last_flashblock_hash: B256::repeat_byte(0xA1),
-                    compute_state_root: false,
-                    pending_parent: None,
-                },
-                Some(&mut tx_cache),
-            )
+            .execute(BuildArgs {
+                base,
+                transactions: vec![tx_a, tx_b, tx_c],
+                cached_state: None,
+                last_flashblock_index: 1,
+                last_flashblock_hash: B256::repeat_byte(0xA1),
+                compute_state_root: false,
+                pending_parent: None,
+            })
             .expect("second build succeeds")
             .expect("second build is canonical");
 

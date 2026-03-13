@@ -15,16 +15,15 @@ xlayer-builder.workspace = true
 
 # reth
 reth-chain-state = { workspace = true, features = ["serde"] }
-reth-engine-primitives = { workspace = true, features = ["std"] }
+reth-chainspec.workspace = true
+reth-db-models.workspace = true
 reth-errors.workspace = true
 reth-evm.workspace = true
 reth-execution-types = { workspace = true, features = ["serde"] }
 reth-metrics.workspace = true
 reth-node-api.workspace = true
 reth-node-core.workspace = true
-reth-optimism-payload-builder.workspace = true
 reth-optimism-primitives = { workspace = true, features = ["serde"] }
-reth-payload-primitives.workspace = true
 reth-primitives-traits = { workspace = true, features = ["serde"] }
 reth-revm.workspace = true
 reth-rpc.workspace = true
@@ -56,6 +55,7 @@ futures-util.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tokio-tungstenite.workspace = true
+tokio-util.workspace = true
 
 # rpc
 jsonrpsee.workspace = true
@@ -65,6 +65,8 @@ async-trait.workspace = true
 brotli = { workspace = true, features = ["std"] }
 derive_more.workspace = true
 eyre.workspace = true
+parking_lot.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 metrics.workspace = true
 moka.workspace = true
