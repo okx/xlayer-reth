@@ -11,6 +11,7 @@ macro_rules! if_flashblocks {
 }
 
 /// All tests run in flashblocks mode; discard standard-only code.
+#[allow(unused)]
 macro_rules! if_standard {
     ($($body:tt)*) => {};
 }
