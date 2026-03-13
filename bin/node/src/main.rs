@@ -104,12 +104,20 @@ fn main() {
                 LegacyRpcRouterLayer::new(legacy_config), // Execute second
             ));
 
+            // Parse and validate bridge intercept configuration
+            let bridge_config = args
+                .xlayer_args
+                .intercept
+                .to_bridge_intercept_config()
+                .map_err(|e| eyre::eyre!("Bridge intercept config error: {e}"))?;
+
             // Create the X Layer payload service builder
             // It handles both flashblocks and default modes internally
             let payload_builder = XLayerPayloadServiceBuilder::new(
                 args.xlayer_args.builder.clone(),
                 args.rollup_args.compute_pending_block,
-            )?;
+            )?
+            .with_bridge_config(bridge_config);
 
             let NodeHandle { node, node_exit_future } = builder
                 .with_types_and_provider::<OpNode, BlockchainProvider<_>>()
