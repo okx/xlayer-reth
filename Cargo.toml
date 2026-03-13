@@ -170,7 +170,7 @@ alloy-json-rpc = { version = "~1.6" }
 alloy-network = { version = "~1.6", default-features = false }
 alloy-primitives = { version = "~1.5", default-features = false, features = [
     "map-foldhash",
-] }
+] } # pinned to ~1.5 (not ~1.6) to avoid secp256k1 version conflict introduced in alloy-primitives 1.6
 alloy-provider = { version = "~1.6" }
 alloy-rlp = { version = "~0.3", default-features = false, features = [
     "core-net",
