@@ -176,6 +176,7 @@ async fn da_footprint_fills_to_limit(rbuilder: LocalInstance) -> eyre::Result<()
                 );
             }
 
+        assert!(!block.includes(&tx_hashes[8]));
         assert!(
             !block.includes(&tx_hashes[9]),
             "tx 9 should not fit in the block due to DA footprint limit"
