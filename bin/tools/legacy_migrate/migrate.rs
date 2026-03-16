@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use alloy_primitives::{Address, BlockNumber};
-use eyre::Result;
+use eyre::{Result, WrapErr};
 use rayon::prelude::*;
 use tracing::info;
 
@@ -65,12 +65,16 @@ pub(crate) fn migrate_segment<N: CliNodeTypes>(
     let mut writer = if highest == 0 && genesis_block > 0 {
         info!(target: "reth::cli", ?segment, "Initializing static file with genesis block");
         // If no data exists yet and genesis is not 0, initialize writer with genesis block
-        let mut w = static_file_provider.get_writer(genesis_block, segment)?;
+        let mut w = static_file_provider
+            .get_writer(genesis_block, segment)
+            .wrap_err_with(|| format!("failed to init writer for {segment:?}"))?;
         w.user_header_mut().set_expected_block_start(genesis_block);
         w
     } else {
         info!(target: "reth::cli", ?segment, "Continuing static file from block {}", highest + 1);
-        static_file_provider.latest_writer(segment)?
+        static_file_provider
+            .latest_writer(segment)
+            .wrap_err_with(|| format!("failed to init writer for {segment:?}"))?
     };
 
     let segment_start = Instant::now();
