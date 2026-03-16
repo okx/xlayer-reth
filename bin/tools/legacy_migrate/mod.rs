@@ -171,16 +171,20 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> LegacyMigrateCommand<C> {
             );
         }
 
-        // Only write v2 storage settings when both migrations have completed.
-        // If either migration was skipped the corresponding storage backend is empty, and
-        // writing v2 settings would route queries there, causing missing-data errors on restart.
-        if self.skip_static_files || self.skip_rocksdb {
+        // Only write v2 storage settings when both migrations have completed AND all segments
+        // were successfully migrated (including receipts).  If receipts were skipped due to
+        // pruning, v2 routing would direct receipt queries to static files that contain no
+        // receipt data.  Since StorageSettings::v2() is all-or-nothing, we must keep v1
+        // settings and preserve the MDBX tables so the node can still serve all queries.
+        if self.skip_static_files || self.skip_rocksdb || !can_migrate_receipts {
             warn!(
                 target: "reth::cli",
                 skip_static_files = self.skip_static_files,
                 skip_rocksdb = self.skip_rocksdb,
-                "Skipping storage settings update: both static-files and RocksDB migrations must \
-                 complete before switching to v2 storage layout. Re-run without skip flags to finalize."
+                can_migrate_receipts,
+                "Skipping storage settings update: all migrations — including receipts — must \
+                 complete before switching to v2 storage layout. Re-run on a node without receipt \
+                 pruning, or pass --keep-mdbx and re-run after resolving the pruning configuration."
             );
         } else {
             // Enable v2 storage layout (static files + RocksDB routing)
@@ -198,7 +202,10 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> LegacyMigrateCommand<C> {
 
             let tx = provider.tx_mut();
 
-            if !self.skip_static_files {
+            // Only clear MDBX static-file tables when v2 settings were written.  If receipts
+            // could not be migrated we kept v1 settings, so the node still reads all of these
+            // tables via MDBX — clearing them here would make that data permanently inaccessible.
+            if !self.skip_static_files && can_migrate_receipts {
                 info!(target: "reth::cli", "Dropping migrated static file tables from MDBX");
 
                 info!(target: "reth::cli", "Clearing TransactionSenders table...");
@@ -213,11 +220,15 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> LegacyMigrateCommand<C> {
                 tx.clear::<tables::StorageChangeSets>()?;
                 info!(target: "reth::cli", "StorageChangeSets table cleared");
 
-                if can_migrate_receipts {
-                    info!(target: "reth::cli", "Clearing Receipts table...");
-                    tx.clear::<tables::Receipts<<<N as reth_node_builder::NodeTypes>::Primitives as reth_primitives_traits::NodePrimitives>::Receipt>>()?;
-                    info!(target: "reth::cli", "Receipts table cleared");
-                }
+                info!(target: "reth::cli", "Clearing Receipts table...");
+                tx.clear::<tables::Receipts<<<N as reth_node_builder::NodeTypes>::Primitives as reth_primitives_traits::NodePrimitives>::Receipt>>()?;
+                info!(target: "reth::cli", "Receipts table cleared");
+            } else if !self.skip_static_files {
+                info!(
+                    target: "reth::cli",
+                    "Keeping MDBX static-file tables: receipts were not migrated so v2 settings \
+                     were not written; node will continue reading these tables via v1 routing."
+                );
             }
 
             if !self.skip_rocksdb {
