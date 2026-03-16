@@ -10,12 +10,6 @@ on:
   pull_request_review:
     types: [submitted]
 
-permissions:
-  contents: write
-  pull-requests: write
-  issues: write
-  actions: write
-
 concurrency:
   group: claude-${{ github.event.pull_request.number || github.event.issue.number }}
   cancel-in-progress: false
@@ -23,9 +17,32 @@ concurrency:
 jobs:
   authorize:
     runs-on: ubuntu-latest
-    permissions: {}
+    permissions:
+      pull-requests: read
     if: "!contains(github.actor, '[bot]')"
     steps:
+      - name: Check branch restriction
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ALLOWED_BRANCH="vui-chee/fix-claude-ci-again"
+          PR_NUMBER="${{ github.event.issue.number || github.event.pull_request.number }}"
+          if [ -z "$PR_NUMBER" ]; then
+            echo "No PR number found, skipping branch check"
+            exit 0
+          fi
+          BRANCH=$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER --jq '.head.ref' 2>/dev/null || echo "")
+          if [ -z "$BRANCH" ]; then
+            echo "Not a PR or could not fetch branch info, skipping"
+            exit 0
+          fi
+          echo "PR branch: $BRANCH"
+          if [ "$BRANCH" != "$ALLOWED_BRANCH" ]; then
+            echo "Branch '$BRANCH' is not allowed. Only '$ALLOWED_BRANCH' triggers CI."
+            exit 1
+          fi
+          echo "Branch check passed."
+
       - name: Check actor authorization
         run: |
           ASSOCIATION="${{ github.event.comment.author_association || github.event.review.author_association || github.event.issue.author_association }}"
@@ -49,6 +66,12 @@ jobs:
 
   claude:
     needs: authorize
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: write
     if: |
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
