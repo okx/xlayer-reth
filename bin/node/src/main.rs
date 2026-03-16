@@ -17,7 +17,6 @@ use reth::{
     builder::{DebugNodeLauncher, EngineNodeLauncher, Node, NodeHandle, TreeConfig},
     providers::providers::BlockchainProvider,
 };
-use reth_node_api::FullNodeComponents;
 use reth_optimism_cli::Cli;
 use reth_optimism_node::{args::RollupArgs, OpNode};
 use reth_rpc_server_types::RethRpcModule;
@@ -117,10 +116,6 @@ fn main() {
                 .with_types_and_provider::<OpNode, BlockchainProvider<_>>()
                 .with_components(op_node.components().payload(payload_builder))
                 .with_add_ons(add_ons)
-                .on_component_initialized(move |_ctx| {
-                    // TODO: Initialize X Layer components here
-                    Ok(())
-                })
                 .extend_rpc_modules(move |ctx| {
                     let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
 
@@ -145,7 +140,7 @@ fn main() {
                             let flashblocks_pubsub = FlashblocksPubSub::new(
                                 ctx.registry.eth_handlers().pubsub.clone(),
                                 flashblocks_state.subscribe_pending_sequence(),
-                                Box::new(ctx.node().task_executor().clone()),
+                                Box::new(ctx.node().task_executor.clone()),
                                 new_op_eth_api.converter().clone(),
                                 xlayer_args.flashblocks_subscription_max_addresses,
                             );
@@ -212,7 +207,7 @@ fn main() {
             // Start X Layer full link monitor handle
             start_monitor_handle(
                 node.tasks(),
-                monitor.clone(),
+                monitor,
                 node.provider().clone(),
                 node.payload_builder_handle.clone(),
                 node.add_ons_handle.engine_events.new_listener(),
