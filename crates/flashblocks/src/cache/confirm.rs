@@ -231,7 +231,8 @@ impl<N: NodePrimitives> ConfirmCache<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{empty_receipts, make_executed_block};
+    use crate::test_utils::{empty_receipts, make_executed_block, make_executed_block_with_txs};
+    use alloy_consensus::BlockHeader;
     use reth_optimism_primitives::OpPrimitives;
 
     #[test]

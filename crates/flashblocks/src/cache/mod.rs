@@ -7,7 +7,7 @@ pub use confirm::ConfirmCache;
 pub use pending::PendingSequence;
 pub use raw::RawFlashblocksCache;
 
-use crate::PendingSequenceRx;
+use crate::{execution::FlashblockCachedReceipt, PendingSequenceRx};
 use parking_lot::RwLock;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -53,12 +53,18 @@ pub struct CachedTxInfo<N: NodePrimitives> {
 /// state, ensuring atomic operations across pending, confirmed, and height
 /// state (e.g. reorg detection + flush + insert in `handle_confirmed_block`).
 #[derive(Debug, Clone)]
-pub struct FlashblockStateCache<N: NodePrimitives> {
+pub struct FlashblockStateCache<N: NodePrimitives>
+where
+    N::Receipt: FlashblockCachedReceipt,
+{
     inner: Arc<RwLock<FlashblockStateCacheInner<N>>>,
 }
 
 // FlashblockStateCache read interfaces
-impl<N: NodePrimitives> FlashblockStateCache<N> {
+impl<N: NodePrimitives> FlashblockStateCache<N>
+where
+    N::Receipt: FlashblockCachedReceipt,
+{
     /// Creates a new [`FlashblockStateCache`].
     pub fn new() -> Self {
         Self { inner: Arc::new(RwLock::new(FlashblockStateCacheInner::new())) }
@@ -66,7 +72,10 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
 }
 
 // FlashblockStateCache read height interfaces
-impl<N: NodePrimitives> FlashblockStateCache<N> {
+impl<N: NodePrimitives> FlashblockStateCache<N>
+where
+    N::Receipt: FlashblockCachedReceipt,
+{
     /// Returns the current confirmed height.
     pub fn get_confirm_height(&self) -> u64 {
         self.inner.read().confirm_height
@@ -117,50 +126,18 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
     }
 
     /// Creates a `StateProviderBox` that overlays the flashblock execution state on top of the
-    /// canonical state for the given block ID. Instantiates a `MemoryOverlayStateProvider` by
-    /// getting the ordered `ExecutedBlock`s from the cache, and overlaying them on top of the
-    /// canonical state provider.
+    /// canonical state for the given block ID.
     ///
     /// For a specific block number/hash, returns all confirm cache blocks up to that height.
     /// For `Pending`, it also includes the current pending executed block state.
     /// For `Latest`, resolves to the confirm height.
     /// Returns `None` if the target block is not in the flashblocks cache.
-    ///
-    /// # Safety of the overlay
-    /// The returned blocks are meant to be layered on top of a canonical `StateProviderBox`
-    /// via `MemoryOverlayStateProvider`. This is correct **if and only if** the overlay
-    /// blocks form a contiguous chain from some height down to `canonical_height + 1`
-    /// (or `canonical_height` itself in the redundant-but-safe race case).
-    ///
-    /// **Safe (redundant overlap)**: Due to a race between canonical commit and confirm
-    /// cache flush, the lowest overlay block may equal the canonical height. For example,
-    /// canonical is at height `x` and the overlay contains `[x+2, x+1, x]`. This is safe
-    /// because `MemoryOverlayStateProvider` checks overlay blocks first (newest-to-oldest)
-    /// — the duplicate `BundleState` at height `x` contains changes identical to what
-    /// canonical already applied, so the result is correct regardless of which source
-    /// resolves the query.
-    ///
-    /// **State inconsistency (gap in overlay)**: If an intermediate block is missing (e.g.
-    /// overlay has `[x+2, x]` but not `x+1`), any account modified only at height `x+1`
-    /// would be invisible — the query falls through to canonical, returning stale state.
-    ///
-    /// **State inconsistency (canonical too far behind)**: If the canonical height is more
-    /// than one block below the lowest overlay block (e.g. canonical at `x-2`, lowest overlay
-    /// at `x`), changes at height `x-1` are not covered by either source.
-    ///
-    /// Both failure modes reduce to: every height between `canonical_height + 1` and the
-    /// target must be present in the overlay. This invariant is naturally maintained by
-    /// `handle_confirmed_block` (rejects non-consecutive heights) and the pending block always
-    /// being `confirm_height + 1`.
-    ///
-    /// On validation failure (non-contiguous overlay or gap to canonical), the cache is
-    /// flushed and `None` is returned.
     pub fn get_state_provider_by_id(
         &self,
         block_id: Option<BlockId>,
         canonical_state: StateProviderBox,
     ) -> Option<(StateProviderBox, SealedHeaderFor<N>)> {
-        let guard = self.inner.read();
+        let mut guard = self.inner.write();
         let block = match block_id.unwrap_or(BlockId::Number(BlockNumberOrTag::Latest)) {
             BlockId::Number(id) => match id {
                 BlockNumberOrTag::Pending => guard.get_pending_block(),
@@ -172,28 +149,27 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
         }?
         .block;
         let block_num = block.number();
+        let in_memory = guard.get_state_provider_at_height(block_num, canonical_state)?;
+        Some((in_memory, block.clone_sealed_header()))
+    }
 
-        let in_memory = guard.get_executed_blocks_up_to_height(block_num);
-        drop(guard);
-
-        let in_memory = match in_memory {
-            Ok(Some(blocks)) => blocks,
-            Ok(None) => return None,
-            Err(e) => {
-                warn!(target: "flashblocks", "Failed to get flashblocks state provider: {e}. Flushing cache");
-                self.inner.write().flush();
-                return None;
-            }
-        };
-        Some((
-            Box::new(MemoryOverlayStateProvider::new(canonical_state, in_memory)),
-            block.clone_sealed_header(),
-        ))
+    pub fn get_pending_state_provider(
+        &self,
+        canonical_state: StateProviderBox,
+    ) -> Option<(StateProviderBox, SealedHeaderFor<N>)> {
+        let mut guard = self.inner.write();
+        let block = guard.get_pending_block()?.block;
+        let block_num = block.number();
+        let in_memory = guard.get_state_provider_at_height(block_num, canonical_state)?;
+        Some((in_memory, block.clone_sealed_header()))
     }
 }
 
 // FlashblockStateCache state mutation interfaces.
-impl<N: NodePrimitives> FlashblockStateCache<N> {
+impl<N: NodePrimitives> FlashblockStateCache<N>
+where
+    N::Receipt: FlashblockCachedReceipt,
+{
     /// Handles updating the latest pending state by the flashblocks rpc handle.
     ///
     /// This method detects when the flashblocks sequencer has advanced to the next
@@ -230,7 +206,10 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
 
 /// Inner state of the flashblocks state cache.
 #[derive(Debug)]
-struct FlashblockStateCacheInner<N: NodePrimitives> {
+struct FlashblockStateCacheInner<N: NodePrimitives>
+where
+    N::Receipt: FlashblockCachedReceipt,
+{
     /// The current in-progress pending flashblock sequence, if any.
     pending_cache: Option<PendingSequence<N>>,
     /// Cache of confirmed flashblock sequences ahead of the canonical chain.
@@ -248,7 +227,10 @@ struct FlashblockStateCacheInner<N: NodePrimitives> {
     pending_sequence_tx: watch::Sender<Option<PendingSequence<N>>>,
 }
 
-impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
+impl<N: NodePrimitives> FlashblockStateCacheInner<N>
+where
+    N::Receipt: FlashblockCachedReceipt,
+{
     fn new() -> Self {
         let (tx, rx) = watch::channel(None);
 
@@ -414,5 +396,54 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
 
     pub fn subscribe_pending_sequence(&self) -> PendingSequenceRx<N> {
         self.pending_sequence_rx.clone()
+    }
+
+    /// Instantiates a `MemoryOverlayStateProvider` by getting the ordered `ExecutedBlock`s
+    /// from the cache, and overlaying them on top of the canonical state provider.
+    ///
+    /// # Safety of the overlay
+    /// The returned blocks are meant to be layered on top of a canonical `StateProviderBox`
+    /// via `MemoryOverlayStateProvider`. This is correct **if and only if** the overlay
+    /// blocks form a contiguous chain from some height down to `canonical_height + 1`
+    /// (or `canonical_height` itself in the redundant-but-safe race case).
+    ///
+    /// **Safe (redundant overlap)**: Due to a race between canonical commit and confirm
+    /// cache flush, the lowest overlay block may equal the canonical height. For example,
+    /// canonical is at height `x` and the overlay contains `[x+2, x+1, x]`. This is safe
+    /// because `MemoryOverlayStateProvider` checks overlay blocks first (newest-to-oldest)
+    /// — the duplicate `BundleState` at height `x` contains changes identical to what
+    /// canonical already applied, so the result is correct regardless of which source
+    /// resolves the query.
+    ///
+    /// **State inconsistency (gap in overlay)**: If an intermediate block is missing (e.g.
+    /// overlay has `[x+2, x]` but not `x+1`), any account modified only at height `x+1`
+    /// would be invisible — the query falls through to canonical, returning stale state.
+    ///
+    /// **State inconsistency (canonical too far behind)**: If the canonical height is more
+    /// than one block below the lowest overlay block (e.g. canonical at `x-2`, lowest overlay
+    /// at `x`), changes at height `x-1` are not covered by either source.
+    ///
+    /// Both failure modes reduce to: every height between `canonical_height + 1` and the
+    /// target must be present in the overlay. This invariant is naturally maintained by
+    /// `handle_confirmed_block` (rejects non-consecutive heights) and the pending block always
+    /// being `confirm_height + 1`.
+    ///
+    /// On validation failure (non-contiguous overlay or gap to canonical), the cache is
+    /// flushed and `None` is returned.
+    pub fn get_state_provider_at_height(
+        &mut self,
+        height: u64,
+        canonical_state: StateProviderBox,
+    ) -> Option<StateProviderBox> {
+        let in_memory = match self.get_executed_blocks_up_to_height(height) {
+            Ok(Some(blocks)) => blocks,
+            Ok(None) => return None,
+            Err(e) => {
+                warn!(target: "flashblocks", "Failed to get flashblocks state provider: {e}. Flushing cache");
+                self.flush();
+                return None;
+            }
+        };
+        Some(Box::new(MemoryOverlayStateProvider::new(canonical_state, in_memory)))
     }
 }

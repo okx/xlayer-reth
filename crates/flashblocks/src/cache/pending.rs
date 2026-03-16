@@ -1,4 +1,4 @@
-use crate::cache::CachedTxInfo;
+use crate::{cache::CachedTxInfo, execution::FlashblockCachedReceipt};
 use derive_more::Deref;
 use std::collections::HashMap;
 
@@ -11,7 +11,10 @@ use reth_rpc_eth_types::{block::BlockAndReceipts, PendingBlock};
 /// The pending flashblocks sequence built with all received OpFlashblockPayload
 /// alongside the metadata for the last added flashblock.
 #[derive(Debug, Clone, Deref)]
-pub struct PendingSequence<N: NodePrimitives> {
+pub struct PendingSequence<N: NodePrimitives>
+where
+    N::Receipt: FlashblockCachedReceipt,
+{
     /// Locally built full pending block of the latest flashblocks sequence.
     #[deref]
     pub pending: PendingBlock<N>,
@@ -25,21 +28,20 @@ pub struct PendingSequence<N: NodePrimitives> {
     pub parent_hash: B256,
     /// The last flashblock index of the latest flashblocks sequence.
     pub last_flashblock_index: u64,
+    /// Cached number of transactions covered by the pending sequence execution.
+    cached_tx_count: usize,
+    /// Cached receipts for the prefix.
+    pub cached_receipts: Vec<N::Receipt>,
+    /// Total gas used by the pending sequence.
+    pub cached_gas_used: u64,
+    /// Total blob/DA gas used by the pending sequence.
+    pub cached_blob_gas_used: u64,
 }
 
-impl<N: NodePrimitives> PendingSequence<N> {
-    /// Create new pending flashblock.
-    pub const fn new(
-        pending: PendingBlock<N>,
-        tx_index: HashMap<TxHash, CachedTxInfo<N>>,
-        cached_reads: CachedReads,
-        block_hash: B256,
-        parent_hash: B256,
-        last_flashblock_index: u64,
-    ) -> Self {
-        Self { pending, tx_index, cached_reads, block_hash, parent_hash, last_flashblock_index }
-    }
-
+impl<N: NodePrimitives> PendingSequence<N>
+where
+    N::Receipt: FlashblockCachedReceipt,
+{
     pub fn get_hash(&self) -> B256 {
         self.block_hash
     }
@@ -80,14 +82,18 @@ mod tests {
         let block_hash = executed.recovered_block.hash();
         let parent_hash = executed.recovered_block.parent_hash();
         let pending_block = PendingBlock::with_executed_block(Instant::now(), executed);
-        PendingSequence::new(
-            pending_block,
-            HashMap::new(),
-            Default::default(),
+        PendingSequence {
+            pending: pending_block,
+            tx_index: HashMap::new(),
+            cached_reads: Default::default(),
             block_hash,
             parent_hash,
-            0,
-        )
+            last_flashblock_index: 0,
+            cached_tx_count: 0,
+            cached_receipts: vec![],
+            cached_gas_used: 0,
+            cached_blob_gas_used: 0,
+        }
     }
 
     fn make_pending_sequence_with_txs(
@@ -101,7 +107,7 @@ mod tests {
         let mut tx_index = HashMap::new();
         for i in 0..tx_count {
             let tx = mock_tx(i as u64);
-            let tx_hash = *tx.tx_hash();
+            let tx_hash = tx.tx_hash();
             let receipt = OpReceipt::Eip7702(Receipt {
                 status: true.into(),
                 cumulative_gas_used: 21_000 * (i as u64 + 1),
@@ -114,48 +120,52 @@ mod tests {
         }
 
         let pending_block = PendingBlock::with_executed_block(Instant::now(), executed);
-        PendingSequence::new(
-            pending_block,
+        PendingSequence {
+            pending: pending_block,
             tx_index,
-            Default::default(),
+            cached_reads: Default::default(),
             block_hash,
             parent_hash,
-            0,
-        )
+            last_flashblock_index: 0,
+            cached_tx_count: 0,
+            cached_receipts: vec![],
+            cached_gas_used: 0,
+            cached_blob_gas_used: 0,
+        }
     }
 
     #[test]
     fn test_pending_sequence_get_hash_returns_stored_block_hash() {
-        let seq = make_pending_sequence(42);
-        assert_eq!(seq.get_hash(), seq.block_hash);
+        let cache = make_pending_sequence(42);
+        assert_eq!(cache.get_hash(), cache.block_hash);
     }
 
     #[test]
     fn test_pending_sequence_get_height_returns_block_number() {
-        let seq = make_pending_sequence(99);
-        assert_eq!(seq.get_height(), 99);
+        let cache = make_pending_sequence(99);
+        assert_eq!(cache.get_height(), 99);
     }
 
     #[test]
     fn test_pending_sequence_get_block_and_receipts_empty_receipts_on_no_tx_block() {
-        let seq = make_pending_sequence(3);
-        let bar = seq.get_block_and_receipts();
+        let cache = make_pending_sequence(3);
+        let bar = cache.get_block_and_receipts();
         assert!(bar.receipts.is_empty());
     }
 
     #[test]
     fn test_pending_sequence_get_tx_info_returns_none_for_unknown_hash() {
-        let seq = make_pending_sequence_with_txs(10, 2);
-        assert!(seq.get_tx_info(&B256::repeat_byte(0xFF)).is_none());
+        let cache = make_pending_sequence_with_txs(10, 2);
+        assert!(cache.get_tx_info(&B256::repeat_byte(0xFF)).is_none());
     }
 
     #[test]
     fn test_pending_sequence_get_tx_info_returns_correct_info_for_known_tx() {
-        let seq = make_pending_sequence_with_txs(42, 3);
-        let (tx_hash, expected_info) = seq.tx_index.iter().next().unwrap();
-        let (info, bar) = seq.get_tx_info(tx_hash).expect("known tx hash should return Some");
+        let cache = make_pending_sequence_with_txs(42, 3);
+        let (tx_hash, expected_info) = cache.tx_index.iter().next().unwrap();
+        let (info, bar) = cache.get_tx_info(tx_hash).expect("known tx hash should return Some");
         assert_eq!(info.block_number, 42);
-        assert_eq!(info.block_hash, seq.block_hash);
+        assert_eq!(info.block_hash, cache.block_hash);
         assert_eq!(info.tx_index, expected_info.tx_index);
         assert_eq!(*info.tx.tx_hash(), *tx_hash);
         assert_eq!(bar.block.number(), 42);
