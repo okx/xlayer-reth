@@ -140,32 +140,32 @@ where
         // the current pending sequence (current pending promoted to confirm, incoming
         // sequence is the next height). Fall back to the flashblocks overlay via
         // `get_pending_state_provider`.
-        let (state_provider, parent_header) =
-            match self.provider.history_by_block_hash(parent_hash) {
-                Ok(canon_provider) => {
-                    let header =
-                        self.provider.sealed_header_by_hash(parent_hash)?.ok_or_else(|| {
-                            eyre::eyre!("parent header not found for hash {parent_hash}")
-                        })?;
-                    (canon_provider, header)
-                }
-                Err(err) => {
-                    trace!(
-                        target: "flashblocks",
-                        error = %err,
-                        "parent not in canonical chain, try getting state from pending state",
-                    );
-                    let canonical_state = self.provider.latest()?;
-                    self.flashblocks_state.get_pending_state_provider(canonical_state).ok_or_else(
-                        || {
-                            eyre::eyre!(
-                                "parent {parent_hash} not in canonical chain and no \
+        let (state_provider, parent_header) = match self.provider.history_by_block_hash(parent_hash)
+        {
+            Ok(canon_provider) => {
+                let header = self
+                    .provider
+                    .sealed_header_by_hash(parent_hash)?
+                    .ok_or_else(|| eyre::eyre!("parent header not found for hash {parent_hash}"))?;
+                (canon_provider, header)
+            }
+            Err(err) => {
+                trace!(
+                    target: "flashblocks",
+                    error = %err,
+                    "parent not in canonical chain, try getting state from pending state",
+                );
+                let canonical_state = self.provider.latest()?;
+                self.flashblocks_state.get_pending_state_provider(canonical_state).ok_or_else(
+                    || {
+                        eyre::eyre!(
+                            "parent {parent_hash} not in canonical chain and no \
                                  pending state available for overlay"
-                            )
-                        },
-                    )?
-                }
-            };
+                        )
+                    },
+                )?
+            }
+        };
 
         let outcome = self.processor.process_fresh(
             &base,
