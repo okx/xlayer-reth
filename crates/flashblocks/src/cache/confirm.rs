@@ -520,7 +520,7 @@ mod tests {
         let (block, receipts) = make_executed_block_with_txs(1, B256::ZERO, 0, 3);
         let block_hash = block.recovered_block.hash();
         let tx_hashes: Vec<_> =
-            block.recovered_block.body().transactions().map(|tx| *tx.tx_hash()).collect();
+            block.recovered_block.body().transactions().map(|tx| tx.tx_hash()).collect();
         cache.insert(1, block, receipts).expect("insert");
 
         for (i, tx_hash) in tx_hashes.iter().enumerate() {
@@ -537,7 +537,7 @@ mod tests {
         let mut cache = ConfirmCache::<OpPrimitives>::new();
         let (block, receipts) = make_executed_block_with_txs(1, B256::ZERO, 0, 2);
         let tx_hashes: Vec<_> =
-            block.recovered_block.body().transactions().map(|tx| *tx.tx_hash()).collect();
+            block.recovered_block.body().transactions().map(|tx| tx.tx_hash()).collect();
         cache.insert(1, block, receipts).expect("insert");
 
         cache.flush_up_to_height(1);
@@ -551,7 +551,7 @@ mod tests {
         let mut cache = ConfirmCache::<OpPrimitives>::new();
         let (block, receipts) = make_executed_block_with_txs(5, B256::ZERO, 0, 2);
         let tx_hashes: Vec<_> =
-            block.recovered_block.body().transactions().map(|tx| *tx.tx_hash()).collect();
+            block.recovered_block.body().transactions().map(|tx| tx.tx_hash()).collect();
         cache.insert(5, block, receipts).expect("insert");
 
         cache.remove_block_by_number(5);
@@ -586,13 +586,13 @@ mod tests {
         let mut cache = ConfirmCache::<OpPrimitives>::new();
         let (block1, receipts1) = make_executed_block_with_txs(1, B256::ZERO, 0, 2);
         let tx_hashes_1: Vec<_> =
-            block1.recovered_block.body().transactions().map(|tx| *tx.tx_hash()).collect();
+            block1.recovered_block.body().transactions().map(|tx| tx.tx_hash()).collect();
         let parent = block1.recovered_block.hash();
         cache.insert(1, block1, receipts1).expect("insert 1");
 
         let (block2, receipts2) = make_executed_block_with_txs(2, parent, 100, 2);
         let tx_hashes_2: Vec<_> =
-            block2.recovered_block.body().transactions().map(|tx| *tx.tx_hash()).collect();
+            block2.recovered_block.body().transactions().map(|tx| tx.tx_hash()).collect();
         cache.insert(2, block2, receipts2).expect("insert 2");
 
         cache.flush_up_to_height(1);
@@ -609,7 +609,7 @@ mod tests {
         let mut cache = ConfirmCache::<OpPrimitives>::new();
         let (block, receipts) = make_executed_block_with_txs(1, B256::ZERO, 0, 2);
         let tx_hashes: Vec<_> =
-            block.recovered_block.body().transactions().map(|tx| *tx.tx_hash()).collect();
+            block.recovered_block.body().transactions().map(|tx| tx.tx_hash()).collect();
         cache.insert(1, block, receipts).expect("insert");
 
         cache.clear();

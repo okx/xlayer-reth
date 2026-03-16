@@ -1,5 +1,29 @@
-mod cache;
-use cache::{CachedExecutionMeta, TransactionCache};
-
 pub(crate) mod worker;
-pub use worker::{BuildArgs, BuildResult, FlashblockCachedReceipt};
+
+use op_alloy_rpc_types_engine::OpFlashblockPayloadBase;
+use reth_optimism_primitives::OpReceipt;
+
+pub(crate) struct BuildArgs<I> {
+    pub(crate) base: OpFlashblockPayloadBase,
+    pub(crate) transactions: I,
+    pub(crate) last_flashblock_index: u64,
+}
+
+/// Receipt requirements for cache-resume flow.
+pub(crate) trait FlashblockCachedReceipt: Clone {
+    /// Adds `gas_offset` to each receipt's `cumulative_gas_used`.
+    fn add_cumulative_gas_offset(receipts: &mut [Self], gas_offset: u64);
+}
+
+impl FlashblockCachedReceipt for OpReceipt {
+    fn add_cumulative_gas_offset(receipts: &mut [Self], gas_offset: u64) {
+        if gas_offset == 0 {
+            return;
+        }
+
+        for receipt in receipts {
+            let inner = receipt.as_receipt_mut();
+            inner.cumulative_gas_used = inner.cumulative_gas_used.saturating_add(gas_offset);
+        }
+    }
+}
