@@ -17,7 +17,6 @@ use reth::{
     builder::{DebugNodeLauncher, EngineNodeLauncher, Node, NodeHandle, TreeConfig},
     providers::providers::BlockchainProvider,
 };
-use reth_node_api::FullNodeComponents;
 use reth_optimism_cli::Cli;
 use reth_optimism_node::{args::RollupArgs, OpNode};
 use reth_rpc_server_types::RethRpcModule;
@@ -115,10 +114,6 @@ fn main() {
                 .with_types_and_provider::<OpNode, BlockchainProvider<_>>()
                 .with_components(op_node.components().payload(payload_builder))
                 .with_add_ons(add_ons)
-                .on_component_initialized(move |_ctx| {
-                    // TODO: Initialize X Layer components here
-                    Ok(())
-                })
                 .extend_rpc_modules(move |ctx| {
                     let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
 
@@ -163,8 +158,6 @@ fn main() {
                         xlayer_rpc,
                     ))?;
                     info!(target: "reth::cli", "xlayer rpc extension enabled");
-
-                    info!(message = "X Layer RPC modules initialized");
                     Ok(())
                 })
                 .launch_with_fn(|builder| {
@@ -199,7 +192,7 @@ fn main() {
             // Start X Layer full link monitor handle
             start_monitor_handle(
                 node.tasks(),
-                monitor.clone(),
+                monitor,
                 node.provider().clone(),
                 node.payload_builder_handle.clone(),
                 node.add_ons_handle.engine_events.new_listener(),
