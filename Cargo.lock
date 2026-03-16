@@ -14352,6 +14352,7 @@ dependencies = [
  "jsonrpsee",
  "jsonrpsee-types",
  "op-alloy-network",
+ "op-alloy-rpc-types",
  "reth-chain-state",
  "reth-optimism-primitives",
  "reth-optimism-rpc",
