@@ -25,6 +25,7 @@ jobs:
   authorize:
     runs-on: ubuntu-latest
     permissions: {}
+    if: "!contains(github.actor, '[bot]')"
     steps:
       - name: Check actor authorization
         run: |
