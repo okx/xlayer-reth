@@ -1,7 +1,7 @@
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.93.0"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/okx/xlayer-reth.git"
 repository = "https://github.com/okx/xlayer-reth.git"
