@@ -118,6 +118,7 @@ reth-rpc-eth-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0
 reth-rpc-eth-types = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0", default-features = false }
 reth-rpc-layer = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
 reth-rpc-server-types = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-static-file-types = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0", default-features = false }
 reth-storage-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0", default-features = false }
 reth-tasks = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
 reth-testing-utils = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
