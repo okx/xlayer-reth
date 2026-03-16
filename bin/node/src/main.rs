@@ -140,7 +140,7 @@ fn main() {
                             let flashblocks_pubsub = FlashblocksPubSub::new(
                                 eth_pubsub,
                                 pending_blocks_rx,
-                                Box::new(ctx.node().task_executor().clone()),
+                                Box::new(ctx.node().task_executor.clone()),
                                 new_op_eth_api.converter().clone(),
                                 xlayer_args.flashblocks_subscription_max_addresses,
                             );
