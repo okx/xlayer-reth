@@ -85,11 +85,11 @@ test include_e2e="false" include_flashblocks="false":
     fi
 
 check-format:
-    cargo fmt --all -- --check
+    cargo +nightly fmt --all -- --check
 
 fix-format:
     cargo fix --allow-dirty --allow-staged
-    cargo fmt --all
+    cargo +nightly fmt --all
 
 check-clippy:
     cargo clippy --all-targets --workspace -- -D warnings
