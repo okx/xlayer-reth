@@ -121,12 +121,11 @@ pub(crate) fn migrate_segment<N: CliNodeTypes>(
                             current_block,
                         )?;
                     }
-                    // Advance writer to handle gaps in changeset data
-                    // Only call ensure_at_block if the writer has already written blocks
-                    // to avoid panic when current_block_number() is None
-                    if writer.current_block_number().is_some() {
-                        writer.ensure_at_block(block.saturating_sub(1))?;
-                    }
+                    // Fill any gap between the last written block and the next block with data.
+                    // This covers both the leading gap (genesis → first block with changesets)
+                    // and any interior gaps.  The writer knows its expected start via
+                    // set_expected_block_start so this is safe even before the first write.
+                    writer.ensure_at_block(block.saturating_sub(1))?;
                     blocks_processed += block - current_block;
                     current_block = block;
 
@@ -148,6 +147,8 @@ pub(crate) fn migrate_segment<N: CliNodeTypes>(
             if !block_changesets.is_empty() {
                 writer.append_account_changeset(block_changesets, current_block)?;
             }
+            // Fill any trailing gap between the last block with changeset data and to_block.
+            writer.ensure_at_block(to_block)?;
         }
 
         StaticFileSegment::StorageChangeSets => {
@@ -171,12 +172,11 @@ pub(crate) fn migrate_segment<N: CliNodeTypes>(
                             current_block,
                         )?;
                     }
-                    // Advance writer to handle gaps in changeset data
-                    // Only call ensure_at_block if the writer has already written blocks
-                    // to avoid panic when current_block_number() is None
-                    if writer.current_block_number().is_some() {
-                        writer.ensure_at_block(block.saturating_sub(1))?;
-                    }
+                    // Fill any gap between the last written block and the next block with data.
+                    // This covers both the leading gap (genesis → first block with changesets)
+                    // and any interior gaps.  The writer knows its expected start via
+                    // set_expected_block_start so this is safe even before the first write.
+                    writer.ensure_at_block(block.saturating_sub(1))?;
                     blocks_processed += block - current_block;
                     current_block = block;
 
@@ -202,6 +202,8 @@ pub(crate) fn migrate_segment<N: CliNodeTypes>(
             if !block_changesets.is_empty() {
                 writer.append_storage_changeset(block_changesets, current_block)?;
             }
+            // Fill any trailing gap between the last block with changeset data and to_block.
+            writer.ensure_at_block(to_block)?;
         }
 
         StaticFileSegment::Receipts => {

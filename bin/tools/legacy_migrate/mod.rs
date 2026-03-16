@@ -74,10 +74,14 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> LegacyMigrateCommand<C> {
             "Migration parameters"
         );
 
-        // Check if receipts can be migrated (no contract log pruning)
-        let can_migrate_receipts = prune_modes.receipts_log_filter.is_empty();
+        // Check if receipts can be migrated (no general or contract log pruning).
+        // Both fields must be unset: `receipts` covers general pruning (e.g. by distance),
+        // `receipts_log_filter` covers per-contract log pruning.  If either is active the
+        // MDBX receipt table may be incomplete and migration would produce gaps.
+        let can_migrate_receipts =
+            prune_modes.receipts.is_none() && prune_modes.receipts_log_filter.is_empty();
         if !can_migrate_receipts {
-            warn!(target: "reth::cli", "Receipts will NOT be migrated due to contract log pruning");
+            warn!(target: "reth::cli", "Receipts will NOT be migrated due to active receipt pruning");
         }
 
         // Start tracking time
@@ -167,11 +171,23 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> LegacyMigrateCommand<C> {
             );
         }
 
-        // Enable v2 storage layout (static files + RocksDB routing)
-        let new_settings = StorageSettings::v2();
-
-        info!(target: "reth::cli", ?new_settings, "Writing storage settings");
-        provider.write_storage_settings(new_settings)?;
+        // Only write v2 storage settings when both migrations have completed.
+        // If either migration was skipped the corresponding storage backend is empty, and
+        // writing v2 settings would route queries there, causing missing-data errors on restart.
+        if self.skip_static_files || self.skip_rocksdb {
+            warn!(
+                target: "reth::cli",
+                skip_static_files = self.skip_static_files,
+                skip_rocksdb = self.skip_rocksdb,
+                "Skipping storage settings update: both static-files and RocksDB migrations must \
+                 complete before switching to v2 storage layout. Re-run without skip flags to finalize."
+            );
+        } else {
+            // Enable v2 storage layout (static files + RocksDB routing)
+            let new_settings = StorageSettings::v2();
+            info!(target: "reth::cli", ?new_settings, "Writing storage settings");
+            provider.write_storage_settings(new_settings)?;
+        }
 
         // Drop migrated MDBX tables unless --keep-mdbx is set
         if !self.keep_mdbx {
