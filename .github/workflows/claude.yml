@@ -27,18 +27,24 @@ jobs:
     steps:
       - name: Check actor authorization
         run: |
+          ASSOCIATION="${{ github.event.comment.author_association || github.event.review.author_association || github.event.issue.author_association }}"
           PR_AUTHOR="${{ github.event.issue.user.login }}"
           if [ -z "$PR_AUTHOR" ]; then
             PR_AUTHOR="${{ github.event.pull_request.user.login }}"
           fi
           ACTOR="${{ github.actor }}"
+          echo "Author association: $ASSOCIATION"
           echo "PR/Issue author: $PR_AUTHOR"
           echo "Triggered by: $ACTOR"
+          if [[ "$ASSOCIATION" != "OWNER" && "$ASSOCIATION" != "MEMBER" && "$ASSOCIATION" != "COLLABORATOR" ]]; then
+            echo "Unauthorized: actor '$ACTOR' is not an org member (association: '$ASSOCIATION')"
+            exit 1
+          fi
           if [[ "$ACTOR" != "$PR_AUTHOR" ]]; then
             echo "Unauthorized: '$ACTOR' is not the PR/issue author ('$PR_AUTHOR')"
             exit 1
           fi
-          echo "Authorized: '$ACTOR' is the PR/issue author"
+          echo "Authorized: '$ACTOR' is an org member and the PR/issue author"
 
   claude:
     needs: authorize
