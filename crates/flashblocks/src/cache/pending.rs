@@ -1,4 +1,4 @@
-use crate::{cache::CachedTxInfo, execution::FlashblockCachedReceipt};
+use crate::{cache::CachedTxInfo, FlashblockCachedReceipt};
 use derive_more::Deref;
 use std::collections::HashMap;
 

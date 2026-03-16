@@ -1,10 +1,9 @@
 use crate::{
-    execution::FlashblockCachedReceipt,
     subscription::pubsub::{
         EnrichedTransaction, FlashblockParams, FlashblockStreamEvent, FlashblockSubscriptionKind,
         FlashblocksFilter,
     },
-    PendingSequence, PendingSequenceRx,
+    FlashblockCachedReceipt, PendingSequence, PendingSequenceRx,
 };
 
 use futures::StreamExt;

@@ -7,7 +7,7 @@ pub use confirm::ConfirmCache;
 pub use pending::PendingSequence;
 pub use raw::RawFlashblocksCache;
 
-use crate::{execution::FlashblockCachedReceipt, PendingSequenceRx};
+use crate::{FlashblockCachedReceipt, PendingSequenceRx};
 use parking_lot::RwLock;
 use std::sync::Arc;
 use tokio::sync::watch;
