@@ -24,6 +24,7 @@ concurrency:
 jobs:
   authorize:
     runs-on: ubuntu-latest
+    permissions: {}
     steps:
       - name: Check actor authorization
         run: |
@@ -68,6 +69,12 @@ jobs:
 
   claude-review:
     needs: authorize
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
     if: |
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@review')) ||
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@review'))
