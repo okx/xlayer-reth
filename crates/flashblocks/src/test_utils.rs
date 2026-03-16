@@ -1,73 +1,105 @@
-//! Test utilities for flashblocks.
-//!
-//! Provides a factory for creating test flashblocks with automatic timestamp management.
-//!
-//! # Examples
-//!
-//! ## Simple: Create a flashblock sequence for the same block
-//!
-//! ```ignore
-//! let factory = TestFlashBlockFactory::new(); // Default 2 second block time
-//! let fb0 = factory.flashblock_at(0).build();
-//! let fb1 = factory.flashblock_after(&fb0).build();
-//! let fb2 = factory.flashblock_after(&fb1).build();
-//! ```
-//!
-//! ## Create flashblocks with transactions
-//!
-//! ```ignore
-//! let factory = TestFlashBlockFactory::new();
-//! let fb0 = factory.flashblock_at(0).build();
-//! let txs = vec![Bytes::from_static(&[1, 2, 3])];
-//! let fb1 = factory.flashblock_after(&fb0).transactions(txs).build();
-//! ```
-//!
-//! ## Test across multiple blocks (timestamps auto-increment)
-//!
-//! ```ignore
-//! let factory = TestFlashBlockFactory::new(); // Default 2 second blocks
-//!
-//! // Block 100 at timestamp 1000000
-//! let fb0 = factory.flashblock_at(0).build();
-//! let fb1 = factory.flashblock_after(&fb0).build();
-//!
-//! // Block 101 at timestamp 1000002 (auto-incremented by block_time)
-//! let fb2 = factory.flashblock_for_next_block(&fb1).build();
-//! let fb3 = factory.flashblock_after(&fb2).build();
-//! ```
-//!
-//! ## Full control with builder
-//!
-//! ```ignore
-//! let factory = TestFlashBlockFactory::new();
-//! let fb = factory.builder()
-//!     .block_number(100)
-//!     .parent_hash(specific_hash)
-//!     .state_root(computed_root)
-//!     .transactions(txs)
-//!     .build();
-//! ```
+use std::sync::Arc;
 
-use alloy_primitives::{Address, Bloom, Bytes, B256, U256};
+use alloy_consensus::{Header, Receipt, TxEip7702};
+use alloy_primitives::{Address, Bloom, Bytes, Signature, B256, U256};
 use alloy_rpc_types_engine::PayloadId;
+use op_alloy_consensus::OpTypedTransaction;
 use op_alloy_rpc_types_engine::{
     OpFlashblockPayload, OpFlashblockPayloadBase, OpFlashblockPayloadDelta,
     OpFlashblockPayloadMetadata,
 };
 
-/// Factory for creating test flashblocks with automatic timestamp management.
-///
-/// Tracks `block_time` to automatically increment timestamps when creating new blocks.
-/// Returns builders that can be further customized before calling `build()`.
-///
-/// # Examples
-///
-/// ```ignore
-/// let factory = TestFlashBlockFactory::new(); // Default 2 second block time
-/// let fb0 = factory.flashblock_at(0).build();
-/// let fb1 = factory.flashblock_after(&fb0).build();
-/// let fb2 = factory.flashblock_for_next_block(&fb1).build(); // timestamp auto-increments
-/// ```
+use reth_chain_state::{ComputedTrieData, ExecutedBlock};
+use reth_execution_types::{BlockExecutionOutput, BlockExecutionResult};
+use reth_optimism_primitives::{
+    OpBlock, OpBlockBody, OpPrimitives, OpReceipt, OpTransactionSigned,
+};
+use reth_primitives_traits::{RecoveredBlock, SealedBlock, SealedHeader};
+
+pub(crate) fn mock_tx(nonce: u64) -> OpTransactionSigned {
+    let tx = TxEip7702 {
+        chain_id: 1u64,
+        nonce,
+        max_fee_per_gas: 0x28f000fff,
+        max_priority_fee_per_gas: 0x28f000fff,
+        gas_limit: 10,
+        to: Address::default(),
+        value: U256::from(3_u64),
+        input: Bytes::from(vec![1, 2]),
+        access_list: Default::default(),
+        authorization_list: Default::default(),
+    };
+    let signature = Signature::new(U256::default(), U256::default(), true);
+    OpTransactionSigned::new_unhashed(OpTypedTransaction::Eip7702(tx), signature)
+}
+
+pub(crate) fn make_executed_block(
+    block_number: u64,
+    parent_hash: B256,
+) -> ExecutedBlock<OpPrimitives> {
+    let header = Header { number: block_number, parent_hash, ..Default::default() };
+    let sealed_header = SealedHeader::seal_slow(header);
+    let block = OpBlock::new(sealed_header.unseal(), Default::default());
+    let sealed_block = SealedBlock::seal_slow(block);
+    let recovered_block = RecoveredBlock::new_sealed(sealed_block, vec![]);
+    let execution_output = Arc::new(BlockExecutionOutput {
+        result: BlockExecutionResult {
+            receipts: vec![],
+            requests: Default::default(),
+            gas_used: 0,
+            blob_gas_used: 0,
+        },
+        state: Default::default(),
+    });
+    ExecutedBlock::new(Arc::new(recovered_block), execution_output, ComputedTrieData::default())
+}
+
+pub(crate) fn empty_receipts() -> Arc<Vec<OpReceipt>> {
+    Arc::new(vec![])
+}
+
+pub(crate) fn make_executed_block_with_txs(
+    block_number: u64,
+    parent_hash: B256,
+    nonce_start: u64,
+    count: usize,
+) -> (ExecutedBlock<OpPrimitives>, Arc<Vec<OpReceipt>>) {
+    let txs: Vec<OpTransactionSigned> =
+        (0..count).map(|i| mock_tx(nonce_start + i as u64)).collect();
+    let senders: Vec<Address> = (0..count).map(|_| Address::default()).collect();
+    let receipts: Vec<OpReceipt> = (0..count)
+        .map(|i| {
+            OpReceipt::Eip7702(Receipt {
+                status: true.into(),
+                cumulative_gas_used: 21_000 * (i as u64 + 1),
+                logs: vec![],
+            })
+        })
+        .collect();
+
+    let header = Header { number: block_number, parent_hash, ..Default::default() };
+    let sealed_header = SealedHeader::seal_slow(header);
+    let body = OpBlockBody { transactions: txs, ..Default::default() };
+    let block = OpBlock::new(sealed_header.unseal(), body);
+    let sealed_block = SealedBlock::seal_slow(block);
+    let recovered_block = RecoveredBlock::new_sealed(sealed_block, senders);
+    let execution_output = Arc::new(BlockExecutionOutput {
+        result: BlockExecutionResult {
+            receipts: receipts.clone(),
+            requests: Default::default(),
+            gas_used: 21_000 * count as u64,
+            blob_gas_used: 0,
+        },
+        state: Default::default(),
+    });
+    let executed = ExecutedBlock::new(
+        Arc::new(recovered_block),
+        execution_output,
+        ComputedTrieData::default(),
+    );
+    (executed, Arc::new(receipts))
+}
+
 #[derive(Debug)]
 pub(crate) struct TestFlashBlockFactory {
     /// Block time in seconds (used to auto-increment timestamps)
@@ -79,8 +111,6 @@ pub(crate) struct TestFlashBlockFactory {
 }
 
 impl TestFlashBlockFactory {
-    /// Creates a new factory with a default block time of 2 seconds.
-    ///
     /// Use [`with_block_time`](Self::with_block_time) to customize the block time.
     pub(crate) fn new() -> Self {
         Self { block_time: 2, base_timestamp: 1_000_000, current_block_number: 100 }
@@ -91,34 +121,10 @@ impl TestFlashBlockFactory {
         self
     }
 
-    /// Creates a builder for a flashblock at the specified index (within the current block).
-    ///
-    /// Returns a builder with index set, allowing further customization before building.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// let factory = TestFlashBlockFactory::new();
-    /// let fb0 = factory.flashblock_at(0).build(); // Simple usage
-    /// let fb1 = factory.flashblock_at(1).state_root(specific_root).build(); // Customize
-    /// ```
     pub(crate) fn flashblock_at(&self, index: u64) -> TestFlashBlockBuilder {
         self.builder().index(index).block_number(self.current_block_number)
     }
 
-    /// Creates a builder for a flashblock following the previous one in the same sequence.
-    ///
-    /// Automatically increments the index and maintains `block_number` and `payload_id`.
-    /// Returns a builder allowing further customization.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// let factory = TestFlashBlockFactory::new();
-    /// let fb0 = factory.flashblock_at(0).build();
-    /// let fb1 = factory.flashblock_after(&fb0).build(); // Simple
-    /// let fb2 = factory.flashblock_after(&fb1).transactions(txs).build(); // With txs
-    /// ```
     pub(crate) fn flashblock_after(&self, previous: &OpFlashblockPayload) -> TestFlashBlockBuilder {
         let parent_hash =
             previous.base.as_ref().map(|b| b.parent_hash).unwrap_or(previous.diff.block_hash);
@@ -131,20 +137,6 @@ impl TestFlashBlockFactory {
             .timestamp(previous.base.as_ref().map(|b| b.timestamp).unwrap_or(self.base_timestamp))
     }
 
-    /// Creates a builder for a flashblock for the next block, starting a new sequence at index 0.
-    ///
-    /// Increments block number, uses previous `block_hash` as `parent_hash`, generates new
-    /// `payload_id`, and automatically increments the timestamp by `block_time`.
-    /// Returns a builder allowing further customization.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// let factory = TestFlashBlockFactory::new(); // 2 second blocks
-    /// let fb0 = factory.flashblock_at(0).build(); // Block 100, timestamp 1000000
-    /// let fb1 = factory.flashblock_for_next_block(&fb0).build(); // Block 101, timestamp 1000002
-    /// let fb2 = factory.flashblock_for_next_block(&fb1).transactions(txs).build(); // Customize
-    /// ```
     pub(crate) fn flashblock_for_next_block(
         &self,
         previous: &OpFlashblockPayload,
@@ -160,21 +152,6 @@ impl TestFlashBlockFactory {
             .timestamp(prev_timestamp + self.block_time)
     }
 
-    /// Returns a custom builder for full control over flashblock creation.
-    ///
-    /// Use this when the convenience methods don't provide enough control.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// let factory = TestFlashBlockFactory::new();
-    /// let fb = factory.builder()
-    ///     .index(5)
-    ///     .block_number(200)
-    ///     .parent_hash(specific_hash)
-    ///     .state_root(computed_root)
-    ///     .build();
-    /// ```
     pub(crate) fn builder(&self) -> TestFlashBlockBuilder {
         TestFlashBlockBuilder {
             index: 0,
@@ -196,9 +173,6 @@ impl TestFlashBlockFactory {
     }
 }
 
-/// Custom builder for creating test flashblocks with full control.
-///
-/// Created via [`TestFlashBlockFactory::builder()`].
 #[derive(Debug)]
 pub(crate) struct TestFlashBlockBuilder {
     index: u64,
@@ -219,80 +193,66 @@ pub(crate) struct TestFlashBlockBuilder {
 }
 
 impl TestFlashBlockBuilder {
-    /// Sets the flashblock index.
     pub(crate) fn index(mut self, index: u64) -> Self {
         self.index = index;
         self
     }
 
-    /// Sets the block number.
     pub(crate) fn block_number(mut self, block_number: u64) -> Self {
         self.block_number = block_number;
         self
     }
 
-    /// Sets the payload ID.
     pub(crate) fn payload_id(mut self, payload_id: PayloadId) -> Self {
         self.payload_id = payload_id;
         self
     }
 
-    /// Sets the parent hash.
     pub(crate) fn parent_hash(mut self, parent_hash: B256) -> Self {
         self.parent_hash = parent_hash;
         self
     }
 
-    /// Sets the timestamp.
     pub(crate) fn timestamp(mut self, timestamp: u64) -> Self {
         self.timestamp = timestamp;
         self
     }
 
-    /// Sets the base payload. Automatically created for index 0 if not set.
     #[allow(dead_code)]
     pub(crate) fn base(mut self, base: OpFlashblockPayloadBase) -> Self {
         self.base = Some(base);
         self
     }
 
-    /// Sets the block hash in the diff.
     #[allow(dead_code)]
     pub(crate) fn block_hash(mut self, block_hash: B256) -> Self {
         self.block_hash = block_hash;
         self
     }
 
-    /// Sets the state root in the diff.
     #[allow(dead_code)]
     pub(crate) fn state_root(mut self, state_root: B256) -> Self {
         self.state_root = state_root;
         self
     }
 
-    /// Sets the receipts root in the diff.
     #[allow(dead_code)]
     pub(crate) fn receipts_root(mut self, receipts_root: B256) -> Self {
         self.receipts_root = receipts_root;
         self
     }
 
-    /// Sets the transactions in the diff.
     pub(crate) fn transactions(mut self, transactions: Vec<Bytes>) -> Self {
         self.transactions = transactions;
         self
     }
 
-    /// Sets the gas used in the diff.
     #[allow(dead_code)]
     pub(crate) fn gas_used(mut self, gas_used: u64) -> Self {
         self.gas_used = gas_used;
         self
     }
 
-    /// Builds the flashblock.
-    ///
-    /// If index is 0 and no base was explicitly set, creates a default base.
     pub(crate) fn build(mut self) -> OpFlashblockPayload {
         // Auto-create base for index 0 if not set
         if self.index == 0 && self.base.is_none() {
