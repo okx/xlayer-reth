@@ -11,10 +11,20 @@ FROM chef AS planner
 COPY . .
 # Remove test-only workspace members that are excluded from the Docker context
 RUN sed -i '/"crates\/tests"/d' Cargo.toml
+# Ensure .cargo/ always exists so it can be copied into the builder stage below.
+RUN mkdir -p .cargo
+# Move local reth source to /reth if present (dev builds via build-docker-dev).
+# .cargo/config.toml patches paradigmxyz/reth to /reth, so the source must be
+# at /reth before cargo chef prepare (cargo metadata) runs.
+RUN if [ -d .cargo/reth ]; then mv .cargo/reth /reth; else mkdir -p /reth; fi
 RUN cargo chef prepare --recipe-path recipe.json --bin xlayer-reth-node
 
 FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
+# Bring in the cargo config (patch overrides) and reth source from the planner
+# stage so that cargo chef cook can resolve the dependency graph the same way.
+COPY --from=planner /app/.cargo/ .cargo/
+COPY --from=planner /reth /reth
 COPY deps/ deps/
 
 ARG BUILD_PROFILE=release
@@ -40,11 +50,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 COPY . .
 # Remove test-only workspace members that are excluded from the Docker context
 RUN sed -i '/"crates\/tests"/d' Cargo.toml
-RUN if [ -d .cargo/reth ]; then \
-        mv .cargo/reth /reth; \
-    else \
-        mkdir -p /reth; \
-    fi
+# Note: /reth is already set up via the planner copy above; no mv needed here.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \

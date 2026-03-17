@@ -130,62 +130,37 @@ check-dev-template:
     #!/usr/bin/env bash
     set -e
 
-    # Check for duplicates within each patch section (not across sections)
-    OKX_DUPLICATES=$(sed -n '/^\[patch\."https:\/\/github\.com\/okx\/reth"\]/,/^\[patch\./p' .reth-dev.toml | grep 'RETH_PATH_PLACEHOLDER' | grep -oE '^[a-z][a-z0-9-]+' | sort | uniq -d)
+    # Check for duplicates in the paradigmxyz patch section
     PARADIGM_DUPLICATES=$(sed -n '/^\[patch\."https:\/\/github\.com\/paradigmxyz\/reth"\]/,/^$/p' .reth-dev.toml | grep 'RETH_PATH_PLACEHOLDER' | grep -oE '^[a-z][a-z0-9-]+' | sort | uniq -d)
-    DUPLICATES="$OKX_DUPLICATES$PARADIGM_DUPLICATES"
+    DUPLICATES="$PARADIGM_DUPLICATES"
 
-    # Get crates from each section separately
-    OKX_CARGO=$(mktemp)
     PARADIGM_CARGO=$(mktemp)
-    OKX_TEMPLATE=$(mktemp)
     PARADIGM_TEMPLATE=$(mktemp)
 
-    # Extract okx/reth dependencies from Cargo.toml
-    grep 'git = "https://github.com/okx/reth"' Cargo.toml | grep -oE '^[a-z][a-z0-9-]+' | sort -u > "$OKX_CARGO"
-
-    # Extract paradigmxyz/reth patches from Cargo.toml
-    sed -n '/^\[patch\."https:\/\/github\.com\/paradigmxyz\/reth"\]/,/^$/p' Cargo.toml | grep -oE '^[a-z][a-z0-9-]+' | sort -u > "$PARADIGM_CARGO"
-
-    # Extract okx/reth patches from .reth-dev.toml
-    sed -n '/^\[patch\."https:\/\/github\.com\/okx\/reth"\]/,/^\[patch\./p' .reth-dev.toml | grep 'RETH_PATH_PLACEHOLDER' | grep -oE '^[a-z][a-z0-9-]+' | sort -u > "$OKX_TEMPLATE"
+    # Extract paradigmxyz/reth direct git dependencies from Cargo.toml workspace deps.
+    # (OP crates come from local deps/ submodule path deps, not from git, so they are excluded.)
+    grep 'git = "https://github.com/paradigmxyz/reth"' Cargo.toml | grep -oE '^[a-z][a-z0-9-]+' | sort -u > "$PARADIGM_CARGO"
 
     # Extract paradigmxyz/reth patches from .reth-dev.toml
     sed -n '/^\[patch\."https:\/\/github\.com\/paradigmxyz\/reth"\]/,/^$/p' .reth-dev.toml | grep 'RETH_PATH_PLACEHOLDER' | grep -oE '^[a-z][a-z0-9-]+' | sort -u > "$PARADIGM_TEMPLATE"
 
-    # Check for missing/extra in okx/reth section
-    OKX_MISSING=$(comm -23 "$OKX_CARGO" "$OKX_TEMPLATE")
-    OKX_EXTRA=$(comm -13 "$OKX_CARGO" "$OKX_TEMPLATE")
-
-    # Check for missing/extra in paradigmxyz/reth section
+    # Template must cover all direct git deps. Extra entries in template are OK
+    # (the template intentionally includes transitive reth workspace crates too).
     PARADIGM_MISSING=$(comm -23 "$PARADIGM_CARGO" "$PARADIGM_TEMPLATE")
-    PARADIGM_EXTRA=$(comm -13 "$PARADIGM_CARGO" "$PARADIGM_TEMPLATE")
 
     # Clean up temp files
-    rm -f "$OKX_CARGO" "$PARADIGM_CARGO" "$OKX_TEMPLATE" "$PARADIGM_TEMPLATE"
+    rm -f "$PARADIGM_CARGO" "$PARADIGM_TEMPLATE"
 
-    if [ -z "$DUPLICATES" ] && [ -z "$OKX_MISSING" ] && [ -z "$OKX_EXTRA" ] && [ -z "$PARADIGM_MISSING" ] && [ -z "$PARADIGM_EXTRA" ]; then
+    if [ -z "$DUPLICATES" ] && [ -z "$PARADIGM_MISSING" ]; then
         echo "✅ Template OK"
     else
         if [ -n "$DUPLICATES" ]; then
             echo "❌ Duplicates in .reth-dev.toml:"
             echo "$DUPLICATES" | tr ' ' '\n' | sed 's/^/  - /'
         fi
-        if [ -n "$OKX_MISSING" ]; then
-            echo "❌ Missing in [patch.\"https://github.com/okx/reth\"] section:"
-            echo "$OKX_MISSING" | tr ' ' '\n' | sed 's/^/  - /'
-        fi
-        if [ -n "$OKX_EXTRA" ]; then
-            echo "❌ Extra in [patch.\"https://github.com/okx/reth\"] section:"
-            echo "$OKX_EXTRA" | tr ' ' '\n' | sed 's/^/  - /'
-        fi
         if [ -n "$PARADIGM_MISSING" ]; then
-            echo "❌ Missing in [patch.\"https://github.com/paradigmxyz/reth\"] section:"
+            echo "❌ Missing in [patch.\"https://github.com/paradigmxyz/reth\"] section of .reth-dev.toml:"
             echo "$PARADIGM_MISSING" | tr ' ' '\n' | sed 's/^/  - /'
-        fi
-        if [ -n "$PARADIGM_EXTRA" ]; then
-            echo "❌ Extra in [patch.\"https://github.com/paradigmxyz/reth\"] section:"
-            echo "$PARADIGM_EXTRA" | tr ' ' '\n' | sed 's/^/  - /'
         fi
         exit 1
     fi
@@ -239,7 +214,8 @@ sync-dev-template reth_path:
     echo "🔄 Syncing .reth-dev.toml with Cargo.toml..."
     echo "📂 Using reth path: $RETH_PATH"
 
-    # Build a lookup table of all crate names to their paths (using fd for speed)
+    # Build a lookup table of all reth-* crate names to their paths (using fd for speed).
+    # Excludes reth-optimism-* crates — those come from the local deps/ git submodule, not reth.
     echo "📋 Building crate index..."
     CRATE_MAP=$(mktemp)
 
@@ -251,54 +227,18 @@ sync-dev-template reth_path:
 
     $FD_CMD -t f "^Cargo.toml$" "$RETH_PATH" -x grep -H "^name = " | \
         sed 's|/Cargo.toml:name = "\(.*\)"|\t\1|' | \
-        awk -F'\t' '{print $2 "\t" $1}' > "$CRATE_MAP"
+        awk -F'\t' '{print $2 "\t" $1}' | \
+        grep -E $'^reth[^\t]' | \
+        grep -v $'^reth-optimism' > "$CRATE_MAP"
 
-    # Create a temporary file with the header for okx/reth patches
-    echo '[patch."https://github.com/okx/reth"]' > .reth-dev.toml.tmp
+    # Generate paradigmxyz/reth patches section from all reth workspace crates
+    # (extra entries beyond direct deps are intentional — they cover transitive deps)
+    echo '[patch."https://github.com/paradigmxyz/reth"]' > .reth-dev.toml.tmp
 
-    # Extract reth dependencies from Cargo.toml and find their actual paths
-    grep 'git = "https://github.com/okx/reth"' Cargo.toml | \
-        grep -oE '^[a-z][a-z0-9-]+' | \
-        sort -u | \
-        while read -r crate; do
-            # Look up the crate in our pre-built map
-            CRATE_DIR=$(grep "^$crate"$'\t' "$CRATE_MAP" | cut -f2 | head -1)
-
-            if [ -z "$CRATE_DIR" ]; then
-                echo "⚠️  Could not find crate '$crate' in $RETH_PATH"
-                echo "$crate = { path = \"RETH_PATH_PLACEHOLDER/crates/$crate\" }" >> .reth-dev.toml.tmp
-                continue
-            fi
-
-            # Make path relative to RETH_PATH
-            REL_PATH=$(echo "$CRATE_DIR" | sed "s|^$RETH_PATH/||")
-
-            echo "$crate = { path = \"RETH_PATH_PLACEHOLDER/$REL_PATH\" }" >> .reth-dev.toml.tmp
-        done
-
-    # Add paradigmxyz/reth patches section
-    echo "" >> .reth-dev.toml.tmp
-    echo '[patch."https://github.com/paradigmxyz/reth"]' >> .reth-dev.toml.tmp
-
-    # Extract reth dependencies from the paradigmxyz patch section
-    sed -n '/^\[patch\."https:\/\/github\.com\/paradigmxyz\/reth"\]/,/^$/p' Cargo.toml | \
-        grep -oE '^[a-z][a-z0-9-]+' | \
-        sort -u | \
-        while read -r crate; do
-            # Look up the crate in our pre-built map
-            CRATE_DIR=$(grep "^$crate"$'\t' "$CRATE_MAP" | cut -f2 | head -1)
-
-            if [ -z "$CRATE_DIR" ]; then
-                echo "⚠️  Could not find crate '$crate' in $RETH_PATH"
-                echo "$crate = { path = \"RETH_PATH_PLACEHOLDER/crates/$crate\" }" >> .reth-dev.toml.tmp
-                continue
-            fi
-
-            # Make path relative to RETH_PATH
-            REL_PATH=$(echo "$CRATE_DIR" | sed "s|^$RETH_PATH/||")
-
-            echo "$crate = { path = \"RETH_PATH_PLACEHOLDER/$REL_PATH\" }" >> .reth-dev.toml.tmp
-        done
+    while IFS=$'\t' read -r crate dir; do
+        REL_PATH=$(echo "$dir" | sed "s|^$RETH_PATH/||")
+        echo "$crate = { path = \"RETH_PATH_PLACEHOLDER/$REL_PATH\" }"
+    done < "$CRATE_MAP" | sort >> .reth-dev.toml.tmp
 
     # Clean up temp file
     rm -f "$CRATE_MAP"
