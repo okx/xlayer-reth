@@ -112,6 +112,7 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          allowed_tools: "Bash,Read,Write,Edit,Glob,Grep"
           prompt: |
             You are a security engineer reviewing Rust dependency vulnerabilities for this repository (xlayer-reth).
 
@@ -166,8 +167,10 @@ jobs:
 
             **STEP 5 — Apply the fix (only if all checks pass)**
 
+            The default branch of this repository is: `${{ github.event.repository.default_branch }}`
+
             a) Create a branch:
-               `git checkout main && git pull origin main && git checkout -b fix/security-<package>-<rustsec-id>`
+               `git checkout ${{ github.event.repository.default_branch }} && git pull origin ${{ github.event.repository.default_branch }} && git checkout -b fix/security-<package>-<rustsec-id>`
 
             b) **Direct dependency**: edit the relevant `Cargo.toml` to bump the version requirement.
 
@@ -209,7 +212,7 @@ jobs:
                - [x] I have reviewed the relevant code guidelines in the \`docs/\` folder
                - [x] My code follows the coding standards of this project
                - [x] I have performed a self-review of my own code" \
-                 --base main
+                  --base ${{ github.event.repository.default_branch }}
                ```
 
             h) **Increment your internal PR count by 1.**
