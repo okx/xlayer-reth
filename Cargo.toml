@@ -1,7 +1,7 @@
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.93.0"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/okx/xlayer-reth.git"
 repository = "https://github.com/okx/xlayer-reth.git"
@@ -17,6 +17,7 @@ members = [
     "crates/builder",
     "crates/chainspec",
     "crates/flashblocks",
+    "crates/intercept",
     "crates/legacy-rpc",
     "crates/monitor",
     "crates/rpc",
@@ -63,6 +64,7 @@ codegen-units = 1
 # Internal Dependencies
 # ==============================================================================
 
+xlayer-bridge-intercept = { path = "crates/intercept" }
 xlayer-builder = { path = "crates/builder" }
 xlayer-chainspec = { path = "crates/chainspec" }
 xlayer-flashblocks = { path = "crates/flashblocks" }

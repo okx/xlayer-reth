@@ -17,7 +17,6 @@ use reth::{
     builder::{DebugNodeLauncher, EngineNodeLauncher, Node, NodeHandle},
     providers::providers::BlockchainProvider,
 };
-use reth_node_api::FullNodeComponents;
 use reth_optimism_cli::Cli;
 use reth_optimism_node::{args::RollupArgs, OpNode};
 use reth_rpc_server_types::RethRpcModule;
@@ -104,21 +103,35 @@ fn main() {
                 LegacyRpcRouterLayer::new(legacy_config), // Execute second
             ));
 
+            // Parse and validate bridge intercept configuration
+            let bridge_config = args
+                .xlayer_args
+                .intercept
+                .to_bridge_intercept_config()
+                .map_err(|e| eyre::eyre!("Bridge intercept config error: {e}"))?;
+
+            if bridge_config.enabled {
+                tracing::info!(
+                    target: "xlayer::intercept",
+                    bridge_contract = ?bridge_config.bridge_contract_address,
+                    target_token = ?bridge_config.target_token_address,
+                    wildcard = bridge_config.wildcard,
+                    "Bridge transaction interception enabled"
+                );
+            }
+
             // Create the X Layer payload service builder
             // It handles both flashblocks and default modes internally
             let payload_builder = XLayerPayloadServiceBuilder::new(
                 args.xlayer_args.builder.clone(),
                 args.rollup_args.compute_pending_block,
-            )?;
+            )?
+            .with_bridge_config(bridge_config);
 
             let NodeHandle { node, node_exit_future } = builder
                 .with_types_and_provider::<OpNode, BlockchainProvider<_>>()
                 .with_components(op_node.components().payload(payload_builder))
                 .with_add_ons(add_ons)
-                .on_component_initialized(move |_ctx| {
-                    // TODO: Initialize X Layer components here
-                    Ok(())
-                })
                 .extend_rpc_modules(move |ctx| {
                     let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
 
@@ -145,7 +158,7 @@ fn main() {
                             let flashblocks_pubsub = FlashblocksPubSub::new(
                                 eth_pubsub,
                                 pending_blocks_rx,
-                                Box::new(ctx.node().task_executor().clone()),
+                                Box::new(ctx.node().task_executor.clone()),
                                 new_op_eth_api.converter().clone(),
                                 xlayer_args.flashblocks_subscription_max_addresses,
                             );
@@ -163,8 +176,6 @@ fn main() {
                         xlayer_rpc,
                     ))?;
                     info!(target: "reth::cli", "xlayer rpc extension enabled");
-
-                    info!(message = "X Layer RPC modules initialized");
                     Ok(())
                 })
                 .launch_with_fn(|builder| {
@@ -195,7 +206,7 @@ fn main() {
             // Start X Layer full link monitor handle
             start_monitor_handle(
                 node.tasks(),
-                monitor.clone(),
+                monitor,
                 node.provider().clone(),
                 node.payload_builder_handle.clone(),
                 node.add_ons_handle.engine_events.new_listener(),

@@ -14028,6 +14028,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "xlayer-bridge-intercept"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
 name = "xlayer-builder"
 version = "0.1.0"
 dependencies = [
@@ -14128,6 +14137,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber 0.3.22",
  "url",
+ "xlayer-bridge-intercept",
  "xlayer-trace-monitor",
 ]
 
@@ -14277,6 +14287,8 @@ dependencies = [
 name = "xlayer-reth-node"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
+ "alloy-evm",
  "alloy-primitives",
  "clap",
  "either",
@@ -14284,17 +14296,32 @@ dependencies = [
  "humantime",
  "op-alloy-network",
  "reth",
+ "reth-basic-payload-builder",
+ "reth-chainspec",
  "reth-cli-util",
+ "reth-evm",
+ "reth-execution-types",
  "reth-node-api",
  "reth-node-builder",
  "reth-optimism-cli",
  "reth-optimism-evm",
+ "reth-optimism-forks",
  "reth-optimism-node",
  "reth-optimism-payload-builder",
+ "reth-optimism-txpool",
  "reth-payload-builder",
+ "reth-payload-builder-primitives",
+ "reth-payload-primitives",
+ "reth-payload-util",
+ "reth-primitives-traits",
+ "reth-revm",
  "reth-rpc-server-types",
+ "reth-storage-api",
+ "reth-transaction-pool",
+ "revm",
  "tracing",
  "url",
+ "xlayer-bridge-intercept",
  "xlayer-builder",
  "xlayer-chainspec",
  "xlayer-flashblocks",
@@ -14322,14 +14349,18 @@ dependencies = [
  "reth-cli",
  "reth-cli-commands",
  "reth-cli-util",
+ "reth-db",
  "reth-db-api",
+ "reth-node-builder",
  "reth-node-core",
  "reth-node-types",
  "reth-optimism-chainspec",
  "reth-optimism-consensus",
  "reth-optimism-evm",
  "reth-optimism-node",
+ "reth-primitives-traits",
  "reth-provider",
+ "reth-static-file-types",
  "reth-storage-api",
  "reth-tracing",
  "serde_json",

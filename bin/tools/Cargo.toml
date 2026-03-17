@@ -30,11 +30,15 @@ reth-cli-util.workspace = true
 reth-optimism-consensus.workspace = true
 reth-tracing.workspace = true
 reth-node-core.workspace = true
+reth-node-builder.workspace = true
 reth-node-types.workspace = true
 reth-chainspec.workspace = true
-reth-provider.workspace = true
-reth-storage-api.workspace = true
+reth-db.workspace = true
 reth-db-api.workspace = true
+reth-primitives-traits.workspace = true
+reth-provider = { workspace = true, features = ["rocksdb"] }
+reth-static-file-types.workspace = true
+reth-storage-api.workspace = true
 
 # alloy
 alloy-consensus.workspace = true

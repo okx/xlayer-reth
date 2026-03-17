@@ -10,34 +10,65 @@ on:
   pull_request_review:
     types: [submitted]
 
+concurrency:
+  group: claude-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+
 jobs:
   authorize:
     runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      authorized: ${{ steps.check.outputs.authorized }}
+    if: |
+      !contains(github.actor, '[bot]') && (
+        (github.event_name == 'issue_comment' && (contains(github.event.comment.body, '@claude') || contains(github.event.comment.body, '@review'))) ||
+        (github.event_name == 'pull_request_review_comment' && (contains(github.event.comment.body, '@claude') || contains(github.event.comment.body, '@review'))) ||
+        (github.event_name == 'pull_request_review' && (contains(github.event.review.body, '@claude') || contains(github.event.review.body, '@review'))) ||
+        (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+      )
     steps:
       - name: Check actor authorization
+        id: check
         run: |
           ASSOCIATION="${{ github.event.comment.author_association || github.event.review.author_association || github.event.issue.author_association }}"
-          echo "Author association: $ASSOCIATION"
-          if [[ "$ASSOCIATION" != "OWNER" && "$ASSOCIATION" != "MEMBER" && "$ASSOCIATION" != "COLLABORATOR" ]]; then
-            echo "Unauthorized: actor '${{ github.actor }}' has association '$ASSOCIATION'"
-            exit 1
+          PR_AUTHOR="${{ github.event.issue.user.login }}"
+          if [ -z "$PR_AUTHOR" ]; then
+            PR_AUTHOR="${{ github.event.pull_request.user.login }}"
           fi
-          echo "Authorized: actor '${{ github.actor }}'"
+          ACTOR="${{ github.actor }}"
+          echo "Author association: $ASSOCIATION"
+          echo "PR/Issue author: $PR_AUTHOR"
+          echo "Triggered by: $ACTOR"
+          if [[ "$ASSOCIATION" != "OWNER" && "$ASSOCIATION" != "MEMBER" && "$ASSOCIATION" != "COLLABORATOR" ]]; then
+            echo "Unauthorized: actor '$ACTOR' is not an org member (association: '$ASSOCIATION')"
+            echo "authorized=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ "$ACTOR" != "$PR_AUTHOR" ]]; then
+            echo "Unauthorized: '$ACTOR' is not the PR/issue author ('$PR_AUTHOR')"
+            echo "authorized=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Authorized: '$ACTOR' is an org member and the PR/issue author"
+          echo "authorized=true" >> "$GITHUB_OUTPUT"
 
   claude:
     needs: authorize
-    if: |
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
-      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
-    runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       pull-requests: write
       issues: write
       id-token: write
-      actions: read # Required for Claude to read CI results on PRs
+      actions: read
+    if: |
+      needs.authorize.outputs.authorized == 'true' && (
+        (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+        (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+        (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+        (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+      )
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -49,19 +80,22 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
   claude-review:
     needs: authorize
-    if: |
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@review')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@review'))
-    runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
       issues: write
       id-token: write
       actions: read
+    if: |
+      needs.authorize.outputs.authorized == 'true' && (
+        (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@review')) ||
+        (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@review'))
+      )
+    runs-on: ubuntu-latest
     steps:
       - name: Acknowledge trigger
         uses: actions/github-script@v7
@@ -93,8 +127,7 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          track_progress: true
-          show_full_output: true
+          track_progress: false
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
