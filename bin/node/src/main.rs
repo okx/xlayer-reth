@@ -128,7 +128,7 @@ fn main() {
                         if args.xlayer_args.enable_inner_tx {
                             // Initialize inner tx replay handler (uses canonical_state_stream)
                             // Note: This only processes real-time blocks, NOT synced blocks from Pipeline
-                            initialize_innertx_replay(ctx.node());
+                            initialize_innertx_replay(ctx.node(), args.xlayer_args.innertx_threadpool_size);
                             info!(target: "reth::cli", "xlayer inner tx replay initialized (canonical_state_stream mode)");
 
                             // Register inner tx RPC
@@ -176,7 +176,7 @@ fn main() {
                         if args.xlayer_args.enable_inner_tx {
                             // Initialize inner tx replay handler (uses canonical_state_stream)
                             // Note: This only processes real-time blocks, NOT synced blocks from Pipeline
-                            initialize_innertx_replay(ctx.node());
+                            initialize_innertx_replay(ctx.node(), args.xlayer_args.innertx_threadpool_size);
                             info!(target: "reth::cli", "xlayer inner tx replay initialized (canonical_state_stream mode)");
 
                             // Register inner tx RPC

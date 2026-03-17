@@ -18,6 +18,14 @@ pub struct XLayerArgs {
     )]
     pub enable_inner_tx: bool,
 
+    /// Thread pool size for inner transaction replay
+    #[arg(
+        long = "xlayer.innertx-threadpool-size",
+        help = "Thread pool size for inner transaction replay (defaults to number of CPUs)",
+        default_value_t = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4),
+    )]
+    pub innertx_threadpool_size: usize,
+
     /// Enable custom flashblocks subscription
     #[arg(
         long = "xlayer.flashblocks-subscription",
@@ -276,6 +284,7 @@ mod tests {
                 legacy_rpc_timeout: Duration::from_secs(30),
             },
             enable_inner_tx: false,
+            innertx_threadpool_size: 4,
             enable_flashblocks_subscription: false,
         };
 

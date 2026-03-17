@@ -4,6 +4,8 @@
 //! process canonical state notifications for inner transaction indexing.
 
 use futures::StreamExt;
+use tokio::sync::Semaphore;
+use std::sync::Arc;
 
 use reth_chain_state::{CanonStateNotification, CanonStateSubscriptions};
 use reth_evm::ConfigureEvm;
@@ -26,7 +28,7 @@ use crate::replay_utils::{remove_block, replay_and_index_block};
 /// - May miss notifications if the handler is slow (broadcast channel)
 ///
 /// For reliable processing of all blocks including synced ones, use ExEx instead.
-pub fn initialize_innertx_replay<Node>(node: &Node)
+pub fn initialize_innertx_replay<Node>(node: &Node, threadpool_size: usize)
 where
     Node: FullNodeComponents + Clone + 'static,
     <Node as FullNodeTypes>::Provider: CanonStateSubscriptions,
@@ -38,12 +40,12 @@ where
     // Subscribe to canonical state updates
     let canonical_stream = provider.canonical_state_stream();
 
-    info!(target: "xlayer::subscriber", "Initializing inner tx replay handler for canonical state stream");
+    info!(target: "xlayer::subscriber", threadpool_size, "Initializing inner tx replay handler for canonical state stream");
 
     task_executor.spawn_critical(
         "xlayer-innertx-replay",
         Box::pin(async move {
-            handle_canonical_state_stream(canonical_stream, provider, evm_config).await;
+            handle_canonical_state_stream(canonical_stream, provider, evm_config, threadpool_size).await;
         }),
     );
 }
@@ -53,12 +55,15 @@ async fn handle_canonical_state_stream<P, E, N>(
     mut stream: impl StreamExt<Item = CanonStateNotification<N>> + Unpin,
     provider: P,
     evm_config: E,
+    threadpool_size: usize,
 ) where
     P: StateProviderFactory + Clone + Send + Sync + 'static,
     E: ConfigureEvm<Primitives = N> + Clone + Send + Sync + 'static,
     N: NodePrimitives + 'static,
 {
-    info!(target: "xlayer::subscriber", "Inner tx replay handler started, waiting for canonical state notifications");
+    info!(target: "xlayer::subscriber", threadpool_size, "Inner tx replay handler started, waiting for canonical state notifications");
+
+    let semaphore = Arc::new(Semaphore::new(threadpool_size));
 
     while let Some(notification) = stream.next().await {
         match notification {
@@ -66,21 +71,27 @@ async fn handle_canonical_state_stream<P, E, N>(
                 debug!(target: "xlayer::subscriber", "Canonical commit: range {:?}", new.range());
 
                 for block in new.blocks_iter() {
-                    debug!(target: "xlayer::subscriber", "Processing committed block: {:?}", block.hash());
+                    let block_hash = block.hash();
+                    let block = block.clone();
+                    debug!(target: "xlayer::subscriber", "Processing committed block: {:?}", block_hash);
 
                     let provider_clone = provider.clone();
                     let evm_config_clone = evm_config.clone();
+                    let permit = semaphore.clone().acquire_owned().await.expect("semaphore closed");
 
-                    if let Err(err) =
-                        replay_and_index_block(provider_clone, evm_config_clone, block.clone())
-                    {
-                        error!(
-                            target: "xlayer::subscriber",
-                            "Failed to process committed block {:?}: {:?}",
-                            block.hash(),
-                            err
-                        );
-                    }
+                    tokio::task::spawn_blocking(move || {
+                        let _permit = permit;
+                        if let Err(err) =
+                            replay_and_index_block(provider_clone, evm_config_clone, block)
+                        {
+                            error!(
+                                target: "xlayer::subscriber",
+                                "Failed to process committed block {:?}: {:?}",
+                                block_hash,
+                                err
+                            );
+                        }
+                    });
                 }
             }
             CanonStateNotification::Reorg { old, new } => {
@@ -91,7 +102,7 @@ async fn handle_canonical_state_stream<P, E, N>(
                     new.range()
                 );
 
-                // Remove old blocks
+                // Remove old blocks — sequential to ensure ordering before new blocks
                 for block in old.blocks_iter() {
                     debug!(target: "xlayer::subscriber", "Removing reorged block: {:?}", block.hash());
 
@@ -109,21 +120,27 @@ async fn handle_canonical_state_stream<P, E, N>(
 
                 // Add new blocks
                 for block in new.blocks_iter() {
-                    debug!(target: "xlayer::subscriber", "Processing new reorg block: {:?}", block.hash());
+                    let block_hash = block.hash();
+                    let block = block.clone();
+                    debug!(target: "xlayer::subscriber", "Processing new reorg block: {:?}", block_hash);
 
                     let provider_clone = provider.clone();
                     let evm_config_clone = evm_config.clone();
+                    let permit = semaphore.clone().acquire_owned().await.expect("semaphore closed");
 
-                    if let Err(err) =
-                        replay_and_index_block(provider_clone, evm_config_clone, block.clone())
-                    {
-                        error!(
-                            target: "xlayer::subscriber",
-                            "Failed to process new reorg block {:?}: {:?}",
-                            block.hash(),
-                            err
-                        );
-                    }
+                    tokio::task::spawn_blocking(move || {
+                        let _permit = permit;
+                        if let Err(err) =
+                            replay_and_index_block(provider_clone, evm_config_clone, block)
+                        {
+                            error!(
+                                target: "xlayer::subscriber",
+                                "Failed to process new reorg block {:?}: {:?}",
+                                block_hash,
+                                err
+                            );
+                        }
+                    });
                 }
             }
         }
