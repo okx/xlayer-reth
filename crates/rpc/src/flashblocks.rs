@@ -199,8 +199,6 @@ pub trait FlashblocksEthApiOverride {
 #[derive(Debug)]
 pub struct FlashblocksEthApiExt<N: RpcNodeCore, Rpc: RpcConvert> {
     eth_api: OpEthApi<N, Rpc>,
-    /// Stored separately to avoid associated type projection ambiguity when
-    /// the trait solver processes `<OpEthApi<N, Rpc> as EthApiTypes>::RpcConvert`.
     converter: Rpc,
     flashblocks_state: FlashblockStateCache<OpPrimitives>,
 }
@@ -597,7 +595,7 @@ where
     fn get_flashblock_state_provider_by_id(
         &self,
         block_id: Option<BlockId>,
-    ) -> RpcResult<Option<(StateProviderBox, SealedHeaderFor<OpPrimitives>)>> {
+    ) -> RpcResult<Option<(StateProviderBox, SealedHeaderFor<N::Primitives>)>> {
         let canon_state = self.eth_api.provider().latest().to_rpc_result()?;
         Ok(self.flashblocks_state.get_state_provider_by_id(block_id, canon_state))
     }

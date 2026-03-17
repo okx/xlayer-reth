@@ -46,7 +46,7 @@ impl XLayerPayloadServiceBuilder {
         da_config: OpDAConfig,
         gas_limit_config: OpGasLimitConfig,
     ) -> eyre::Result<Self> {
-        let builder = if (xlayer_builder_args.flashblocks.enabled || flashblock_rpc) {
+        let builder = if xlayer_builder_args.flashblocks.enabled || flashblock_rpc {
             let builder_config = BuilderConfig::try_from(xlayer_builder_args)?;
             XLayerPayloadServiceBuilderInner::Flashblocks(Box::new(FlashblocksServiceBuilder(
                 builder_config,

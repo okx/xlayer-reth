@@ -8,10 +8,10 @@ pub mod helper;
 pub use default::{DefaultRpcExt, DefaultRpcExtApiServer, SequencerClientProvider};
 pub use flashblocks::{FlashblocksEthApiExt, FlashblocksEthApiOverrideServer};
 
-// Implement `SequencerClientProvider` for `OpEthApi`
 use reth_optimism_rpc::{OpEthApi, SequencerClient};
 use reth_rpc_eth_api::{RpcConvert, RpcNodeCore};
 
+// Implement `SequencerClientProvider` for `OpEthApi`
 impl<N, Rpc> SequencerClientProvider for OpEthApi<N, Rpc>
 where
     N: RpcNodeCore,
