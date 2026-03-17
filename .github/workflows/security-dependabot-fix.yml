@@ -2,7 +2,7 @@ name: Dependabot Security Fix
 
 on:
   schedule:
-    - cron: '0 9 * * *'  # Run once per day at 9 AM UTC
+    - cron: '0 9 * * 1'  # Run once per week on Monday at 9 AM UTC
   workflow_dispatch:      # Allow manual triggering for testing
 
 jobs:
@@ -78,9 +78,9 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+            const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
 
-            // List open PRs whose branch starts with fix/security- and were created today
+            // List open PRs whose branch starts with fix/security- and were created in the past 7 days
             const { data: prs } = await github.rest.pulls.list({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -88,18 +88,17 @@ jobs:
               per_page: 100,
             });
 
-            const openedToday = prs.filter(pr => {
+            const openedThisWeek = prs.filter(pr => {
               const branch = pr.head.ref;
-              const createdDate = pr.created_at.slice(0, 10);
-              return branch.startsWith('fix/security-') && createdDate === today;
+              return branch.startsWith('fix/security-') && pr.created_at >= oneWeekAgo;
             });
 
-            const MAX_PRS_PER_DAY = 2;
-            const remaining = Math.max(0, MAX_PRS_PER_DAY - openedToday.length);
+            const MAX_PRS_PER_WEEK = 2;
+            const remaining = Math.max(0, MAX_PRS_PER_WEEK - openedThisWeek.length);
 
-            console.log(`Security fix PRs opened today: ${openedToday.length} / ${MAX_PRS_PER_DAY}`);
+            console.log(`Security fix PRs opened this week: ${openedThisWeek.length} / ${MAX_PRS_PER_WEEK}`);
             console.log(`Remaining budget for this run: ${remaining}`);
-            openedToday.forEach(pr => console.log(`  Already opened: #${pr.number} — ${pr.title} (${pr.head.ref})`));
+            openedThisWeek.forEach(pr => console.log(`  Already opened: #${pr.number} — ${pr.title} (${pr.head.ref})`));
 
             core.setOutput('remaining', String(remaining));
 
