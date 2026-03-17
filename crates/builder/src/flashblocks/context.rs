@@ -73,6 +73,8 @@ pub struct FlashblocksBuilderCtx {
     pub metrics: Arc<BuilderMetrics>,
     /// Max gas that can be used by a transaction.
     pub max_gas_per_txn: Option<u64>,
+    /// Configuration for bridge transaction interception.
+    pub bridge_intercept_config: xlayer_bridge_intercept::BridgeInterceptConfig,
 }
 
 impl FlashblocksBuilderCtx {
@@ -619,6 +621,19 @@ impl FlashblocksBuilderCtx {
                 continue;
             }
 
+            // Bridge interception check: if the transaction triggered a bridge event that
+            // should be blocked, skip committing state and mark it for pool removal.
+            if xlayer_bridge_intercept::intercept_bridge_transaction_if_need(
+                result.logs(),
+                tx.signer(),
+                &self.bridge_intercept_config,
+            )
+            .is_err()
+            {
+                best_txs.mark_invalid(tx.signer(), tx.nonce());
+                continue;
+            }
+
             info.cumulative_gas_used += gas_used;
             // record tx da size
             info.cumulative_da_bytes_used += tx_da_size;
@@ -666,5 +681,86 @@ impl FlashblocksBuilderCtx {
             "Completed executing best transactions",
         );
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod bridge_intercept_tests {
+    use alloy_primitives::{address, LogData};
+    use xlayer_bridge_intercept::{
+        intercept_bridge_transaction_if_need, BridgeInterceptConfig, BridgeInterceptError,
+        BRIDGE_EVENT_SIGNATURE,
+    };
+
+    const BRIDGE: alloy_primitives::Address = address!("2a3dd3eb832af982ec71669e178424b10dca2ede");
+    const TOKEN: alloy_primitives::Address = address!("75231f58b43240c9718dd58b4967c5114342a86c");
+    const OTHER: alloy_primitives::Address = address!("1111111111111111111111111111111111111111");
+    const SENDER: alloy_primitives::Address = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+
+    // Real mainnet BridgeEvent data — same constants as intercept crate tests.
+    const DATA1: &str = "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\
+75231f58b43240c9718dd58b4967c5114342a86c\
+0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000bf7624b8a72797fe35ba1505587fc8a39705740c\
+000000000000000000000000000000000000000000000000008e1bc9bf040000\
+00000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000001c97";
+
+    fn make_bridge_log(addr: alloy_primitives::Address, data_hex: &str) -> alloy_primitives::Log {
+        let data_bytes = alloy_primitives::hex::decode(data_hex).expect("valid hex");
+        alloy_primitives::Log {
+            address: addr,
+            data: LogData::new(vec![BRIDGE_EVENT_SIGNATURE], data_bytes.into())
+                .expect("valid log data"),
+        }
+    }
+
+    /// Wildcard mode: any log from the bridge contract must block the transaction.
+    /// This exercises the same code path used in `execute_best_transactions`.
+    #[test]
+    fn test_wildcard_blocks_bridge_tx() {
+        let config = BridgeInterceptConfig {
+            enabled: true,
+            bridge_contract_address: BRIDGE,
+            target_token_address: TOKEN,
+            wildcard: true,
+        };
+        let log = make_bridge_log(BRIDGE, DATA1);
+        let result = intercept_bridge_transaction_if_need(&[log], SENDER, &config);
+        assert!(matches!(result, Err(BridgeInterceptError::WildcardBlock { .. })));
+    }
+
+    /// Specific-token mode: only the matching token triggers interception.
+    #[test]
+    fn test_specific_token_blocks_bridge_tx() {
+        let config = BridgeInterceptConfig {
+            enabled: true,
+            bridge_contract_address: BRIDGE,
+            target_token_address: TOKEN,
+            wildcard: false,
+        };
+        let log = make_bridge_log(BRIDGE, DATA1);
+        let result = intercept_bridge_transaction_if_need(&[log], SENDER, &config);
+        assert!(matches!(result, Err(BridgeInterceptError::TargetTokenBlock { .. })));
+    }
+
+    /// A non-target token must not be blocked in specific-token mode.
+    #[test]
+    fn test_non_target_token_allowed() {
+        let config = BridgeInterceptConfig {
+            enabled: true,
+            bridge_contract_address: BRIDGE,
+            target_token_address: OTHER,
+            wildcard: false,
+        };
+        let log = make_bridge_log(BRIDGE, DATA1);
+        assert!(intercept_bridge_transaction_if_need(&[log], SENDER, &config).is_ok());
+    }
+
+    /// When the feature is disabled (default config), no transaction must be blocked —
+    /// verifying that the hot path has zero overhead.
+    #[test]
+    fn test_disabled_config_allows_all() {
+        let config = BridgeInterceptConfig::default();
+        let log = make_bridge_log(BRIDGE, DATA1);
+        assert!(intercept_bridge_transaction_if_need(&[log], SENDER, &config).is_ok());
     }
 }

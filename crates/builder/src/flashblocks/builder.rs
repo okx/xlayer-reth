@@ -212,6 +212,8 @@ pub(super) struct FlashblocksBuilder<Pool, Client, Tasks> {
     pub builder_tx: FlashblocksBuilderTx,
     /// Tokio task metrics for monitoring spawned tasks
     pub task_metrics: Arc<FlashblocksTaskMetrics>,
+    /// Configuration for bridge transaction interception.
+    pub bridge_intercept_config: xlayer_bridge_intercept::BridgeInterceptConfig,
 }
 
 impl<Pool, Client, Tasks> FlashblocksBuilder<Pool, Client, Tasks> {
@@ -244,6 +246,7 @@ impl<Pool, Client, Tasks> FlashblocksBuilder<Pool, Client, Tasks> {
             metrics,
             builder_tx,
             task_metrics,
+            bridge_intercept_config: Default::default(),
         }
     }
 }
@@ -333,6 +336,7 @@ where
             builder_signer: self.config.builder_signer,
             metrics: self.metrics.clone(),
             max_gas_per_txn: self.config.max_gas_per_txn,
+            bridge_intercept_config: self.bridge_intercept_config.clone(),
         })
     }
 
@@ -704,6 +708,7 @@ where
             target_da_footprint_for_batch,
         )
         .wrap_err("failed to execute best transactions")?;
+
         // Extract last transactions
         let new_transactions = fb_state
             .slice_new_transactions(&info.executed_transactions)
