@@ -43,6 +43,12 @@ impl XLayerInterceptArgs {
 
         self.validate()?;
 
+        // When disabled, skip all address parsing — the values are irrelevant and may
+        // contain unparseable strings that would panic at the `.expect()` calls below.
+        if !self.enabled {
+            return Ok(BridgeInterceptConfig::default());
+        }
+
         // After validation we know: if enabled, bridge_contract is Some and parseable;
         // target_token (when Some and not "*"/empty) is also parseable.
         let bridge_contract_address = self
@@ -557,6 +563,17 @@ mod tests {
     #[test]
     fn test_xlayer_intercept_to_config_disabled() {
         let args = XLayerInterceptArgs::default();
+        let config = args.to_bridge_intercept_config().unwrap();
+        assert!(!config.enabled);
+    }
+
+    #[test]
+    fn test_xlayer_intercept_disabled_with_invalid_addresses_does_not_panic() {
+        let args = XLayerInterceptArgs {
+            enabled: false,
+            bridge_contract: Some("not-an-address".to_string()),
+            target_token: Some("also-garbage".to_string()),
+        };
         let config = args.to_bridge_intercept_config().unwrap();
         assert!(!config.enabled);
     }
