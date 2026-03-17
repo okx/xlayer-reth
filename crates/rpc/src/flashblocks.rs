@@ -595,7 +595,7 @@ where
     fn get_flashblock_state_provider_by_id(
         &self,
         block_id: Option<BlockId>,
-    ) -> RpcResult<Option<(StateProviderBox, SealedHeaderFor<N::Primitives>)>> {
+    ) -> RpcResult<Option<(StateProviderBox, SealedHeaderFor<OpPrimitives>)>> {
         let canon_state = self.eth_api.provider().latest().to_rpc_result()?;
         Ok(self.flashblocks_state.get_state_provider_by_id(block_id, canon_state))
     }
