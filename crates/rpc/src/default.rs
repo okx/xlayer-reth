@@ -14,9 +14,9 @@ pub trait SequencerClientProvider {
     fn sequencer_client(&self) -> Option<&SequencerClient>;
 }
 
-/// `XLayer`-specific RPC API trait.
+/// X Layer default Eth JSON-RPC API extension trait.
 #[rpc(server, namespace = "eth")]
-pub trait XlayerRpcExtApi {
+pub trait DefaultRpcExtApi {
     /// Returns boolean indicating if the node's flashblocks RPC functionality is enabled,
     /// and if the flashblocks state cache is initialized.
     ///
@@ -27,21 +27,21 @@ pub trait XlayerRpcExtApi {
     async fn flashblocks_enabled(&self) -> RpcResult<bool>;
 }
 
-/// `XLayer` RPC extension implementation.
+/// X Layer default Eth JSON-RPC API extension implementation.
 #[derive(Debug, Clone)]
-pub struct XlayerRpcExt {
+pub struct DefaultRpcExt {
     flashblocks_state: Option<FlashblockStateCache<OpPrimitives>>,
 }
 
-impl XlayerRpcExt {
-    /// Creates a new [`XlayerRpcExt`].
+impl DefaultRpcExt {
+    /// Creates a new [`DefaultRpcExt`].
     pub fn new(flashblocks_state: Option<FlashblockStateCache<OpPrimitives>>) -> Self {
         Self { flashblocks_state }
     }
 }
 
 #[async_trait]
-impl XlayerRpcExtApiServer for XlayerRpcExt {
+impl DefaultRpcExtApiServer for DefaultRpcExt {
     /// Handler for: `eth_flashblocksEnabled`
     async fn flashblocks_enabled(&self) -> RpcResult<bool> {
         Ok(self.flashblocks_state.as_ref().is_some_and(|cache| cache.get_confirm_height() > 0))
@@ -54,14 +54,14 @@ mod tests {
 
     #[test]
     fn test_flashblocks_disabled_when_no_cache() {
-        let ext = XlayerRpcExt::new(None);
+        let ext = DefaultRpcExt::new(None);
         assert!(ext.flashblocks_state.is_none());
     }
 
     #[test]
     fn test_flashblocks_disabled_at_zero_height() {
         let cache = FlashblockStateCache::<OpPrimitives>::new();
-        let ext = XlayerRpcExt::new(Some(cache));
+        let ext = DefaultRpcExt::new(Some(cache));
         assert!(ext.flashblocks_state.as_ref().unwrap().get_confirm_height() == 0);
     }
 }

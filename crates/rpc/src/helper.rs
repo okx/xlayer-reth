@@ -1,5 +1,4 @@
 use alloy_consensus::{BlockHeader, TxReceipt};
-use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::B256;
 use alloy_rpc_types_eth::TransactionInfo;
 use op_alloy_network::Optimism;

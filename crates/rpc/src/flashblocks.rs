@@ -197,7 +197,7 @@ pub trait FlashblocksEthApiOverride {
 
 /// Extended Eth API with flashblocks cache overlay.
 #[derive(Debug)]
-pub struct XLayerEthApiExt<N: RpcNodeCore, Rpc: RpcConvert> {
+pub struct FlashblocksEthApiExt<N: RpcNodeCore, Rpc: RpcConvert> {
     eth_api: OpEthApi<N, Rpc>,
     /// Stored separately to avoid associated type projection ambiguity when
     /// the trait solver processes `<OpEthApi<N, Rpc> as EthApiTypes>::RpcConvert`.
@@ -205,8 +205,8 @@ pub struct XLayerEthApiExt<N: RpcNodeCore, Rpc: RpcConvert> {
     flashblocks_state: FlashblockStateCache<OpPrimitives>,
 }
 
-impl<N: RpcNodeCore, Rpc: RpcConvert> XLayerEthApiExt<N, Rpc> {
-    /// Creates a new [`XLayerEthApiExt`].
+impl<N: RpcNodeCore, Rpc: RpcConvert> FlashblocksEthApiExt<N, Rpc> {
+    /// Creates a new [`FlashblocksEthApiExt`].
     pub fn new(
         eth_api: OpEthApi<N, Rpc>,
         flashblocks_state: FlashblockStateCache<OpPrimitives>,
@@ -220,10 +220,11 @@ impl<N: RpcNodeCore, Rpc: RpcConvert> XLayerEthApiExt<N, Rpc> {
 }
 
 #[async_trait]
-impl<N, Rpc> FlashblocksEthApiOverrideServer for XLayerEthApiExt<N, Rpc>
+impl<N, Rpc> FlashblocksEthApiOverrideServer for FlashblocksEthApiExt<N, Rpc>
 where
     N: RpcNodeCore<Primitives = OpPrimitives>,
-    Rpc: RpcConvert<Network = Optimism, Primitives = N::Primitives, Error = OpEthApiError>,
+    Rpc: RpcConvert<Network = Optimism, Primitives = N::Primitives, Error = OpEthApiError>
+        + RpcConvert<Primitives = OpPrimitives>,
     OpEthApi<N, Rpc>: FullEthApi<NetworkTypes = Optimism, Error = OpEthApiError>
         + EthApiTypes<RpcConvert = Rpc>
         + RpcNodeCore<Primitives = OpPrimitives>
@@ -584,10 +585,11 @@ where
     }
 }
 
-impl<N, Rpc> XLayerEthApiExt<N, Rpc>
+impl<N, Rpc> FlashblocksEthApiExt<N, Rpc>
 where
     N: RpcNodeCore<Primitives = OpPrimitives>,
-    Rpc: RpcConvert<Network = Optimism, Primitives = N::Primitives, Error = OpEthApiError>,
+    Rpc: RpcConvert<Network = Optimism, Primitives = N::Primitives, Error = OpEthApiError>
+        + RpcConvert<Primitives = OpPrimitives>,
     OpEthApi<N, Rpc>: RpcNodeCore<Primitives = OpPrimitives> + Send + Sync + 'static,
 {
     /// Returns a `StateProvider` overlaying flashblock execution state on top of canonical state

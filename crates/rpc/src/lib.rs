@@ -1,12 +1,12 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-pub mod eth;
+pub mod default;
+pub mod flashblocks;
 pub mod helper;
-pub mod xlayer_ext;
 
-pub use eth::{FlashblocksEthApiOverrideServer, XLayerEthApiExt};
-pub use xlayer_ext::{SequencerClientProvider, XlayerRpcExt, XlayerRpcExtApiServer};
+pub use default::{DefaultRpcExt, DefaultRpcExtApiServer, SequencerClientProvider};
+pub use flashblocks::{FlashblocksEthApiExt, FlashblocksEthApiOverrideServer};
 
 // Implement `SequencerClientProvider` for `OpEthApi`
 use reth_optimism_rpc::{OpEthApi, SequencerClient};

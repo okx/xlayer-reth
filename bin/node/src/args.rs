@@ -123,6 +123,7 @@ impl LegacyRpcArgs {
     }
 }
 
+#[derive(Debug, Clone, Args, PartialEq, Eq, Default)]
 pub struct FlashblocksRpcArgs {
     /// Enable flashblocks RPC
     #[arg(
@@ -292,13 +293,19 @@ mod tests {
             "--xlayer.flashblocks-subscription",
             "--xlayer.flashblocks-subscription-max-addresses",
             "2000",
+            "--xlayer.flashblocks-url",
+            "ws://localhost:1111",
         ])
         .args;
 
-        assert!(args.enable_flashblocks_subscription);
         assert!(args.legacy.legacy_rpc_url.is_some());
         assert_eq!(args.legacy.legacy_rpc_timeout, Duration::from_secs(45));
-        assert_eq!(args.flashblocks_subscription_max_addresses, 2000);
+        assert!(args.flashblocks_rpc.enable_flashblocks_subscription);
+        assert_eq!(args.flashblocks_rpc.flashblocks_subscription_max_addresses, 2000);
+        assert_eq!(
+            args.flashblocks_rpc.flashblock_url,
+            Some(Url::parse("ws://localhost:1111").unwrap())
+        );
         assert!(args.validate().is_ok());
     }
 
