@@ -113,12 +113,12 @@ impl LocalInstance {
             .with_database(create_test_db(config.clone()))
             .with_launch_context(runtime.clone())
             .with_types::<OpNode>()
-            .with_components(
-                op_node
-                    .components()
-                    .pool(pool_component(&rollup_args))
-                    .payload(FlashblocksServiceBuilder(builder_config)),
-            )
+            .with_components(op_node.components().pool(pool_component(&rollup_args)).payload(
+                FlashblocksServiceBuilder {
+                    config: builder_config,
+                    bridge_intercept: Default::default(),
+                },
+            ))
             .with_add_ons(addons)
             .on_rpc_started(move |_, _| {
                 let _ = rpc_ready_tx.send(());
