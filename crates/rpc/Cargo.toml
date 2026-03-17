@@ -34,7 +34,6 @@ alloy-serde.workspace = true
 
 # op
 op-alloy-network.workspace = true
-op-alloy-rpc-types.workspace = true
 
 # rpc
 jsonrpsee.workspace = true

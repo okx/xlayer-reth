@@ -1,5 +1,4 @@
-pub(crate) mod processor;
-pub(crate) mod validator;
+pub(crate) mod worker;
 
 use op_alloy_rpc_types_engine::OpFlashblockPayloadBase;
 use reth_optimism_primitives::OpReceipt;
@@ -8,18 +7,6 @@ pub(crate) struct BuildArgs<I> {
     pub(crate) base: OpFlashblockPayloadBase,
     pub(crate) transactions: I,
     pub(crate) last_flashblock_index: u64,
-}
-
-/// State root strategies during flashblocks sequence validation.
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) enum StateRootStrategy {
-    /// Synchronous state root computation
-    #[default]
-    Synchronous,
-    /// Parallel state root computation
-    Parallel,
-    /// Sparse trie task
-    SparseTrieTask,
 }
 
 /// Receipt requirements for cache-resume flow.
