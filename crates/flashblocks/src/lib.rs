@@ -11,7 +11,7 @@ mod ws;
 mod test_utils;
 
 pub use cache::{CachedTxInfo, FlashblockStateCache, PendingSequence};
-pub(crate) use execution::{BuildArgs, FlashblockCachedReceipt};
+pub use execution::FlashblockCachedReceipt;
 pub use service::FlashblocksRpcService;
 pub use subscription::FlashblocksPubSub;
 pub use ws::WsFlashBlockStream;
