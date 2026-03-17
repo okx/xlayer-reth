@@ -1,4 +1,3 @@
-pub(crate) mod processor;
 pub(crate) mod validator;
 
 use op_alloy_rpc_types_engine::OpFlashblockPayloadBase;
@@ -11,7 +10,7 @@ pub(crate) struct BuildArgs<I> {
 }
 
 /// State root strategies during flashblocks sequence validation.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum StateRootStrategy {
     /// Synchronous state root computation
     #[default]
