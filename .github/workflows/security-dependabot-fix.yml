@@ -24,34 +24,45 @@ jobs:
       - name: Fetch top 2 highest-risk Dependabot alerts
         id: alerts
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Requires a fine-grained PAT with "Dependabot alerts: Read" repository permission.
+          # GITHUB_TOKEN cannot access this API — set GH_SECURITY_PAT in repo secrets.
+          GH_TOKEN: ${{ secrets.GH_SECURITY_PAT }}
         run: |
-          # Fetch all open alerts, keep moderate/high/critical, sort by severity
-          # (critical=0, high=1, medium/moderate=2), take the top 2.
-          # Written to a file to prevent prompt injection from advisory text.
-          gh api "repos/${{ github.repository }}/dependabot/alerts" \
-            --paginate -f state=open \
-          | jq '[
-              .[] |
-              select(.security_advisory.severity | ascii_downcase | IN("critical","high","medium")) |
-              {
-                number:          .number,
-                package:         .dependency.package.name,
-                manifest_path:   .dependency.manifest_path,
-                severity:        .security_advisory.severity,
-                summary:         .security_advisory.summary,
-                vulnerable_range:.security_vulnerability.vulnerable_version_range,
-                first_patched:   .security_vulnerability.first_patched_version.identifier,
-                cve:             (.security_advisory.cve_id // .security_advisory.ghsa_id),
-                url:             .html_url,
-                severity_rank: (
-                  .security_advisory.severity | ascii_downcase |
-                  if . == "critical" then 0
-                  elif . == "high"   then 1
-                  else                    2 end
-                )
-              }
-            ] | sort_by(.severity_rank) | .[0:2]' > /tmp/alerts.json
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::GH_SECURITY_PAT secret is not set. Add a fine-grained PAT with 'Dependabot alerts: Read' permission."
+            exit 1
+          fi
+
+          # Fetch all open alerts into a raw file first so gh errors are caught before jq runs.
+          if ! gh api "repos/${{ github.repository }}/dependabot/alerts" \
+                --paginate -f state=open > /tmp/alerts_raw.json; then
+            echo "::error::Failed to fetch Dependabot alerts. Ensure GH_SECURITY_PAT has 'Dependabot alerts: Read' permission and Dependabot is enabled for this repo."
+            exit 1
+          fi
+
+          # Keep moderate/high/critical, sort by severity (critical=0, high=1, medium=2), take top 2.
+          # Written to a file — never interpolated into the Claude prompt — to prevent prompt injection.
+          jq '[
+            .[] |
+            select(.security_advisory.severity | ascii_downcase | IN("critical","high","medium")) |
+            {
+              number:          .number,
+              package:         .dependency.package.name,
+              manifest_path:   .dependency.manifest_path,
+              severity:        .security_advisory.severity,
+              summary:         .security_advisory.summary,
+              vulnerable_range:.security_vulnerability.vulnerable_version_range,
+              first_patched:   .security_vulnerability.first_patched_version.identifier,
+              cve:             (.security_advisory.cve_id // .security_advisory.ghsa_id),
+              url:             .html_url,
+              severity_rank: (
+                .security_advisory.severity | ascii_downcase |
+                if . == "critical" then 0
+                elif . == "high"   then 1
+                else                    2 end
+              )
+            }
+          ] | sort_by(.severity_rank) | .[0:2]' /tmp/alerts_raw.json > /tmp/alerts.json
 
           COUNT=$(jq 'length' /tmp/alerts.json)
           echo "Alerts selected for fixing: $COUNT"
