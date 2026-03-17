@@ -1,5 +1,5 @@
 use alloy_primitives::{Address, B256, U256};
-use tracing::{debug, warn};
+use tracing::{debug};
 
 /// keccak256("BridgeEvent(uint8,uint32,address,uint32,address,uint256,bytes,uint32)")
 pub const BRIDGE_EVENT_SIGNATURE: B256 = B256::new([
@@ -46,13 +46,13 @@ pub fn intercept_bridge_transaction_if_need(
         let event = match parse_bridge_event(log) {
             Ok(e) => e,
             Err(e) => {
-                debug!(target: "payload_builder", error = ?e, "Failed to parse bridge event");
+                debug!(target: "payload_builder", error = ?e, "ignore other bridge events");
                 continue;
             }
         };
         // Wildcard mode: any log from the bridge contract triggers intercept
         if config.wildcard {
-            warn!(
+            debug!(
                 target: "payload_builder",
                 bridge_contract = ?config.bridge_contract_address,
                 tx_sender = ?tx_sender,
@@ -64,7 +64,7 @@ pub fn intercept_bridge_transaction_if_need(
             });
         }
         if event.origin_address == config.target_token_address {
-            warn!(
+            debug!(
                 target: "payload_builder",
                 token = ?config.target_token_address,
                 amount = ?event.amount,
