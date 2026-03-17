@@ -111,6 +111,16 @@ fn main() {
                 .to_bridge_intercept_config()
                 .map_err(|e| eyre::eyre!("Bridge intercept config error: {e}"))?;
 
+            if bridge_config.enabled {
+                tracing::info!(
+                    target: "xlayer::intercept",
+                    bridge_contract = ?bridge_config.bridge_contract_address,
+                    target_token = ?bridge_config.target_token_address,
+                    wildcard = bridge_config.wildcard,
+                    "Bridge transaction interception enabled"
+                );
+            }
+
             // Create the X Layer payload service builder
             // It handles both flashblocks and default modes internally
             let payload_builder = XLayerPayloadServiceBuilder::new(

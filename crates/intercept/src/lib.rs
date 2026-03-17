@@ -42,6 +42,14 @@ pub fn intercept_bridge_transaction_if_need(
         if log.address != config.bridge_contract_address {
             continue;
         }
+        // Specific token mode: parse BridgeEvent and match originAddress
+        let event = match parse_bridge_event(log) {
+            Ok(e) => e,
+            Err(e) => {
+                debug!(target: "payload_builder", error = ?e, "Failed to parse bridge event");
+                continue;
+            }
+        };
         // Wildcard mode: any log from the bridge contract triggers intercept
         if config.wildcard {
             warn!(
@@ -55,14 +63,6 @@ pub fn intercept_bridge_transaction_if_need(
                 sender: tx_sender,
             });
         }
-        // Specific token mode: parse BridgeEvent and match originAddress
-        let event = match parse_bridge_event(log) {
-            Ok(e) => e,
-            Err(e) => {
-                debug!(target: "payload_builder", error = ?e, "Failed to parse bridge event");
-                continue;
-            }
-        };
         if event.origin_address == config.target_token_address {
             warn!(
                 target: "payload_builder",
