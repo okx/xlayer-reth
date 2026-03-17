@@ -1,16 +1,16 @@
 use crate::{
-    cache::{CachedTxInfo, FlashblockStateCache, PendingSequence},
-    execution::BuildArgs,
-    FlashblockCachedReceipt,
+    cache::{FlashblockStateCache, PendingSequence},
+    BuildArgs, FlashblockCachedReceipt,
 };
-use alloy_eips::eip2718::WithEncoded;
-use op_alloy_rpc_types_engine::OpFlashblockPayloadBase;
 use std::{
-    collections::HashMap,
     sync::Arc,
     time::{Duration, Instant},
 };
-use tracing::*;
+use tracing::trace;
+
+use alloy_eips::{eip2718::WithEncoded, BlockNumberOrTag};
+use alloy_primitives::B256;
+use op_alloy_rpc_types_engine::OpFlashblockPayloadBase;
 
 use reth_chain_state::{ComputedTrieData, ExecutedBlock};
 use reth_errors::RethError;
@@ -22,26 +22,22 @@ use reth_evm::{
 };
 use reth_execution_types::{BlockExecutionOutput, BlockExecutionResult};
 use reth_primitives_traits::{
-    transaction::TxHashRef, BlockBody, HeaderTy, NodePrimitives, Recovered, RecoveredBlock,
+    transaction::TxHashRef, AlloyBlockHeader, BlockTy, HeaderTy, NodePrimitives, ReceiptTy,
+    Recovered, RecoveredBlock, SealedHeader,
 };
 use reth_revm::{
-    cached::CachedReads,
     database::StateProviderDatabase,
     db::{states::bundle_state::BundleRetention, BundleState, State},
 };
-use reth_rpc_eth_types::PendingBlock;
+use reth_rpc_eth_types::{EthApiError, PendingBlock};
 use reth_storage_api::{
-    HashedPostStateProvider, HeaderProvider, StateProviderFactory, StateRootProvider,
+    noop::NoopProvider, BlockReaderIdExt, HashedPostStateProvider, StateProviderFactory,
+    StateRootProvider,
 };
-use reth_trie_common::HashedPostState;
 
-/// Builds the [`PendingSequence`]s from the accumulated flashblock transaction sequences.
-/// Commits results directly to [`FlashblockStateCache`] via `handle_pending_sequence()`.
+/// The `FlashblocksValidator` builds [`PendingBlock`] out of a sequence of transactions.
 ///
-/// Supports two execution modes:
-/// - **Fresh**: Full execution for a new block height.
-/// - **Incremental**: Suffix-only execution reusing cached prefix state from an existing
-///   pending sequence at the same height.
+/// Owns a [`TransactionCache`] for incremental prefix caching between flashblock builds.
 #[derive(Debug)]
 pub(crate) struct FlashblockSequenceValidator<N: NodePrimitives, EvmConfig, Provider>
 where
@@ -52,6 +48,7 @@ where
     /// The canonical chainstate provider.
     provider: Provider,
     /// The flashblocks state cache containing the flashblocks state cache layer.
+    /// state cache layer.
     flashblocks_state: FlashblockStateCache<N>,
 }
 
@@ -77,320 +74,562 @@ where
     N: NodePrimitives,
     N::Receipt: FlashblockCachedReceipt,
     EvmConfig: ConfigureEvm<Primitives = N, NextBlockEnvCtx: From<OpFlashblockPayloadBase> + Unpin>,
-    Provider: StateProviderFactory + HeaderProvider<Header = HeaderTy<N>> + Unpin,
+    Provider: StateProviderFactory
+        + BlockReaderIdExt<
+            Header = HeaderTy<N>,
+            Block = BlockTy<N>,
+            Transaction = N::SignedTx,
+            Receipt = ReceiptTy<N>,
+        > + Unpin,
 {
-    /// Executes a flashblock transaction sequence and commits the result to the flashblocks
-    /// state cache. Note that the flashblocks sequence validator should be the only handle
-    /// that advances the flashblocks state cache tip.
+    /// Returns the [`PendingSequence`], which contains the full built execution state of
+    /// the flashblocks sequence passed in `BuildArgs`.
     ///
-    /// Determines execution mode from the current pending state:
-    /// - No pending sequence exists, cache not yet initialized → fresh build.
-    /// - Pending is at a different height → fresh build.
-    /// - If pending exists at the same height → incremental build.
+    /// The
+    ///
+    /// In canonical mode, the internal transaction cache is used to resume from
+    /// cached state if the transaction list is a continuation of what was previously
+    /// executed.
+    ///
+    /// Returns `None` if:
+    /// - In canonical mode: flashblock doesn't attach to the latest header
+    /// - In speculative mode: no pending parent state provided
     pub(crate) fn execute<I: IntoIterator<Item = WithEncoded<Recovered<N::SignedTx>>>>(
         &mut self,
-        args: BuildArgs<I>,
+        mut args: BuildArgs<I>,
     ) -> eyre::Result<()> {
-        let block_number = args.base.block_number;
-        let transactions: Vec<_> = args.transactions.into_iter().collect();
+        trace!(target: "flashblocks", "Attempting new pending block from flashblocks");
 
-        // Determine execution mode from pending state
-        let pending = self.flashblocks_state.get_pending_sequence();
-        let pending_height = pending.as_ref().map(|p| p.get_height());
-        let incremental = pending_height == Some(block_number);
+        let parent_hash = args.base.parent_hash;
+        let parent_header = self.state_cache.latest_header(parent_hash)?;
+        let state_provider = self.state_cache.history_by_block_hash(parent_header.hash())?;
 
-        // Validate height continuity
-        if let Some(pending_height) = pending_height
-            && block_number != pending_height
-            && block_number != pending_height + 1
-        {
-            // State cache is polluted
-            warn!(
+        let latest = self
+            .provider
+            .latest_header()?
+            .ok_or(EthApiError::HeaderNotFound(BlockNumberOrTag::Latest.into()))?;
+        let latest_hash = latest.hash();
+
+        // Determine build mode: canonical (parent is local tip) or speculative (parent is pending)
+        let is_canonical = args.base.parent_hash == latest_hash;
+        let has_pending_parent = args.pending_parent.is_some();
+
+        if !is_canonical && !has_pending_parent {
+            trace!(
                 target: "flashblocks",
-                incoming_height = block_number,
-                pending_height = pending_height,
-                "state mismatch from incoming sequence to current pending tip",
+                flashblock_parent = ?args.base.parent_hash,
+                local_latest = ?latest.num_hash(),
+                "Skipping non-consecutive flashblock (no pending parent available)"
             );
-            return Err(eyre::eyre!(
-                "state mismatch from incoming sequence to current pending tip"
-            ));
+            return Ok(None);
         }
 
-        if incremental {
-            self.execute_incremental(
-                args.base,
-                transactions,
-                args.last_flashblock_index,
-                pending.unwrap(),
-            )
+        // Collect transactions and extract hashes for cache lookup
+        let transactions: Vec<_> = args.transactions.into_iter().collect();
+        let tx_hashes: Vec<B256> = transactions.iter().map(|tx| *tx.tx_hash()).collect();
+
+        // Get state provider and parent header context.
+        // For speculative builds, use the canonical anchor hash (not the pending parent hash)
+        // for storage reads, but execute with the pending parent's sealed header context.
+        let (state_provider, canonical_anchor, parent_header) = if is_canonical {
+            (self.provider.history_by_block_hash(latest.hash())?, latest.hash(), &latest)
         } else {
-            self.execute_fresh(args.base, transactions, args.last_flashblock_index)
-        }
-    }
-
-    /// Full flashblocks sequence execution from a new block height.
-    fn execute_fresh(
-        &self,
-        base: OpFlashblockPayloadBase,
-        transactions: Vec<WithEncoded<Recovered<N::SignedTx>>>,
-        last_flashblock_index: u64,
-    ) -> eyre::Result<()> {
-        let parent_hash = base.parent_hash;
-
-        // Prioritize trying to get parent hash state from canonical provider first. If
-        // the parent is not in the canonical chain, then try building fresh on top of
-        // the current pending sequence (current pending promoted to confirm, incoming
-        // sequence is the next height). Fall back to the flashblocks overlay via
-        // `get_pending_state_provider`.
-        let (state_provider, parent_header) = match self.provider.history_by_block_hash(parent_hash)
-        {
-            Ok(canon_provider) => {
-                let header = self
-                    .provider
-                    .sealed_header_by_hash(parent_hash)?
-                    .ok_or_else(|| eyre::eyre!("parent header not found for hash {parent_hash}"))?;
-                (canon_provider, header)
-            }
-            Err(err) => {
+            // For speculative building, we need to use the canonical anchor
+            // and apply the pending state's bundle on top of it
+            let pending = args.pending_parent.as_ref().unwrap();
+            let Some(parent_header) = pending.sealed_header.as_ref() else {
                 trace!(
                     target: "flashblocks",
-                    error = %err,
-                    "parent not in canonical chain, try getting state from pending state",
+                    pending_block_number = pending.block_number,
+                    pending_block_hash = ?pending.block_hash,
+                    "Skipping speculative build: pending parent header is unavailable"
                 );
-                let canonical_state = self.provider.latest()?;
-                self.flashblocks_state.get_pending_state_provider(canonical_state).ok_or_else(
-                    || {
-                        eyre::eyre!(
-                            "parent {parent_hash} not in canonical chain and no \
-                             pending state available for overlay"
-                        )
-                    },
-                )?
+                return Ok(None);
+            };
+            if !is_consistent_speculative_parent_hashes(
+                args.base.parent_hash,
+                pending.block_hash,
+                parent_header.hash(),
+            ) {
+                trace!(
+                    target: "flashblocks",
+                    incoming_parent_hash = ?args.base.parent_hash,
+                    pending_block_hash = ?pending.block_hash,
+                    pending_sealed_hash = ?parent_header.hash(),
+                    pending_block_number = pending.block_number,
+                    "Skipping speculative build: inconsistent pending parent hashes"
+                );
+                return Ok(None);
             }
+            trace!(
+                target: "flashblocks",
+                pending_block_number = pending.block_number,
+                pending_block_hash = ?pending.block_hash,
+                canonical_anchor = ?pending.canonical_anchor_hash,
+                "Building speculatively on pending state"
+            );
+            (
+                self.provider.history_by_block_hash(pending.canonical_anchor_hash)?,
+                pending.canonical_anchor_hash,
+                parent_header,
+            )
         };
 
-        let mut request_cache = CachedReads::default();
-        let cached_db =
-            request_cache.as_db_mut(StateProviderDatabase::new(state_provider.as_ref()));
-        let mut state = State::builder().with_database(cached_db).with_bundle_update().build();
+        // Set up cached reads
+        let cache_key = if is_canonical { latest_hash } else { args.base.parent_hash };
+        let mut request_cache = args
+            .cached_state
+            .take()
+            .filter(|(hash, _)| hash == &cache_key)
+            .map(|(_, state)| state)
+            .unwrap_or_else(|| {
+                // For speculative builds, use cached reads from pending parent
+                args.pending_parent.as_ref().map(|p| p.cached_reads.clone()).unwrap_or_default()
+            });
 
-        let mut builder = self
-            .evm_config
-            .builder_for_next_block(&mut state, &parent_header, base.clone().into())
-            .map_err(RethError::other)?;
-        builder.apply_pre_execution_changes()?;
-        for tx in &transactions {
-            builder.execute_transaction(tx.clone())?;
-        }
-        let BlockBuilderOutcome { execution_result, block, hashed_state, .. } =
-            builder.finish(state_provider.as_ref())?;
-        let bundle = state.take_bundle();
+        let cached_db = request_cache.as_db_mut(StateProviderDatabase::new(&state_provider));
 
-        self.commit_pending_sequence(
-            base,
-            transactions,
-            last_flashblock_index,
-            execution_result,
-            block,
-            hashed_state,
-            bundle,
-            request_cache,
-        )
-    }
+        // Check for resumable canonical execution state.
+        let canonical_parent_hash = args.base.parent_hash;
+        let cached_prefix = if is_canonical {
+            self.tx_cache
+                .get_resumable_state_with_execution_meta_for_parent(
+                    args.base.block_number,
+                    canonical_parent_hash,
+                    &tx_hashes,
+                )
+                .map(|(bundle, receipts, _requests, gas_used, blob_gas_used, cached_tx_count)| {
+                    trace!(
+                        target: "flashblocks",
+                        cached_tx_count,
+                        total_txs = tx_hashes.len(),
+                        "Cache hit (executing only uncached suffix)"
+                    );
+                    CachedPrefixExecutionResult {
+                        cached_tx_count,
+                        bundle: bundle.clone(),
+                        receipts: receipts.to_vec(),
+                        gas_used,
+                        blob_gas_used,
+                    }
+                })
+        } else {
+            None
+        };
 
-    /// Incremental execution for the same block height as the current pending. Reuses
-    /// the pending sequence's `BundleState` as prestate and its warm `CachedReads`,
-    /// executing only new unexecuted transactions from incremental flashblock payloads.
-    fn execute_incremental(
-        &self,
-        base: OpFlashblockPayloadBase,
-        transactions: Vec<WithEncoded<Recovered<N::SignedTx>>>,
-        last_flashblock_index: u64,
-        pending: PendingSequence<N>,
-    ) -> eyre::Result<()> {
-        if pending.last_flashblock_index != last_flashblock_index {
-            // State cache is polluted
-            warn!(
-                target: "flashblocks",
-                incoming_last_flashblock_index = last_flashblock_index,
-                pending_last_flashblock_index = pending.last_flashblock_index,
-                "state mismatch from incoming sequence to current pending tip",
-            );
-            return Err(eyre::eyre!(
-                "state mismatch, last flashblock index mismatch pending index"
-            ));
-        }
+        // Build state with appropriate prestate
+        // - Speculative builds use pending parent prestate
+        // - Canonical cache-hit builds use cached prefix prestate
+        let mut state = if let Some(ref pending) = args.pending_parent {
+            State::builder()
+                .with_database(cached_db)
+                .with_bundle_prestate(pending.execution_outcome.state.clone())
+                .with_bundle_update()
+                .build()
+        } else if let Some(ref cached_prefix) = cached_prefix {
+            State::builder()
+                .with_database(cached_db)
+                .with_bundle_prestate(cached_prefix.bundle.clone())
+                .with_bundle_update()
+                .build()
+        } else {
+            State::builder().with_database(cached_db).with_bundle_update().build()
+        };
 
-        // Get latest canonical state, then overlay flashblocks state cache blocks
-        // from canonical height up to the parent hash. This handles the case where
-        // the parent is a flashblocks-confirmed block ahead of canonical.
-        let parent_hash = base.parent_hash;
-        let canonical_state = self.provider.latest()?;
-        let (state_provider, parent_header) = self
-            .flashblocks_state
-            .get_state_provider_by_hash(parent_hash, canonical_state)
-            .ok_or_else(|| {
-                eyre::eyre!("failed to build overlay state provider for parent {parent_hash}")
-            })?;
+        let (execution_result, block, hashed_state, bundle) = if let Some(cached_prefix) =
+            cached_prefix
+        {
+            // Cached prefix execution model:
+            // - The cached bundle prestate already includes pre-execution state changes
+            //   (blockhash/beacon root updates, create2deployer), so we do NOT call
+            //   apply_pre_execution_changes() again.
+            // - The only pre-execution effect we need is set_state_clear_flag, which configures EVM
+            //   empty-account handling (OP Stack chains activate Spurious Dragon at genesis, so
+            //   this is always true).
+            // - Suffix transactions execute against the warm prestate.
+            // - Post-execution (finish()) runs once on the suffix executor, producing correct
+            //   results for the full block. For OP Stack post-merge, the
+            //   post_block_balance_increments are empty (no block rewards, no ommers, no
+            //   withdrawals passed), so finish() only seals execution state.
+            let attrs = args.base.clone().into();
+            let evm_env =
+                self.evm_config.next_evm_env(parent_header, &attrs).map_err(RethError::other)?;
+            let execution_ctx = self
+                .evm_config
+                .context_for_next_block(parent_header, attrs)
+                .map_err(RethError::other)?;
 
-        // Extract prestate from current pending
-        let exec_output = &pending.pending.executed_block.execution_output;
-        let prestate_bundle = exec_output.state.clone();
-        let cached_tx_count =
-            pending.pending.executed_block.recovered_block.body().transaction_count();
-        let cached_receipts = exec_output.result.receipts.clone();
-        let cached_gas_used = exec_output.result.gas_used;
-        let cached_blob_gas_used = exec_output.result.blob_gas_used;
+            // The cached bundle prestate already includes pre-execution state changes.
+            // Only set the state clear flag (Spurious Dragon empty-account handling).
+            state.set_state_clear_flag(true);
+            let evm = self.evm_config.evm_with_env(&mut state, evm_env);
+            let mut executor = self.evm_config.create_executor(evm, execution_ctx.clone());
 
-        // Set up state DB with pending's warm CachedReads + prestate bundle
-        let mut request_cache = pending.cached_reads;
-        let cached_db =
-            request_cache.as_db_mut(StateProviderDatabase::new(state_provider.as_ref()));
-        let mut state = State::builder()
-            .with_database(cached_db)
-            .with_bundle_prestate(prestate_bundle)
-            .with_bundle_update()
-            .build();
+            for tx in transactions.iter().skip(cached_prefix.cached_tx_count).cloned() {
+                let _gas_used = executor.execute_transaction(tx)?;
+            }
 
-        let attrs = base.clone().into();
-        let evm_env =
-            self.evm_config.next_evm_env(&parent_header, &attrs).map_err(RethError::other)?;
-        let execution_ctx = self
-            .evm_config
-            .context_for_next_block(&parent_header, attrs)
-            .map_err(RethError::other)?;
+            let (evm, suffix_execution_result) = executor.finish()?;
+            let (db, evm_env) = evm.finish();
+            db.merge_transitions(BundleRetention::Reverts);
 
-        // Skip apply_pre_execution_changes (already applied in the original fresh build).
-        // The only pre-execution effect we need is set_state_clear_flag, which configures EVM
-        // empty-account handling (OP Stack chains activate Spurious Dragon at genesis, so
-        // this is always true).
-        state.set_state_clear_flag(true);
-        let evm = self.evm_config.evm_with_env(&mut state, evm_env);
-        let mut executor = self.evm_config.create_executor(evm, execution_ctx.clone());
+            let execution_result =
+                Self::merge_cached_and_suffix_results(cached_prefix, suffix_execution_result);
 
-        for tx in transactions.iter().skip(cached_tx_count).cloned() {
-            executor.execute_transaction(tx)?;
-        }
+            let (hashed_state, state_root) = if args.compute_state_root {
+                trace!(target: "flashblocks", "Computing block state root");
+                let hashed_state = state_provider.hashed_post_state(&db.bundle_state);
+                let (state_root, _) = state_provider
+                    .state_root_with_updates(hashed_state.clone())
+                    .map_err(RethError::other)?;
+                (hashed_state, state_root)
+            } else {
+                let noop_provider = NoopProvider::default();
+                let hashed_state = noop_provider.hashed_post_state(&db.bundle_state);
+                let (state_root, _) = noop_provider
+                    .state_root_with_updates(hashed_state.clone())
+                    .map_err(RethError::other)?;
+                (hashed_state, state_root)
+            };
+            let bundle = db.take_bundle();
 
-        let (evm, execution_result) = executor.finish()?;
-        let (db, evm_env) = evm.finish();
-        db.merge_transitions(BundleRetention::Reverts);
+            let (block_transactions, senders): (Vec<_>, Vec<_>) =
+                transactions.iter().map(|tx| tx.1.clone().into_parts()).unzip();
+            let block = self
+                .evm_config
+                .block_assembler()
+                .assemble_block(BlockAssemblerInput::new(
+                    evm_env,
+                    execution_ctx,
+                    parent_header,
+                    block_transactions,
+                    &execution_result,
+                    &bundle,
+                    &state_provider,
+                    state_root,
+                ))
+                .map_err(RethError::other)?;
+            let block = RecoveredBlock::new_unhashed(block, senders);
 
-        let execution_result = Self::merge_cached_block_execution_results(
-            cached_receipts,
-            cached_gas_used,
-            cached_blob_gas_used,
-            execution_result,
-        );
+            (execution_result, block, hashed_state, bundle)
+        } else {
+            let mut builder = self
+                .evm_config
+                .builder_for_next_block(&mut state, parent_header, args.base.clone().into())
+                .map_err(RethError::other)?;
 
-        // Compute state root via sparse trie
-        let hashed_state = state_provider.hashed_post_state(&db.bundle_state);
-        let (state_root, _) = state_provider
-            .state_root_with_updates(hashed_state.clone())
-            .map_err(RethError::other)?;
-        let bundle = db.take_bundle();
+            builder.apply_pre_execution_changes()?;
 
-        // Assemble block
-        let (block_transactions, senders): (Vec<_>, Vec<_>) =
-            transactions.iter().map(|tx| tx.1.clone().into_parts()).unzip();
-        let block = self
-            .evm_config
-            .block_assembler()
-            .assemble_block(BlockAssemblerInput::new(
-                evm_env,
-                execution_ctx,
-                &parent_header,
-                block_transactions,
-                &execution_result,
-                &bundle,
-                state_provider.as_ref(),
-                state_root,
-            ))
-            .map_err(RethError::other)?;
-        let block = RecoveredBlock::new_unhashed(block, senders);
+            for tx in transactions {
+                let _gas_used = builder.execute_transaction(tx)?;
+            }
 
-        self.commit_pending_sequence(
-            base,
-            transactions,
-            last_flashblock_index,
-            execution_result,
-            block,
-            hashed_state,
-            bundle,
-            request_cache,
-        )
-    }
+            let BlockBuilderOutcome { execution_result, block, hashed_state, .. } =
+                if args.compute_state_root {
+                    trace!(target: "flashblocks", "Computing block state root");
+                    builder.finish(&state_provider)?
+                } else {
+                    builder.finish(NoopProvider::default())?
+                };
+            let bundle = state.take_bundle();
 
-    /// Builds a [`PendingSequence`] and commits it to the flashblocks state cache.
-    #[expect(clippy::too_many_arguments)]
-    fn commit_pending_sequence(
-        &self,
-        base: OpFlashblockPayloadBase,
-        transactions: Vec<WithEncoded<Recovered<N::SignedTx>>>,
-        last_flashblock_index: u64,
-        execution_result: BlockExecutionResult<N::Receipt>,
-        block: RecoveredBlock<N::Block>,
-        hashed_state: HashedPostState,
-        bundle: BundleState,
-        request_cache: CachedReads,
-    ) -> eyre::Result<()> {
-        let block_hash = block.hash();
-        let parent_hash = base.parent_hash;
+            (execution_result, block, hashed_state, bundle)
+        };
 
-        // Build pending execution block
-        let execution_outcome =
-            Arc::new(BlockExecutionOutput { state: bundle, result: execution_result });
-        let executed_block = ExecutedBlock::new(
-            block.into(),
-            execution_outcome.clone(),
-            ComputedTrieData::without_trie_input(
-                Arc::new(hashed_state.into_sorted()),
-                Arc::default(),
-            ),
-        );
-        let pending_block = PendingBlock::with_executed_block(
-            Instant::now() + Duration::from_secs(1),
-            executed_block,
-        );
-
-        // Build tx index
-        let mut tx_index = HashMap::with_capacity(transactions.len());
-        for (idx, tx) in transactions.iter().enumerate() {
-            tx_index.insert(
-                *tx.tx_hash(),
-                CachedTxInfo {
-                    block_number: base.block_number,
-                    block_hash,
-                    tx_index: idx as u64,
-                    tx: tx.1.clone().into_inner(),
-                    receipt: execution_outcome.result.receipts[idx].clone(),
+        // Update internal transaction cache (only in canonical mode)
+        if is_canonical {
+            self.tx_cache.update_with_execution_meta_for_parent(
+                args.base.block_number,
+                canonical_parent_hash,
+                tx_hashes,
+                bundle.clone(),
+                execution_result.receipts.clone(),
+                CachedExecutionMeta {
+                    requests: execution_result.requests.clone(),
+                    gas_used: execution_result.gas_used,
+                    blob_gas_used: execution_result.blob_gas_used,
                 },
             );
         }
-        self.flashblocks_state.handle_pending_sequence(PendingSequence {
-            pending: pending_block,
-            tx_index,
-            cached_reads: request_cache,
-            block_hash,
-            parent_hash,
-            last_flashblock_index,
-        })
+
+        let execution_outcome = BlockExecutionOutput { state: bundle, result: execution_result };
+        let execution_outcome = Arc::new(execution_outcome);
+
+        // Create pending state for subsequent builds.
+        // Use the locally built block hash for both parent matching and speculative
+        // execution context to avoid split-hash ambiguity.
+        let local_block_hash = block.hash();
+        if local_block_hash != args.last_flashblock_hash {
+            trace!(
+                target: "flashblocks",
+                local_block_hash = ?local_block_hash,
+                sequencer_block_hash = ?args.last_flashblock_hash,
+                block_number = block.number(),
+                "Local block hash differs from sequencer-provided hash; speculative chaining will follow local hash"
+            );
+        }
+        let sealed_header = SealedHeader::new(block.header().clone(), local_block_hash);
+        let pending_state = PendingBlockState::new(
+            local_block_hash,
+            block.number(),
+            args.base.parent_hash,
+            canonical_anchor,
+            execution_outcome.clone(),
+            request_cache.clone(),
+        )
+        .with_sealed_header(sealed_header);
+
+        let pending_block = PendingBlock::with_executed_block(
+            Instant::now() + Duration::from_secs(1),
+            ExecutedBlock::new(
+                block.into(),
+                execution_outcome,
+                ComputedTrieData::without_trie_input(
+                    Arc::new(hashed_state.into_sorted()),
+                    Arc::default(),
+                ),
+            ),
+        );
+        let pending_flashblock = PendingFlashBlock::new(
+            pending_block,
+            canonical_anchor,
+            args.last_flashblock_index,
+            args.last_flashblock_hash,
+            args.compute_state_root,
+        );
+
+        Ok(Some(BuildResult { pending_flashblock, cached_reads: request_cache, pending_state }))
     }
 
-    fn merge_cached_block_execution_results(
-        cached_receipts: Vec<N::Receipt>,
-        cached_gas_used: u64,
-        cached_blob_gas_used: u64,
-        mut execution_result: BlockExecutionResult<N::Receipt>,
+    fn merge_cached_and_suffix_results(
+        cached_prefix: CachedPrefixExecutionResult<N::Receipt>,
+        mut suffix_result: BlockExecutionResult<N::Receipt>,
     ) -> BlockExecutionResult<N::Receipt> {
-        N::Receipt::add_cumulative_gas_offset(&mut execution_result.receipts, cached_gas_used);
-        let mut receipts = cached_receipts;
-        receipts.extend(execution_result.receipts);
+        N::Receipt::add_cumulative_gas_offset(&mut suffix_result.receipts, cached_prefix.gas_used);
+
+        let mut receipts = cached_prefix.receipts;
+        receipts.extend(suffix_result.receipts);
+
+        // Use only suffix requests: the suffix executor's finish() produces
+        // post-execution requests from the complete block state (cached prestate +
+        // suffix changes). The cached prefix requests came from an intermediate
+        // state and must not be merged.
+        let requests = suffix_result.requests;
+
         BlockExecutionResult {
             receipts,
-            requests: execution_result.requests,
-            gas_used: cached_gas_used.saturating_add(execution_result.gas_used),
-            blob_gas_used: cached_blob_gas_used.saturating_add(execution_result.blob_gas_used),
+            requests,
+            gas_used: cached_prefix.gas_used.saturating_add(suffix_result.gas_used),
+            blob_gas_used: cached_prefix.blob_gas_used.saturating_add(suffix_result.blob_gas_used),
         }
     }
 }
+
+#[inline]
+fn is_consistent_speculative_parent_hashes(
+    incoming_parent_hash: B256,
+    pending_block_hash: B256,
+    pending_sealed_hash: B256,
+) -> bool {
+    incoming_parent_hash == pending_block_hash && pending_block_hash == pending_sealed_hash
+}
+
+// #[cfg(test)]
+// mod tests {
+//     use super::{is_consistent_speculative_parent_hashes, BuildArgs, FlashBlockBuilder};
+//     use crate::execution::cache::CachedExecutionMeta;
+//     use alloy_consensus::{SignableTransaction, TxEip1559};
+//     use alloy_eips::eip2718::Encodable2718;
+//     use alloy_network::TxSignerSync;
+//     use alloy_primitives::{Address, StorageKey, StorageValue, TxKind, B256, U256};
+//     use alloy_signer_local::PrivateKeySigner;
+//     use op_alloy_rpc_types_engine::OpFlashblockPayloadBase;
+//     use op_revm::constants::L1_BLOCK_CONTRACT;
+//     use reth_optimism_chainspec::OP_MAINNET;
+//     use reth_optimism_evm::OpEvmConfig;
+//     use reth_optimism_primitives::{OpBlock, OpPrimitives, OpTransactionSigned};
+//     use reth_primitives_traits::{AlloyBlockHeader, Recovered, SignerRecoverable};
+//     use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
+//     use reth_provider::ChainSpecProvider;
+//     use reth_storage_api::BlockReaderIdExt;
+//     use std::str::FromStr;
+
+//     fn signed_transfer_tx(
+//         signer: &PrivateKeySigner,
+//         nonce: u64,
+//         recipient: Address,
+//     ) -> OpTransactionSigned {
+//         let mut tx = TxEip1559 {
+//             chain_id: 10, // OP Mainnet chain id
+//             nonce,
+//             gas_limit: 100_000,
+//             max_priority_fee_per_gas: 1_000_000_000,
+//             max_fee_per_gas: 2_000_000_000,
+//             to: TxKind::Call(recipient),
+//             value: U256::from(1),
+//             ..Default::default()
+//         };
+//         let signature = signer.sign_transaction_sync(&mut tx).expect("signing tx succeeds");
+//         tx.into_signed(signature).into()
+//     }
+
+//     fn into_encoded_recovered(
+//         tx: OpTransactionSigned,
+//         signer: Address,
+//     ) -> alloy_eips::eip2718::WithEncoded<Recovered<OpTransactionSigned>> {
+//         let encoded = tx.encoded_2718();
+//         Recovered::new_unchecked(tx, signer).into_encoded_with(encoded)
+//     }
+
+//     #[test]
+//     fn speculative_parent_hashes_must_all_match() {
+//         let h = B256::repeat_byte(0x11);
+//         assert!(is_consistent_speculative_parent_hashes(h, h, h));
+//     }
+
+//     #[test]
+//     fn speculative_parent_hashes_reject_any_mismatch() {
+//         let incoming = B256::repeat_byte(0x11);
+//         let pending = B256::repeat_byte(0x22);
+//         let sealed = B256::repeat_byte(0x33);
+
+//         assert!(!is_consistent_speculative_parent_hashes(incoming, pending, sealed));
+//         assert!(!is_consistent_speculative_parent_hashes(incoming, incoming, sealed));
+//         assert!(!is_consistent_speculative_parent_hashes(incoming, pending, pending));
+//     }
+
+//     #[test]
+//     fn canonical_build_reuses_cached_prefix_execution() {
+//         let provider = MockEthProvider::<OpPrimitives>::new().with_chain_spec(OP_MAINNET.clone());
+//         let genesis_hash = provider.chain_spec().genesis_hash();
+//         let genesis_block =
+//             OpBlock::new(provider.chain_spec().genesis_header().clone(), Default::default());
+//         provider.add_block(genesis_hash, genesis_block);
+
+//         let recipient = Address::repeat_byte(0x22);
+//         let signer = PrivateKeySigner::random();
+//         let tx_a = signed_transfer_tx(&signer, 0, recipient);
+//         let tx_b = signed_transfer_tx(&signer, 1, recipient);
+//         let tx_c = signed_transfer_tx(&signer, 2, recipient);
+//         let signer = tx_a.recover_signer().expect("tx signer recovery succeeds");
+
+//         provider.add_account(signer, ExtendedAccount::new(0, U256::from(1_000_000_000_000_000u64)));
+//         provider.add_account(recipient, ExtendedAccount::new(0, U256::ZERO));
+//         provider.add_account(
+//             L1_BLOCK_CONTRACT,
+//             ExtendedAccount::new(1, U256::ZERO).extend_storage([
+//                 (StorageKey::with_last_byte(1), StorageValue::from(1_000_000_000u64)),
+//                 (StorageKey::with_last_byte(5), StorageValue::from(188u64)),
+//                 (StorageKey::with_last_byte(6), StorageValue::from(684_000u64)),
+//                 (
+//                     StorageKey::with_last_byte(3),
+//                     StorageValue::from_str(
+//                         "0x0000000000000000000000000000000000001db0000d27300000000000000005",
+//                     )
+//                     .expect("valid L1 fee scalar storage value"),
+//                 ),
+//             ]),
+//         );
+
+//         let latest = provider
+//             .latest_header()
+//             .expect("provider latest header query succeeds")
+//             .expect("genesis header exists");
+
+//         let base = OpFlashblockPayloadBase {
+//             parent_hash: latest.hash(),
+//             parent_beacon_block_root: B256::ZERO,
+//             fee_recipient: Address::ZERO,
+//             prev_randao: B256::repeat_byte(0x55),
+//             block_number: latest.number() + 1,
+//             gas_limit: 30_000_000,
+//             timestamp: latest.timestamp() + 2,
+//             extra_data: Default::default(),
+//             base_fee_per_gas: U256::from(1_000_000_000u64),
+//         };
+//         let base_parent_hash = base.parent_hash;
+
+//         let tx_a_hash = B256::from(*tx_a.tx_hash());
+//         let tx_b_hash = B256::from(*tx_b.tx_hash());
+//         let tx_c_hash = B256::from(*tx_c.tx_hash());
+
+//         let tx_a = into_encoded_recovered(tx_a, signer);
+//         let tx_b = into_encoded_recovered(tx_b, signer);
+//         let tx_c = into_encoded_recovered(tx_c, signer);
+
+//         let evm_config = OpEvmConfig::optimism(OP_MAINNET.clone());
+//         let mut builder = FlashBlockBuilder::<OpPrimitives, _, _>::new(evm_config, provider);
+
+//         let first = builder
+//             .execute(BuildArgs {
+//                 base: base.clone(),
+//                 transactions: vec![tx_a.clone(), tx_b.clone()],
+//                 cached_state: None,
+//                 last_flashblock_index: 0,
+//                 last_flashblock_hash: B256::repeat_byte(0xA0),
+//                 compute_state_root: false,
+//                 pending_parent: None,
+//             })
+//             .expect("first build succeeds")
+//             .expect("first build is canonical");
+
+//         assert_eq!(first.pending_state.execution_outcome.result.receipts.len(), 2);
+
+//         let cached_hashes = vec![tx_a_hash, tx_b_hash];
+//         let (bundle, receipts, requests, gas_used, blob_gas_used, skip) = builder
+//             .tx_cache
+//             .get_resumable_state_with_execution_meta_for_parent(
+//                 base.block_number,
+//                 base_parent_hash,
+//                 &cached_hashes,
+//             )
+//             .expect("cache should contain first build execution state");
+//         assert_eq!(skip, 2);
+
+//         let mut tampered_receipts = receipts.to_vec();
+//         tampered_receipts[0].as_receipt_mut().cumulative_gas_used =
+//             tampered_receipts[0].as_receipt().cumulative_gas_used.saturating_add(17);
+//         let expected_tampered_gas = tampered_receipts[0].as_receipt().cumulative_gas_used;
+
+//         builder.tx_cache.update_with_execution_meta_for_parent(
+//             base.block_number,
+//             base_parent_hash,
+//             cached_hashes,
+//             bundle.clone(),
+//             tampered_receipts,
+//             CachedExecutionMeta { requests: requests.clone(), gas_used, blob_gas_used },
+//         );
+
+//         let second_hashes = vec![tx_a_hash, tx_b_hash, tx_c_hash];
+//         let (_, _, _, _, _, skip) = builder
+//             .tx_cache
+//             .get_resumable_state_with_execution_meta_for_parent(
+//                 base.block_number,
+//                 base_parent_hash,
+//                 &second_hashes,
+//             )
+//             .expect("second tx list should extend cached prefix");
+//         assert_eq!(skip, 2);
+
+//         let second = builder
+//             .execute(BuildArgs {
+//                 base,
+//                 transactions: vec![tx_a, tx_b, tx_c],
+//                 cached_state: None,
+//                 last_flashblock_index: 1,
+//                 last_flashblock_hash: B256::repeat_byte(0xA1),
+//                 compute_state_root: false,
+//                 pending_parent: None,
+//             })
+//             .expect("second build succeeds")
+//             .expect("second build is canonical");
+
+//         let receipts = &second.pending_state.execution_outcome.result.receipts;
+//         assert_eq!(receipts.len(), 3);
+//         assert_eq!(receipts[0].as_receipt().cumulative_gas_used, expected_tampered_gas);
+//         assert!(
+//             receipts[2].as_receipt().cumulative_gas_used
+//                 > receipts[1].as_receipt().cumulative_gas_used
+//         );
+//     }
+// }

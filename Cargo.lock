@@ -8073,7 +8073,7 @@ dependencies = [
  "reth-node-api",
  "reth-primitives-traits",
  "reth-tracing",
- "ringbuffer",
+ "ringbuffer 0.16.0",
  "serde",
  "serde_json",
  "tokio",
@@ -9554,7 +9554,7 @@ dependencies = [
  "reth-rpc-eth-types",
  "reth-storage-api",
  "reth-tasks",
- "ringbuffer",
+ "ringbuffer 0.16.0",
  "serde_json",
  "tokio",
  "tokio-tungstenite 0.28.0",
@@ -11027,6 +11027,12 @@ dependencies = [
  "untrusted",
  "windows-sys 0.52.0",
 ]
+
+[[package]]
+name = "ringbuffer"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3df6368f71f205ff9c33c076d170dd56ebf68e8161c733c0caa07a7a5509ed53"
 
 [[package]]
 name = "ringbuffer"
@@ -14215,8 +14221,7 @@ dependencies = [
  "reth-storage-api",
  "reth-tasks",
  "reth-tracing",
- "reth-trie-common",
- "ringbuffer",
+ "ringbuffer 0.15.0",
  "serde",
  "serde_json",
  "test-case",

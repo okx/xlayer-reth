@@ -28,6 +28,14 @@ where
     pub parent_hash: B256,
     /// The last flashblock index of the latest flashblocks sequence.
     pub last_flashblock_index: u64,
+    /// Cached number of transactions covered by the pending sequence execution.
+    cached_tx_count: usize,
+    /// Cached receipts for the prefix.
+    pub cached_receipts: Vec<N::Receipt>,
+    /// Total gas used by the pending sequence.
+    pub cached_gas_used: u64,
+    /// Total blob/DA gas used by the pending sequence.
+    pub cached_blob_gas_used: u64,
 }
 
 impl<N: NodePrimitives> PendingSequence<N>
@@ -81,6 +89,10 @@ mod tests {
             block_hash,
             parent_hash,
             last_flashblock_index: 0,
+            cached_tx_count: 0,
+            cached_receipts: vec![],
+            cached_gas_used: 0,
+            cached_blob_gas_used: 0,
         }
     }
 
@@ -115,6 +127,10 @@ mod tests {
             block_hash,
             parent_hash,
             last_flashblock_index: 0,
+            cached_tx_count: 0,
+            cached_receipts: vec![],
+            cached_gas_used: 0,
+            cached_blob_gas_used: 0,
         }
     }
 

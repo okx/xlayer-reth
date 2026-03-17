@@ -3,10 +3,9 @@ pub mod pending;
 pub(crate) mod raw;
 pub(crate) mod utils;
 
-pub(crate) use confirm::ConfirmCache;
-pub(crate) use raw::RawFlashblocksCache;
-
+pub use confirm::ConfirmCache;
 pub use pending::PendingSequence;
+pub use raw::RawFlashblocksCache;
 
 use crate::{FlashblockCachedReceipt, PendingSequenceRx};
 use parking_lot::RwLock;
@@ -87,11 +86,6 @@ where
         self.inner.read().pending_cache.as_ref().map(|p| p.get_height())
     }
 
-    /// Returns a clone of the current pending sequence, if any.
-    pub fn get_pending_sequence(&self) -> Option<PendingSequence<N>> {
-        self.inner.read().pending_cache.clone()
-    }
-
     pub fn get_rpc_block_by_id(&self, block_id: Option<BlockId>) -> Option<BlockAndReceipts<N>> {
         match block_id.unwrap_or(BlockId::Number(BlockNumberOrTag::Latest)) {
             BlockId::Number(id) => self.get_rpc_block(id),
@@ -165,18 +159,6 @@ where
     ) -> Option<(StateProviderBox, SealedHeaderFor<N>)> {
         let mut guard = self.inner.write();
         let block = guard.get_pending_block()?.block;
-        let block_num = block.number();
-        let in_memory = guard.get_state_provider_at_height(block_num, canonical_state)?;
-        Some((in_memory, block.clone_sealed_header()))
-    }
-
-    pub fn get_state_provider_by_hash(
-        &self,
-        block_hash: B256,
-        canonical_state: StateProviderBox,
-    ) -> Option<(StateProviderBox, SealedHeaderFor<N>)> {
-        let mut guard = self.inner.write();
-        let block = guard.get_block_by_hash(&block_hash)?.block;
         let block_num = block.number();
         let in_memory = guard.get_state_provider_at_height(block_num, canonical_state)?;
         Some((in_memory, block.clone_sealed_header()))
