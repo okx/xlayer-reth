@@ -125,6 +125,5 @@ jobs:
 
             Use the pr-review skill to perform a code review of this PR.
 
-            When done, post your full review summary as a PR comment using:
-            gh pr comment ${{ github.event.pull_request.number || github.event.issue.number }} --body "<your review>"
-          claude_args: "--allowedTools Skill,SlashCommand,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Glob,Grep"
+            When done, output your full review summary to stdout. Do NOT post it yourself via gh pr comment — the action will post it automatically.
+          claude_args: "--allowedTools Skill,SlashCommand,Bash(gh pr diff:*),Bash(gh pr view:*),Read,Glob,Grep"
