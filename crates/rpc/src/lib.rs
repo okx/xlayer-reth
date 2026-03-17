@@ -5,7 +5,7 @@ pub mod eth;
 pub mod helper;
 pub mod xlayer_ext;
 
-pub use eth::{EthApiOverrideServer, XLayerEthApiExt};
+pub use eth::{FlashblocksEthApiOverrideServer, XLayerEthApiExt};
 pub use xlayer_ext::{SequencerClientProvider, XlayerRpcExt, XlayerRpcExtApiServer};
 
 // Implement `SequencerClientProvider` for `OpEthApi`

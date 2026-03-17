@@ -55,13 +55,13 @@ mod tests {
     #[test]
     fn test_flashblocks_disabled_when_no_cache() {
         let ext = XlayerRpcExt::new(None);
-        assert!(ext.flash_cache.is_none());
+        assert!(ext.flashblocks_state.is_none());
     }
 
     #[test]
     fn test_flashblocks_disabled_at_zero_height() {
         let cache = FlashblockStateCache::<OpPrimitives>::new();
         let ext = XlayerRpcExt::new(Some(cache));
-        assert!(ext.flash_cache.as_ref().unwrap().get_confirm_height() == 0);
+        assert!(ext.flashblocks_state.as_ref().unwrap().get_confirm_height() == 0);
     }
 }

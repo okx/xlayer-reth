@@ -9,28 +9,28 @@ use jsonrpsee::{
 use tokio_stream::wrappers::WatchStream;
 use tracing::*;
 
-use alloy_consensus::BlockHeader;
+use alloy_eips::eip2718::Encodable2718;
 use alloy_eips::{BlockId, BlockNumberOrTag};
 use alloy_primitives::{Address, Bytes, TxHash, B256, U256};
 use alloy_rpc_types_eth::{
     state::{EvmOverrides, StateOverride},
-    BlockOverrides, Filter, Index, Log, TransactionInfo,
+    BlockOverrides, Index,
 };
+use alloy_serde::JsonStorageKey;
 use op_alloy_network::Optimism;
 use op_alloy_rpc_types::OpTransactionRequest;
 
 use reth_chain_state::CanonStateSubscriptions;
 use reth_optimism_primitives::OpPrimitives;
-use reth_optimism_rpc::eth::OpEthApi;
-use reth_primitives_traits::{BlockBody, NodePrimitives, SealedHeaderFor, SignerRecoverable};
+use reth_optimism_rpc::{OpEthApi, OpEthApiError};
+use reth_primitives_traits::SealedHeaderFor;
 use reth_revm::{database::StateProviderDatabase, db::State};
-use reth_rpc::eth::EthFilter;
-use reth_rpc_convert::RpcTransaction;
+use reth_rpc_convert::{RpcConvert, RpcTransaction};
 use reth_rpc_eth_api::{
-    helpers::{estimate::EstimateCall, EthBlocks, EthCall, EthState, EthTransactions, FullEthApi},
-    EthApiServer, EthApiTypes, RpcBlock, RpcNodeCore, RpcReceipt,
+    helpers::{estimate::EstimateCall, Call, FullEthApi, LoadState},
+    EthApiServer, EthApiTypes, FromEvmError, RpcBlock, RpcNodeCore, RpcReceipt,
 };
-use reth_rpc_eth_types::{block::convert_transaction_receipt, error::FromEvmError, EthApiError};
+use reth_rpc_eth_types::{block::convert_transaction_receipt, EthApiError};
 use reth_rpc_server_types::result::ToRpcResult;
 use reth_storage_api::{StateProvider, StateProviderBox, StateProviderFactory};
 
@@ -135,8 +135,8 @@ pub trait FlashblocksEthApiOverride {
         index: Index,
     ) -> RpcResult<Option<Bytes>>;
 
-    /// Sends a signed transaction and awaits the transaction receipt, with the flashblock state cache
-    /// overlay support for pending and confirmed blocks.
+    /// Sends a signed transaction and awaits the transaction receipt, with the flashblock state
+    /// cache overlay support for pending and confirmed blocks.
     ///
     /// This will return a timeout error if the transaction isn't included within some time period.
     #[method(name = "sendRawTransactionSync")]
@@ -164,9 +164,9 @@ pub trait FlashblocksEthApiOverride {
         block_number: Option<BlockId>,
         overrides: Option<StateOverride>,
     ) -> RpcResult<U256>;
+
     /// Returns the balance of the account of given address, with the flashblock state cache
     /// overlay support for pending and confirmed block states.
-
     #[method(name = "getBalance")]
     async fn balance(&self, address: Address, block_number: Option<BlockId>) -> RpcResult<U256>;
 
@@ -190,41 +190,59 @@ pub trait FlashblocksEthApiOverride {
     async fn storage_at(
         &self,
         address: Address,
-        slot: U256,
+        slot: JsonStorageKey,
         block_number: Option<BlockId>,
     ) -> RpcResult<B256>;
 }
 
 /// Extended Eth API with flashblocks cache overlay.
 #[derive(Debug)]
-pub struct XLayerEthApiExt<Eth: EthApiTypes> {
-    eth_api: OpEthApi<Eth>,
+pub struct XLayerEthApiExt<N: RpcNodeCore, Rpc: RpcConvert> {
+    eth_api: OpEthApi<N, Rpc>,
+    /// Stored separately to avoid associated type projection ambiguity when
+    /// the trait solver processes `<OpEthApi<N, Rpc> as EthApiTypes>::RpcConvert`.
+    converter: Rpc,
     flashblocks_state: FlashblockStateCache<OpPrimitives>,
 }
 
-impl<Eth: EthApiTypes> XLayerEthApiExt<Eth> {
+impl<N: RpcNodeCore, Rpc: RpcConvert> XLayerEthApiExt<N, Rpc> {
     /// Creates a new [`XLayerEthApiExt`].
     pub fn new(
-        eth_api: OpEthApi<Eth>,
+        eth_api: OpEthApi<N, Rpc>,
         flashblocks_state: FlashblockStateCache<OpPrimitives>,
-    ) -> Self {
-        Self { eth_api, flashblocks_state }
+    ) -> Self
+    where
+        Rpc: Clone + RpcConvert<Primitives = N::Primitives, Error = OpEthApiError>,
+    {
+        let converter = eth_api.converter().clone();
+        Self { eth_api, converter, flashblocks_state }
     }
 }
 
 #[async_trait]
-impl<Eth> FlashblocksEthApiOverrideServer for XLayerEthApiExt<Eth>
+impl<N, Rpc> FlashblocksEthApiOverrideServer for XLayerEthApiExt<N, Rpc>
 where
-    Eth: FullEthApi<NetworkTypes = Optimism> + Send + Sync + 'static,
-    jsonrpsee_types::error::ErrorObject<'static>: From<Eth::Error>,
+    N: RpcNodeCore<Primitives = OpPrimitives>,
+    Rpc: RpcConvert<Network = Optimism, Primitives = N::Primitives, Error = OpEthApiError>,
+    OpEthApi<N, Rpc>: FullEthApi<NetworkTypes = Optimism, Error = OpEthApiError>
+        + EthApiTypes<RpcConvert = Rpc>
+        + RpcNodeCore<Primitives = OpPrimitives>
+        + LoadState
+        + Call
+        + EstimateCall
+        + Send
+        + Sync
+        + 'static,
 {
     // ----------------- Block apis -----------------
     /// Handler for: `eth_blockNumber`
     async fn block_number(&self) -> RpcResult<U256> {
         trace!(target: "rpc::eth", "Serving eth_blockNumber");
         let fb_height = self.flashblocks_state.get_confirm_height();
-        let canon_height = self.eth_api.block_number().await?;
-        Ok(U256::from(std::cmp::max(fb_height, canon_height)))
+        // `EthApiServer::block_number` is synchronous (not async)
+        let canon_height: U256 = EthApiServer::block_number(&self.eth_api)?;
+        let fb_height = U256::from(fb_height);
+        Ok(std::cmp::max(fb_height, canon_height))
     }
 
     /// Handler for: `eth_getBlockByNumber`
@@ -235,22 +253,18 @@ where
     ) -> RpcResult<Option<RpcBlock<Optimism>>> {
         trace!(target: "rpc::eth", ?number, ?full, "Serving eth_getBlockByNumber");
         if let Some(bar) = self.flashblocks_state.get_rpc_block(number) {
-            return to_rpc_block::<Eth>(&bar, full, self.eth_api.converter())
-                .map(Some)
-                .map_err(Into::into);
+            return to_rpc_block(&bar, full, &self.converter).map(Some).map_err(Into::into);
         }
-        self.eth_api.block_by_number(number, full).await
+        EthApiServer::block_by_number(&self.eth_api, number, full).await
     }
 
     /// Handler for: `eth_getBlockByHash`
     async fn block_by_hash(&self, hash: B256, full: bool) -> RpcResult<Option<RpcBlock<Optimism>>> {
         trace!(target: "rpc::eth", ?hash, ?full, "Serving eth_getBlockByHash");
         if let Some(bar) = self.flashblocks_state.get_block_by_hash(&hash) {
-            return to_rpc_block::<Eth>(&bar, full, self.eth_api.converter())
-                .map(Some)
-                .map_err(Into::into);
+            return to_rpc_block(&bar, full, &self.converter).map(Some).map_err(Into::into);
         }
-        self.eth_api.block_by_hash(hash, full).await
+        EthApiServer::block_by_hash(&self.eth_api, hash, full).await
     }
 
     /// Handler for: `eth_getBlockReceipts`
@@ -260,11 +274,9 @@ where
     ) -> RpcResult<Option<Vec<RpcReceipt<Optimism>>>> {
         trace!(target: "rpc::eth", ?block_id, "Serving eth_getBlockReceipts");
         if let Some(bar) = self.flashblocks_state.get_rpc_block(block_id) {
-            return to_block_receipts::<Eth>(&bar, self.eth_api.converter())
-                .map(Some)
-                .map_err(Into::into);
+            return to_block_receipts(&bar, &self.converter).map(Some).map_err(Into::into);
         }
-        self.eth_api.block_receipts(block_id).await
+        EthApiServer::block_receipts(&self.eth_api, block_id.into()).await
     }
 
     /// Handler for: `eth_getBlockTransactionCountByNumber`
@@ -274,20 +286,20 @@ where
     ) -> RpcResult<Option<U256>> {
         trace!(target: "rpc::eth", ?number, "Serving eth_getBlockTransactionCountByNumber");
         if let Some(bar) = self.flashblocks_state.get_rpc_block(number) {
-            let count = bar.block.body().transaction_count();
+            let count = bar.block.body().transactions.len();
             return Ok(Some(U256::from(count)));
         }
-        self.eth_api.block_transaction_count_by_number(number).await
+        EthApiServer::block_transaction_count_by_number(&self.eth_api, number).await
     }
 
-    /// Handler for: `eth_getUncleCountByBlockHash`
+    /// Handler for: `eth_getBlockTransactionCountByHash`
     async fn block_transaction_count_by_hash(&self, hash: B256) -> RpcResult<Option<U256>> {
         trace!(target: "rpc::eth", ?hash, "Serving eth_getBlockTransactionCountByHash");
         if let Some(bar) = self.flashblocks_state.get_block_by_hash(&hash) {
-            let count = bar.block.body().transaction_count();
+            let count = bar.block.body().transactions.len();
             return Ok(Some(U256::from(count)));
         }
-        self.eth_api.block_transaction_count_by_hash(hash).await
+        EthApiServer::block_transaction_count_by_hash(&self.eth_api, hash).await
     }
 
     // ----------------- Transaction apis -----------------
@@ -298,9 +310,9 @@ where
     ) -> RpcResult<Option<RpcTransaction<Optimism>>> {
         trace!(target: "rpc::eth", ?hash, "Serving eth_getTransactionByHash");
         if let Some((info, bar)) = self.flashblocks_state.get_tx_info(&hash) {
-            return Ok(Some(to_rpc_transaction::<Eth>(&info, &bar, self.eth_api.converter())?));
+            return Ok(Some(to_rpc_transaction(&info, &bar, &self.converter)?));
         }
-        self.eth_api.transaction_by_hash(hash).await
+        EthApiServer::transaction_by_hash(&self.eth_api, hash).await
     }
 
     /// Handler for: `eth_getRawTransactionByHash`
@@ -309,7 +321,7 @@ where
         if let Some((info, _)) = self.flashblocks_state.get_tx_info(&hash) {
             return Ok(Some(info.tx.encoded_2718().into()));
         }
-        self.eth_api.raw_transaction_by_hash(hash).await
+        EthApiServer::raw_transaction_by_hash(&self.eth_api, hash).await
     }
 
     /// Handler for: `eth_getTransactionReceipt`
@@ -317,11 +329,11 @@ where
         trace!(target: "rpc::eth", ?hash, "Serving eth_getTransactionReceipt");
         if let Some((_, bar)) = self.flashblocks_state.get_tx_info(&hash)
             && let Some(Ok(receipt)) =
-                bar.find_and_convert_transaction_receipt(hash, self.eth_api.converter())
+                bar.find_and_convert_transaction_receipt(hash, &self.converter)
         {
             return Ok(Some(receipt));
         }
-        self.eth_api.transaction_receipt(hash).await
+        EthApiServer::transaction_receipt(&self.eth_api, hash).await
     }
 
     /// Handler for: `eth_getTransactionByBlockHashAndIndex`
@@ -332,14 +344,10 @@ where
     ) -> RpcResult<Option<RpcTransaction<Optimism>>> {
         trace!(target: "rpc::eth", ?block_hash, ?index, "Serving eth_getTransactionByBlockHashAndIndex");
         if let Some(bar) = self.flashblocks_state.get_block_by_hash(&block_hash) {
-            return to_rpc_transaction_from_bar_and_index::<Eth>(
-                &bar,
-                index.into(),
-                self.eth_api.converter(),
-            )
-            .map_err(Into::into);
+            return to_rpc_transaction_from_bar_and_index(&bar, index.into(), &self.converter)
+                .map_err(Into::into);
         }
-        self.eth_api.transaction_by_block_hash_and_index(block_hash, index).await
+        EthApiServer::transaction_by_block_hash_and_index(&self.eth_api, block_hash, index).await
     }
 
     /// Handler for: `eth_getTransactionByBlockNumberAndIndex`
@@ -350,14 +358,10 @@ where
     ) -> RpcResult<Option<RpcTransaction<Optimism>>> {
         trace!(target: "rpc::eth", ?number, ?index, "Serving eth_getTransactionByBlockNumberAndIndex");
         if let Some(bar) = self.flashblocks_state.get_rpc_block(number) {
-            return to_rpc_transaction_from_bar_and_index::<Eth>(
-                &bar,
-                index.into(),
-                self.eth_api.converter(),
-            )
-            .map_err(Into::into);
+            return to_rpc_transaction_from_bar_and_index(&bar, index.into(), &self.converter)
+                .map_err(Into::into);
         }
-        self.eth_api.transaction_by_block_number_and_index(number, index).await
+        EthApiServer::transaction_by_block_number_and_index(&self.eth_api, number, index).await
     }
 
     /// Handler for: `eth_getRawTransactionByBlockHashAndIndex`
@@ -367,12 +371,13 @@ where
         index: Index,
     ) -> RpcResult<Option<Bytes>> {
         trace!(target: "rpc::eth", ?hash, ?index, "Serving eth_getRawTransactionByBlockHashAndIndex");
+        let idx: usize = index.into();
         if let Some(bar) = self.flashblocks_state.get_block_by_hash(&hash)
-            && let Some(tx) = bar.block.body().transactions().nth(index.into())
+            && let Some(tx) = bar.block.body().transactions.get(idx)
         {
             return Ok(Some(tx.encoded_2718().into()));
         }
-        self.eth_api.raw_transaction_by_block_hash_and_index(hash, index).await
+        EthApiServer::raw_transaction_by_block_hash_and_index(&self.eth_api, hash, index).await
     }
 
     /// Handler for: `eth_getRawTransactionByBlockNumberAndIndex`
@@ -382,21 +387,25 @@ where
         index: Index,
     ) -> RpcResult<Option<Bytes>> {
         trace!(target: "rpc::eth", ?number, ?index, "Serving eth_getRawTransactionByBlockNumberAndIndex");
+        let idx: usize = index.into();
         if let Some(bar) = self.flashblocks_state.get_rpc_block(number)
-            && let Some(tx) = bar.block.body().transactions().nth(index.into())
+            && let Some(tx) = bar.block.body().transactions.get(idx)
         {
             return Ok(Some(tx.encoded_2718().into()));
         }
-        self.eth_api.raw_transaction_by_block_number_and_index(number, index).await
+        EthApiServer::raw_transaction_by_block_number_and_index(&self.eth_api, number, index).await
     }
 
     /// Handler for: `eth_sendRawTransactionSync`
     async fn send_raw_transaction_sync(&self, tx: Bytes) -> RpcResult<RpcReceipt<Optimism>> {
+        use reth_rpc_eth_api::helpers::EthTransactions;
+
         trace!(target: "rpc::eth", ?tx, "Serving eth_sendRawTransactionSync");
-        let timeout_duration = EthTransactions::send_raw_transaction_sync_timeout(&self.eth_api);
-        let hash =
-            EthTransactions::send_raw_transaction(&self.eth_api, tx).await.map_err(Into::into)?;
-        let converter = self.eth_api.converter();
+        let timeout_duration = self.eth_api.send_raw_transaction_sync_timeout();
+        let hash = <OpEthApi<N, Rpc> as EthTransactions>::send_raw_transaction(&self.eth_api, tx)
+            .await
+            .map_err(|e| -> jsonrpsee_types::error::ErrorObject<'static> { e.into() })?;
+        let converter = &self.converter;
 
         let mut canonical_stream = self.eth_api.provider().canonical_state_stream();
         let mut flashblock_stream =
@@ -413,7 +422,7 @@ where
                             if let Some(receipt) =
                                 bar.find_and_convert_transaction_receipt(hash, converter)
                             {
-                                return receipt;
+                                return receipt.map_err(Into::into);
                             }
                         }
                     }
@@ -421,18 +430,18 @@ where
                     canonical_notification = canonical_stream.next() => {
                         if let Some(notification) = canonical_notification {
                             let chain = notification.committed();
-                            if let Some((block, tx, receipt, all_receipts)) =
+                            if let Some((block, indexed_tx, receipt, all_receipts)) =
                                 chain.find_transaction_and_receipt_by_hash(hash)
                             {
                                 if let Some(receipt) = convert_transaction_receipt(
                                     block,
                                     all_receipts,
-                                    tx,
+                                    indexed_tx,
                                     receipt,
                                     converter,
                                 )
                                 .transpose()
-                                .map_err(Into::into)?
+                                .map_err(|e: OpEthApiError| -> jsonrpsee_types::error::ErrorObject<'static> { e.into() })?
                                 {
                                     return Ok(receipt);
                                 }
@@ -465,7 +474,10 @@ where
     ) -> RpcResult<Bytes> {
         trace!(target: "rpc::eth", ?transaction, ?block_number, ?state_overrides, ?block_overrides, "Serving eth_call");
         if let Some((state, header)) = self.get_flashblock_state_provider_by_id(block_number)? {
-            let evm_env = self.eth_api.evm_env_for_header(&header).map_err(Into::into)?;
+            let evm_env = self
+                .eth_api
+                .evm_env_for_header(&header)
+                .map_err(|e| -> jsonrpsee_types::error::ErrorObject<'static> { e.into() })?;
             let mut db = State::builder().with_database(StateProviderDatabase::new(state)).build();
             let (evm_env, tx_env) = self
                 .eth_api
@@ -475,11 +487,22 @@ where
                     &mut db,
                     EvmOverrides::new(state_overrides, block_overrides),
                 )
-                .map_err(Into::into)?;
-            let res = EthCall::transact(&self.eth_api, db, evm_env, tx_env).map_err(Into::into)?;
-            return <Eth as EthApiTypes>::Error::ensure_success(res.result).map_err(Into::into);
+                .map_err(|e| -> jsonrpsee_types::error::ErrorObject<'static> { e.into() })?;
+            let res = self
+                .eth_api
+                .transact(db, evm_env, tx_env)
+                .map_err(|e| -> jsonrpsee_types::error::ErrorObject<'static> { e.into() })?;
+            return <OpEthApiError as FromEvmError<_>>::ensure_success(res.result)
+                .map_err(Into::into);
         }
-        self.eth_api.call(transaction, block_number, state_overrides, block_overrides).await
+        EthApiServer::call(
+            &self.eth_api,
+            transaction,
+            block_number,
+            state_overrides,
+            block_overrides,
+        )
+        .await
     }
 
     /// Handler for: `eth_estimateGas`
@@ -491,13 +514,16 @@ where
     ) -> RpcResult<U256> {
         trace!(target: "rpc::eth", ?transaction, ?block_number, "Serving eth_estimateGas");
         if let Some((state, header)) = self.get_flashblock_state_provider_by_id(block_number)? {
-            let evm_env = self.eth_api.evm_env_for_header(&header).map_err(Into::into)?;
+            let evm_env = self
+                .eth_api
+                .evm_env_for_header(&header)
+                .map_err(|e| -> jsonrpsee_types::error::ErrorObject<'static> { e.into() })?;
             return self
                 .eth_api
                 .estimate_gas_with(evm_env, transaction, state, overrides)
                 .map_err(Into::into);
         }
-        self.eth_api.estimate_gas(transaction, block_number, overrides).await
+        EthApiServer::estimate_gas(&self.eth_api, transaction, block_number, overrides).await
     }
 
     /// Handler for: `eth_getBalance`
@@ -506,7 +532,7 @@ where
         if let Some((state, _)) = self.get_flashblock_state_provider_by_id(block_number)? {
             return Ok(state.account_balance(&address).to_rpc_result()?.unwrap_or_default());
         }
-        self.eth_api.balance(address, block_number).await
+        EthApiServer::balance(&self.eth_api, address, block_number).await
     }
 
     /// Handler for: `eth_getTransactionCount`
@@ -521,7 +547,7 @@ where
                 state.account_nonce(&address).to_rpc_result()?.unwrap_or_default(),
             ));
         }
-        self.eth_api.transaction_count(address, block_number).await
+        EthApiServer::transaction_count(&self.eth_api, address, block_number).await
     }
 
     /// Handler for: `eth_getCode`
@@ -534,34 +560,35 @@ where
                 .map(|code| code.original_bytes())
                 .unwrap_or_default());
         }
-        self.eth_api.get_code(address, block_number).await
+        EthApiServer::get_code(&self.eth_api, address, block_number).await
     }
 
     /// Handler for: `eth_getStorageAt`
     async fn storage_at(
         &self,
         address: Address,
-        slot: U256,
+        slot: JsonStorageKey,
         block_number: Option<BlockId>,
     ) -> RpcResult<B256> {
         trace!(target: "rpc::eth", ?address, ?slot, ?block_number, "Serving eth_getStorageAt");
         if let Some((state, _)) = self.get_flashblock_state_provider_by_id(block_number)? {
-            let storage_key = B256::new(slot.to_be_bytes());
             return Ok(B256::new(
                 state
-                    .storage(address, storage_key)
+                    .storage(address, slot.as_b256())
                     .to_rpc_result()?
                     .unwrap_or_default()
                     .to_be_bytes(),
             ));
         }
-        self.eth_api.storage_at(address, slot, block_number).await
+        EthApiServer::storage_at(&self.eth_api, address, slot, block_number).await
     }
 }
 
-impl<Eth> XLayerEthApiExt<Eth>
+impl<N, Rpc> XLayerEthApiExt<N, Rpc>
 where
-    Eth: FullEthApi<NetworkTypes = Optimism> + Send + Sync + 'static,
+    N: RpcNodeCore<Primitives = OpPrimitives>,
+    Rpc: RpcConvert<Network = Optimism, Primitives = N::Primitives, Error = OpEthApiError>,
+    OpEthApi<N, Rpc>: RpcNodeCore<Primitives = OpPrimitives> + Send + Sync + 'static,
 {
     /// Returns a `StateProvider` overlaying flashblock execution state on top of canonical state
     /// for the given block ID. Returns `None` if the block is not in the flashblocks cache.

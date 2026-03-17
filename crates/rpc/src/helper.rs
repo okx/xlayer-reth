@@ -1,15 +1,16 @@
-use alloy_consensus::TxReceipt;
+use alloy_consensus::{BlockHeader, TxReceipt};
+use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::B256;
 use alloy_rpc_types_eth::TransactionInfo;
 use op_alloy_network::Optimism;
 
 use reth_optimism_primitives::OpPrimitives;
-use reth_primitives_traits::{Recovered, SignerRecoverable, TransactionMeta};
+use reth_primitives_traits::{Recovered, SignedTransaction, TransactionMeta};
 use reth_rpc_convert::{transaction::ConvertReceiptInput, RpcConvert, RpcTransaction};
-use reth_rpc_eth_api::{EthApiTypes, RpcBlock, RpcReceipt};
-use reth_rpc_eth_types::{block::BlockAndReceipts, utils::calculate_gas_used_and_next_log_index};
+use reth_rpc_eth_api::{RpcBlock, RpcReceipt};
+use reth_rpc_eth_types::block::BlockAndReceipts;
 
-use xlayer_flashblocks::cache::CachedTxInfo;
+use xlayer_flashblocks::CachedTxInfo;
 
 /// Converter for `TransactionMeta`
 pub(crate) fn build_tx_meta(
@@ -44,14 +45,13 @@ pub(crate) fn build_tx_info(
 }
 
 /// Converts a `BlockAndReceipts` into an RPC block.
-pub(crate) fn to_rpc_block<Eth: EthApiTypes<NetworkTypes = Optimism>>(
+pub(crate) fn to_rpc_block<Rpc>(
     bar: &BlockAndReceipts<OpPrimitives>,
     full: bool,
-    converter: &Eth::RpcConvert,
-) -> Result<RpcBlock<Optimism>, Eth::Error>
+    converter: &Rpc,
+) -> Result<RpcBlock<Optimism>, Rpc::Error>
 where
-    Eth::RpcConvert: RpcConvert<Primitives = OpPrimitives>,
-    Eth::Error: From<<Eth::RpcConvert as RpcConvert>::Error>,
+    Rpc: RpcConvert<Network = Optimism, Primitives = OpPrimitives>,
 {
     Ok(bar.block.clone_into_rpc_block(
         full.into(),
@@ -61,13 +61,12 @@ where
 }
 
 /// Converts all receipts from a `BlockAndReceipts` into RPC receipts.
-pub(crate) fn to_block_receipts<Eth: EthApiTypes<NetworkTypes = Optimism>>(
+pub(crate) fn to_block_receipts<Rpc>(
     bar: &BlockAndReceipts<OpPrimitives>,
-    converter: &Eth::RpcConvert,
-) -> Result<Vec<RpcReceipt<Optimism>>, Eth::Error>
+    converter: &Rpc,
+) -> Result<Vec<RpcReceipt<Optimism>>, Rpc::Error>
 where
-    Eth::RpcConvert: RpcConvert<Primitives = OpPrimitives>,
-    Eth::Error: From<<Eth::RpcConvert as RpcConvert>::Error>,
+    Rpc: RpcConvert<Network = Optimism, Primitives = OpPrimitives>,
 {
     let txs = bar.block.body().transactions();
     let senders = bar.block.senders();
@@ -77,7 +76,6 @@ where
     let mut next_log_index = 0usize;
 
     let inputs = txs
-        .iter()
         .zip(senders.iter())
         .zip(receipts.iter())
         .enumerate()
@@ -105,28 +103,26 @@ where
 }
 
 /// Converts a `CachedTxInfo` and `BlockAndReceipts` into an RPC transaction.
-pub(crate) fn to_rpc_transaction<Eth: EthApiTypes<NetworkTypes = Optimism>>(
+pub(crate) fn to_rpc_transaction<Rpc>(
     info: &CachedTxInfo<OpPrimitives>,
     bar: &BlockAndReceipts<OpPrimitives>,
-    converter: &Eth::RpcConvert,
-) -> Result<RpcTransaction<Optimism>, Eth::Error>
+    converter: &Rpc,
+) -> Result<RpcTransaction<Optimism>, Rpc::Error>
 where
-    Eth::RpcConvert: RpcConvert<Primitives = OpPrimitives>,
-    Eth::Error: From<<Eth::RpcConvert as RpcConvert>::Error>,
+    Rpc: RpcConvert<Network = Optimism, Primitives = OpPrimitives>,
 {
     let tx_info = build_tx_info(bar, info.tx.tx_hash(), info.tx_index);
-    Ok(converter.fill(info.tx.try_into_recovered_unchecked()?, tx_info)?)
+    Ok(converter.fill(info.tx.clone().try_into_recovered().expect("valid cached tx"), tx_info)?)
 }
 
 /// Converts a `BlockAndReceipts` and transaction index into an RPC transaction.
-pub(crate) fn to_rpc_transaction_from_bar_and_index<Eth: EthApiTypes<NetworkTypes = Optimism>>(
+pub(crate) fn to_rpc_transaction_from_bar_and_index<Rpc>(
     bar: &BlockAndReceipts<OpPrimitives>,
     index: usize,
-    converter: &Eth::RpcConvert,
-) -> Result<Option<RpcTransaction<Optimism>>, Eth::Error>
+    converter: &Rpc,
+) -> Result<Option<RpcTransaction<Optimism>>, Rpc::Error>
 where
-    Eth::RpcConvert: RpcConvert<Primitives = OpPrimitives>,
-    Eth::Error: From<<Eth::RpcConvert as RpcConvert>::Error>,
+    Rpc: RpcConvert<Network = Optimism, Primitives = OpPrimitives>,
 {
     if let Some((signer, tx)) = bar.block.transactions_with_sender().nth(index) {
         let tx_info = build_tx_info(bar, tx.tx_hash(), index as u64);
