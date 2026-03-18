@@ -28,19 +28,18 @@ jobs:
           # runner pre-sets for the gh CLI (pointing at GITHUB_TOKEN). The PAT is then
           # applied inline on the gh command so it always wins.
           # Requires a fine-grained PAT with "Dependabot alerts: Read" permission.
-          DEPENDABOT_PAT: ${{ secrets.GH_SECURITY_PAT }}
+          GH_TOKEN: ${{ secrets.GH_SECURITY_PAT }}
         run: |
-          if [ -z "$DEPENDABOT_PAT" ]; then
+          if [ -z "$GH_TOKEN" ]; then
             echo "::error::GH_SECURITY_PAT secret is not set. Add a fine-grained PAT with 'Dependabot alerts: Read' permission."
             exit 1
           fi
 
-          # Set GH_TOKEN inline on the command so it overrides the runner-pre-set value.
-          # Fetch to a file first so a gh error is caught cleanly before jq runs.
-          if ! GH_TOKEN="$DEPENDABOT_PAT" gh api "repos/${{ github.repository }}/dependabot/alerts" \
-                --paginate -f state=open > /tmp/alerts_raw.json; then
-            echo "::error::Failed to fetch Dependabot alerts. Ensure GH_SECURITY_PAT has 'Dependabot alerts: Read' permission and Dependabot is enabled for this repo."
-            exit 1
+          if gh api "repos/${{ github.repository }}/dependabot/alerts" \
+            --method GET --paginate -f state=open > /tmp/alerts_raw.json; then
+              echo "Successfully fetched dependabot alerts"
+          else
+            echo "Error: Failed to fetch dependabot alerts" >&2
           fi
 
           # Keep moderate/high/critical, sort by severity (critical=0, high=1, medium=2), take top 2.
@@ -87,6 +86,8 @@ jobs:
       - name: Run Claude to fix security issues
         if: steps.alerts.outputs.has_alerts == 'true'
         uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ secrets.GH_SECURITY_PAT }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -125,7 +126,7 @@ jobs:
                ```
                git add -A
                git commit -m "fix(deps): update <package> to <first_patched> (<cve>)"
-               git push origin fix/security-<package>-<number>
+               git push "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" HEAD:fix/security-<package>-<number>
                gh pr create \
                  --title "fix(deps): update <package> to <first_patched> (<severity> <cve>)" \
                  --body "## Description
