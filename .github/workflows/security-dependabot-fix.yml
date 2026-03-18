@@ -42,7 +42,8 @@ jobs:
             echo "Error: Failed to fetch dependabot alerts" >&2
           fi
 
-          # Keep moderate/high/critical, sort by severity (critical=0, high=1, medium=2), take top 2.
+          # Keep moderate/high/critical, sort by severity (critical=0, high=1, medium=2).
+          # No limit yet — existing open PRs are filtered out below before taking top 2.
           # Written to a file — never interpolated into the Claude prompt — to prevent prompt injection.
           jq '[
             .[] |
@@ -64,7 +65,19 @@ jobs:
                 else                    2 end
               )
             }
-          ] | sort_by(.severity_rank) | .[0:2]' /tmp/alerts_raw.json > /tmp/alerts.json
+          ] | sort_by(.severity_rank)' /tmp/alerts_raw.json > /tmp/alerts_all.json
+
+          # Collect alert numbers that already have an open PR (branch: fix/security-*-<number>).
+          # The alert number is always the last dash-separated segment of the branch name.
+          HANDLED_NUMS=$(gh pr list --state open --json headRefName \
+            --jq '[.[].headRefName | select(startswith("fix/security-")) | split("-") | last] | unique' \
+            2>/dev/null || echo '[]')
+          echo "Alert numbers with existing open PRs: $HANDLED_NUMS"
+
+          # Filter out already-handled alerts, then take the top 2 remaining.
+          jq --argjson handled "$HANDLED_NUMS" '
+            [.[] | select((.number | tostring) as $n | ($handled | index($n)) == null)] | .[0:2]
+          ' /tmp/alerts_all.json > /tmp/alerts.json
 
           COUNT=$(jq 'length' /tmp/alerts.json)
           echo "Alerts selected for fixing: $COUNT"
