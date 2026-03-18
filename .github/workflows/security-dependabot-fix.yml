@@ -24,52 +24,57 @@ jobs:
 
       - name: Fetch Dependabot high/medium security alerts
         id: alerts
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "Fetching open Dependabot alerts via gh CLI..."
+        uses: actions/github-script@v7
+        with:
+          script: |
+            let hasAlerts = false;
+            let alertsSummary = '';
 
-          # Fail loudly on API errors rather than silently swallowing them
-          RAW=$(gh api "repos/${{ github.repository }}/dependabot/alerts" \
-            --paginate \
-            -f state=open) || {
-            echo "::error::Failed to fetch Dependabot alerts. Check that security-events: read permission is granted and Dependabot alerts are enabled for this repo."
-            exit 1
-          }
+            try {
+              const { data } = await github.rest.dependabot.listAlertsForRepo({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+                per_page: 100,
+              });
 
-          # Filter to critical/high/medium and reshape into the fields Claude needs.
-          # Advisory text is written to a file (never interpolated into the prompt)
-          # to prevent prompt injection from externally-controlled advisory content.
-          echo "$RAW" | jq '[
-            .[] |
-            select(.security_advisory.severity | ascii_downcase | IN("critical","high","medium")) |
-            {
-              number:          .number,
-              package:         .dependency.package.name,
-              ecosystem:       .dependency.package.ecosystem,
-              manifest_path:   .dependency.manifest_path,
-              scope:           .dependency.scope,
-              severity:        .security_advisory.severity,
-              summary:         .security_advisory.summary,
-              description:     (.security_advisory.description // "" | .[0:500]),
-              vulnerable_range:.security_vulnerability.vulnerable_version_range,
-              first_patched:   .security_vulnerability.first_patched_version.identifier,
-              cve:             .security_advisory.cve_id,
-              ghsa:            .security_advisory.ghsa_id,
-              url:             .html_url
+              const filtered = data.filter(a => {
+                const sev = a.security_advisory?.severity?.toLowerCase();
+                return ['critical', 'high', 'medium'].includes(sev);
+              });
+
+              if (filtered.length === 0) {
+                console.log('No critical/high/medium security alerts found. Nothing to do.');
+              } else {
+                hasAlerts = true;
+                const summary = filtered.map(a => ({
+                  number: a.number,
+                  package: a.dependency?.package?.name,
+                  ecosystem: a.dependency?.package?.ecosystem,
+                  manifest_path: a.dependency?.manifest_path,
+                  scope: a.dependency?.scope,
+                  severity: a.security_advisory?.severity,
+                  summary: a.security_advisory?.summary,
+                  description: (a.security_advisory?.description ?? '').substring(0, 500),
+                  vulnerable_range: a.security_vulnerability?.vulnerable_version_range,
+                  first_patched: a.security_vulnerability?.first_patched_version?.identifier,
+                  cve: a.security_advisory?.cve_id,
+                  ghsa: a.security_advisory?.ghsa_id,
+                  url: a.html_url,
+                }));
+                // Write alerts to a file rather than passing through an output to avoid
+                // prompt injection: advisory text is controlled by external parties and
+                // must never be interpolated directly into the Claude prompt string.
+                const fs = require('fs');
+                fs.writeFileSync('/tmp/alerts.json', JSON.stringify(summary, null, 2));
+                console.log(`Found ${filtered.length} critical/high/medium alert(s):`);
+                summary.forEach(a => console.log(`  [${a.severity}] ${a.package} — ${a.cve ?? a.ghsa} (fixed in ${a.first_patched ?? 'unknown'})`));
+              }
+            } catch (e) {
+              console.log('Could not fetch Dependabot alerts:', e.message);
             }
-          ]' > /tmp/alerts.json
 
-          COUNT=$(jq 'length' /tmp/alerts.json)
-          echo "Critical/high/medium alerts found: $COUNT"
-
-          if [ "$COUNT" -eq 0 ]; then
-            echo "No actionable alerts. Skipping remaining steps."
-            echo "has_alerts=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_alerts=true" >> "$GITHUB_OUTPUT"
-            jq -r '.[] | "  [\(.severity)] \(.package) — \(.cve // .ghsa) (fixed in \(.first_patched // "unknown"))"' /tmp/alerts.json
-          fi
+            core.setOutput('has_alerts', hasAlerts ? 'true' : 'false');
 
       - name: Count security fix PRs already opened today
         id: pr-budget
