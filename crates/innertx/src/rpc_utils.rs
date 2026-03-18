@@ -28,8 +28,8 @@ use crate::{
 };
 
 const TX_HASH_LENGTH: usize = 66;
-const TIMEOUT_DURATION_S: u64 = 3;
-const INTERVAL_DELAY_MS: u64 = 10;
+const TIMEOUT_DURATION_S: u64 = 60;
+const INTERVAL_DELAY_MS: u64 = 100;
 
 fn string_to_b256(hex_str: String) -> Result<B256, FromHexError> {
     let hex = hex_str.strip_prefix("0x").unwrap_or(&hex_str);
