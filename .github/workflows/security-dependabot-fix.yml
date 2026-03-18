@@ -24,17 +24,20 @@ jobs:
       - name: Fetch top 2 highest-risk Dependabot alerts
         id: alerts
         env:
-          # Requires a fine-grained PAT with "Dependabot alerts: Read" repository permission.
-          # GITHUB_TOKEN cannot access this API — set GH_SECURITY_PAT in repo secrets.
-          GH_TOKEN: ${{ secrets.GH_SECURITY_PAT }}
+          # Use a distinct name to avoid collision with the GH_TOKEN that the Actions
+          # runner pre-sets for the gh CLI (pointing at GITHUB_TOKEN). The PAT is then
+          # applied inline on the gh command so it always wins.
+          # Requires a fine-grained PAT with "Dependabot alerts: Read" permission.
+          DEPENDABOT_PAT: ${{ secrets.GH_SECURITY_PAT }}
         run: |
-          if [ -z "$GH_TOKEN" ]; then
+          if [ -z "$DEPENDABOT_PAT" ]; then
             echo "::error::GH_SECURITY_PAT secret is not set. Add a fine-grained PAT with 'Dependabot alerts: Read' permission."
             exit 1
           fi
 
-          # Fetch all open alerts into a raw file first so gh errors are caught before jq runs.
-          if ! gh api "repos/${{ github.repository }}/dependabot/alerts" \
+          # Set GH_TOKEN inline on the command so it overrides the runner-pre-set value.
+          # Fetch to a file first so a gh error is caught cleanly before jq runs.
+          if ! GH_TOKEN="$DEPENDABOT_PAT" gh api "repos/${{ github.repository }}/dependabot/alerts" \
                 --paginate -f state=open > /tmp/alerts_raw.json; then
             echo "::error::Failed to fetch Dependabot alerts. Ensure GH_SECURITY_PAT has 'Dependabot alerts: Read' permission and Dependabot is enabled for this repo."
             exit 1
