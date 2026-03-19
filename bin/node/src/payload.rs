@@ -4,6 +4,7 @@ use reth_node_builder::{components::BasicPayloadServiceBuilder, BuilderContext};
 use reth_optimism_evm::OpEvmConfig;
 use reth_optimism_node::node::OpPayloadBuilder;
 use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
+use xlayer_bridge_intercept::BridgeInterceptConfig;
 use xlayer_builder::{
     args::BuilderArgs,
     flashblocks::{BuilderConfig, FlashblocksServiceBuilder},
@@ -48,9 +49,10 @@ impl XLayerPayloadServiceBuilder {
     ) -> eyre::Result<Self> {
         let builder = if xlayer_builder_args.flashblocks.enabled || flashblock_rpc {
             let builder_config = BuilderConfig::try_from(xlayer_builder_args)?;
-            XLayerPayloadServiceBuilderInner::Flashblocks(Box::new(FlashblocksServiceBuilder(
-                builder_config,
-            )))
+            XLayerPayloadServiceBuilderInner::Flashblocks(Box::new(FlashblocksServiceBuilder {
+                config: builder_config,
+                bridge_intercept: Default::default(),
+            }))
         } else {
             let payload_builder = OpPayloadBuilder::new(compute_pending_block)
                 .with_da_config(da_config)
@@ -61,6 +63,14 @@ impl XLayerPayloadServiceBuilder {
         };
 
         Ok(Self { builder })
+    }
+
+    /// Apply bridge intercept config to the flashblocks builder.
+    pub fn with_bridge_config(mut self, config: BridgeInterceptConfig) -> Self {
+        if let XLayerPayloadServiceBuilderInner::Flashblocks(ref mut fb) = self.builder {
+            fb.with_bridge_intercept(config);
+        }
+        self
     }
 }
 
