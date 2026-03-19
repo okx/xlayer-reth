@@ -46,6 +46,8 @@ reth-provider.workspace = true
 # alloy
 alloy-consensus.workspace = true
 alloy-eips = { workspace = true, features = ["serde"] }
+alloy-eip7928.workspace = true
+alloy-evm.workspace = true
 alloy-json-rpc.workspace = true
 alloy-primitives = { workspace = true, features = ["serde"] }
 alloy-rpc-types-engine = { workspace = true, features = ["serde"] }
@@ -70,6 +72,7 @@ async-trait.workspace = true
 
 # misc
 brotli = { workspace = true, features = ["std"] }
+crossbeam-channel.workspace = true
 derive_more.workspace = true
 eyre.workspace = true
 parking_lot.workspace = true

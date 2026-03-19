@@ -14171,7 +14171,9 @@ name = "xlayer-flashblocks"
 version = "0.1.0"
 dependencies = [
  "alloy-consensus",
+ "alloy-eip7928",
  "alloy-eips",
+ "alloy-evm",
  "alloy-json-rpc",
  "alloy-network",
  "alloy-primitives",
@@ -14180,6 +14182,7 @@ dependencies = [
  "alloy-signer-local",
  "async-trait",
  "brotli",
+ "crossbeam-channel",
  "derive_more",
  "eyre",
  "futures",
