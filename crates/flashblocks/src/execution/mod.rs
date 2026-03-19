@@ -1,3 +1,4 @@
+pub(crate) mod assemble;
 pub(crate) mod validator;
 
 use alloy_eips::eip4895::Withdrawal;

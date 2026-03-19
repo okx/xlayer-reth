@@ -1,6 +1,7 @@
 use crate::{
     cache::{CachedTxInfo, FlashblockStateCache, PendingSequence},
     execution::{
+        assemble::{assemble_flashblock, FlashblockAssemblerInput},
         BuildArgs, FlashblockReceipt, OverlayProviderFactory, PrefixExecutionMeta,
         StateRootStrategy,
     },
@@ -38,6 +39,7 @@ use reth_evm::{
     ConfigureEvm, Evm, TxEnvFor,
 };
 use reth_execution_types::{BlockExecutionOutput, BlockExecutionResult};
+use reth_optimism_forks::OpHardforks;
 use reth_primitives_traits::{
     transaction::TxHashRef, HeaderTy, NodePrimitives, Recovered, RecoveredBlock, SealedHeaderFor,
 };
@@ -69,9 +71,10 @@ use reth_trie_parallel::root::{ParallelStateRoot, ParallelStateRootError};
 /// - **Incremental (same height)**: Full re-execution via `execute_fresh()`. The warm
 ///   execution cache and `PreservedSparseTrie` from the previous sequence build offset
 ///   the cost of re-executing prefix transactions.
-pub(crate) struct FlashblockSequenceValidator<N: NodePrimitives, EvmConfig, Provider>
+pub(crate) struct FlashblockSequenceValidator<N: NodePrimitives, EvmConfig, Provider, ChainSpec>
 where
     EvmConfig: ConfigureEvm,
+    ChainSpec: OpHardforks,
 {
     /// The flashblocks state cache containing the flashblocks state cache layer.
     flashblocks_state: FlashblockStateCache<N>,
@@ -79,6 +82,8 @@ where
     provider: Provider,
     /// EVM configuration.
     evm_config: EvmConfig,
+    /// Chain specification for hardfork checks.
+    chain_spec: Arc<ChainSpec>,
     /// Configuration for the engine tree.
     tree_config: TreeConfig,
     /// Payload processor for state root computation.
@@ -87,7 +92,8 @@ where
     runtime: Runtime,
 }
 
-impl<N, EvmConfig, Provider> FlashblockSequenceValidator<N, EvmConfig, Provider>
+impl<N, EvmConfig, Provider, ChainSpec>
+    FlashblockSequenceValidator<N, EvmConfig, Provider, ChainSpec>
 where
     N: NodePrimitives,
     N::Receipt: FlashblockReceipt,
@@ -101,10 +107,12 @@ where
         + HashedPostStateProvider
         + Unpin
         + Clone,
+    ChainSpec: OpHardforks,
 {
     pub(crate) fn new(
         evm_config: EvmConfig,
         provider: Provider,
+        chain_spec: Arc<ChainSpec>,
         flashblocks_state: FlashblockStateCache<N>,
         runtime: Runtime,
         tree_config: TreeConfig,
@@ -115,7 +123,15 @@ where
             &tree_config,
             Default::default(),
         );
-        Self { flashblocks_state, provider, evm_config, tree_config, payload_processor, runtime }
+        Self {
+            flashblocks_state,
+            provider,
+            evm_config,
+            chain_spec,
+            tree_config,
+            payload_processor,
+            runtime,
+        }
     }
 
     /// Executes the incoming flashblocks sequence transactions delta and commits the
@@ -126,6 +142,7 @@ where
     ) -> eyre::Result<()>
     where
         N::SignedTx: Encodable2718,
+        N::Block: From<alloy_consensus::Block<N::SignedTx>>,
     {
         // Pre-validate incoming flashblocks sequence
         let pending_sequence = self
@@ -228,15 +245,20 @@ where
         // needed. This frees up resources while state root computation continues.
         let valid_block_tx = handle.terminate_caching(Some(output.clone()));
 
+        // Extract signed transactions for the block body before moving
+        // `block_transactions` into the tx root closure.
+        let body_transactions: Vec<N::SignedTx> =
+            block_transactions.iter().map(|tx| tx.1.inner().clone()).collect();
+
         // Spawn async tx root computation
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let transaction_root = self.payload_processor.executor().spawn_blocking(move || {
+        self.payload_processor.executor().spawn_blocking(move || {
             let txs: Vec<_> = block_transactions.iter().map(|tx| &tx.1).collect();
             let _ = result_tx.send(calculate_transaction_root(&txs));
         });
 
         // Wait for the receipt root computation to complete.
-        let receipt_root_bloom = {
+        let (receipts_root, logs_bloom) = {
             debug!(target: "flashblocks::validator", "wait_receipt_root");
             receipt_root_rx
                         .blocking_recv()
@@ -245,16 +267,14 @@ where
                                 target: "flashblocks::validator",
                                 "Receipt root task dropped sender without result, receipt root calculation likely aborted"
                             );
-                        })
-                        .ok()
+                        })?
         };
-        let transaction_root = result_rx.blocking_recv().inspect_err(|_| {
+        let transactions_root = result_rx.blocking_recv().inspect_err(|_| {
             tracing::error!(
                 target: "flashblocks::validator",
                 "Transaction root task dropped sender without result, transaction root calculation likely aborted"
             );
-        })
-        .ok();
+        })?;
 
         let root_time = Instant::now();
         let hashed_state = self.provider.hashed_post_state(&output.state);
@@ -272,7 +292,7 @@ where
                 match task_result {
                     Ok(StateRootComputeOutcome { state_root, trie_updates }) => {
                         let elapsed = root_time.elapsed();
-                        maybe_state_root = Some((state_root, trie_updates, elapsed));
+                        maybe_state_root = Some((state_root, trie_updates));
                         info!(target: "flashblocks::validator", ?state_root, ?elapsed, "State root task finished");
                     }
                     Err(error) => {
@@ -291,7 +311,7 @@ where
                             ?elapsed,
                             "Regular root task finished"
                         );
-                        maybe_state_root = Some((result.0, result.1, elapsed));
+                        maybe_state_root = Some((result.0, result.1));
                     }
                     Err(error) => {
                         debug!(target: "flashblocks::validator", %error, "Parallel state root computation failed");
@@ -304,19 +324,42 @@ where
         // Determine the state root.
         // If the state root was computed in parallel, we use it.
         // Otherwise, we fall back to computing it synchronously.
-        let (state_root, trie_output, root_elapsed) =
-            if let Some(maybe_state_root) = maybe_state_root {
-                maybe_state_root
-            } else {
-                // fallback is to compute the state root regularly in sync
-                warn!(target: "flashblocks::validator", "Failed to compute state root");
-                let (root, updates) =
-                    Self::compute_state_root_serial(overlay_factory.clone(), &hashed_state)?;
-                (root, updates, root_time.elapsed())
-            };
+        let (state_root, trie_output) = if let Some(maybe_state_root) = maybe_state_root {
+            maybe_state_root
+        } else {
+            // fallback is to compute the state root regularly in sync
+            warn!(target: "flashblocks::validator", "Failed to compute state root");
+            let (root, updates) =
+                Self::compute_state_root_serial(overlay_factory.clone(), &hashed_state)?;
+            (root, updates)
+        };
 
-        // Assemble block
+        // Capture execution metrics before `output` is moved into the deferred trie task.
+        let prefix_gas_used = output.result.gas_used;
+        let prefix_blob_gas_used = output.result.blob_gas_used;
+
+        // Assemble the block using pre-computed roots (avoids recomputation).
+        let block = assemble_flashblock(
+            self.chain_spec.as_ref(),
+            FlashblockAssemblerInput {
+                base: &args.base,
+                state_root,
+                transactions_root,
+                receipts_root,
+                logs_bloom,
+                gas_used: prefix_gas_used,
+                blob_gas_used: prefix_blob_gas_used,
+                bundle_state: &output.state,
+                state_provider: state_provider.as_ref(),
+                transactions: body_transactions,
+            },
+        )?;
+        let block: N::Block = block.into();
         let block = RecoveredBlock::new_unhashed(block, senders);
+
+        if let Some(valid_block_tx) = valid_block_tx {
+            let _ = valid_block_tx.send(());
+        }
         let executed_block = self.spawn_deferred_trie_task(
             block,
             output,
@@ -337,9 +380,9 @@ where
             executed_block,
             PrefixExecutionMeta {
                 cached_reads,
-                cached_tx_count: block_transactions.len(),
-                gas_used: executed_block.execution_output.result.gas_used,
-                blob_gas_used: executed_block.execution_output.result.blob_gas_used,
+                cached_tx_count: block_transaction_count,
+                gas_used: prefix_gas_used,
+                blob_gas_used: prefix_blob_gas_used,
                 last_flashblock_index: args.last_flashblock_index,
             },
             block_transaction_count,
@@ -438,7 +481,7 @@ where
     /// 3. Executes transactions with metrics collection via state hooks
     /// 4. Merges state transitions and records execution metrics
     #[expect(clippy::type_complexity)]
-    fn execute_block<S, Err, T>(
+    fn execute_block<Err, T>(
         &mut self,
         state_provider: &dyn StateProvider,
         execution_env: ExecutionEnv<EvmConfig>,
@@ -454,7 +497,6 @@ where
         CachedReads,
     )>
     where
-        S: StateProvider + Send,
         T: ExecutableTxFor<EvmConfig> + ExecutableTxParts<TxEnvFor<EvmConfig>, N::SignedTx>,
         Err: core::error::Error + Send + Sync + 'static,
         EvmConfig: ConfigureEvm<Primitives = N, NextBlockEnvCtx: From<OpFlashblockPayloadBase> + Unpin>
@@ -619,8 +661,8 @@ where
         bal: Option<Arc<BlockAccessList>>,
     ) -> eyre::Result<
         PayloadHandle<
-            impl ExecutableTxFor<EvmConfig> + use<N, Provider, EvmConfig>,
-            impl core::error::Error + Send + Sync + 'static + use<N, Provider, EvmConfig>,
+            impl ExecutableTxFor<EvmConfig> + use<N, Provider, EvmConfig, ChainSpec>,
+            impl core::error::Error + Send + Sync + 'static + use<N, Provider, EvmConfig, ChainSpec>,
             N::Receipt,
         >,
     > {
