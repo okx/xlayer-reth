@@ -16,17 +16,17 @@ const DEFAULT_CONFIRM_BLOCK_CACHE_SIZE: usize = 1_000;
 const DEFAULT_TX_CACHE_SIZE: usize = DEFAULT_CONFIRM_BLOCK_CACHE_SIZE * 10_000;
 
 #[derive(Debug)]
-pub struct ConfirmedBlock<N: NodePrimitives> {
+pub(crate) struct ConfirmedBlock<N: NodePrimitives> {
     /// The locally built pending block with execution output.
-    pub executed_block: ExecutedBlock<N>,
+    pub(crate) executed_block: ExecutedBlock<N>,
     /// The receipts for the pending block
-    pub receipts: Arc<Vec<ReceiptTy<N>>>,
+    pub(crate) receipts: Arc<Vec<ReceiptTy<N>>>,
 }
 
 impl<N: NodePrimitives> ConfirmedBlock<N> {
     /// Returns a pair of [`RecoveredBlock`] and a vector of  [`NodePrimitives::Receipt`]s by
     /// cloning from borrowed self.
-    pub fn to_block_and_receipts(&self) -> BlockAndReceipts<N> {
+    pub(crate) fn to_block_and_receipts(&self) -> BlockAndReceipts<N> {
         BlockAndReceipts {
             block: self.executed_block.recovered_block.clone(),
             receipts: self.receipts.clone(),
@@ -45,7 +45,7 @@ impl<N: NodePrimitives> ConfirmedBlock<N> {
 /// Transaction data is stored in a `HashMap` which indexes transaction hashes to
 /// [`CachedTxInfo`] for O(1) tx/receipt lookups.
 #[derive(Debug)]
-pub struct ConfirmCache<N: NodePrimitives> {
+pub(crate) struct ConfirmCache<N: NodePrimitives> {
     /// Primary storage: block number → (block hash, block + receipts).
     /// `BTreeMap` ordering enables efficient range-based flush via `split_off`.
     blocks: BTreeMap<u64, (B256, ConfirmedBlock<N>)>,
@@ -63,7 +63,7 @@ impl<N: NodePrimitives> Default for ConfirmCache<N> {
 
 impl<N: NodePrimitives> ConfirmCache<N> {
     /// Creates a new [`ConfirmCache`].
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             blocks: BTreeMap::new(),
             hash_to_number: HashMap::with_capacity(DEFAULT_CONFIRM_BLOCK_CACHE_SIZE),
@@ -72,17 +72,17 @@ impl<N: NodePrimitives> ConfirmCache<N> {
     }
 
     /// Returns the number of cached entries.
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.blocks.len()
     }
 
     /// Returns `true` if the cache is empty.
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.blocks.is_empty()
     }
 
     /// Inserts a confirmed block into the cache, indexed by block number and block hash.
-    pub fn insert(
+    pub(crate) fn insert(
         &mut self,
         height: u64,
         executed_block: ExecutedBlock<N>,
@@ -118,34 +118,37 @@ impl<N: NodePrimitives> ConfirmCache<N> {
     }
 
     /// Clears all entries.
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.tx_index.clear();
         self.blocks.clear();
         self.hash_to_number.clear();
     }
 
     /// Returns the block number for the given block hash, if cached.
-    pub fn number_for_hash(&self, block_hash: &B256) -> Option<u64> {
+    pub(crate) fn number_for_hash(&self, block_hash: &B256) -> Option<u64> {
         self.hash_to_number.get(block_hash).copied()
     }
 
     /// Returns the block hash for the given block number, if cached.
-    pub fn hash_for_number(&self, block_number: u64) -> Option<B256> {
+    pub(crate) fn hash_for_number(&self, block_number: u64) -> Option<B256> {
         self.blocks.get(&block_number).map(|(hash, _)| *hash)
     }
 
     /// Returns the confirmed block for the given block hash, if present.
-    pub fn get_block_by_hash(&self, block_hash: &B256) -> Option<BlockAndReceipts<N>> {
+    pub(crate) fn get_block_by_hash(&self, block_hash: &B256) -> Option<BlockAndReceipts<N>> {
         self.get_block_by_number(self.number_for_hash(block_hash)?)
     }
 
     /// Returns the confirmed block for the given block number, if present.
-    pub fn get_block_by_number(&self, block_number: u64) -> Option<BlockAndReceipts<N>> {
+    pub(crate) fn get_block_by_number(&self, block_number: u64) -> Option<BlockAndReceipts<N>> {
         self.blocks.get(&block_number).map(|(_, entry)| entry.to_block_and_receipts())
     }
 
     /// Returns the cached transaction info for the given tx hash, if present.
-    pub fn get_tx_info(&self, tx_hash: &TxHash) -> Option<(CachedTxInfo<N>, BlockAndReceipts<N>)> {
+    pub(crate) fn get_tx_info(
+        &self,
+        tx_hash: &TxHash,
+    ) -> Option<(CachedTxInfo<N>, BlockAndReceipts<N>)> {
         let tx_info = self.tx_index.get(tx_hash).cloned()?;
         let block = self.get_block_by_number(tx_info.block_number)?;
         Some((tx_info, block))
@@ -155,7 +158,7 @@ impl<N: NodePrimitives> ConfirmCache<N> {
     /// ordered newest to oldest (for use with `MemoryOverlayStateProvider`).
     ///
     /// Returns an error if state cache pollution detected (non-contiguous blocks).
-    pub fn get_executed_blocks_up_to_height(
+    pub(crate) fn get_executed_blocks_up_to_height(
         &self,
         target_height: u64,
         canon_height: u64,
@@ -190,7 +193,10 @@ impl<N: NodePrimitives> ConfirmCache<N> {
     }
 
     /// Removes and returns the confirmed block for the given block number.
-    pub fn remove_block_by_number(&mut self, block_number: u64) -> Option<ConfirmedBlock<N>> {
+    pub(crate) fn remove_block_by_number(
+        &mut self,
+        block_number: u64,
+    ) -> Option<ConfirmedBlock<N>> {
         let (hash, block) = self.blocks.remove(&block_number)?;
         self.hash_to_number.remove(&hash);
         self.remove_tx_index_for_block(&block);
@@ -198,7 +204,7 @@ impl<N: NodePrimitives> ConfirmCache<N> {
     }
 
     /// Removes and returns the confirmed block for the given block hash.
-    pub fn remove_block_by_hash(&mut self, block_hash: &B256) -> Option<ConfirmedBlock<N>> {
+    pub(crate) fn remove_block_by_hash(&mut self, block_hash: &B256) -> Option<ConfirmedBlock<N>> {
         let number = self.hash_to_number.remove(block_hash)?;
         let (_, block) = self.blocks.remove(&number)?;
         self.remove_tx_index_for_block(&block);
@@ -216,7 +222,7 @@ impl<N: NodePrimitives> ConfirmCache<N> {
     ///
     /// Called when the canonical chain catches up to the confirmed cache. Returns
     /// the number of entries flushed.
-    pub fn flush_up_to_height(&mut self, canon_height: u64) -> usize {
+    pub(crate) fn flush_up_to_height(&mut self, canon_height: u64) -> usize {
         let retained = self.blocks.split_off(&(canon_height + 1));
         let stale = std::mem::replace(&mut self.blocks, retained);
         let count = stale.len();
@@ -520,7 +526,7 @@ mod tests {
         let (block, receipts) = make_executed_block_with_txs(1, B256::ZERO, 0, 3);
         let block_hash = block.recovered_block.hash();
         let tx_hashes: Vec<_> =
-            block.recovered_block.body().transactions().map(|tx| *tx.tx_hash()).collect();
+            block.recovered_block.body().transactions().map(|tx| tx.tx_hash()).collect();
         cache.insert(1, block, receipts).expect("insert");
 
         for (i, tx_hash) in tx_hashes.iter().enumerate() {
@@ -537,7 +543,7 @@ mod tests {
         let mut cache = ConfirmCache::<OpPrimitives>::new();
         let (block, receipts) = make_executed_block_with_txs(1, B256::ZERO, 0, 2);
         let tx_hashes: Vec<_> =
-            block.recovered_block.body().transactions().map(|tx| *tx.tx_hash()).collect();
+            block.recovered_block.body().transactions().map(|tx| tx.tx_hash()).collect();
         cache.insert(1, block, receipts).expect("insert");
 
         cache.flush_up_to_height(1);
@@ -551,7 +557,7 @@ mod tests {
         let mut cache = ConfirmCache::<OpPrimitives>::new();
         let (block, receipts) = make_executed_block_with_txs(5, B256::ZERO, 0, 2);
         let tx_hashes: Vec<_> =
-            block.recovered_block.body().transactions().map(|tx| *tx.tx_hash()).collect();
+            block.recovered_block.body().transactions().map(|tx| tx.tx_hash()).collect();
         cache.insert(5, block, receipts).expect("insert");
 
         cache.remove_block_by_number(5);
@@ -586,13 +592,13 @@ mod tests {
         let mut cache = ConfirmCache::<OpPrimitives>::new();
         let (block1, receipts1) = make_executed_block_with_txs(1, B256::ZERO, 0, 2);
         let tx_hashes_1: Vec<_> =
-            block1.recovered_block.body().transactions().map(|tx| *tx.tx_hash()).collect();
+            block1.recovered_block.body().transactions().map(|tx| tx.tx_hash()).collect();
         let parent = block1.recovered_block.hash();
         cache.insert(1, block1, receipts1).expect("insert 1");
 
         let (block2, receipts2) = make_executed_block_with_txs(2, parent, 100, 2);
         let tx_hashes_2: Vec<_> =
-            block2.recovered_block.body().transactions().map(|tx| *tx.tx_hash()).collect();
+            block2.recovered_block.body().transactions().map(|tx| tx.tx_hash()).collect();
         cache.insert(2, block2, receipts2).expect("insert 2");
 
         cache.flush_up_to_height(1);
@@ -609,7 +615,7 @@ mod tests {
         let mut cache = ConfirmCache::<OpPrimitives>::new();
         let (block, receipts) = make_executed_block_with_txs(1, B256::ZERO, 0, 2);
         let tx_hashes: Vec<_> =
-            block.recovered_block.body().transactions().map(|tx| *tx.tx_hash()).collect();
+            block.recovered_block.body().transactions().map(|tx| tx.tx_hash()).collect();
         cache.insert(1, block, receipts).expect("insert");
 
         cache.clear();

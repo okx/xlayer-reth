@@ -1,47 +1,30 @@
-use crate::{cache::CachedTxInfo, FlashblockCachedReceipt};
+use crate::{cache::CachedTxInfo, execution::PrefixExecutionMeta};
 use derive_more::Deref;
 use std::collections::HashMap;
 
 use alloy_consensus::BlockHeader;
 use alloy_primitives::{TxHash, B256};
 use reth_primitives_traits::NodePrimitives;
-use reth_revm::cached::CachedReads;
 use reth_rpc_eth_types::{block::BlockAndReceipts, PendingBlock};
 
-/// The pending flashblocks sequence built with all received OpFlashblockPayload
+/// The pending flashblocks sequence built with all received `OpFlashblockPayload`
 /// alongside the metadata for the last added flashblock.
 #[derive(Debug, Clone, Deref)]
-pub struct PendingSequence<N: NodePrimitives>
-where
-    N::Receipt: FlashblockCachedReceipt,
-{
+pub struct PendingSequence<N: NodePrimitives> {
     /// Locally built full pending block of the latest flashblocks sequence.
     #[deref]
     pub pending: PendingBlock<N>,
     /// Transaction index: tx hash → cached tx info for O(1) tx/receipt lookups.
     pub tx_index: HashMap<TxHash, CachedTxInfo<N>>,
-    /// Cached reads from execution for reuse.
-    pub cached_reads: CachedReads,
     /// The current block hash of the latest flashblocks sequence.
     pub block_hash: B256,
     /// Parent hash of the built block (may be non-canonical or canonical).
     pub parent_hash: B256,
-    /// The last flashblock index of the latest flashblocks sequence.
-    pub last_flashblock_index: u64,
-    /// Cached number of transactions covered by the pending sequence execution.
-    cached_tx_count: usize,
-    /// Cached receipts for the prefix.
-    pub cached_receipts: Vec<N::Receipt>,
-    /// Total gas used by the pending sequence.
-    pub cached_gas_used: u64,
-    /// Total blob/DA gas used by the pending sequence.
-    pub cached_blob_gas_used: u64,
+    /// Prefix execution metadata for incremental builds.
+    pub prefix_execution_meta: PrefixExecutionMeta,
 }
 
-impl<N: NodePrimitives> PendingSequence<N>
-where
-    N::Receipt: FlashblockCachedReceipt,
-{
+impl<N: NodePrimitives> PendingSequence<N> {
     pub fn get_hash(&self) -> B256 {
         self.block_hash
     }
@@ -85,14 +68,9 @@ mod tests {
         PendingSequence {
             pending: pending_block,
             tx_index: HashMap::new(),
-            cached_reads: Default::default(),
             block_hash,
             parent_hash,
-            last_flashblock_index: 0,
-            cached_tx_count: 0,
-            cached_receipts: vec![],
-            cached_gas_used: 0,
-            cached_blob_gas_used: 0,
+            prefix_execution_meta: Default::default(),
         }
     }
 
@@ -123,14 +101,9 @@ mod tests {
         PendingSequence {
             pending: pending_block,
             tx_index,
-            cached_reads: Default::default(),
             block_hash,
             parent_hash,
-            last_flashblock_index: 0,
-            cached_tx_count: 0,
-            cached_receipts: vec![],
-            cached_gas_used: 0,
-            cached_blob_gas_used: 0,
+            prefix_execution_meta: Default::default(),
         }
     }
 

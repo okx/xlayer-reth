@@ -3,7 +3,7 @@ use crate::{
         EnrichedTransaction, FlashblockParams, FlashblockStreamEvent, FlashblockSubscriptionKind,
         FlashblocksFilter,
     },
-    FlashblockCachedReceipt, PendingSequence, PendingSequenceRx,
+    PendingSequence, PendingSequenceRx,
 };
 
 use futures::StreamExt;
@@ -74,10 +74,7 @@ pub trait FlashblocksPubSubApi<T: RpcObject> {
 
 /// Optimism-specific Ethereum pubsub handler that extends standard subscriptions with flashblocks support.
 #[derive(Clone)]
-pub struct FlashblocksPubSub<Eth: EthApiTypes, N: NodePrimitives>
-where
-    N::Receipt: FlashblockCachedReceipt,
-{
+pub struct FlashblocksPubSub<Eth: EthApiTypes, N: NodePrimitives> {
     /// Standard eth pubsub handler
     eth_pubsub: EthPubSub<Eth>,
     /// All nested flashblocks fields bundled together
@@ -89,7 +86,6 @@ where
     Eth: RpcNodeCore<Primitives = N> + 'static,
     Eth::Provider: BlockNumReader,
     Eth::RpcConvert: RpcConvert<Primitives = N> + Clone,
-    N::Receipt: FlashblockCachedReceipt,
 {
     /// Creates a new, shareable instance.
     ///
@@ -166,7 +162,6 @@ where
     Eth: RpcNodeCore<Primitives = N> + 'static,
     Eth::Provider: BlockNumReader,
     Eth::RpcConvert: RpcConvert<Primitives = N> + Clone,
-    N::Receipt: FlashblockCachedReceipt,
 {
     async fn subscribe(
         &self,
@@ -201,10 +196,7 @@ where
 }
 
 #[derive(Clone)]
-pub struct FlashblocksPubSubInner<Eth: EthApiTypes, N: NodePrimitives>
-where
-    N::Receipt: FlashblockCachedReceipt,
-{
+pub struct FlashblocksPubSubInner<Eth: EthApiTypes, N: NodePrimitives> {
     /// Pending block receiver from flashblocks, if available
     pub(crate) pending_block_rx: PendingSequenceRx<N>,
     /// The type that's used to spawn subscription tasks.
@@ -219,7 +211,6 @@ impl<Eth: EthApiTypes, N: NodePrimitives> FlashblocksPubSubInner<Eth, N>
 where
     Eth: RpcNodeCore<Primitives = N> + 'static,
     Eth::RpcConvert: RpcConvert<Primitives = N> + Clone,
-    N::Receipt: FlashblockCachedReceipt,
 {
     fn new_flashblocks_stream(
         &self,
@@ -497,10 +488,7 @@ where
 /// Extract `Header` from `PendingFlashBlock`
 fn extract_header_from_pending_block<N: NodePrimitives>(
     pending_block: &PendingSequence<N>,
-) -> Result<Header<N::BlockHeader>, ErrorObject<'static>>
-where
-    N::Receipt: FlashblockCachedReceipt,
-{
+) -> Result<Header<N::BlockHeader>, ErrorObject<'static>> {
     let block = pending_block.block();
     Ok(Header::from_consensus(
         block.clone_sealed_header().into(),
