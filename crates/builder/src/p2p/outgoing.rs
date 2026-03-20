@@ -1,4 +1,4 @@
-use super::Message;
+use super::types;
 use eyre::Context;
 use futures::stream::FuturesUnordered;
 use libp2p::{swarm::Stream, PeerId, StreamProtocol};
@@ -31,7 +31,7 @@ impl StreamsHandler {
         self.peers_to_stream.remove(peer);
     }
 
-    pub(crate) async fn broadcast_message<M: Message>(&mut self, message: M) -> eyre::Result<()> {
+    pub(crate) async fn broadcast_message(&mut self, message: types::Message) -> eyre::Result<()> {
         use futures::{SinkExt as _, StreamExt as _};
         use tokio_util::{
             codec::{FramedWrite, LinesCodec},
@@ -39,7 +39,7 @@ impl StreamsHandler {
         };
 
         let protocol = message.protocol();
-        let payload = message.to_string().wrap_err("failed to serialize payload")?;
+        let payload = serde_json::to_string(&message).wrap_err("failed to serialize payload")?;
 
         let peers = self.peers_to_stream.keys().cloned().collect::<Vec<_>>();
         let mut futures = FuturesUnordered::new();

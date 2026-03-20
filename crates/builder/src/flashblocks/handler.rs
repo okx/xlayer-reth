@@ -2,10 +2,10 @@ use crate::{
     flashblocks::{
         handler_ctx::FlashblockHandlerContext,
         utils::{
-            cache::FlashblockPayloadsCache, execution::ExecutionInfo, p2p::Message,
-            wspub::WebSocketPublisher,
+            cache::FlashblockPayloadsCache, execution::ExecutionInfo, wspub::WebSocketPublisher,
         },
     },
+    p2p::Message,
     traits::ClientBounds,
 };
 use std::sync::Arc;

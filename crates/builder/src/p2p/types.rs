@@ -16,8 +16,8 @@ pub(crate) enum Message {
     OpFlashblockPayload(OpFlashblockPayload),
 }
 
-impl crate::p2p::Message for Message {
-    fn protocol(&self) -> crate::p2p::StreamProtocol {
+impl Message {
+    pub(crate) fn protocol(&self) -> crate::p2p::StreamProtocol {
         FLASHBLOCKS_STREAM_PROTOCOL
     }
 }

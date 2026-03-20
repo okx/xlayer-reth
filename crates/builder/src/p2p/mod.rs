@@ -1,9 +1,11 @@
 mod behaviour;
 mod outgoing;
+pub(crate) mod types;
 
 use behaviour::Behaviour;
 use libp2p_stream::IncomingStreams;
 
+use crate::{flashblocks::utils::wspub::WebSocketPublisher, metrics::BuilderMetrics};
 use eyre::Context;
 use libp2p::{
     dns,
@@ -15,6 +17,7 @@ use libp2p::{
 use multiaddr::Protocol;
 use std::{
     collections::{HashMap, HashSet},
+    sync::Arc,
     time::Duration,
 };
 use tokio::sync::mpsc;
@@ -22,27 +25,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 pub use libp2p::{Multiaddr, StreamProtocol};
+pub(crate) use types::Message;
 
 const DEFAULT_MAX_PEER_COUNT: u32 = 50;
 const DEFAULT_PEER_RETRY_INTERVAL: Duration = Duration::from_secs(60);
-
-/// A message that can be sent between peers.
-pub trait Message:
-    serde::Serialize + for<'de> serde::Deserialize<'de> + Send + Sync + Clone + std::fmt::Debug
-{
-    fn protocol(&self) -> StreamProtocol;
-
-    fn to_string(&self) -> eyre::Result<String> {
-        serde_json::to_string(self).wrap_err("failed to serialize message to string")
-    }
-
-    fn from_str(s: &str) -> eyre::Result<Self>
-    where
-        Self: Sized,
-    {
-        serde_json::from_str(s).wrap_err("failed to deserialize message from string")
-    }
-}
 
 /// The libp2p node.
 ///
@@ -53,7 +39,7 @@ pub trait Message:
 /// - incoming messages received on incoming streams are handled by `IncomingStreamsHandler`, which reads messages from the stream and sends them to a channel for processing by the consumer of this library.
 ///
 /// Currently, there is no gossip implemented; messages are simply broadcast to connected peers.
-pub struct Node<M> {
+pub struct Node {
     /// The peer ID of this node.
     peer_id: PeerId,
 
@@ -68,7 +54,7 @@ pub struct Node<M> {
     known_peers: Vec<Multiaddr>,
 
     /// Receiver for outgoing messages to be sent to peers.
-    outgoing_message_rx: mpsc::Receiver<M>,
+    outgoing_message_rx: mpsc::Receiver<Message>,
 
     /// Handler for managing outgoing streams to peers.
     /// Used to determine what peers to broadcast to when a
@@ -76,16 +62,23 @@ pub struct Node<M> {
     outgoing_streams_handler: outgoing::StreamsHandler,
 
     /// Handlers for incoming streams (streams which remote peers have opened with us).
-    incoming_streams_handlers: Vec<IncomingStreamsHandler<M>>,
+    incoming_streams_handlers: Vec<IncomingStreamsHandler>,
 
     /// The protocols this node supports.
     protocols: Vec<StreamProtocol>,
 
     /// Cancellation token to shut down the node.
     cancellation_token: CancellationToken,
+
+    /// WebSocket publisher for broadcasting flashblocks
+    /// to all connected subscribers.
+    ws_pub: Arc<WebSocketPublisher>,
+
+    /// The metrics for the builder
+    metrics: Arc<BuilderMetrics>,
 }
 
-impl<M: Message + 'static> Node<M> {
+impl Node {
     /// Returns the multiaddresses that this node is listening on, with the peer ID included.
     pub fn multiaddrs(&self) -> Vec<libp2p::Multiaddr> {
         self.listen_addrs
@@ -111,6 +104,8 @@ impl<M: Message + 'static> Node<M> {
             cancellation_token,
             incoming_streams_handlers,
             protocols,
+            ws_pub,
+            metrics,
         } = self;
 
         for addr in listen_addrs {
@@ -162,6 +157,10 @@ impl<M: Message + 'static> Node<M> {
                 Some(message) = outgoing_message_rx.recv() => {
                     let protocol = message.protocol();
                     debug!(target: "flashblocks-p2p", "received message to broadcast on protocol {protocol}");
+                    if let Message::OpFlashblockPayload(ref fb_payload) = message {
+                        let flashblock_byte_size = ws_pub.publish(fb_payload)?;
+                        metrics.flashblock_byte_size_histogram.record(flashblock_byte_size as f64);
+                    }
                     if let Err(e) = outgoing_streams_handler.broadcast_message(message).await {
                         warn!(target: "flashblocks-p2p", "failed to broadcast message on protocol {protocol}: {e:?}");
                     }
@@ -220,10 +219,10 @@ impl<M: Message + 'static> Node<M> {
     }
 }
 
-pub struct NodeBuildResult<M> {
-    pub node: Node<M>,
-    pub outgoing_message_tx: mpsc::Sender<M>,
-    pub incoming_message_rxs: HashMap<StreamProtocol, mpsc::Receiver<M>>,
+pub struct NodeBuildResult {
+    pub node: Node,
+    pub outgoing_message_tx: mpsc::Sender<Message>,
+    pub incoming_message_rxs: HashMap<StreamProtocol, mpsc::Receiver<Message>>,
 }
 
 pub struct NodeBuilder {
@@ -235,16 +234,12 @@ pub struct NodeBuilder {
     protocols: Vec<StreamProtocol>,
     max_peer_count: Option<u32>,
     cancellation_token: Option<CancellationToken>,
-}
-
-impl Default for NodeBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
+    ws_pub: Arc<WebSocketPublisher>,
+    metrics: Arc<BuilderMetrics>,
 }
 
 impl NodeBuilder {
-    pub fn new() -> Self {
+    pub fn new(ws_pub: Arc<WebSocketPublisher>, metrics: Arc<BuilderMetrics>) -> Self {
         Self {
             port: None,
             listen_addrs: Vec::new(),
@@ -254,6 +249,8 @@ impl NodeBuilder {
             protocols: Vec::new(),
             max_peer_count: None,
             cancellation_token: None,
+            ws_pub,
+            metrics,
         }
     }
 
@@ -307,7 +304,7 @@ impl NodeBuilder {
         self
     }
 
-    pub fn try_build<M: Message + 'static>(self) -> eyre::Result<NodeBuildResult<M>> {
+    pub fn try_build(self) -> eyre::Result<NodeBuildResult> {
         let Self {
             port,
             listen_addrs,
@@ -317,6 +314,8 @@ impl NodeBuilder {
             protocols,
             max_peer_count,
             cancellation_token,
+            ws_pub,
+            metrics,
         } = self;
 
         // TODO: caller should be forced to provide this
@@ -401,6 +400,8 @@ impl NodeBuilder {
                 cancellation_token,
                 incoming_streams_handlers,
                 protocols,
+                ws_pub,
+                metrics,
             },
             outgoing_message_tx,
             incoming_message_rxs,
@@ -408,19 +409,19 @@ impl NodeBuilder {
     }
 }
 
-struct IncomingStreamsHandler<M> {
+struct IncomingStreamsHandler {
     protocol: StreamProtocol,
     incoming: IncomingStreams,
-    tx: mpsc::Sender<M>,
+    tx: mpsc::Sender<Message>,
     cancellation_token: CancellationToken,
 }
 
-impl<M: Message + 'static> IncomingStreamsHandler<M> {
+impl IncomingStreamsHandler {
     fn new(
         protocol: StreamProtocol,
         incoming: IncomingStreams,
         cancellation_token: CancellationToken,
-    ) -> (Self, mpsc::Receiver<M>) {
+    ) -> (Self, mpsc::Receiver<Message>) {
         const CHANNEL_SIZE: usize = 100;
         let (tx, rx) = mpsc::channel(CHANNEL_SIZE);
         (Self { protocol, incoming, tx, cancellation_token }, rx)
@@ -458,10 +459,10 @@ impl<M: Message + 'static> IncomingStreamsHandler<M> {
     }
 }
 
-async fn handle_incoming_stream<M: Message>(
+async fn handle_incoming_stream(
     peer_id: PeerId,
     stream: libp2p::Stream,
-    payload_tx: mpsc::Sender<M>,
+    payload_tx: mpsc::Sender<Message>,
 ) -> eyre::Result<()> {
     use futures::StreamExt as _;
     use tokio_util::{
@@ -475,7 +476,8 @@ async fn handle_incoming_stream<M: Message>(
     while let Some(res) = reader.next().await {
         match res {
             Ok(str) => {
-                let payload = M::from_str(&str).wrap_err("failed to decode stream message")?;
+                let payload = serde_json::from_str::<Message>(&str)
+                    .wrap_err("failed to decode stream message")?;
                 debug!(target: "flashblocks-p2p", "got message from peer {peer_id}: {payload:?}");
                 let _ = payload_tx.send(payload).await;
             }
@@ -507,9 +509,13 @@ fn create_transport(
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::{
+        flashblocks::utils::wspub::WebSocketPublisher,
+        metrics::{tokio::FlashblocksTaskMetrics, BuilderMetrics},
+    };
+    use op_alloy_rpc_types_engine::OpFlashblockPayload;
 
     const TEST_AGENT_VERSION: &str = "test/1.0.0";
-    const TEST_PROTOCOL: StreamProtocol = StreamProtocol::new("/test/1.0.0");
 
     /// Binds two ephemeral ports on 127.0.0.1, guaranteeing they are distinct.
     /// Returns `(port1, port2, guard1, guard2)` — callers must hold the guards
@@ -532,34 +538,19 @@ mod test {
         panic!("failed to obtain two distinct ephemeral ports after {MAX_RETRIES} retries");
     }
 
-    #[derive(Debug, PartialEq, Eq, Clone)]
-    struct TestMessage {
-        content: String,
-    }
-
-    impl Message for TestMessage {
-        fn protocol(&self) -> StreamProtocol {
-            TEST_PROTOCOL
-        }
-    }
-
-    impl serde::Serialize for TestMessage {
-        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: serde::Serializer,
-        {
-            serializer.serialize_str(&self.content)
-        }
-    }
-
-    impl<'de> serde::Deserialize<'de> for TestMessage {
-        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where
-            D: serde::Deserializer<'de>,
-        {
-            let s = String::deserialize(deserializer)?;
-            Ok(TestMessage { content: s })
-        }
+    fn make_test_node_builder() -> NodeBuilder {
+        let task_metrics = FlashblocksTaskMetrics::new();
+        let metrics = Arc::new(BuilderMetrics::default());
+        let ws_pub = Arc::new(
+            WebSocketPublisher::new(
+                "127.0.0.1:0".parse().unwrap(),
+                metrics.clone(),
+                &task_metrics.websocket_publisher,
+                None,
+            )
+            .expect("can create test WebSocketPublisher"),
+        );
+        NodeBuilder::new(ws_pub, metrics)
     }
 
     #[tokio::test]
@@ -572,26 +563,26 @@ mod test {
         drop(_guard2);
 
         let NodeBuildResult { node: node1, outgoing_message_tx: _, incoming_message_rxs: mut rx1 } =
-            NodeBuilder::new()
+            make_test_node_builder()
                 .with_listen_addr(format!("/ip4/127.0.0.1/tcp/{port1}").parse().unwrap())
                 .with_agent_version(TEST_AGENT_VERSION.to_string())
-                .with_protocol(TEST_PROTOCOL)
-                .try_build::<TestMessage>()
+                .with_protocol(types::FLASHBLOCKS_STREAM_PROTOCOL)
+                .try_build()
                 .unwrap();
         let NodeBuildResult { node: node2, outgoing_message_tx: tx2, incoming_message_rxs: _ } =
-            NodeBuilder::new()
+            make_test_node_builder()
                 .with_known_peers(node1.multiaddrs())
-                .with_protocol(TEST_PROTOCOL)
+                .with_protocol(types::FLASHBLOCKS_STREAM_PROTOCOL)
                 .with_listen_addr(format!("/ip4/127.0.0.1/tcp/{port2}").parse().unwrap())
                 .with_agent_version(TEST_AGENT_VERSION.to_string())
-                .try_build::<TestMessage>()
+                .try_build()
                 .unwrap();
 
         tokio::spawn(async move { node1.run().await });
         tokio::spawn(async move { node2.run().await });
-        let message = TestMessage { content: "message".to_string() };
-        let mut rx = rx1.remove(&TEST_PROTOCOL).unwrap();
-        let recv_message: TestMessage = tokio::time::timeout(Duration::from_secs(10), async {
+        let message = Message::from_flashblock_payload(OpFlashblockPayload::default());
+        let mut rx = rx1.remove(&types::FLASHBLOCKS_STREAM_PROTOCOL).unwrap();
+        let recv_message = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 // Use try_send to avoid panicking if the channel is full
                 // (e.g. connection not yet established and messages are buffered).
