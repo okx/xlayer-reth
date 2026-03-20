@@ -10,6 +10,10 @@ on:
   pull_request_review:
     types: [submitted]
 
+permissions:
+  id-token: write
+  contents: read
+
 jobs:
   call-central-workflow:
     uses: Vui-Chee/workflows/.github/workflows/xlayer-reth-claude.yml@master
