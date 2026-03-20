@@ -11,6 +11,7 @@ permissions:
   issues: write
   id-token: write
   actions: read
+  security-events: read
 
 jobs:
   call-central-workflow:
