@@ -11,8 +11,11 @@ on:
     types: [submitted]
 
 permissions:
-  id-token: write
   contents: read
+  pull-requests: write
+  issues: write
+  id-token: write
+  actions: read
 
 jobs:
   call-central-workflow:
