@@ -18,4 +18,4 @@ jobs:
     secrets:
       gh_pat: ${{ secrets.GH_SECURITY_PAT }}
       anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-      github_token: ${{ secrets.GITHUB_TOKEN }}
+      other_gh_token: ${{ secrets.GITHUB_TOKEN }}
