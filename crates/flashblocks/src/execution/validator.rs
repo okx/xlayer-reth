@@ -192,7 +192,8 @@ where
 
         // Create lazy overlay from ancestors - this doesn't block, allowing execution to start
         // before the trie data is ready. The overlay will be computed on first access.
-        let (lazy_overlay, anchor_hash) = self.get_parent_lazy_overlay(parent_hash);
+        let (lazy_overlay, anchor_hash) =
+            Self::get_parent_lazy_overlay(overlay_data.as_ref(), parent_hash);
 
         // Create overlay factory for payload processor (StateRootTask path needs it for
         // multiproofs)
@@ -445,8 +446,7 @@ where
                     "height mismatch: incoming={incoming_block_number}, pending={pending_height}"
                 ));
             }
-            let incremental = pending_height == incoming_block_number;
-            if incremental {
+            if pending_height == incoming_block_number {
                 // Validate states of last executed flashblock index
                 let last_index = pending.prefix_execution_meta.last_flashblock_index;
                 if last_index.saturating_add(1) != incoming_index {
@@ -470,7 +470,7 @@ where
                 "height mismatch: incoming={incoming_block_number}, canonical={canon_height}"
             ));
         }
-        return Ok(None);
+        Ok(None)
     }
 
     /// Executes a block with the given state provider.
@@ -562,7 +562,7 @@ where
         if let Some(seq) = pending_sequence {
             result = Self::merge_suffix_results(
                 &seq.prefix_execution_meta,
-                seq.pending.receipts.as_ref().clone(),
+                (*seq.pending.receipts).clone(),
                 result,
             );
         }
@@ -620,7 +620,7 @@ where
         };
 
         let mut senders = Vec::with_capacity(transaction_count);
-        let mut transactions = handle.iter_transactions().into_iter();
+        let mut transactions = handle.iter_transactions();
 
         // Some executors may execute transactions that do not append receipts during the
         // main loop (e.g., system transactions whose receipts are added during finalization).
@@ -905,16 +905,15 @@ where
     /// block hash (the highest persisted ancestor). This allows execution to start immediately
     /// while the trie input computation is deferred until the overlay is actually needed.
     ///
-    /// If parent is on disk (no in-memory blocks), returns `None` for the lazy overlay.
-    ///
-    /// Uses a cached overlay if available for the canonical head (the common case).
-    fn get_parent_lazy_overlay(&self, parent_hash: B256) -> (Option<LazyOverlay>, B256) {
-        // Get blocks leading to the parent to determine the anchor
-        let (blocks, anchor_hash) = self
-            .flashblocks_state
-            .get_overlay_data(&parent_hash)
-            .map(|(blocks, _, anchor_hash)| (blocks, anchor_hash))
-            .unwrap_or_else(|| (vec![], parent_hash));
+    /// If parent is on disk (no in-memory blocks), returns `(None, parent_hash)`.
+    fn get_parent_lazy_overlay(
+        overlay_data: Option<&(Vec<ExecutedBlock<N>>, B256)>,
+        parent_hash: B256,
+    ) -> (Option<LazyOverlay>, B256) {
+        let Some((blocks, anchor)) = overlay_data else {
+            return (None, parent_hash);
+        };
+        let anchor_hash = *anchor;
 
         if blocks.is_empty() {
             debug!(target: "flashblocks::validator", "Parent found on disk, no lazy overlay needed");
