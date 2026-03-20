@@ -5,14 +5,11 @@ use crate::{
         generator::BlockPayloadJobGenerator,
         handler::FlashblocksPayloadHandler,
         handler_ctx::FlashblockHandlerContext,
-        utils::{
-            cache::FlashblockPayloadsCache,
-            p2p::{Message, AGENT_VERSION, FLASHBLOCKS_STREAM_PROTOCOL},
-            wspub::WebSocketPublisher,
-        },
+        utils::{cache::FlashblockPayloadsCache, wspub::WebSocketPublisher},
         BuilderConfig,
     },
     metrics::{tokio::FlashblocksTaskMetrics, BuilderMetrics},
+    p2p::types::{AGENT_VERSION, FLASHBLOCKS_STREAM_PROTOCOL},
     traits::{NodeBounds, PoolBounds},
 };
 use eyre::WrapErr as _;
@@ -54,8 +51,19 @@ impl FlashblocksServiceBuilder {
         // this is effectively unused right now due to the usage of reth's `task_executor`.
         let cancel = tokio_util::sync::CancellationToken::new();
 
+        let metrics = Arc::new(BuilderMetrics::default());
+        let task_metrics = Arc::new(FlashblocksTaskMetrics::new());
+        let ws_pub: Arc<WebSocketPublisher> = WebSocketPublisher::new(
+            self.config.flashblocks.ws_addr,
+            metrics.clone(),
+            &task_metrics.websocket_publisher,
+            self.config.flashblocks.ws_subscriber_limit,
+        )
+        .wrap_err("failed to create ws publisher")?
+        .into();
+
         let (incoming_message_rx, outgoing_message_tx) = if self.config.flashblocks.p2p_enabled {
-            let mut builder = crate::p2p::NodeBuilder::new();
+            let mut builder = crate::p2p::NodeBuilder::new(ws_pub.clone(), metrics.clone());
 
             if let Some(ref private_key_file) = self.config.flashblocks.p2p_private_key_file
                 && !private_key_file.is_empty()
@@ -88,7 +96,7 @@ impl FlashblocksServiceBuilder {
                     .with_port(self.config.flashblocks.p2p_port)
                     .with_cancellation_token(cancel.clone())
                     .with_max_peer_count(self.config.flashblocks.p2p_max_peer_count)
-                    .try_build::<Message>()
+                    .try_build()
                     .wrap_err("failed to build flashblocks p2p node")?;
             let multiaddrs = node.multiaddrs();
             ctx.task_executor().spawn_task(async move {
@@ -108,9 +116,6 @@ impl FlashblocksServiceBuilder {
             (incoming_message_rx, outgoing_message_tx)
         };
 
-        let metrics = Arc::new(BuilderMetrics::default());
-        let task_metrics = Arc::new(FlashblocksTaskMetrics::new());
-
         // Channels for built flashblock payloads
         let (built_fb_payload_tx, built_fb_payload_rx) = tokio::sync::mpsc::channel(16);
         // Channels for built full block payloads
@@ -122,14 +127,6 @@ impl FlashblocksServiceBuilder {
             FlashblockPayloadsCache::new(None)
         };
 
-        let ws_pub: Arc<WebSocketPublisher> = WebSocketPublisher::new(
-            self.config.flashblocks.ws_addr,
-            metrics.clone(),
-            &task_metrics.websocket_publisher,
-            self.config.flashblocks.ws_subscriber_limit,
-        )
-        .wrap_err("failed to create ws publisher")?
-        .into();
         let mut payload_builder = FlashblocksBuilder::new(
             OpEvmConfig::optimism(ctx.chain_spec()),
             pool,
@@ -140,7 +137,6 @@ impl FlashblocksServiceBuilder {
             built_fb_payload_tx,
             built_payload_tx,
             p2p_cache.clone(),
-            ws_pub.clone(),
             metrics.clone(),
             task_metrics.clone(),
         );
