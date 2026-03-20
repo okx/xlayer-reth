@@ -2,7 +2,7 @@ name: Dependabot Security Fix
 
 on:
   schedule:
-    - cron: '0 9 * * 1'  # Run once per week on Monday at 9 AM UTC
+    - cron: '0 0 * * *'  # Run daily at midnight UTC
   workflow_dispatch:      # Allow manual triggering for testing
 
 jobs:
@@ -21,7 +21,7 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Fetch top 2 highest-risk Dependabot alerts
+      - name: Fetch top 5 highest-risk Dependabot alerts
         id: alerts
         env:
           # Use a distinct name to avoid collision with the GH_TOKEN that the Actions
@@ -45,12 +45,12 @@ jobs:
             echo "Error: Failed to fetch dependabot alerts" >&2
           fi
 
-          # Keep moderate/high/critical, sort by severity (critical=0, high=1, medium=2).
-          # No limit yet — existing open PRs are filtered out below before taking top 2.
+          # Keep low/medium/high/critical, sort by severity (critical=0, high=1, medium=2, low=3).
+          # No limit yet — existing open PRs are filtered out below before taking top 5.
           # Written to a file — never interpolated into the Claude prompt — to prevent prompt injection.
           jq '[
             .[] |
-            select(.security_advisory.severity | ascii_downcase | IN("critical","high","medium")) |
+            select(.security_advisory.severity | ascii_downcase | IN("critical","high","medium","low")) |
             {
               number:          .number,
               package:         .dependency.package.name,
@@ -65,7 +65,8 @@ jobs:
                 .security_advisory.severity | ascii_downcase |
                 if . == "critical" then 0
                 elif . == "high"   then 1
-                else                    2 end
+                elif . == "medium" then 2
+                else                    3 end
               )
             }
           ] | sort_by(.severity_rank)' /tmp/alerts_raw.json > /tmp/alerts_all.json
@@ -88,14 +89,14 @@ jobs:
             [.[] | select(
               .package as $pkg |
               ($branches | map(startswith("fix/security-\($pkg)-")) | any) | not
-            )] | .[0:2]
+            )] | .[0:5]
           ' /tmp/alerts_all.json > /tmp/alerts.json
 
           COUNT=$(jq 'length' /tmp/alerts.json)
           echo "Alerts selected for fixing: $COUNT"
 
           if [ "$COUNT" -eq 0 ]; then
-            echo "No moderate/high/critical alerts found. Nothing to do."
+            echo "No alerts found. Nothing to do."
             echo "has_alerts=false" >> "$GITHUB_OUTPUT"
           else
             echo "has_alerts=true" >> "$GITHUB_OUTPUT"
