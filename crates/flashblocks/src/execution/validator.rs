@@ -203,10 +203,10 @@ where
         .with_block_hash(Some(anchor_hash))
         .with_lazy_overlay(lazy_overlay);
 
-        // Spawn the appropriate processor based on strategy
+        // Spawn the appropriate processor based on strategy.
         let mut handle = self.spawn_payload_processor(
             execution_env.clone(),
-            block_transactions.clone(),
+            transactions.clone(),
             provider_builder,
             overlay_factory.clone(),
             strategy,
@@ -229,7 +229,7 @@ where
             &parent_header,
             attrs,
             transactions,
-            pending_sequence,
+            pending_sequence.as_ref(),
             &mut handle,
         )?;
 
@@ -488,7 +488,7 @@ where
         parent_header: &SealedHeaderFor<N>,
         attrs: EvmConfig::NextBlockEnvCtx,
         transactions: Vec<WithEncoded<Recovered<N::SignedTx>>>,
-        pending_sequence: Option<PendingSequence<N>>,
+        pending_sequence: Option<&PendingSequence<N>>,
         handle: &mut PayloadHandle<T, Err, N::Receipt>,
     ) -> eyre::Result<(
         BlockExecutionOutput<N::Receipt>,
@@ -504,12 +504,11 @@ where
     {
         // Build state
         let mut read_cache = pending_sequence
-            .as_ref()
             .map(|p| p.prefix_execution_meta.cached_reads.clone())
             .unwrap_or_default();
         let cached_db = read_cache.as_db_mut(StateProviderDatabase::new(state_provider));
         let mut state_builder = State::builder().with_database(cached_db).with_bundle_update();
-        if let Some(seq) = pending_sequence.as_ref() {
+        if let Some(seq) = pending_sequence {
             state_builder = state_builder
                 .with_bundle_prestate(seq.pending.executed_block.execution_output.state.clone());
         }
@@ -533,7 +532,8 @@ where
 
         // Spawn background task to compute receipt root and logs bloom incrementally.
         // Unbounded channel is used since tx count bounds capacity anyway (max ~30k txs per block).
-        let receipts_len = transactions.len();
+        let prefix_receipt_count = pending_sequence.map_or(0, |s| s.pending.receipts.len());
+        let receipts_len = prefix_receipt_count + transactions.len();
         let (receipt_tx, receipt_rx) = crossbeam_channel::unbounded();
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         let task_handle = ReceiptRootTaskHandle::new(receipt_rx, result_tx);
@@ -548,9 +548,9 @@ where
         }
 
         // Execute all transactions and finalize
-        let (executor, senders) = self.execute_transactions(
+        let (executor, suffix_senders) = self.execute_transactions(
             executor,
-            pending_sequence.as_ref(),
+            pending_sequence,
             transaction_count,
             handle,
             &receipt_tx,
@@ -559,13 +559,22 @@ where
 
         // Finish execution and get the result
         let (_evm, mut result) = executor.finish().map(|(evm, result)| (evm.into_db(), result))?;
-        if let Some(seq) = pending_sequence.as_ref() {
+        if let Some(seq) = pending_sequence {
             result = Self::merge_suffix_results(
                 &seq.prefix_execution_meta,
                 seq.pending.receipts.as_ref().clone(),
                 result,
             );
         }
+        // Reconstruct full senders list
+        let senders = if let Some(seq) = pending_sequence {
+            let mut all_senders = seq.pending.executed_block.recovered_block.senders().to_vec();
+            all_senders.extend(suffix_senders);
+            all_senders
+        } else {
+            suffix_senders
+        };
+
         // Merge transitions into bundle state
         db.merge_transitions(BundleRetention::Reverts);
 
@@ -599,12 +608,16 @@ where
         EvmConfig: ConfigureEvm<Primitives = N, NextBlockEnvCtx: From<OpFlashblockPayloadBase> + Unpin>
             + 'static,
     {
-        // Send all previously executed receipts to the receipt root task for incremental builds
-        if let Some(seq) = pending_sequence {
+        // Send all previously executed receipts to the receipt root task for incremental builds.
+        let receipt_index_offset = if let Some(seq) = pending_sequence {
+            let prefix_count = seq.pending.receipts.len();
             for (index, receipt) in seq.pending.receipts.iter().enumerate() {
                 let _ = receipt_tx.send(IndexedReceipt::new(index, receipt.clone()));
             }
-        }
+            prefix_count
+        } else {
+            0
+        };
 
         let mut senders = Vec::with_capacity(transaction_count);
         let mut transactions = handle.iter_transactions().into_iter();
@@ -629,7 +642,7 @@ where
                 last_sent_len = current_len;
                 // Send the latest receipt to the background task for incremental root computation.
                 if let Some(receipt) = executor.receipts().last() {
-                    let tx_index = current_len - 1;
+                    let tx_index = receipt_index_offset + current_len - 1;
                     let _ = receipt_tx.send(IndexedReceipt::new(tx_index, receipt.clone()));
                 }
             }
@@ -901,7 +914,7 @@ where
             .flashblocks_state
             .get_overlay_data(&parent_hash)
             .map(|(blocks, _, anchor_hash)| (blocks, anchor_hash))
-            .unwrap_or_else(|| (vec![], B256::ZERO));
+            .unwrap_or_else(|| (vec![], parent_hash));
 
         if blocks.is_empty() {
             debug!(target: "flashblocks::validator", "Parent found on disk, no lazy overlay needed");
