@@ -10,15 +10,14 @@ on:
   pull_request_review:
     types: [submitted]
 
-permissions:
-  contents: read
-  pull-requests: write
-  issues: write
-  id-token: write
-  actions: read
-
 jobs:
   call-central-workflow:
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
     uses: Vui-Chee/workflows/.github/workflows/xlayer-reth-claude.yml@master
     secrets:
       anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
