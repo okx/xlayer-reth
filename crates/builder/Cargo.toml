@@ -127,7 +127,7 @@ nanoid = { version = "0.4", optional = true }
 rand = "0.9.0"
 rlimit = { version = "0.10", optional = true }
 sha3 = "0.10"
-tracing-subscriber = { version = "0.3.18", features = ["env-filter", "json"] }
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "json"] }
 testcontainers = "0.27.0"
 
 [dev-dependencies]
