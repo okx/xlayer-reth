@@ -3,6 +3,7 @@
 !.claude/skills/
 .vscode
 .idea
+.omc
 
 tests/data
 tests/op-reth-seq
