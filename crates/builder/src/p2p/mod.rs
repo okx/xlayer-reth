@@ -157,12 +157,12 @@ impl Node {
                 Some(message) = outgoing_message_rx.recv() => {
                     let protocol = message.protocol();
                     debug!(target: "flashblocks-p2p", "received message to broadcast on protocol {protocol}");
+                    if let Err(e) = outgoing_streams_handler.broadcast_message(message.clone()).await {
+                        warn!(target: "flashblocks-p2p", "failed to broadcast message on protocol {protocol}: {e:?}");
+                    }
                     if let Message::OpFlashblockPayload(ref fb_payload) = message {
                         let flashblock_byte_size = ws_pub.publish(fb_payload)?;
                         metrics.flashblock_byte_size_histogram.record(flashblock_byte_size as f64);
-                    }
-                    if let Err(e) = outgoing_streams_handler.broadcast_message(message).await {
-                        warn!(target: "flashblocks-p2p", "failed to broadcast message on protocol {protocol}: {e:?}");
                     }
                 }
                 event = swarm.select_next_some() => {
