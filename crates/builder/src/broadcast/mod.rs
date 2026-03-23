@@ -1,11 +1,13 @@
 mod behaviour;
 mod outgoing;
 pub(crate) mod types;
+pub(crate) mod wspub;
 
 use behaviour::Behaviour;
 use libp2p_stream::IncomingStreams;
+use wspub::WebSocketPublisher;
 
-use crate::{flashblocks::utils::wspub::WebSocketPublisher, metrics::BuilderMetrics};
+use crate::metrics::BuilderMetrics;
 use eyre::Context;
 use libp2p::{
     dns,
@@ -30,13 +32,18 @@ pub(crate) use types::Message;
 const DEFAULT_MAX_PEER_COUNT: u32 = 50;
 const DEFAULT_PEER_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 
-/// The libp2p node.
+/// The broadcast node.
 ///
 /// The current behaviour of the node regarding messaging protocols is as follows:
-/// - for each supported protocol, the node will accept incoming streams from remote peers on that protocol.
-/// - when a new connection is established with a peer, the node will open outbound streams to that peer for each supported protocol.
-/// - when a new outgoing message is received on `outgoing_message_rx`, the node will broadcast that message to all connected peers that have an outbound stream open for the message's protocol.
-/// - incoming messages received on incoming streams are handled by `IncomingStreamsHandler`, which reads messages from the stream and sends them to a channel for processing by the consumer of this library.
+/// - for each supported protocol, the node will accept incoming streams from remote peers on that
+///   protocol.
+/// - when a new connection is established with a peer, the node will open outbound streams to that
+///   peer for each supported protocol.
+/// - when a new outgoing message is received on `outgoing_message_rx`, the node will broadcast that
+///   message to all connected peers that have an outbound stream open for the message's protocol.
+/// - incoming messages received on incoming streams are handled by `IncomingStreamsHandler`, which
+///   reads messages from the stream and sends them to a channel for processing by the consumer of
+///   this library.
 ///
 /// Currently, there is no gossip implemented; messages are simply broadcast to connected peers.
 pub struct Node {
@@ -87,7 +94,9 @@ impl Node {
             .collect()
     }
 
-    /// Runs the p2p node, dials known peers, and starts listening for incoming connections and messages.
+    /// Runs the broadcast node.
+    /// 1. Dials known peers, and starts listening for incoming connections and messages.
+    /// 2. Publishes flashblocks to websocket subscribers
     ///
     /// This function will run until the cancellation token is triggered.
     /// If an error occurs, it will be logged, but the node will continue running.
@@ -137,7 +146,7 @@ impl Node {
             tokio::select! {
                 biased;
                 _ = cancellation_token.cancelled() => {
-                    debug!(target: "flashblocks-p2p", "cancellation token triggered, shutting down node");
+                    debug!(target: "payload_builder::broadcast", "cancellation token triggered, shutting down node");
                     handles.into_iter().for_each(|h| h.abort());
                     break Ok(());
                 }
@@ -146,23 +155,29 @@ impl Node {
                     let connected_peers: HashSet<PeerId> = swarm.connected_peers().copied().collect();
                     for (peer_id, address) in &known_peers_info {
                         if !connected_peers.contains(peer_id) {
-                            debug!(target: "flashblocks-p2p", "retrying connection to disconnected known peer {peer_id} at {address}");
+                            debug!(target: "payload_builder::broadcast", "retrying connection to disconnected known peer {peer_id} at {address}");
                             swarm.add_peer_address(*peer_id, address.clone());
                             if let Err(e) = swarm.dial(address.clone()) {
-                                warn!(target: "flashblocks-p2p", "failed to retry dial to known peer {peer_id} at {address}: {e:?}");
+                                warn!(target: "payload_builder::broadcast", "failed to retry dial to known peer {peer_id} at {address}: {e:?}");
                             }
                         }
                     }
                 }
                 Some(message) = outgoing_message_rx.recv() => {
                     let protocol = message.protocol();
-                    debug!(target: "flashblocks-p2p", "received message to broadcast on protocol {protocol}");
+                    debug!(target: "payload_builder::broadcast", "received message to broadcast on protocol {protocol}");
                     if let Err(e) = outgoing_streams_handler.broadcast_message(message.clone()).await {
-                        warn!(target: "flashblocks-p2p", "failed to broadcast message on protocol {protocol}: {e:?}");
+                        warn!(target: "payload_builder::broadcast", "failed to broadcast message on protocol {protocol}: {e:?}");
                     }
                     if let Message::OpFlashblockPayload(ref fb_payload) = message {
-                        let flashblock_byte_size = ws_pub.publish(fb_payload)?;
-                        metrics.flashblock_byte_size_histogram.record(flashblock_byte_size as f64);
+                        match ws_pub.publish(fb_payload) {
+                            Ok(flashblock_byte_size) => {
+                                metrics.flashblock_byte_size_histogram.record(flashblock_byte_size as f64);
+                            }
+                            Err(e) => {
+                                warn!(target: "payload_builder::broadcast", "failed to publish flashblock to ws subscribers: {e:?}");
+                            }
+                        }
                     }
                 }
                 event = swarm.select_next_some() => {
@@ -171,10 +186,10 @@ impl Node {
                             address,
                             ..
                         } => {
-                            debug!(target: "flashblocks-p2p", "new listen address: {address}");
+                            debug!(target: "payload_builder::broadcast", "new listen address: {address}");
                         }
                         SwarmEvent::ExternalAddrConfirmed { address } => {
-                            debug!(target: "flashblocks-p2p", "external address confirmed: {address}");
+                            debug!(target: "payload_builder::broadcast", "external address confirmed: {address}");
                         }
                         SwarmEvent::ConnectionEstablished {
                             peer_id,
@@ -183,7 +198,7 @@ impl Node {
                         } => {
                             // when a new connection is established, open outbound streams for each protocol
                             // and add them to the outgoing streams handler.
-                            debug!(target: "flashblocks-p2p", "fb p2p connection established with peer {peer_id}");
+                            debug!(target: "payload_builder::broadcast", "fb p2p connection established with peer {peer_id}");
                             if !outgoing_streams_handler.has_peer(&peer_id) {
                                 for protocol in &protocols {
                                         match swarm
@@ -193,10 +208,10 @@ impl Node {
                                         .await
                                     {
                                         Ok(stream) => { outgoing_streams_handler.insert_peer_and_stream(peer_id, protocol.clone(), stream);
-                                            debug!(target: "flashblocks-p2p", "opened outbound stream with peer {peer_id} with protocol {protocol} on connection {connection_id}");
+                                            debug!(target: "payload_builder::broadcast", "opened outbound stream with peer {peer_id} with protocol {protocol} on connection {connection_id}");
                                         }
                                         Err(e) => {
-                                            warn!(target: "flashblocks-p2p", "failed to open stream with peer {peer_id} on connection {connection_id}: {e:?}");
+                                            warn!(target: "payload_builder::broadcast", "failed to open stream with peer {peer_id} on connection {connection_id}: {e:?}");
                                         }
                                     }
                                 }
@@ -207,7 +222,7 @@ impl Node {
                             cause,
                             ..
                         } => {
-                            debug!(target: "flashblocks-p2p", "connection closed with peer {peer_id}: {cause:?}");
+                            debug!(target: "payload_builder::broadcast", "connection closed with peer {peer_id}: {cause:?}");
                             outgoing_streams_handler.remove_peer(&peer_id);
                         }
                         SwarmEvent::Behaviour(event) => event.handle(&mut swarm),
@@ -436,21 +451,21 @@ impl IncomingStreamsHandler {
         loop {
             tokio::select! {
                 _ = cancellation_token.cancelled() => {
-                    debug!(target: "flashblocks-p2p", "cancellation token triggered, shutting down incoming streams handler for protocol {protocol}");
+                    debug!(target: "payload_builder::broadcast", "cancellation token triggered, shutting down incoming streams handler for protocol {protocol}");
                     return;
                 }
                 Some((from, stream)) = incoming.next() => {
-                    debug!(target: "flashblocks-p2p", "new incoming stream on protocol {protocol} from peer {from}");
+                    debug!(target: "payload_builder::broadcast", "new incoming stream on protocol {protocol} from peer {from}");
                     handle_stream_futures.push(tokio::spawn(handle_incoming_stream(from, stream, tx.clone())));
                 }
                 Some(res) = handle_stream_futures.next() => {
                     match res {
                         Ok(Ok(())) => {}
                         Ok(Err(e)) => {
-                            warn!(target: "flashblocks-p2p", "error handling incoming stream: {e:?}");
+                            warn!(target: "payload_builder::broadcast", "error handling incoming stream: {e:?}");
                         }
                         Err(e) => {
-                            warn!(target: "flashblocks-p2p", "task handling incoming stream panicked: {e:?}");
+                            warn!(target: "payload_builder::broadcast", "task handling incoming stream panicked: {e:?}");
                         }
                     }
                 }
@@ -478,7 +493,7 @@ async fn handle_incoming_stream(
             Ok(str) => {
                 let payload = serde_json::from_str::<Message>(&str)
                     .wrap_err("failed to decode stream message")?;
-                debug!(target: "flashblocks-p2p", "got message from peer {peer_id}: {payload:?}");
+                debug!(target: "payload_builder::broadcast", "got message from peer {peer_id}: {payload:?}");
                 let _ = payload_tx.send(payload).await;
             }
             Err(e) => {
@@ -509,10 +524,8 @@ fn create_transport(
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{
-        flashblocks::utils::wspub::WebSocketPublisher,
-        metrics::{tokio::FlashblocksTaskMetrics, BuilderMetrics},
-    };
+    use crate::broadcast::wspub::WebSocketPublisher;
+    use crate::metrics::{tokio::FlashblocksTaskMetrics, BuilderMetrics};
     use op_alloy_rpc_types_engine::OpFlashblockPayload;
 
     const TEST_AGENT_VERSION: &str = "test/1.0.0";

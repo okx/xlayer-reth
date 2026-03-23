@@ -172,14 +172,6 @@ impl Default for FlashblocksArgs {
 
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
 pub struct FlashblocksP2pArgs {
-    /// Enable libp2p networking for flashblock propagation
-    #[arg(
-        long = "flashblocks.p2p_enabled",
-        env = "FLASHBLOCK_P2P_ENABLED",
-        default_value = "false"
-    )]
-    pub p2p_enabled: bool,
-
     /// Port for the flashblocks p2p node
     #[arg(long = "flashblocks.p2p_port", env = "FLASHBLOCK_P2P_PORT", default_value = "9009")]
     pub p2p_port: u16,

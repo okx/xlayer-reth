@@ -91,7 +91,7 @@ impl BehaviourEvent {
                             continue;
                         }
 
-                        tracing::debug!(target: "flashblocks-p2p", "mDNS discovered peer {peer_id} at {multiaddr}");
+                        tracing::debug!(target: "payload_builder::broadcast", "mDNS discovered peer {peer_id} at {multiaddr}");
                         swarm.add_peer_address(peer_id, multiaddr);
                         swarm.dial(peer_id).unwrap_or_else(|e| {
                             tracing::error!("failed to dial mDNS discovered peer {peer_id}: {e}")
@@ -100,7 +100,7 @@ impl BehaviourEvent {
                 }
                 mdns::Event::Expired(list) => {
                     for (peer_id, multiaddr) in list {
-                        tracing::debug!(target: "flashblocks-p2p", "mDNS expired peer {peer_id} at {multiaddr}");
+                        tracing::debug!(target: "payload_builder::broadcast", "mDNS expired peer {peer_id} at {multiaddr}");
                     }
                 }
             },

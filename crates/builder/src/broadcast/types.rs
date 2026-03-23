@@ -7,8 +7,8 @@ use reth_optimism_payload_builder::OpBuiltPayload as RethOpBuiltPayload;
 use reth_optimism_primitives::OpBlock;
 
 pub(crate) const AGENT_VERSION: &str = "flashblock-builder/1.0.0";
-pub(crate) const FLASHBLOCKS_STREAM_PROTOCOL: crate::p2p::StreamProtocol =
-    crate::p2p::StreamProtocol::new("/flashblocks/1.0.0");
+pub(crate) const FLASHBLOCKS_STREAM_PROTOCOL: crate::broadcast::StreamProtocol =
+    crate::broadcast::StreamProtocol::new("/flashblocks/1.0.0");
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub(crate) enum Message {
@@ -17,7 +17,7 @@ pub(crate) enum Message {
 }
 
 impl Message {
-    pub(crate) fn protocol(&self) -> crate::p2p::StreamProtocol {
+    pub(crate) fn protocol(&self) -> crate::broadcast::StreamProtocol {
         FLASHBLOCKS_STREAM_PROTOCOL
     }
 }
