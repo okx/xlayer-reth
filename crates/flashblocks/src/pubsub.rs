@@ -7,6 +7,7 @@ use jsonrpsee::types::ErrorObject;
 use reth_rpc_server_types::result::invalid_params_rpc_err;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use xlayer_innertx::innertx_inspector::InternalTransaction;
 
 const FLASHBLOCKS: &str = "flashblocks";
 
@@ -100,6 +101,9 @@ pub struct SubTxFilter {
 
     /// Flag to include transaction receipts.
     pub tx_receipt: bool,
+
+    /// Flag to include internal transaction traces.
+    pub tx_inner_tx: bool,
 }
 
 impl SubTxFilter {
@@ -151,4 +155,8 @@ pub struct EnrichedTransaction<Tx, R> {
     /// Transaction receipt (if `tx_receipt` is true in filter criteria).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub receipt: Option<R>,
+
+    /// Internal transaction traces (if `tx_innertx` is true in filter criteria).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub innertx: Option<Vec<InternalTransaction>>,
 }
