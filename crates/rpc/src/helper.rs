@@ -52,11 +52,11 @@ pub(crate) fn to_rpc_block<Rpc>(
 where
     Rpc: RpcConvert<Network = Optimism, Primitives = OpPrimitives>,
 {
-    Ok(bar.block.clone_into_rpc_block(
+    bar.block.clone_into_rpc_block(
         full.into(),
         |tx, tx_info| converter.fill(tx, tx_info),
         |header, size| converter.convert_header(header, size),
-    )?)
+    )
 }
 
 /// Converts all receipts from a `BlockAndReceipts` into RPC receipts.
@@ -98,7 +98,7 @@ where
         })
         .collect::<Vec<_>>();
 
-    Ok(converter.convert_receipts_with_block(inputs, bar.sealed_block())?)
+    converter.convert_receipts_with_block(inputs, bar.sealed_block())
 }
 
 /// Converts a `CachedTxInfo` and `BlockAndReceipts` into an RPC transaction.
@@ -111,7 +111,7 @@ where
     Rpc: RpcConvert<Network = Optimism, Primitives = OpPrimitives>,
 {
     let tx_info = build_tx_info(bar, info.tx.tx_hash(), info.tx_index);
-    Ok(converter.fill(info.tx.clone().try_into_recovered().expect("valid cached tx"), tx_info)?)
+    converter.fill(info.tx.clone().try_into_recovered().expect("valid cached tx"), tx_info)
 }
 
 /// Converts a `BlockAndReceipts` and transaction index into an RPC transaction.

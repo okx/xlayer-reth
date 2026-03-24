@@ -214,7 +214,7 @@ impl<N: NodePrimitives> ConfirmCache<N> {
     /// Removes all tx index entries for the transactions in the given block.
     fn remove_tx_index_for_block(&mut self, block: &ConfirmedBlock<N>) {
         for tx in block.executed_block.recovered_block.body().transactions() {
-            self.tx_index.remove(&*tx.tx_hash());
+            self.tx_index.remove(tx.tx_hash());
         }
     }
 

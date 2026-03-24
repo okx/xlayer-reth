@@ -4,7 +4,6 @@ pub(crate) mod raw;
 pub(crate) mod utils;
 
 pub(crate) use confirm::ConfirmCache;
-pub(crate) use raw::RawFlashblocksCache;
 
 pub use pending::PendingSequence;
 
@@ -218,7 +217,7 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
         block_hash: &B256,
     ) -> Option<(Vec<ExecutedBlock<N>>, SealedHeaderFor<N>, B256)> {
         let guard = self.inner.read();
-        let block = guard.get_block_by_hash(&block_hash)?.block;
+        let block = guard.get_block_by_hash(block_hash)?.block;
         let block_num = block.number();
         let canon_hash = guard.get_canon_info().1;
         let in_memory = guard.get_executed_blocks_up_to_height(block_num);

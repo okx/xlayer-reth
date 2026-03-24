@@ -431,8 +431,7 @@ where
                             let chain = notification.committed();
                             if let Some((block, indexed_tx, receipt, all_receipts)) =
                                 chain.find_transaction_and_receipt_by_hash(hash)
-                            {
-                                if let Some(receipt) = convert_transaction_receipt(
+                                && let Some(receipt) = convert_transaction_receipt(
                                     block,
                                     all_receipts,
                                     indexed_tx,
@@ -444,7 +443,6 @@ where
                                 {
                                     return Ok(receipt);
                                 }
-                            }
                         } else {
                             // Canonical stream ended
                             break;
