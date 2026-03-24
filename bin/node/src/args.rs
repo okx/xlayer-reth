@@ -132,6 +132,14 @@ pub struct XLayerArgs {
     #[command(flatten)]
     pub monitor: FullLinkMonitorArgs,
 
+    /// Enable inner transaction capture and storage
+    #[arg(
+        long = "xlayer.enable-innertx",
+        help = "Enable inner transaction capture and storage (disabled by default)",
+        default_value = "false"
+    )]
+    pub enable_inner_tx: bool,
+
     /// Bridge intercept configuration
     #[command(flatten)]
     pub intercept: XLayerInterceptArgs,
@@ -410,6 +418,7 @@ mod tests {
             "https://mainnet.infura.io/v3/test",
             "--rpc.legacy-timeout",
             "45s",
+            "--xlayer.enable-innertx",
             "--xlayer.flashblocks-subscription",
             "--xlayer.flashblocks-subscription-max-addresses",
             "2000",
@@ -418,6 +427,7 @@ mod tests {
         ])
         .args;
 
+        assert!(args.enable_inner_tx);
         assert!(args.legacy.legacy_rpc_url.is_some());
         assert_eq!(args.legacy.legacy_rpc_timeout, Duration::from_secs(45));
         assert!(args.flashblocks_rpc.enable_flashblocks_subscription);
