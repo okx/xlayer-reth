@@ -24,8 +24,10 @@ use reth_optimism_cli::Cli;
 use reth_optimism_node::{args::RollupArgs, OpNode};
 use reth_rpc_server_types::RethRpcModule;
 
+use reth_optimism_flashblocks::FlashBlockExtension;
 use xlayer_chainspec::XLayerChainSpecParser;
 use xlayer_flashblocks::handler::FlashblocksService;
+use xlayer_flashblocks::innertx::InnerTxHook;
 use xlayer_flashblocks::subscription::FlashblocksPubSub;
 use xlayer_innertx::{
     db_utils::initialize_inner_tx_db,
@@ -180,9 +182,53 @@ fn main() {
                         {
                             let eth_pubsub = ctx.registry.eth_handlers().pubsub.clone();
 
+                            // If innertx is enabled, create a bridge task that enriches
+                            // each `PendingFlashBlock` with internal transaction traces
+                            // before feeding them to the subscription layer. This computes
+                            // innertx once per flashblock update (not per subscriber).
+                            //
+                            // NOTE: Requires the reth fork to be updated with the
+                            // `FlashBlockExtension` field on `PendingFlashBlock`.
+                            // After updating the reth git rev, uncomment the bridge task below.
+                            let rx_for_pubsub = if args.xlayer_args.enable_inner_tx {
+                                let innertx_hook = InnerTxHook::new(
+                                    ctx.node().provider().clone(),
+                                    ctx.node().evm_config().clone(),
+                                );
+                                let (enriched_tx, enriched_rx) =
+                                    tokio::sync::watch::channel(pending_blocks_rx.borrow().clone());
+                                let original_rx = pending_blocks_rx;
+
+                                ctx.node().task_executor().spawn_critical(
+                                    "xlayer-flashblocks-innertx-enricher",
+                                    Box::pin(async move {
+                                        let mut rx = original_rx;
+                                        while rx.changed().await.is_ok() {
+                                            let enriched = rx.borrow_and_update().clone().map(
+                                                |mut block| {
+                                                    if let Some(traces) =
+                                                        innertx_hook.compute_innertx(block.block())
+                                                    {
+                                                        block.extension = Some(
+                                                            FlashBlockExtension::new(traces),
+                                                        );
+                                                    }
+                                                    block
+                                                },
+                                            );
+                                            let _ = enriched_tx.send(enriched);
+                                        }
+                                    }),
+                                );
+                                info!(target: "reth::cli", "xlayer innertx enricher task spawned");
+                                enriched_rx
+                            } else {
+                                pending_blocks_rx
+                            };
+
                             let flashblocks_pubsub = FlashblocksPubSub::new(
                                 eth_pubsub,
-                                pending_blocks_rx,
+                                rx_for_pubsub,
                                 Box::new(ctx.node().task_executor().clone()),
                                 new_op_eth_api.converter().clone(),
                                 xlayer_args.flashblocks_subscription_max_addresses,

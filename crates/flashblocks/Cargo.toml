@@ -12,16 +12,22 @@ default = []
 
 [dependencies]
 xlayer-builder.workspace = true
+xlayer-innertx.workspace = true
 reth-node-api.workspace = true
 reth-node-core.workspace = true
+reth-evm.workspace = true
+reth-revm.workspace = true
 reth-primitives-traits.workspace = true
 reth-tracing.workspace = true
 reth-optimism-flashblocks.workspace = true
 
 alloy-primitives.workspace = true
 alloy-consensus.workspace = true
+alloy-evm.workspace = true
 alloy-rpc-types-eth.workspace = true
 alloy-json-rpc.workspace = true
+
+revm-database.workspace = true
 
 reth-rpc.workspace = true
 reth-rpc-convert.workspace = true
