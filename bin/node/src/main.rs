@@ -5,11 +5,13 @@ mod payload;
 
 use payload::XLayerPayloadServiceBuilder;
 
+use std::path::Path;
+use std::sync::Arc;
+
 use args::XLayerArgs;
 use clap::Parser;
 use either::Either;
-use std::sync::Arc;
-use tracing::info;
+use tracing::{error, info};
 
 use op_alloy_network::Optimism;
 use reth::rpc::eth::EthApiTypes;
@@ -25,6 +27,11 @@ use reth_rpc_server_types::RethRpcModule;
 use xlayer_chainspec::XLayerChainSpecParser;
 use xlayer_flashblocks::handler::FlashblocksService;
 use xlayer_flashblocks::subscription::FlashblocksPubSub;
+use xlayer_innertx::{
+    db_utils::initialize_inner_tx_db,
+    rpc_utils::{XlayerInnerTxExt, XlayerInnerTxExtApiServer},
+    subscriber_utils::initialize_innertx_replay,
+};
 use xlayer_legacy_rpc::{layer::LegacyRpcRouterLayer, LegacyRpcRouterConfig};
 use xlayer_monitor::{start_monitor_handle, RpcMonitorLayer, XLayerMonitor};
 use xlayer_rpc::xlayer_ext::{XlayerRpcExt, XlayerRpcExtApiServer};
@@ -76,7 +83,25 @@ fn main() {
                 info!(target: "xlayer::monitor", "Global tracer initialized with output path: {}", args.xlayer_args.monitor.output_path);
             }
 
+            // Log XLayer feature status
+            info!(
+                inner_tx_enabled = args.xlayer_args.enable_inner_tx,
+                "XLayer features configuration"
+            );
+
             let op_node = OpNode::new(args.rollup_args.clone());
+
+            let data_dir = builder.config().datadir();
+            if args.xlayer_args.enable_inner_tx {
+                let db = data_dir.db();
+                let db_path = db.parent().unwrap_or_else(|| Path::new("/")).to_str().unwrap();
+                match initialize_inner_tx_db(db_path) {
+                    Ok(_) => info!(target: "reth::cli", "xlayer db initialize_inner_tx_db"),
+                    Err(e) => {
+                        error!(target: "reth::cli", "xlayer db failed to initialize_inner_tx_db {:#?}", e)
+                    }
+                }
+            }
 
             let genesis_block = builder.config().chain.genesis().number.unwrap_or_default();
             info!("X Layer genesis block = {}", genesis_block);
@@ -121,6 +146,19 @@ fn main() {
                 })
                 .extend_rpc_modules(move |ctx| {
                     let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
+
+                    // Initialize innertx if enabled
+                    if args.xlayer_args.enable_inner_tx {
+                        // Initialize inner tx replay handler (uses canonical_state_stream)
+                        // Note: This only processes real-time blocks, NOT synced blocks from Pipeline
+                        initialize_innertx_replay(ctx.node());
+                        info!(target: "reth::cli", "xlayer inner tx replay initialized (canonical_state_stream mode)");
+
+                        // Register inner tx RPC
+                        let custom_rpc = XlayerInnerTxExt { backend: new_op_eth_api.clone() };
+                        ctx.modules.merge_configured(custom_rpc.into_rpc())?;
+                        info!(target: "reth::cli", "xlayer innertx rpc enabled");
+                    }
 
                     // Initialize flashblocks RPC service if not in flashblocks sequencer mode
                     if !args.xlayer_args.builder.flashblocks.enabled {

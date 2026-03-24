@@ -14239,6 +14239,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "xlayer-innertx"
+version = "0.1.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-evm",
+ "alloy-primitives",
+ "alloy-rlp",
+ "eyre",
+ "futures",
+ "jsonrpsee",
+ "once_cell",
+ "reth-chain-state",
+ "reth-db",
+ "reth-db-api",
+ "reth-evm",
+ "reth-exex",
+ "reth-node-api",
+ "reth-primitives-traits",
+ "reth-provider",
+ "reth-revm",
+ "reth-rpc",
+ "reth-rpc-eth-api",
+ "reth-storage-api",
+ "reth-tracing",
+ "revm-context-interface",
+ "revm-database",
+ "serde",
+ "tokio",
+]
+
+[[package]]
 name = "xlayer-legacy-rpc"
 version = "0.1.0"
 dependencies = [
@@ -14302,6 +14334,7 @@ dependencies = [
  "xlayer-builder",
  "xlayer-chainspec",
  "xlayer-flashblocks",
+ "xlayer-innertx",
  "xlayer-legacy-rpc",
  "xlayer-monitor",
  "xlayer-rpc",
@@ -14348,11 +14381,9 @@ name = "xlayer-rpc"
 version = "0.1.0"
 dependencies = [
  "jsonrpsee",
- "reth-chainspec",
  "reth-optimism-rpc",
  "reth-rpc",
  "reth-rpc-eth-api",
- "reth-storage-api",
  "serde",
  "tokio",
 ]
