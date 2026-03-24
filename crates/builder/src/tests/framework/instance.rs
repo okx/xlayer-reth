@@ -41,7 +41,7 @@ use reth_optimism_rpc::OpEthApiBuilder;
 use reth_optimism_txpool::OpPooledTransaction;
 use reth_transaction_pool::{AllTransactionsEvents, TransactionPool};
 use std::{
-    sync::{Arc, LazyLock},
+    sync::{Arc, LazyLock, OnceLock},
     time::Instant,
 };
 use tokio::{sync::oneshot, task::JoinHandle};
@@ -117,6 +117,7 @@ impl LocalInstance {
                 FlashblocksServiceBuilder {
                     config: builder_config,
                     bridge_intercept: Default::default(),
+                    events_sender: Arc::new(OnceLock::new()),
                 },
             ))
             .with_add_ons(addons)

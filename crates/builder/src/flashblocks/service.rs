@@ -16,18 +16,26 @@ use crate::{
     traits::{NodeBounds, PoolBounds},
 };
 use eyre::WrapErr as _;
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use reth_basic_payload_builder::BasicPayloadJobGeneratorConfig;
 use reth_node_api::NodeTypes;
 use reth_node_builder::{components::PayloadServiceBuilder, BuilderContext};
 use reth_optimism_evm::OpEvmConfig;
+use reth_optimism_node::OpEngineTypes;
 use reth_payload_builder::{PayloadBuilderHandle, PayloadBuilderService};
+use reth_payload_builder_primitives::Events;
 use reth_provider::CanonStateSubscriptions;
+
+pub type PayloadEventsSender = tokio::sync::broadcast::Sender<Events<OpEngineTypes>>;
 
 pub struct FlashblocksServiceBuilder {
     pub config: BuilderConfig,
     pub bridge_intercept: xlayer_bridge_intercept::BridgeInterceptConfig,
+    pub events_sender: Arc<OnceLock<PayloadEventsSender>>,
 }
 
 impl FlashblocksServiceBuilder {
@@ -158,6 +166,8 @@ impl FlashblocksServiceBuilder {
 
         let (payload_service, payload_builder_handle) =
             PayloadBuilderService::new(payload_generator, ctx.provider().canonical_state_stream());
+
+        let _ = self.events_sender.set(payload_service.payload_events_handle());
 
         let handler_ctx = FlashblockHandlerContext::new(
             &ctx.provider().clone(),

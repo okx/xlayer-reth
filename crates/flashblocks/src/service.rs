@@ -13,7 +13,7 @@ use reth_tasks::TaskExecutor;
 
 use xlayer_builder::{
     args::FlashblocksArgs,
-    flashblocks::WebSocketPublisher,
+    flashblocks::{PayloadEventsSender, WebSocketPublisher},
     metrics::{tokio::FlashblocksTaskMetrics, BuilderMetrics},
 };
 
@@ -30,6 +30,8 @@ pub struct FlashblocksRpcService<S> {
     ws_pub: Arc<WebSocketPublisher>,
     /// Whether to relay flashblocks to the subscribers.
     relay_flashblocks: bool,
+    /// Payload events sender for forwarding locally-built payloads to the engine state tree.
+    events_sender: Option<PayloadEventsSender>,
     /// Data directory for flashblocks persistence.
     datadir: ChainPath<DataDirPath>,
 }
@@ -43,6 +45,7 @@ where
         incoming_flashblock_rx: S,
         args: FlashblocksArgs,
         relay_flashblocks: bool,
+        events_sender: Option<PayloadEventsSender>,
         datadir: ChainPath<DataDirPath>,
     ) -> Result<Self, eyre::Report> {
         let (received_flashblocks_tx, _) = tokio::sync::broadcast::channel(128);
@@ -68,6 +71,7 @@ where
             task_executor,
             ws_pub,
             relay_flashblocks,
+            events_sender,
             datadir,
         })
     }
