@@ -1,21 +1,18 @@
-use reth_primitives_traits::{Block, BlockTy, NodePrimitives};
-use reth_rpc_eth_types::block::BlockAndReceipts;
-
-pub(crate) fn block_from_bar<N: NodePrimitives>(bar: &BlockAndReceipts<N>) -> BlockTy<N> {
-    BlockTy::<N>::new(bar.block.header().clone(), bar.block.body().clone())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::Arc;
+
     use alloy_consensus::{BlockHeader, Header};
     use alloy_primitives::B256;
     use reth_optimism_primitives::{OpBlock, OpPrimitives};
+    use reth_primitives_traits::{Block, BlockTy, NodePrimitives};
     use reth_primitives_traits::{RecoveredBlock, SealedBlock, SealedHeader};
     use reth_rpc_eth_types::block::BlockAndReceipts;
-    use std::sync::Arc;
 
-    /// Builds a minimal `BlockAndReceipts<OpPrimitives>` for testing.
+    pub(crate) fn block_from_bar<N: NodePrimitives>(bar: &BlockAndReceipts<N>) -> BlockTy<N> {
+        BlockTy::<N>::new(bar.block.header().clone(), bar.block.body().clone())
+    }
+
     fn make_block_and_receipts(
         block_number: u64,
         parent_hash: B256,

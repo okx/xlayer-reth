@@ -71,16 +71,6 @@ impl<N: NodePrimitives> ConfirmCache<N> {
         }
     }
 
-    /// Returns the number of cached entries.
-    pub(crate) fn len(&self) -> usize {
-        self.blocks.len()
-    }
-
-    /// Returns `true` if the cache is empty.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.blocks.is_empty()
-    }
-
     /// Inserts a confirmed block into the cache, indexed by block number and block hash.
     pub(crate) fn insert(
         &mut self,
@@ -127,11 +117,6 @@ impl<N: NodePrimitives> ConfirmCache<N> {
     /// Returns the block number for the given block hash, if cached.
     pub(crate) fn number_for_hash(&self, block_hash: &B256) -> Option<u64> {
         self.hash_to_number.get(block_hash).copied()
-    }
-
-    /// Returns the block hash for the given block number, if cached.
-    pub(crate) fn hash_for_number(&self, block_number: u64) -> Option<B256> {
-        self.blocks.get(&block_number).map(|(hash, _)| *hash)
     }
 
     /// Returns the confirmed block for the given block hash, if present.
@@ -192,25 +177,6 @@ impl<N: NodePrimitives> ConfirmCache<N> {
             .collect())
     }
 
-    /// Removes and returns the confirmed block for the given block number.
-    pub(crate) fn remove_block_by_number(
-        &mut self,
-        block_number: u64,
-    ) -> Option<ConfirmedBlock<N>> {
-        let (hash, block) = self.blocks.remove(&block_number)?;
-        self.hash_to_number.remove(&hash);
-        self.remove_tx_index_for_block(&block);
-        Some(block)
-    }
-
-    /// Removes and returns the confirmed block for the given block hash.
-    pub(crate) fn remove_block_by_hash(&mut self, block_hash: &B256) -> Option<ConfirmedBlock<N>> {
-        let number = self.hash_to_number.remove(block_hash)?;
-        let (_, block) = self.blocks.remove(&number)?;
-        self.remove_tx_index_for_block(&block);
-        Some(block)
-    }
-
     /// Removes all tx index entries for the transactions in the given block.
     fn remove_tx_index_for_block(&mut self, block: &ConfirmedBlock<N>) {
         for tx in block.executed_block.recovered_block.body().transactions() {
@@ -231,6 +197,18 @@ impl<N: NodePrimitives> ConfirmCache<N> {
             self.remove_tx_index_for_block(&bar);
         }
         count
+    }
+
+    /// Returns the number of cached entries.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.blocks.len()
+    }
+
+    /// Returns `true` if the cache is empty.
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
     }
 }
 
@@ -321,15 +299,6 @@ mod tests {
     }
 
     #[test]
-    fn test_confirm_cache_hash_for_number_returns_correct_mapping() {
-        let mut cache = ConfirmCache::<OpPrimitives>::new();
-        let block = make_executed_block(10, B256::ZERO);
-        let expected_hash = block.recovered_block.hash();
-        cache.insert(10, block, empty_receipts()).expect("insert");
-        assert_eq!(cache.hash_for_number(10), Some(expected_hash));
-    }
-
-    #[test]
     fn test_confirm_cache_clear_removes_all_entries() {
         let mut cache = ConfirmCache::<OpPrimitives>::new();
         let block = make_executed_block(1, B256::ZERO);
@@ -396,32 +365,6 @@ mod tests {
         assert!(cache.number_for_hash(&hashes[0]).is_none());
         assert!(cache.number_for_hash(&hashes[1]).is_none());
         assert!(cache.number_for_hash(&hashes[2]).is_some());
-    }
-
-    #[test]
-    fn test_confirm_cache_remove_block_by_number_returns_block_and_cleans_indices() {
-        let mut cache = ConfirmCache::<OpPrimitives>::new();
-        let block = make_executed_block(5, B256::ZERO);
-        let block_hash = block.recovered_block.hash();
-        cache.insert(5, block, empty_receipts()).expect("insert");
-        let removed = cache.remove_block_by_number(5);
-        assert!(removed.is_some());
-        assert_eq!(cache.len(), 0);
-        assert!(cache.get_block_by_number(5).is_none());
-        assert!(cache.number_for_hash(&block_hash).is_none());
-    }
-
-    #[test]
-    fn test_confirm_cache_remove_block_by_hash_returns_block_and_cleans_indices() {
-        let mut cache = ConfirmCache::<OpPrimitives>::new();
-        let block = make_executed_block(7, B256::ZERO);
-        let block_hash = block.recovered_block.hash();
-        cache.insert(7, block, empty_receipts()).expect("insert");
-        let removed = cache.remove_block_by_hash(&block_hash);
-        assert!(removed.is_some());
-        assert_eq!(cache.len(), 0);
-        assert!(cache.get_block_by_hash(&block_hash).is_none());
-        assert!(cache.get_block_by_number(7).is_none());
     }
 
     #[test]
@@ -547,20 +490,6 @@ mod tests {
         cache.insert(1, block, receipts).expect("insert");
 
         cache.flush_up_to_height(1);
-        for tx_hash in tx_hashes.iter() {
-            assert!(cache.get_tx_info(tx_hash).is_none());
-        }
-    }
-
-    #[test]
-    fn test_confirm_cache_remove_block_by_number_cleans_tx_index() {
-        let mut cache = ConfirmCache::<OpPrimitives>::new();
-        let (block, receipts) = make_executed_block_with_txs(5, B256::ZERO, 0, 2);
-        let tx_hashes: Vec<_> =
-            block.recovered_block.body().transactions().map(|tx| tx.tx_hash()).collect();
-        cache.insert(5, block, receipts).expect("insert");
-
-        cache.remove_block_by_number(5);
         for tx_hash in tx_hashes.iter() {
             assert!(cache.get_tx_info(tx_hash).is_none());
         }

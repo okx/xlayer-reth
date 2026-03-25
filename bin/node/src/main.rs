@@ -22,7 +22,6 @@ use reth_optimism_evm::OpEvmConfig;
 use reth_optimism_node::{args::RollupArgs, OpNode};
 use reth_provider::CanonStateSubscriptions;
 use reth_rpc_server_types::RethRpcModule;
-use reth_tasks::Runtime;
 
 use xlayer_chainspec::XLayerChainSpecParser;
 use xlayer_flashblocks::{

@@ -233,7 +233,7 @@ where
         self.task_executor.spawn_critical_blocking_task(
             "xlayer-flashblocks-execution",
             async move {
-                handle_execution_tasks::<S, N, EvmConfig, Provider, ChainSpec>(
+                handle_execution_tasks::<N, EvmConfig, Provider, ChainSpec>(
                     validator, cache, queue,
                 );
             },

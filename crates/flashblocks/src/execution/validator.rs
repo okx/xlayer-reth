@@ -486,7 +486,7 @@ where
     /// 2. Spawns a background task for incremental receipt root computation
     /// 3. Executes transactions with metrics collection via state hooks
     /// 4. Merges state transitions and records execution metrics
-    #[expect(clippy::type_complexity)]
+    #[expect(clippy::type_complexity, clippy::too_many_arguments)]
     fn execute_block<Err, T>(
         &mut self,
         state_provider: &dyn StateProvider,
@@ -864,6 +864,7 @@ where
         }
     }
 
+    #[expect(clippy::type_complexity)]
     fn state_provider_builder(
         &self,
         hash: B256,

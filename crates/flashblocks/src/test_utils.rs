@@ -116,6 +116,7 @@ impl TestFlashBlockFactory {
         Self { block_time: 2, base_timestamp: 1_000_000, current_block_number: 100 }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn with_block_time(mut self, block_time: u64) -> Self {
         self.block_time = block_time;
         self
@@ -242,6 +243,7 @@ impl TestFlashBlockBuilder {
         self
     }
 
+    #[allow(dead_code)]
     pub(crate) fn transactions(mut self, transactions: Vec<Bytes>) -> Self {
         self.transactions = transactions;
         self

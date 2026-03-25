@@ -64,7 +64,7 @@ impl<T: SignedTransaction> RawFlashblocksCacheInner<T> {
         let retained: Vec<_> = self
             .cache
             .drain()
-            .filter(|entry| entry.block_number().map_or(true, |n| n > height))
+            .filter(|entry| entry.block_number().is_none_or(|n| n > height))
             .collect();
         for entry in retained {
             self.cache.enqueue(entry);
@@ -161,7 +161,7 @@ impl<T: SignedTransaction> RawFlashblocksEntry<T> {
         }
         self.block_number() == Some(flashblock.block_number())
             && self.payload_id() == Some(flashblock.payload_id)
-            && self.payloads.get(&flashblock.index).is_none()
+            && !self.payloads.contains_key(&flashblock.index)
     }
 
     fn try_get_best_revision(&self) -> Option<u64> {

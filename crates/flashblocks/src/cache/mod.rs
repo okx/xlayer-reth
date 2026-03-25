@@ -66,6 +66,12 @@ pub struct FlashblockStateCache<N: NodePrimitives> {
     changeset_cache: ChangesetCache,
 }
 
+impl<N: NodePrimitives> Default for FlashblockStateCache<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // FlashblockStateCache read interfaces
 impl<N: NodePrimitives> FlashblockStateCache<N> {
     /// Creates a new [`FlashblockStateCache`].

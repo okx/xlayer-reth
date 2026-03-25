@@ -123,7 +123,7 @@ fn process_flashblock_payload<N: NodePrimitives>(
     Ok(())
 }
 
-pub fn handle_execution_tasks<S, N, EvmConfig, Provider, ChainSpec>(
+pub fn handle_execution_tasks<N, EvmConfig, Provider, ChainSpec>(
     mut validator: FlashblockSequenceValidator<N, EvmConfig, Provider, ChainSpec>,
     raw_cache: Arc<RawFlashblocksCache<N::SignedTx>>,
     task_queue: ExecutionTaskQueue,
