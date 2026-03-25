@@ -120,6 +120,7 @@ reth-rpc-eth-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3
 reth-rpc-eth-types = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3", default-features = false }
 reth-rpc-layer = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
 reth-rpc-server-types = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
+reth-static-file-types = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3", default-features = false }
 reth-storage-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3", default-features = false }
 reth-tasks = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
 reth-testing-utils = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
@@ -137,7 +138,7 @@ reth-trie-common = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3
 reth-optimism-chainspec = { path = "deps/optimism/rust/op-reth/crates/chainspec/", default-features = false }
 reth-optimism-cli = { path = "deps/optimism/rust/op-reth/crates/cli/", default-features = false }
 reth-optimism-consensus = { path = "deps/optimism/rust/op-reth/crates/consensus/", default-features = false }
-reth-optimism-evm = { path = "deps/optimism/rust/op-reth/crates/evm/", default-features = false }
+reth-optimism-evm = { path = "deps/optimism/rust/op-reth/crates/evm/", default-features = false, features = ["rpc"] }
 reth-optimism-flashblocks = { path = "deps/optimism/rust/op-reth/crates/flashblocks/" }
 reth-optimism-forks = { path = "deps/optimism/rust/op-reth/crates/hardforks/", default-features = false }
 reth-optimism-node = { path = "deps/optimism/rust/op-reth/crates/node/" }
