@@ -282,6 +282,7 @@ where
                                 hashed_state: Either::Right(trie_data.hashed_state),
                                 trie_updates: Either::Right(trie_data.trie_updates),
                             };
+                        // Use default zero id — to avoid accumulating stale entries in the engine state tree.
                         let payload = OpBuiltPayload::<OpPrimitives>::new(
                             reth_payload_builder::PayloadId::default(),
                             Arc::new(block),

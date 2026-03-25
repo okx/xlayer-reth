@@ -78,10 +78,17 @@ impl<N: NodePrimitives> ConfirmCache<N> {
         executed_block: ExecutedBlock<N>,
         receipts: Arc<Vec<ReceiptTy<N>>>,
     ) -> eyre::Result<()> {
-        if self.blocks.len() >= DEFAULT_CONFIRM_BLOCK_CACHE_SIZE {
+        if self.blocks.len() >= DEFAULT_CONFIRM_BLOCK_CACHE_SIZE
+            && !self.blocks.contains_key(&height)
+        {
             return Err(eyre!(
                 "confirm cache at max capacity ({DEFAULT_CONFIRM_BLOCK_CACHE_SIZE}), cannot insert block: {height}"
             ));
+        }
+        if let Some((old_hash, old_block)) = self.blocks.remove(&height) {
+            // Clean up old entries at this height if exist
+            self.hash_to_number.remove(&old_hash);
+            self.remove_tx_index_for_block(&old_block);
         }
 
         // Build tx index entries for all transactions in this block
@@ -100,13 +107,6 @@ impl<N: NodePrimitives> ConfirmCache<N> {
                 },
             );
         }
-
-        if let Some((old_hash, old_block)) = self.blocks.remove(&height) {
-            // Clean up old height entries if exist
-            self.hash_to_number.remove(&old_hash);
-            self.remove_tx_index_for_block(&old_block);
-        }
-
         // Build block index entries for block data
         self.hash_to_number.insert(hash, height);
         self.blocks.insert(height, (hash, ConfirmedBlock { executed_block, receipts }));
@@ -519,6 +519,37 @@ mod tests {
             None,
             "stale hash_to_number entry should be removed on duplicate height insert"
         );
+    }
+
+    #[test]
+    fn test_confirm_cache_insert_duplicate_height_retains_shared_tx_entries() {
+        // Two blocks at the same height share a transaction (same nonce → same hash).
+        // After replacing, the shared tx must still be present in the index.
+        let mut cache = ConfirmCache::<OpPrimitives>::new();
+        // block_a has txs with nonces [0, 1]
+        let (block_a, receipts_a) = make_executed_block_with_txs(10, B256::ZERO, 0, 2);
+        let shared_tx_hash: TxHash =
+            (*block_a.recovered_block.body().transactions().next().unwrap().tx_hash()).into();
+        // block_b has txs with nonces [0, 2] — nonce 0 is shared with block_a
+        let (block_b, receipts_b) = make_executed_block_with_txs(10, B256::repeat_byte(0xFF), 0, 2);
+        let block_b_tx_hashes: Vec<TxHash> = block_b
+            .recovered_block
+            .body()
+            .transactions()
+            .map(|tx| (*tx.tx_hash()).into())
+            .collect();
+
+        cache.insert(10, block_a, receipts_a).expect("first insert");
+        assert!(cache.get_tx_info(&shared_tx_hash).is_some());
+
+        cache.insert(10, block_b, receipts_b).expect("second insert");
+        // The shared tx (nonce 0) must still be in the index, pointing to block_b
+        let info = cache.get_tx_info(&shared_tx_hash);
+        assert!(info.is_some(), "shared tx should be retained after replacement");
+        // All block_b txs should be present
+        for tx_hash in &block_b_tx_hashes {
+            assert!(cache.get_tx_info(tx_hash).is_some(), "block_b tx should be in index");
+        }
     }
 
     #[test]
