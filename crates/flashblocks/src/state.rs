@@ -2,7 +2,7 @@ use crate::{
     cache::RawFlashblocksCache,
     execution::validator::FlashblockSequenceValidator,
     execution::{FlashblockReceipt, OverlayProviderFactory},
-    service::{ExecutionTaskQueue, EXECUTION_TASK_QUEUE_CAPACITY},
+    service::{ExecutionTaskQueue, ExecutionTaskQueueFlush, EXECUTION_TASK_QUEUE_CAPACITY},
     FlashblockStateCache,
 };
 use futures_util::{FutureExt, Stream, StreamExt};
@@ -169,7 +169,7 @@ pub fn handle_execution_tasks<S, N, EvmConfig, Provider, ChainSpec>(
         };
 
         // Extract buildable sequence for this height from raw cache
-        let Some(args) = raw_cache.take_buildable_for_height(execute_height) else {
+        let Some(args) = raw_cache.try_get_buildable_args(execute_height) else {
             trace!(
                 target: "flashblocks",
                 execute_height = execute_height,
@@ -199,6 +199,7 @@ pub async fn handle_canonical_stream<N: NodePrimitives>(
     mut canon_rx: CanonStateNotificationStream<N>,
     flashblocks_state: FlashblockStateCache<N>,
     raw_cache: Arc<RawFlashblocksCache<N::SignedTx>>,
+    task_queue: ExecutionTaskQueue,
 ) {
     info!(target: "flashblocks", "Canonical state handler started");
     while let Some(notification) = canon_rx.next().await {
@@ -207,8 +208,10 @@ pub async fn handle_canonical_stream<N: NodePrimitives>(
         let block_number = tip.number();
         let is_reorg = notification.reverted().is_some();
 
-        flashblocks_state.handle_canonical_block((block_number, block_hash), is_reorg);
         raw_cache.handle_canonical_height(block_number);
+        if flashblocks_state.handle_canonical_block((block_number, block_hash), is_reorg) {
+            task_queue.flush();
+        }
 
         debug!(
             target: "flashblocks",

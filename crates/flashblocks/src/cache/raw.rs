@@ -4,11 +4,10 @@ use ringbuffer::{AllocRingBuffer, RingBuffer};
 use std::{collections::BTreeMap, sync::Arc};
 
 use alloy_eips::{eip2718::WithEncoded, eip4895::Withdrawal};
-use alloy_primitives::B256;
 use alloy_rpc_types_engine::PayloadId;
 use op_alloy_rpc_types_engine::{OpFlashblockPayload, OpFlashblockPayloadBase};
 
-use reth_primitives_traits::{transaction::TxHashRef, Recovered, SignedTransaction};
+use reth_primitives_traits::{Recovered, SignedTransaction};
 
 const MAX_RAW_CACHE_SIZE: usize = 10;
 
@@ -40,11 +39,11 @@ impl<T: SignedTransaction> RawFlashblocksCache<T> {
         self.inner.write().handle_flashblock(flashblock)
     }
 
-    pub(crate) fn take_buildable_for_height(
+    pub(crate) fn try_get_buildable_args(
         &self,
         height: u64,
     ) -> Option<BuildArgs<Vec<WithEncoded<Recovered<T>>>>> {
-        self.inner.read().take_buildable_for_height(height)
+        self.inner.read().try_get_buildable_args(height)
     }
 }
 
@@ -98,14 +97,14 @@ impl<T: SignedTransaction> RawFlashblocksCacheInner<T> {
         Ok(())
     }
 
-    fn take_buildable_for_height(
+    fn try_get_buildable_args(
         &self,
         height: u64,
     ) -> Option<BuildArgs<Vec<WithEncoded<Recovered<T>>>>> {
         self.cache
             .iter()
             .find(|entry| entry.block_number() == Some(height))
-            .and_then(|entry| entry.to_buildable_args())
+            .and_then(|entry| entry.try_to_buildable_args())
     }
 }
 
@@ -162,7 +161,7 @@ impl<T: SignedTransaction> RawFlashblocksEntry<T> {
             && self.payloads.get(&flashblock.index).is_none()
     }
 
-    fn get_best_revision(&self) -> Option<u64> {
+    fn try_get_best_revision(&self) -> Option<u64> {
         if !self.has_base || self.payloads.is_empty() {
             return None;
         }
@@ -188,14 +187,6 @@ impl<T: SignedTransaction> RawFlashblocksEntry<T> {
         Some(self.payloads.values().next()?.payload_id)
     }
 
-    fn transactions(&self) -> Vec<WithEncoded<Recovered<T>>> {
-        self.recovered_transactions_by_index.values().flatten().cloned().collect()
-    }
-
-    fn tx_hashes(&self) -> Vec<B256> {
-        self.recovered_transactions_by_index.values().flatten().map(|tx| *tx.tx_hash()).collect()
-    }
-
     fn base(&self) -> Option<&OpFlashblockPayloadBase> {
         self.payloads.get(&0)?.base.as_ref()
     }
@@ -211,8 +202,8 @@ impl<T: SignedTransaction> RawFlashblocksEntry<T> {
             .collect()
     }
 
-    fn to_buildable_args(&self) -> Option<BuildArgs<Vec<WithEncoded<Recovered<T>>>>> {
-        let best_revision = self.get_best_revision()?;
+    fn try_to_buildable_args(&self) -> Option<BuildArgs<Vec<WithEncoded<Recovered<T>>>>> {
+        let best_revision = self.try_get_best_revision()?;
         Some(BuildArgs {
             base: self.base()?.clone(),
             transactions: self.transactions_up_to(best_revision),
@@ -234,10 +225,6 @@ mod tests {
     use reth_optimism_primitives::OpTransactionSigned;
 
     type TestRawCache = RawFlashblocksCacheInner<OpTransactionSigned>;
-
-    // ===== RawFlashblocksEntry tests via RawFlashblocksCacheInner =====
-
-    // --- can_accept ---
 
     #[test]
     fn test_raw_entry_can_accept_first_flashblock_on_empty_entry() {
@@ -306,7 +293,7 @@ mod tests {
 
         cache.handle_flashblock(fb1).expect("fb1 insert");
         let entry = cache.cache.iter().next().expect("entry should exist");
-        let best = entry.get_best_revision();
+        let best = entry.try_get_best_revision();
         assert!(best.is_none(), "get_best_revision should return None without base (index 0)");
     }
 
@@ -318,7 +305,7 @@ mod tests {
         let mut cache = TestRawCache::new();
         cache.handle_flashblock(fb0).expect("fb0 insert");
         let entry = cache.cache.iter().next().expect("entry should exist");
-        let best = entry.get_best_revision();
+        let best = entry.try_get_best_revision();
         assert_eq!(best, Some(0), "only index 0 → best revision is 0");
     }
 
@@ -336,7 +323,7 @@ mod tests {
         cache.handle_flashblock(fb2).expect("fb2");
         cache.handle_flashblock(fb3).expect("fb3");
         let entry = cache.cache.iter().next().expect("entry should exist");
-        let best = entry.get_best_revision();
+        let best = entry.try_get_best_revision();
         assert_eq!(best, Some(3), "consecutive 0..3 → best revision 3");
     }
 
@@ -353,7 +340,7 @@ mod tests {
         cache.handle_flashblock(fb1).expect("fb1");
         cache.handle_flashblock(fb3).expect("fb3 (gap after index 1)");
         let entry = cache.cache.iter().next().expect("entry should exist");
-        let best = entry.get_best_revision();
+        let best = entry.try_get_best_revision();
         assert_eq!(best, Some(1), "gap between 1 and 3 → best revision is 1");
     }
 
@@ -529,7 +516,7 @@ mod tests {
         let mut cache = TestRawCache::new();
         cache.handle_flashblock(fb1).expect("fb1 insert");
         let entry = cache.cache.iter().next().expect("entry should exist");
-        let best = entry.get_best_revision();
+        let best = entry.try_get_best_revision();
         // Assert: no base → None, even though index 1 exists
         assert!(best.is_none(), "no base means get_best_revision must return None");
     }
@@ -548,7 +535,7 @@ mod tests {
         cache.handle_flashblock(fb0).expect("fb0");
         cache.handle_flashblock(fb2).expect("fb2");
         let entry = cache.cache.iter().next().expect("entry should exist");
-        let best = entry.get_best_revision();
+        let best = entry.try_get_best_revision();
         // Assert: gap immediately after base (index 1 missing) → best revision is 0
         assert_eq!(best, Some(0), "gap at index 1 means best revision stays at 0");
     }
@@ -603,33 +590,6 @@ mod tests {
         );
         let entry = cache.cache.iter().next().expect("entry should exist");
         assert_eq!(entry.payloads.len(), 4, "entry should contain 4 payloads");
-    }
-
-    #[test]
-    fn test_raw_entry_transactions_returns_empty_vec_on_empty_flashblock() {
-        let factory = TestFlashBlockFactory::new();
-        let fb0 = factory.flashblock_at(0).build();
-        let mut cache = TestRawCache::new();
-
-        cache.handle_flashblock(fb0).expect("fb0 insert");
-        let entry = cache.cache.iter().next().expect("entry should exist");
-        let txs = entry.transactions();
-        assert!(txs.is_empty(), "flashblock with no txs should return empty transactions vec");
-    }
-
-    #[test]
-    fn test_raw_entry_tx_hashes_consistent_with_transaction_count() {
-        let factory = TestFlashBlockFactory::new();
-        let fb0 = factory.flashblock_at(0).build();
-        let mut cache = TestRawCache::new();
-
-        cache.handle_flashblock(fb0).expect("fb0 insert");
-        let entry = cache.cache.iter().next().expect("entry should exist");
-        assert_eq!(
-            entry.tx_hashes().len(),
-            entry.transaction_count(),
-            "tx_hashes length should match transaction_count"
-        );
     }
 
     #[test]

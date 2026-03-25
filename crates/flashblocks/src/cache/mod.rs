@@ -267,7 +267,7 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
     /// It also detects chainstate re-orgs (set with re-org arg flag) and flashblocks
     /// state cache pollution. By default once error is detected, we will automatically
     /// flush the flashblocks state cache.
-    pub fn handle_canonical_block(&self, canon_info: (u64, B256), reorg: bool) {
+    pub fn handle_canonical_block(&self, canon_info: (u64, B256), reorg: bool) -> bool {
         debug!(
             target: "flashblocks",
             canonical_height = canon_info.0,
@@ -387,7 +387,7 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
         Ok(())
     }
 
-    fn handle_canonical_block(&mut self, canon_info: (u64, B256), reorg: bool) {
+    fn handle_canonical_block(&mut self, canon_info: (u64, B256), reorg: bool) -> bool {
         let pending_stale =
             self.pending_cache.as_ref().is_some_and(|p| p.get_height() <= canon_info.0);
         if pending_stale || reorg {
@@ -400,6 +400,7 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
                 "Reorg or pending stale detected on handle canonical block",
             );
             self.flush();
+            return true;
         } else {
             debug!(
                 target: "flashblocks",
@@ -413,6 +414,7 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
         // Update state heights
         self.canon_info = canon_info;
         self.confirm_height = self.confirm_height.max(canon_info.0);
+        false
     }
 
     pub fn get_confirmed_block(&self) -> Option<BlockAndReceipts<N>> {
