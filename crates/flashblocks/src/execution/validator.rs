@@ -884,9 +884,10 @@ where
         SealedHeaderFor<N>,
         Option<(Vec<ExecutedBlock<N>>, B256)>,
     )> {
-        // Get overlay data (executed blocks + parent header) from flashblocks cache
-        if let Some((overlay_blocks, header, canon_hash)) =
-            self.flashblocks_state.get_overlay_data(&hash)
+        // Get overlay data (executed blocks + parent header) from flashblocks
+        // state cache and the canonical in-memory cache.
+        if let Some((overlay_blocks, header, anchor_hash)) =
+            self.flashblocks_state.get_overlay_data(&hash)?
         {
             debug!(
                 target: "flashblocks::validator",
@@ -895,11 +896,11 @@ where
             return Ok((
                 StateProviderBuilder::new(
                     self.provider.clone(),
-                    canon_hash,
+                    anchor_hash,
                     Some(overlay_blocks.clone()),
                 ),
                 header,
-                Some((overlay_blocks, canon_hash)),
+                Some((overlay_blocks, anchor_hash)),
             ));
         }
         // Check if block is persisted

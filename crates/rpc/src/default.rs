@@ -60,7 +60,15 @@ mod tests {
 
     #[test]
     fn test_flashblocks_disabled_at_zero_height() {
-        let cache = FlashblockStateCache::<OpPrimitives>::new();
+        let cache = FlashblockStateCache::<OpPrimitives>::new(
+            reth_chain_state::CanonicalInMemoryState::new(
+                Default::default(),
+                Default::default(),
+                None,
+                None,
+                None,
+            ),
+        );
         let ext = DefaultRpcExt::new(Some(cache));
         assert!(ext.flashblocks_state.as_ref().unwrap().get_confirm_height() == 0);
     }

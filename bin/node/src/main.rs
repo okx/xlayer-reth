@@ -152,7 +152,7 @@ fn main() {
                         args.xlayer_args.flashblocks_rpc.flashblock_url
                     {
                         // Initialize flashblocks RPC
-                        let flashblocks_state = FlashblockStateCache::new();
+                        let flashblocks_state = FlashblockStateCache::new(ctx.provider().canonical_in_memory_state());
                         let canon_state_rx = ctx.provider().canonical_state_stream();
                         let service = FlashblocksRpcService::new(
                             args.xlayer_args.builder.flashblocks,

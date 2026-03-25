@@ -17,7 +17,8 @@ use tracing::*;
 use alloy_consensus::BlockHeader;
 use alloy_primitives::{TxHash, B256};
 use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag};
-use reth_chain_state::{ExecutedBlock, MemoryOverlayStateProvider};
+
+use reth_chain_state::{CanonicalInMemoryState, ExecutedBlock, MemoryOverlayStateProvider};
 use reth_primitives_traits::{NodePrimitives, ReceiptTy, SealedHeaderFor};
 use reth_rpc_eth_types::block::BlockAndReceipts;
 use reth_storage_api::StateProviderBox;
@@ -64,21 +65,17 @@ pub struct CachedTxInfo<N: NodePrimitives> {
 pub struct FlashblockStateCache<N: NodePrimitives> {
     inner: Arc<RwLock<FlashblockStateCacheInner<N>>>,
     changeset_cache: ChangesetCache,
-}
-
-impl<N: NodePrimitives> Default for FlashblockStateCache<N> {
-    fn default() -> Self {
-        Self::new()
-    }
+    canon_in_memory_state: CanonicalInMemoryState<N>,
 }
 
 // FlashblockStateCache read interfaces
 impl<N: NodePrimitives> FlashblockStateCache<N> {
     /// Creates a new [`FlashblockStateCache`].
-    pub fn new() -> Self {
+    pub fn new(canon_in_memory_state: CanonicalInMemoryState<N>) -> Self {
         Self {
             inner: Arc::new(RwLock::new(FlashblockStateCacheInner::new())),
             changeset_cache: ChangesetCache::new(),
+            canon_in_memory_state,
         }
     }
 }
@@ -216,32 +213,56 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
         ))
     }
 
-    /// Returns all available blocks for the given hash that lead back to the
-    /// canonical chain (from newest to oldest), the parent hash of the oldest
-    /// returned block, and the sealed header of the specified block hash.
+    /// Returns all overlay blocks for the given hash, spanning from the
+    /// persisted on-disk anchor up through the flashblocks state cache.
     ///
-    /// Returns `None` if the block for the given hash is not found.
+    /// Overlay blocks are collected newest-to-oldest from two layers:
+    /// 1. **Flashblocks state cache** — pending + confirmed blocks
+    /// 2. **Engine canonical in-memory state** — blocks committed to the
+    ///    canonical chain but not yet persisted to disk
+    ///
+    /// Returns the overlay blocks, sealed header of the requested block,
+    /// and the on-disk anchor hash. Returns `Ok(None)` if the block is
+    /// not found in either layer (i.e. it is fully persisted on disk).
+    #[expect(clippy::type_complexity)]
     pub fn get_overlay_data(
         &self,
         block_hash: &B256,
-    ) -> Option<(Vec<ExecutedBlock<N>>, SealedHeaderFor<N>, B256)> {
+    ) -> eyre::Result<Option<(Vec<ExecutedBlock<N>>, SealedHeaderFor<N>, B256)>> {
+        // 1. Retrieve flashblocks state cache overlay
         let guard = self.inner.read();
-        let block = guard.get_block_by_hash(block_hash)?.block;
-        let block_num = block.number();
+        let mut header =
+            guard.get_block_by_hash(block_hash).map(|bar| bar.block.clone_sealed_header());
+        let mut overlay = if let Some(ref h) = header {
+            let block_num = h.number();
+            guard.get_executed_blocks_up_to_height(block_num)?.unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let canon_hash = guard.get_canon_info().1;
-        let in_memory = guard.get_executed_blocks_up_to_height(block_num);
         drop(guard);
 
-        let in_memory = match in_memory {
-            Ok(blocks) => blocks,
-            Err(e) => {
-                // Flush as the overlay is non-contiguous, indicating potential poluuted state.
-                warn!(target: "flashblocks", "Failed to get flashblocks state provider: {e}. Flushing cache");
-                self.inner.write().flush();
-                None
-            }
-        }?;
-        Some((in_memory, block.clone_sealed_header(), canon_hash))
+        // 2. Retrieve engine canonical in-memory blocks
+        let anchor_hash =
+            if let Some(block_state) = self.canon_in_memory_state.state_by_hash(canon_hash) {
+                let anchor = block_state.anchor();
+                if header.is_none() {
+                    header = block_state
+                        .chain()
+                        .find(|s| s.hash() == *block_hash)
+                        .map(|s| s.block_ref().recovered_block().sealed_header().clone())
+                }
+                overlay.extend(block_state.chain().map(|s| s.block()));
+                anchor.hash
+            } else {
+                canon_hash
+            };
+
+        if overlay.is_empty() || header.is_none() {
+            // Block hash not found, already persisted to disk
+            return Ok(None);
+        }
+        Ok(Some((overlay, header.expect("valid cached header"), anchor_hash)))
     }
 }
 
