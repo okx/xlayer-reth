@@ -101,8 +101,11 @@ impl<T: SignedTransaction> RawFlashblocksCacheInner<T> {
         &self,
         height: u64,
     ) -> Option<BuildArgs<Vec<WithEncoded<Recovered<T>>>>> {
+        // Iterate newest-first so that the most recent entry is always picked first
+        // (same height, different payload_id).
         self.cache
             .iter()
+            .rev()
             .find(|entry| entry.block_number() == Some(height))
             .and_then(|entry| entry.try_to_buildable_args())
     }

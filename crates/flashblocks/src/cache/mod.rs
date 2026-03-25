@@ -390,17 +390,17 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
     fn handle_canonical_block(&mut self, canon_info: (u64, B256), reorg: bool) -> bool {
         let pending_stale =
             self.pending_cache.as_ref().is_some_and(|p| p.get_height() <= canon_info.0);
-        if pending_stale || reorg {
+        let flush = pending_stale || reorg;
+        if flush {
             warn!(
                 target: "flashblocks",
                 canonical_height = canon_info.0,
                 cache_height = self.confirm_height,
                 canonical_reorg = reorg,
-                pending_stale = pending_stale,
+                pending_stale,
                 "Reorg or pending stale detected on handle canonical block",
             );
             self.flush();
-            return true;
         } else {
             debug!(
                 target: "flashblocks",
@@ -414,7 +414,7 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
         // Update state heights
         self.canon_info = canon_info;
         self.confirm_height = self.confirm_height.max(canon_info.0);
-        false
+        flush
     }
 
     pub fn get_confirmed_block(&self) -> Option<BlockAndReceipts<N>> {

@@ -172,14 +172,14 @@ pub fn handle_execution_tasks<S, N, EvmConfig, Provider, ChainSpec>(
         let Some(args) = raw_cache.try_get_buildable_args(execute_height) else {
             trace!(
                 target: "flashblocks",
-                execute_height = execute_height,
-                "No buildable args for excution task height, skipping"
+                execute_height,
+                "No buildable args for execution task height, skipping"
             );
             continue;
         };
         debug!(
             target: "flashblocks",
-            execute_height = execute_height,
+            execute_height,
             last_index = args.last_flashblock_index,
             "Executing flashblocks sequence"
         );
@@ -188,7 +188,7 @@ pub fn handle_execution_tasks<S, N, EvmConfig, Provider, ChainSpec>(
             warn!(
                 target: "flashblocks",
                 %err,
-                execute_height = execute_height,
+                execute_height,
                 "Validator failed to execute flashblocks sequence"
             );
         }
