@@ -272,3 +272,7 @@ op-alloy-rpc-types = { path = "deps/optimism/rust/op-alloy/crates/rpc-types" }
 alloy-op-hardforks = { path = "deps/optimism/rust/alloy-op-hardforks/" }
 alloy-op-evm = { path = "deps/optimism/rust/alloy-op-evm/" }
 op-alloy = { path = "deps/optimism/rust/op-alloy/crates/op-alloy" }
+# Security patch: upgrade jsonwebtoken to 10.3.0 (CVE-2026-25537)
+# alloy-rpc-types-engine 1.6.3 requires jsonwebtoken ^9.3.0 (^9 semver),
+# which does not include 10.x. This local fork pins jsonwebtoken to 10.3.0.
+alloy-rpc-types-engine = { path = "deps/alloy-rpc-types-engine" }
