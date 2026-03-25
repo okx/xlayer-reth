@@ -227,17 +227,12 @@ where
             )),
         );
 
-        // Spawn the flashblocks sequence execution task handle on a dedicated blocking thread.
+        // Spawn the flashblocks sequence execution task on a dedicated OS thread.
         let cache = raw_cache.clone();
         let queue = task_queue.clone();
-        self.task_executor.spawn_critical_blocking_task(
-            "xlayer-flashblocks-execution",
-            async move {
-                handle_execution_tasks::<N, EvmConfig, Provider, ChainSpec>(
-                    validator, cache, queue,
-                );
-            },
-        );
+        reth_tasks::spawn_os_thread("xlayer-flashblocks-execution", move || {
+            handle_execution_tasks::<N, EvmConfig, Provider, ChainSpec>(validator, cache, queue);
+        });
 
         // Spawn the canonical stream handle.
         self.task_executor.spawn_critical_task(

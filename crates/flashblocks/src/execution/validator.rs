@@ -470,8 +470,13 @@ where
             // Optimistic fresh build
             return Ok(None);
         }
-        // No pending sequence initialized yet. Validate with canonical chainstate height
+        // No pending sequence initialized yet. Validate with canonical chainstate height.
         let canon_height = self.flashblocks_state.get_canon_height();
+        if canon_height == 0 {
+            return Err(eyre::eyre!(
+                "canonical height not yet initialized, skipping: incoming={incoming_block_number}"
+            ));
+        }
         if incoming_block_number > canon_height + 1 {
             return Err(eyre::eyre!(
                 "flashblock height too far ahead: incoming={incoming_block_number}, canonical={canon_height}"
