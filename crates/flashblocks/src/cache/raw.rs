@@ -209,6 +209,7 @@ impl<T: SignedTransaction> RawFlashblocksEntry<T> {
         let best_revision = self.try_get_best_revision()?;
         Some(BuildArgs {
             base: self.base()?.clone(),
+            payload_id: self.payload_id()?,
             transactions: self.transactions_up_to(best_revision),
             withdrawals: self.withdrawals_at(best_revision),
             last_flashblock_index: best_revision,
@@ -271,8 +272,8 @@ mod tests {
             .payload_id(payload_id)
             .build();
         let result = cache.handle_flashblock(fb_wrong_block);
-        assert!(result.is_ok(), "mismatched block number creates a new entry");
-        assert_eq!(cache.cache.len(), 2, "should have two distinct entries");
+        assert!(result.is_err(), "mismatched block number with same payload_id should be rejected");
+        assert_eq!(cache.cache.len(), 1, "rejected flashblock should not create a new entry");
     }
 
     #[test]
@@ -401,7 +402,7 @@ mod tests {
 
         cache.handle_canonical_height(100);
         let result = cache.handle_flashblock(fb100);
-        assert!(result.is_ok(), "flashblock at canonical height returns Ok");
+        assert!(result.is_err(), "flashblock at canonical height should be rejected");
         assert_eq!(cache.cache.len(), 0, "flashblock at canonical height should not be inserted");
     }
 

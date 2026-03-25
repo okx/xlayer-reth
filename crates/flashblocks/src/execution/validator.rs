@@ -145,8 +145,7 @@ where
         N::Block: From<alloy_consensus::Block<N::SignedTx>>,
     {
         // Pre-validate incoming flashblocks sequence
-        let pending_sequence =
-            self.prevalidate_incoming_sequence(args.base.block_number, args.last_flashblock_index)?;
+        let pending_sequence = self.prevalidate_incoming_sequence(&args)?;
 
         let parent_hash = args.base.parent_hash;
         let block_transactions: Vec<_> = args.transactions.into_iter().collect();
@@ -380,6 +379,7 @@ where
             args.base,
             executed_block,
             PrefixExecutionMeta {
+                payload_id: args.payload_id,
                 cached_reads,
                 cached_tx_count: block_transaction_count,
                 gas_used: prefix_gas_used,
@@ -431,11 +431,15 @@ where
         })
     }
 
-    fn prevalidate_incoming_sequence(
+    fn prevalidate_incoming_sequence<
+        I: IntoIterator<Item = WithEncoded<Recovered<N::SignedTx>>>,
+    >(
         &self,
-        incoming_block_number: u64,
-        incoming_last_index: u64,
+        args: &BuildArgs<I>,
     ) -> eyre::Result<Option<PendingSequence<N>>> {
+        let incoming_payload_id = args.payload_id;
+        let incoming_block_number = args.base.block_number;
+        let incoming_last_index = args.last_flashblock_index;
         if let Some(pending) = self.flashblocks_state.get_pending_sequence() {
             // Validate incoming height continuity
             let pending_height = pending.get_height();
@@ -447,11 +451,17 @@ where
                 ));
             }
             if pending_height == incoming_block_number {
-                // Validate states of last executed flashblock index
-                let last_index = pending.prefix_execution_meta.last_flashblock_index;
-                if last_index >= incoming_last_index {
+                // Validate for incremental builds
+                let pending_payload_id = pending.prefix_execution_meta.payload_id;
+                if pending_payload_id != incoming_payload_id {
                     return Err(eyre::eyre!(
-                        "flashblock index mismatch: incoming={incoming_last_index}, pending={incoming_last_index}"
+                        "payload_id mismatch on incremental build: incoming={incoming_payload_id}, pending={pending_payload_id}"
+                    ));
+                }
+                let pending_last_index = pending.prefix_execution_meta.last_flashblock_index;
+                if pending_last_index >= incoming_last_index {
+                    return Err(eyre::eyre!(
+                        "flashblock index mismatch: incoming={incoming_last_index}, pending={pending_last_index}"
                     ));
                 }
                 return Ok(Some(pending));

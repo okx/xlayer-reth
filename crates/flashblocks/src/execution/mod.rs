@@ -4,6 +4,7 @@ pub(crate) mod validator;
 pub(crate) use validator::FlashblockSequenceValidator;
 
 use alloy_eips::eip4895::Withdrawal;
+use alloy_rpc_types_engine::PayloadId;
 use op_alloy_rpc_types_engine::OpFlashblockPayloadBase;
 
 use reth_optimism_primitives::OpReceipt;
@@ -15,6 +16,7 @@ use reth_revm::cached::CachedReads;
 
 pub(crate) struct BuildArgs<I> {
     pub(crate) base: OpFlashblockPayloadBase,
+    pub(crate) payload_id: PayloadId,
     pub(crate) transactions: I,
     pub(crate) withdrawals: Vec<Withdrawal>,
     pub(crate) last_flashblock_index: u64,
@@ -23,6 +25,8 @@ pub(crate) struct BuildArgs<I> {
 /// Cached prefix execution data used to resume canonical builds.
 #[derive(Debug, Clone, Default)]
 pub struct PrefixExecutionMeta {
+    /// The payload ID of the latest flashblocks sequence.
+    pub(crate) payload_id: PayloadId,
     /// Cached reads from execution for reuse.
     pub cached_reads: CachedReads,
     /// Number of leading transactions covered by cached execution.
