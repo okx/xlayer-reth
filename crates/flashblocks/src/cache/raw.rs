@@ -195,6 +195,8 @@ impl<T: SignedTransaction> RawFlashblocksEntry<T> {
     }
 
     fn withdrawals_at(&self, index: u64) -> Vec<Withdrawal> {
+        // Per the OP Stack flashblocks spec, each diff's `withdrawals` field is cumulative
+        // (the complete list for the entire block), not incremental
         self.payloads.get(&index).map(|p| p.diff.withdrawals.clone()).unwrap_or_default()
     }
 
