@@ -15,31 +15,45 @@ xlayer-builder.workspace = true
 
 # reth
 reth-chain-state = { workspace = true, features = ["serde"] }
-reth-engine-primitives = { workspace = true, features = ["std"] }
+reth-chainspec.workspace = true
+reth-db-models.workspace = true
+reth-engine-primitives.workspace = true
+reth-engine-tree.workspace = true
 reth-errors.workspace = true
 reth-evm.workspace = true
 reth-execution-types = { workspace = true, features = ["serde"] }
 reth-metrics.workspace = true
 reth-node-api.workspace = true
 reth-node-core.workspace = true
+reth-optimism-consensus.workspace = true
+reth-optimism-flashblocks.workspace = true
+reth-optimism-forks.workspace = true
 reth-optimism-payload-builder.workspace = true
 reth-optimism-primitives = { workspace = true, features = ["serde"] }
+reth-payload-builder.workspace = true
+reth-payload-builder-primitives.workspace = true
 reth-payload-primitives.workspace = true
 reth-primitives-traits = { workspace = true, features = ["serde"] }
+reth-provider.workspace = true
 reth-revm.workspace = true
 reth-rpc.workspace = true
 reth-rpc-convert.workspace = true
 reth-rpc-eth-api.workspace = true
 reth-rpc-eth-types.workspace = true
 reth-rpc-server-types.workspace = true
-reth-optimism-flashblocks.workspace = true
 reth-storage-api.workspace = true
 reth-tasks = { workspace = true, features = ["rayon"] }
 reth-tracing.workspace = true
+reth-trie.workspace = true
+reth-trie-common.workspace = true
+reth-trie-db.workspace = true
+reth-trie-parallel.workspace = true
 
 # alloy
 alloy-consensus.workspace = true
 alloy-eips = { workspace = true, features = ["serde"] }
+alloy-eip7928.workspace = true
+alloy-evm.workspace = true
 alloy-json-rpc.workspace = true
 alloy-primitives = { workspace = true, features = ["serde"] }
 alloy-rpc-types-engine = { workspace = true, features = ["serde"] }
@@ -56,6 +70,7 @@ futures-util.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tokio-tungstenite.workspace = true
+tokio-util.workspace = true
 
 # rpc
 jsonrpsee.workspace = true
@@ -63,8 +78,12 @@ async-trait.workspace = true
 
 # misc
 brotli = { workspace = true, features = ["std"] }
+crossbeam-channel.workspace = true
 derive_more.workspace = true
+either.workspace = true
 eyre.workspace = true
+parking_lot.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 metrics.workspace = true
 moka.workspace = true

@@ -8,25 +8,31 @@ use payload::XLayerPayloadServiceBuilder;
 use args::XLayerArgs;
 use clap::Parser;
 use either::Either;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tracing::info;
 
-use op_alloy_network::Optimism;
 use reth::rpc::eth::EthApiTypes;
 use reth::{
     builder::{DebugNodeLauncher, EngineNodeLauncher, Node, NodeHandle, TreeConfig},
     providers::providers::BlockchainProvider,
 };
+use reth_chainspec::ChainSpecProvider;
 use reth_optimism_cli::Cli;
+use reth_optimism_evm::OpEvmConfig;
 use reth_optimism_node::{args::RollupArgs, OpNode};
+use reth_provider::CanonStateSubscriptions;
 use reth_rpc_server_types::RethRpcModule;
 
 use xlayer_chainspec::XLayerChainSpecParser;
-use xlayer_flashblocks::handler::FlashblocksService;
-use xlayer_flashblocks::subscription::FlashblocksPubSub;
+use xlayer_flashblocks::{
+    FlashblockStateCache, FlashblocksPersistCtx, FlashblocksPubSub, FlashblocksRpcCtx,
+    FlashblocksRpcService, WsFlashBlockStream,
+};
 use xlayer_legacy_rpc::{layer::LegacyRpcRouterLayer, LegacyRpcRouterConfig};
 use xlayer_monitor::{start_monitor_handle, RpcMonitorLayer, XLayerMonitor};
-use xlayer_rpc::xlayer_ext::{XlayerRpcExt, XlayerRpcExtApiServer};
+use xlayer_rpc::{
+    DefaultRpcExt, DefaultRpcExtApiServer, FlashblocksEthApiExt, FlashblocksEthApiOverrideServer,
+};
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
@@ -120,11 +126,18 @@ fn main() {
                 );
             }
 
+            // Get the payload events tx for pre-warming the engine tree with locally built
+            // pending flashblocks sequence.
+            let events_sender = Arc::new(OnceLock::new());
+            let tree_config = builder.config().engine.tree_config();
+
             // Create the X Layer payload service builder
             // It handles both flashblocks and default modes internally
             let payload_builder = XLayerPayloadServiceBuilder::new(
                 args.xlayer_args.builder.clone(),
+                args.xlayer_args.flashblocks_rpc.flashblock_url.is_some(),
                 args.rollup_args.compute_pending_block,
+                events_sender.clone(),
             )?
             .with_bridge_config(bridge_config);
 
@@ -135,47 +148,71 @@ fn main() {
                 .extend_rpc_modules(move |ctx| {
                     let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
 
-                    // Initialize flashblocks RPC service if not in flashblocks sequencer mode
-                    if !args.xlayer_args.builder.flashblocks.enabled {
-                        if let Some(flashblock_rx) = new_op_eth_api.subscribe_received_flashblocks()
-                        {
-                            let service = FlashblocksService::new(
-                                ctx.node().clone(),
-                                flashblock_rx,
-                                args.xlayer_args.builder.flashblocks,
-                                args.rollup_args.flashblocks_url.is_some(),
+                    let flashblocks_state = if let Some(flashblock_url) =
+                        args.xlayer_args.flashblocks_rpc.flashblock_url
+                    {
+                        // Initialize flashblocks RPC
+                        let flashblocks_state = FlashblockStateCache::new();
+                        let canon_state_rx = ctx.provider().canonical_state_stream();
+                        let service = FlashblocksRpcService::new(
+                            args.xlayer_args.builder.flashblocks,
+                            flashblocks_state.clone(),
+                            ctx.node().task_executor.clone(),
+                            FlashblocksRpcCtx {
+                                provider: ctx.provider().clone(),
+                                canon_state_rx,
+                                evm_config: OpEvmConfig::optimism(ctx.provider().chain_spec()),
+                                chain_spec: ctx.provider().chain_spec(),
+                                tree_config,
+                            },
+                            FlashblocksPersistCtx {
                                 datadir,
-                            )?;
-                            service.spawn();
-                            info!(target: "reth::cli", "xlayer flashblocks service initialized");
-                        }
+                                relay_flashblocks: args.rollup_args.flashblocks_url.is_some(),
+                            },
+                        )?;
+                        service.spawn_prewarm(events_sender);
+                        service.spawn_persistence()?;
+                        service.spawn_rpc(WsFlashBlockStream::new(flashblock_url));
+                        info!(target: "reth::cli", "xlayer flashblocks service initialized");
 
-                        if xlayer_args.enable_flashblocks_subscription
-                            && let Some(pending_blocks_rx) = new_op_eth_api.pending_block_rx()
-                        {
-                            let eth_pubsub = ctx.registry.eth_handlers().pubsub.clone();
-
+                        // Initialize custom flashblocks subscription
+                        if args.xlayer_args.flashblocks_rpc.enable_flashblocks_subscription {
                             let flashblocks_pubsub = FlashblocksPubSub::new(
-                                eth_pubsub,
-                                pending_blocks_rx,
+                                ctx.registry.eth_handlers().pubsub.clone(),
+                                flashblocks_state.subscribe_pending_sequence(),
                                 Box::new(ctx.node().task_executor.clone()),
                                 new_op_eth_api.converter().clone(),
-                                xlayer_args.flashblocks_subscription_max_addresses,
+                                args.xlayer_args.flashblocks_rpc.flashblocks_subscription_max_addresses,
                             );
                             ctx.modules.add_or_replace_if_module_configured(
                                 RethRpcModule::Eth,
                                 flashblocks_pubsub.into_rpc(),
                             )?;
-                            info!(target: "reth::cli", "xlayer eth pubsub initialized");
+                            info!(target: "reth::cli", "xlayer flashblocks pubsub initialized");
                         }
-                    }
+
+                        // Register flashblocks Eth API overrides
+                        let flashblocks_eth = FlashblocksEthApiExt::new(
+                            ctx.registry.eth_api().clone(),
+                            flashblocks_state.clone(),
+                        );
+                        ctx.modules.add_or_replace_if_module_configured(
+                            RethRpcModule::Eth,
+                            FlashblocksEthApiOverrideServer::into_rpc(flashblocks_eth),
+                        )?;
+                        info!(target: "reth::cli", "xlayer flashblocks eth api overrides initialized");
+                        Some(flashblocks_state)
+                    } else {
+                        None
+                    };
 
                     // Register X Layer RPC
-                    let xlayer_rpc = XlayerRpcExt { backend: new_op_eth_api };
-                    ctx.modules.merge_configured(XlayerRpcExtApiServer::<Optimism>::into_rpc(
+                    let xlayer_rpc = DefaultRpcExt::new(flashblocks_state);
+                    ctx.modules.merge_configured(DefaultRpcExtApiServer::into_rpc(
                         xlayer_rpc,
                     ))?;
-                    info!(target: "reth::cli", "xlayer rpc extension enabled");
+                    info!(target: "reth::cli", "xlayer eth rpc extension enabled");
+                    info!(message = "X Layer RPC modules initialized");
                     Ok(())
                 })
                 .launch_with_fn(|builder| {

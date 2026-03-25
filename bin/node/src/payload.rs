@@ -1,3 +1,5 @@
+use std::sync::{Arc, OnceLock};
+
 use reth::builder::components::PayloadServiceBuilder;
 use reth_node_api::NodeTypes;
 use reth_node_builder::{components::BasicPayloadServiceBuilder, BuilderContext};
@@ -7,7 +9,7 @@ use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
 use xlayer_bridge_intercept::BridgeInterceptConfig;
 use xlayer_builder::{
     args::BuilderArgs,
-    flashblocks::{BuilderConfig, FlashblocksServiceBuilder},
+    flashblocks::{BuilderConfig, FlashblocksServiceBuilder, PayloadEventsSender},
     traits::{NodeBounds, PoolBounds},
 };
 
@@ -28,27 +30,34 @@ pub struct XLayerPayloadServiceBuilder {
 impl XLayerPayloadServiceBuilder {
     pub fn new(
         xlayer_builder_args: BuilderArgs,
+        flashblock_rpc: bool,
         compute_pending_block: bool,
+        events_sender: Arc<OnceLock<PayloadEventsSender>>,
     ) -> eyre::Result<Self> {
         Self::with_config(
             xlayer_builder_args,
+            flashblock_rpc,
             compute_pending_block,
             OpDAConfig::default(),
             OpGasLimitConfig::default(),
+            events_sender,
         )
     }
 
     pub fn with_config(
         xlayer_builder_args: BuilderArgs,
+        flashblock_rpc: bool,
         compute_pending_block: bool,
         da_config: OpDAConfig,
         gas_limit_config: OpGasLimitConfig,
+        events_sender: Arc<OnceLock<PayloadEventsSender>>,
     ) -> eyre::Result<Self> {
-        let builder = if xlayer_builder_args.flashblocks.enabled {
+        let builder = if xlayer_builder_args.flashblocks.enabled || flashblock_rpc {
             let builder_config = BuilderConfig::try_from(xlayer_builder_args)?;
             XLayerPayloadServiceBuilderInner::Flashblocks(Box::new(FlashblocksServiceBuilder {
                 config: builder_config,
                 bridge_intercept: Default::default(),
+                events_sender,
             }))
         } else {
             let payload_builder = OpPayloadBuilder::new(compute_pending_block)

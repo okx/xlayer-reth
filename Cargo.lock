@@ -728,9 +728,9 @@ dependencies = [
 
 [[package]]
 name = "alloy-serde"
-version = "1.7.3"
+version = "1.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2ce1e0dbf7720eee747700e300c99aac01b1a95bb93f493a01e78ee28bb1a37"
+checksum = "9e6d631f8b975229361d8af7b2c749af31c73b3cf1352f90e144ddb06227105e"
 dependencies = [
  "alloy-primitives",
  "arbitrary",
@@ -8117,7 +8117,7 @@ dependencies = [
  "reth-node-api",
  "reth-primitives-traits",
  "reth-tracing",
- "ringbuffer 0.16.0",
+ "ringbuffer",
  "serde",
  "serde_json",
  "tokio",
@@ -9598,7 +9598,7 @@ dependencies = [
  "reth-rpc-eth-types",
  "reth-storage-api",
  "reth-tasks",
- "ringbuffer 0.16.0",
+ "ringbuffer",
  "serde_json",
  "tokio",
  "tokio-tungstenite 0.28.0",
@@ -11071,12 +11071,6 @@ dependencies = [
  "untrusted",
  "windows-sys 0.52.0",
 ]
-
-[[package]]
-name = "ringbuffer"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3df6368f71f205ff9c33c076d170dd56ebf68e8161c733c0caa07a7a5509ed53"
 
 [[package]]
 name = "ringbuffer"
@@ -13020,9 +13014,9 @@ dependencies = [
 
 [[package]]
 name = "unicode-width"
-version = "0.2.2"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
+checksum = "1fc81956842c57dac11422a97c3b8195a1ff727f06e85c84ed2e8aa277c9a0fd"
 
 [[package]]
 name = "unicode-xid"
@@ -14163,6 +14157,7 @@ dependencies = [
  "reth-optimism-storage",
  "reth-optimism-txpool",
  "reth-payload-builder",
+ "reth-payload-builder-primitives",
  "reth-payload-primitives",
  "reth-payload-util",
  "reth-primitives",
@@ -14245,7 +14240,9 @@ name = "xlayer-flashblocks"
 version = "0.1.0"
 dependencies = [
  "alloy-consensus",
+ "alloy-eip7928",
  "alloy-eips",
+ "alloy-evm",
  "alloy-json-rpc",
  "alloy-network",
  "alloy-primitives",
@@ -14254,7 +14251,9 @@ dependencies = [
  "alloy-signer-local",
  "async-trait",
  "brotli",
+ "crossbeam-channel",
  "derive_more",
+ "either",
  "eyre",
  "futures",
  "futures-util",
@@ -14264,8 +14263,12 @@ dependencies = [
  "op-alloy-consensus",
  "op-alloy-rpc-types-engine",
  "op-revm",
+ "parking_lot",
  "reth-chain-state",
+ "reth-chainspec",
+ "reth-db-models",
  "reth-engine-primitives",
+ "reth-engine-tree",
  "reth-errors",
  "reth-evm",
  "reth-execution-types",
@@ -14273,10 +14276,14 @@ dependencies = [
  "reth-node-api",
  "reth-node-core",
  "reth-optimism-chainspec",
+ "reth-optimism-consensus",
  "reth-optimism-evm",
  "reth-optimism-flashblocks",
+ "reth-optimism-forks",
  "reth-optimism-payload-builder",
  "reth-optimism-primitives",
+ "reth-payload-builder",
+ "reth-payload-builder-primitives",
  "reth-payload-primitives",
  "reth-primitives-traits",
  "reth-provider",
@@ -14289,13 +14296,19 @@ dependencies = [
  "reth-storage-api",
  "reth-tasks",
  "reth-tracing",
- "ringbuffer 0.15.0",
+ "reth-trie",
+ "reth-trie-common",
+ "reth-trie-db",
+ "reth-trie-parallel",
+ "ringbuffer",
  "serde",
  "serde_json",
  "test-case",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
  "tokio-tungstenite 0.26.2",
+ "tokio-util",
  "tracing",
  "url",
  "xlayer-builder",
@@ -14354,6 +14367,7 @@ dependencies = [
  "op-alloy-network",
  "reth",
  "reth-basic-payload-builder",
+ "reth-chain-state",
  "reth-chainspec",
  "reth-cli-util",
  "reth-evm",
@@ -14365,17 +14379,21 @@ dependencies = [
  "reth-optimism-forks",
  "reth-optimism-node",
  "reth-optimism-payload-builder",
+ "reth-optimism-primitives",
  "reth-optimism-txpool",
  "reth-payload-builder",
  "reth-payload-builder-primitives",
  "reth-payload-primitives",
  "reth-payload-util",
  "reth-primitives-traits",
+ "reth-provider",
  "reth-revm",
  "reth-rpc-server-types",
  "reth-storage-api",
+ "reth-tasks",
  "reth-transaction-pool",
  "revm",
+ "tokio",
  "tracing",
  "url",
  "xlayer-bridge-intercept",
@@ -14431,12 +14449,30 @@ dependencies = [
 name = "xlayer-rpc"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-primitives",
+ "alloy-rpc-types-eth",
+ "alloy-serde",
+ "futures",
  "jsonrpsee",
+ "jsonrpsee-types",
+ "op-alloy-network",
+ "op-alloy-rpc-types",
+ "reth-chain-state",
+ "reth-optimism-primitives",
  "reth-optimism-rpc",
- "reth-rpc",
+ "reth-primitives-traits",
+ "reth-revm",
+ "reth-rpc-convert",
  "reth-rpc-eth-api",
- "serde",
+ "reth-rpc-eth-types",
+ "reth-rpc-server-types",
+ "reth-storage-api",
  "tokio",
+ "tokio-stream",
+ "tracing",
+ "xlayer-flashblocks",
 ]
 
 [[package]]
