@@ -335,8 +335,8 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
     fn flush(&mut self) {
         warn!(target: "flashblocks", "Flushing flashblocks state cache");
         self.pending_cache = None;
-        self.confirm_height = 0;
         self.confirm_cache.clear();
+        self.confirm_height = self.canon_info.0;
     }
 
     /// Handles flushing a newly confirmed block to the confirm cache. Note that
