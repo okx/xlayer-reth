@@ -1,14 +1,31 @@
 use crate::{
-    handle::{handle_persistence, handle_relay_flashblocks},
+    cache::{raw::RawFlashblocksCache, FlashblockStateCache},
+    execution::{FlashblockReceipt, FlashblockSequenceValidator, OverlayProviderFactory},
+    persist::{handle_persistence, handle_relay_flashblocks},
+    state::{handle_canonical_stream, handle_execution_tasks, handle_incoming_flashblocks},
     ReceivedFlashblocksRx,
 };
-use futures_util::{FutureExt, Stream, StreamExt};
-use std::{net::SocketAddr, sync::Arc, time::Duration};
-use tokio::time::sleep;
+use futures_util::Stream;
+use std::{
+    collections::BTreeSet,
+    net::SocketAddr,
+    sync::{Arc, Condvar, Mutex, OnceLock},
+};
+use tokio::sync::broadcast::Sender;
 use tracing::*;
 
-use op_alloy_rpc_types_engine::OpFlashblockPayload;
+use alloy_eips::eip2718::Encodable2718;
+use op_alloy_rpc_types_engine::{OpFlashblockPayload, OpFlashblockPayloadBase};
+
+use reth_chain_state::CanonStateNotificationStream;
+use reth_engine_primitives::TreeConfig;
+use reth_evm::ConfigureEvm;
 use reth_node_core::dirs::{ChainPath, DataDirPath};
+use reth_optimism_forks::OpHardforks;
+use reth_primitives_traits::NodePrimitives;
+use reth_provider::{
+    BlockReader, HashedPostStateProvider, HeaderProvider, StateProviderFactory, StateReader,
+};
 use reth_tasks::TaskExecutor;
 
 use xlayer_builder::{
@@ -17,62 +34,88 @@ use xlayer_builder::{
     metrics::{tokio::FlashblocksTaskMetrics, BuilderMetrics},
 };
 
-const CONNECTION_BACKOUT_PERIOD: Duration = Duration::from_secs(5);
+pub const EXECUTION_TASK_QUEUE_CAPACITY: usize = 5;
 
-pub struct FlashblocksRpcService<S> {
-    /// Incoming flashblock stream.
-    incoming_flashblock_rx: S,
-    /// Broadcast channel to forward received flashblocks from the subscription.
-    received_flashblocks_tx: tokio::sync::broadcast::Sender<Arc<OpFlashblockPayload>>,
-    /// Task executor.
-    task_executor: TaskExecutor,
-    /// Flashblocks websocket publisher for relaying flashblocks to subscribers.
-    ws_pub: Arc<WebSocketPublisher>,
-    /// Whether to relay flashblocks to the subscribers.
-    relay_flashblocks: bool,
-    /// Payload events sender for forwarding locally-built payloads to the engine state tree.
-    events_sender: Option<PayloadEventsSender>,
-    /// Data directory for flashblocks persistence.
-    datadir: ChainPath<DataDirPath>,
+pub type ExecutionTaskQueue = Arc<(Mutex<BTreeSet<u64>>, Condvar)>;
+
+/// Context for flashblocks RPC state handles.
+pub struct FlashblocksRpcCtx<N: NodePrimitives, EvmConfig, Provider, ChainSpec> {
+    /// Canonical chainstate provider.
+    pub provider: Provider,
+    /// Canonical state notification stream.
+    pub canon_state_rx: CanonStateNotificationStream<N>,
+    /// Evm config for the sequence validator.
+    pub evm_config: EvmConfig,
+    /// Chain specs for the sequence validator.
+    pub chain_spec: Arc<ChainSpec>,
+    /// Node engine tree configuration for the sequence validator.
+    pub tree_config: TreeConfig,
 }
 
-impl<S> FlashblocksRpcService<S>
+/// Context for handling flashblocks persistence and relaying.
+pub struct FlashblocksPersistCtx {
+    /// Data directory for flashblocks persistence.
+    pub datadir: ChainPath<DataDirPath>,
+    /// Whether to relay flashblocks to the subscribers.
+    pub relay_flashblocks: bool,
+}
+
+pub struct FlashblocksRpcService<N, EvmConfig, Provider, ChainSpec>
 where
-    S: Stream<Item = eyre::Result<OpFlashblockPayload>> + Unpin + 'static,
+    N: NodePrimitives,
+    EvmConfig: ConfigureEvm,
+    ChainSpec: OpHardforks,
+{
+    /// Flashblock configurations.
+    args: FlashblocksArgs,
+    /// Flashblocks state cache (shared with RPC handlers).
+    flashblocks_state: FlashblockStateCache<N>,
+    /// Flashblocks RPC context.
+    rpc_ctx: FlashblocksRpcCtx<N, EvmConfig, Provider, ChainSpec>,
+    /// Flashblocks persist context.
+    persist_ctx: FlashblocksPersistCtx,
+    /// Task executor.
+    task_executor: TaskExecutor,
+    /// Broadcast channel to forward received flashblocks from the subscription.
+    received_flashblocks_tx: Sender<Arc<OpFlashblockPayload>>,
+}
+
+impl<N, EvmConfig, Provider, ChainSpec> FlashblocksRpcService<N, EvmConfig, Provider, ChainSpec>
+where
+    N: NodePrimitives,
+    N::Receipt: FlashblockReceipt,
+    N::SignedTx: Encodable2718,
+    N::Block: From<alloy_consensus::Block<N::SignedTx>>,
+    EvmConfig: ConfigureEvm<Primitives = N, NextBlockEnvCtx: From<OpFlashblockPayloadBase> + Unpin>
+        + Send
+        + 'static,
+    Provider: StateProviderFactory
+        + HeaderProvider<Header = <N as NodePrimitives>::BlockHeader>
+        + OverlayProviderFactory
+        + BlockReader
+        + StateReader
+        + HashedPostStateProvider
+        + Unpin
+        + Clone
+        + Send
+        + 'static,
+    ChainSpec: OpHardforks + Send + Sync + 'static,
 {
     pub fn new(
-        task_executor: TaskExecutor,
-        incoming_flashblock_rx: S,
         args: FlashblocksArgs,
-        relay_flashblocks: bool,
-        events_sender: Option<PayloadEventsSender>,
-        datadir: ChainPath<DataDirPath>,
-    ) -> Result<Self, eyre::Report> {
+        flashblocks_state: FlashblockStateCache<N>,
+        task_executor: TaskExecutor,
+        rpc_ctx: FlashblocksRpcCtx<N, EvmConfig, Provider, ChainSpec>,
+        persist_ctx: FlashblocksPersistCtx,
+    ) -> eyre::Result<Self> {
         let (received_flashblocks_tx, _) = tokio::sync::broadcast::channel(128);
-
-        // Initialize ws publisher for relaying flashblocks
-        let ws_addr = SocketAddr::new(args.flashblocks_addr.parse()?, args.flashblocks_port);
-        let metrics = Arc::new(BuilderMetrics::default());
-        let task_metrics = Arc::new(FlashblocksTaskMetrics::new());
-        let ws_pub = Arc::new(
-            WebSocketPublisher::new(
-                ws_addr,
-                metrics,
-                &task_metrics.websocket_publisher,
-                args.ws_subscriber_limit,
-            )
-            .map_err(|e| eyre::eyre!("Failed to create WebSocket publisher: {e}"))?,
-        );
-        info!(target: "flashblocks", "WebSocket publisher initialized at {}", ws_addr);
-
         Ok(Self {
-            incoming_flashblock_rx,
-            received_flashblocks_tx,
+            args,
+            flashblocks_state,
+            rpc_ctx,
+            persist_ctx,
             task_executor,
-            ws_pub,
-            relay_flashblocks,
-            events_sender,
-            datadir,
+            received_flashblocks_tx,
         })
     }
 
@@ -81,10 +124,10 @@ where
         self.received_flashblocks_tx.subscribe()
     }
 
-    pub fn spawn(&self) {
-        debug!(target: "flashblocks", "Initializing flashblocks service");
+    pub fn spawn_persistence(&self) -> eyre::Result<()> {
         // Spawn persistence handle
-        let datadir = self.datadir.clone();
+        debug!(target: "flashblocks", "Initializing flashblocks persistence");
+        let datadir = self.persist_ctx.datadir.clone();
         let rx = self.subscribe_received_flashblocks();
         self.task_executor.spawn_critical_task(
             "xlayer-flashblocks-persistence",
@@ -92,11 +135,24 @@ where
                 handle_persistence(rx, datadir).await;
             }),
         );
-
         // Spawn relayer handle
-        if self.relay_flashblocks {
+        if self.persist_ctx.relay_flashblocks {
+            let ws_addr =
+                SocketAddr::new(self.args.flashblocks_addr.parse()?, self.args.flashblocks_port);
+            let metrics = Arc::new(BuilderMetrics::default());
+            let task_metrics = Arc::new(FlashblocksTaskMetrics::new());
+            let ws_pub = Arc::new(
+                WebSocketPublisher::new(
+                    ws_addr,
+                    metrics,
+                    &task_metrics.websocket_publisher,
+                    self.args.ws_subscriber_limit,
+                )
+                .map_err(|e| eyre::eyre!("Failed to create WebSocket publisher: {e}"))?,
+            );
+            info!(target: "flashblocks", "WebSocket publisher initialized at {ws_addr}");
+
             let rx = self.subscribe_received_flashblocks();
-            let ws_pub = self.ws_pub.clone();
             self.task_executor.spawn_critical_task(
                 "xlayer-flashblocks-publish",
                 Box::pin(async move {
@@ -104,60 +160,100 @@ where
                 }),
             );
         }
+        Ok(())
     }
 
-    /// Contains the main logic for processing raw incoming flashblocks, and updating the
-    /// flashblocks state cache layer. The logic pipeline is as follows:
-    /// 1. Notifies subscribers
-    /// 2. Inserts into the raw flashblocks cache
-    pub async fn handle_flashblocks(&mut self) {
-        loop {
-            tokio::select! {
-                // Event 1: New flashblock arrives (batch process all ready flashblocks)
-                result = self.incoming_flashblock_rx.next() => {
-                    match result {
-                        Some(Ok(flashblock)) => {
-                            // Process first flashblock
-                            self.process_flashblock(flashblock);
+    pub fn spawn_rpc<S>(self, incoming_rx: S)
+    where
+        S: Stream<Item = eyre::Result<OpFlashblockPayload>> + Unpin + Send + 'static,
+    {
+        debug!(target: "flashblocks", "Initializing flashblocks rpc");
+        let raw_cache = Arc::new(RawFlashblocksCache::new());
+        let validator = FlashblockSequenceValidator::new(
+            self.rpc_ctx.evm_config,
+            self.rpc_ctx.provider,
+            self.rpc_ctx.chain_spec,
+            self.flashblocks_state.clone(),
+            self.task_executor.clone(),
+            self.rpc_ctx.tree_config,
+        );
+        let task_queue = Arc::new((Mutex::new(BTreeSet::new()), Condvar::new()));
 
-                            // Batch process all other immediately available flashblocks
-                            while let Some(result) = self.incoming_flashblock_rx.next().now_or_never().flatten() {
-                                match result {
-                                    Ok(fb) => self.process_flashblock(fb),
-                                    Err(err) => warn!(target: "flashblocks", %err, "Error receiving flashblock"),
-                                }
-                            }
-                        }
-                        Some(Err(err)) => {
-                            warn!(
-                                target: "flashblocks",
-                                %err,
-                                retry_period = CONNECTION_BACKOUT_PERIOD.as_secs(),
-                                "Error receiving flashblock"
-                            );
-                            sleep(CONNECTION_BACKOUT_PERIOD).await;
-                        }
-                        None => {
-                            warn!(target: "flashblocks", "Flashblock stream ended");
-                            break;
-                        }
+        // Spawn incoming raw flashblocks handle.
+        let received_tx = self.received_flashblocks_tx.clone();
+        self.task_executor.spawn_critical_task(
+            "xlayer-flashblocks-payload",
+            Box::pin(handle_incoming_flashblocks::<S, N>(
+                incoming_rx,
+                received_tx,
+                raw_cache.clone(),
+                task_queue.clone(),
+            )),
+        );
+
+        // Spawn the flashblocks sequence execution task handle on a dedicated blocking thread.
+        let cache = raw_cache.clone();
+        self.task_executor.spawn_critical_blocking_task(
+            "xlayer-flashblocks-execution",
+            async move {
+                handle_execution_tasks::<S, N, EvmConfig, Provider, ChainSpec>(
+                    validator, cache, task_queue,
+                );
+            },
+        );
+
+        // Spawn the canonical stream handle.
+        self.task_executor.spawn_critical_task(
+            "xlayer-flashblocks-canonical",
+            Box::pin(handle_canonical_stream::<N>(
+                self.rpc_ctx.canon_state_rx,
+                self.flashblocks_state,
+                raw_cache,
+            )),
+        );
+    }
+
+    pub fn spawn_prewarm(&self, events_sender: Arc<OnceLock<PayloadEventsSender>>)
+    where
+        N: NodePrimitives<
+            Block = <reth_optimism_primitives::OpPrimitives as NodePrimitives>::Block,
+            Receipt = <reth_optimism_primitives::OpPrimitives as NodePrimitives>::Receipt,
+        >,
+    {
+        let mut pending_rx = self.flashblocks_state.subscribe_pending_sequence();
+        if let Some(payload_events_sender) = events_sender.get().cloned() {
+            self.task_executor.spawn_critical_task(
+                "xlayer-flashblocks-prewarm",
+                Box::pin(async move {
+                    use either::Either;
+                    use reth_optimism_payload_builder::OpBuiltPayload;
+                    use reth_optimism_primitives::OpPrimitives;
+                    use reth_payload_builder_primitives::Events;
+
+                    while pending_rx.changed().await.is_ok() {
+                        let Some(pending_sequence) = pending_rx.borrow_and_update().clone() else {
+                            continue;
+                        };
+                        let executed = &pending_sequence.executed_block;
+                        let block = executed.recovered_block.clone_sealed_block();
+                        let trie_data = executed.trie_data();
+                        let built =
+                            reth_payload_primitives::BuiltPayloadExecutedBlock::<OpPrimitives> {
+                                recovered_block: executed.recovered_block.clone(),
+                                execution_output: executed.execution_output.clone(),
+                                hashed_state: Either::Right(trie_data.hashed_state),
+                                trie_updates: Either::Right(trie_data.trie_updates),
+                            };
+                        let payload = OpBuiltPayload::<OpPrimitives>::new(
+                            reth_payload_builder::PayloadId::default(),
+                            Arc::new(block),
+                            alloy_primitives::U256::ZERO,
+                            Some(built),
+                        );
+                        let _ = payload_events_sender.send(Events::BuiltPayload(payload));
                     }
-                }
-            }
-        }
-    }
-
-    /// Processes a single flashblock: notifies subscribers, and inserts into
-    /// the raw flashblocks cache.
-    fn process_flashblock(&mut self, flashblock: OpFlashblockPayload) {
-        self.notify_received_flashblock(&flashblock);
-        // TODO: Insert into the raw flashblocks cache
-    }
-
-    /// Notifies all subscribers about the received flashblock.
-    fn notify_received_flashblock(&self, flashblock: &OpFlashblockPayload) {
-        if self.received_flashblocks_tx.receiver_count() > 0 {
-            let _ = self.received_flashblocks_tx.send(Arc::new(flashblock.clone()));
+                }),
+            );
         }
     }
 }

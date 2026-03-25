@@ -4,6 +4,7 @@ pub(crate) mod raw;
 pub(crate) mod utils;
 
 pub(crate) use confirm::ConfirmCache;
+pub(crate) use raw::RawFlashblocksCache;
 
 pub use pending::PendingSequence;
 

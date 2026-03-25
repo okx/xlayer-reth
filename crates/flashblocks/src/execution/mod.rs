@@ -1,6 +1,8 @@
 pub(crate) mod assemble;
 pub(crate) mod validator;
 
+pub(crate) use validator::FlashblockSequenceValidator;
+
 use alloy_eips::eip4895::Withdrawal;
 use op_alloy_rpc_types_engine::OpFlashblockPayloadBase;
 
@@ -15,13 +17,12 @@ pub(crate) struct BuildArgs<I> {
     pub(crate) base: OpFlashblockPayloadBase,
     pub(crate) transactions: I,
     pub(crate) withdrawals: Vec<Withdrawal>,
-    pub(crate) start_flashblock_index: u64,
     pub(crate) last_flashblock_index: u64,
 }
 
 /// Cached prefix execution data used to resume canonical builds.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct PrefixExecutionMeta {
+pub struct PrefixExecutionMeta {
     /// Cached reads from execution for reuse.
     pub cached_reads: CachedReads,
     /// Number of leading transactions covered by cached execution.
@@ -46,7 +47,7 @@ enum StateRootStrategy {
 }
 
 /// Receipt requirements for cache-resume flow.
-pub(crate) trait FlashblockReceipt: Clone {
+pub trait FlashblockReceipt: Clone {
     /// Adds `gas_offset` to each receipt's `cumulative_gas_used`.
     fn add_cumulative_gas_offset(receipts: &mut [Self], gas_offset: u64);
 }
@@ -66,7 +67,7 @@ impl FlashblockReceipt for OpReceipt {
 /// Trait alias for the bounds required on a provider factory to create an
 /// [`OverlayStateProviderFactory`] that supports parallel and serial state
 /// root computation.
-pub(crate) trait OverlayProviderFactory:
+pub trait OverlayProviderFactory:
     DatabaseProviderFactory<
         Provider: StageCheckpointReader
                       + PruneCheckpointReader

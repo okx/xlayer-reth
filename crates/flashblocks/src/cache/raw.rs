@@ -1,12 +1,12 @@
+use crate::execution::BuildArgs;
 use parking_lot::RwLock;
 use ringbuffer::{AllocRingBuffer, RingBuffer};
 use std::{collections::BTreeMap, sync::Arc};
-use tracing::*;
 
-use alloy_eips::eip2718::WithEncoded;
+use alloy_eips::{eip2718::WithEncoded, eip4895::Withdrawal};
 use alloy_primitives::B256;
 use alloy_rpc_types_engine::PayloadId;
-use op_alloy_rpc_types_engine::OpFlashblockPayload;
+use op_alloy_rpc_types_engine::{OpFlashblockPayload, OpFlashblockPayloadBase};
 
 use reth_primitives_traits::{transaction::TxHashRef, Recovered, SignedTransaction};
 
@@ -32,12 +32,19 @@ impl<T: SignedTransaction> RawFlashblocksCache<T> {
         Self { inner }
     }
 
-    pub fn handle_canonical_height(&mut self, height: u64) {
+    pub fn handle_canonical_height(&self, height: u64) {
         self.inner.write().handle_canonical_height(height);
     }
 
-    pub fn handle_flashblock(&mut self, flashblock: OpFlashblockPayload) -> eyre::Result<()> {
+    pub fn handle_flashblock(&self, flashblock: OpFlashblockPayload) -> eyre::Result<()> {
         self.inner.write().handle_flashblock(flashblock)
+    }
+
+    pub(crate) fn take_buildable_for_height(
+        &self,
+        height: u64,
+    ) -> Option<BuildArgs<Vec<WithEncoded<Recovered<T>>>>> {
+        self.inner.read().take_buildable_for_height(height)
     }
 }
 
@@ -54,26 +61,25 @@ impl<T: SignedTransaction> RawFlashblocksCacheInner<T> {
 
     pub fn handle_canonical_height(&mut self, height: u64) {
         self.canon_height = height;
-        // Evict entries from the front (oldest) whose block number is at or
-        // below the new canonical height.
-        while self
+        // Evict all entries whose height is at or below the new canonical height.
+        let retained: Vec<_> = self
             .cache
-            .front()
-            .is_some_and(|entry| entry.block_number().is_some_and(|n| n <= height))
-        {
-            self.cache.dequeue();
+            .drain()
+            .filter(|entry| entry.block_number().map_or(true, |n| n > height))
+            .collect();
+        for entry in retained {
+            self.cache.enqueue(entry);
         }
     }
 
     pub fn handle_flashblock(&mut self, flashblock: OpFlashblockPayload) -> eyre::Result<()> {
-        if flashblock.block_number() <= self.canon_height {
-            debug!(
-                target: "flashblocks",
-                flashblock_number = flashblock.block_number(),
-                canon_height = self.canon_height,
-                "Received old flashblock behind canonical height, skip adding",
-            );
-            return Ok(());
+        let incoming_height = flashblock.block_number();
+        if incoming_height <= self.canon_height {
+            return Err(eyre::eyre!(
+                "Received old flashblock behind canonical height, skip adding to raw cache: flashblock_number={}, canon_height={}",
+                incoming_height,
+                self.canon_height,
+            ));
         }
 
         // Search for an existing entry matching this payload_id.
@@ -87,9 +93,19 @@ impl<T: SignedTransaction> RawFlashblocksCacheInner<T> {
             // when the cache is full.
             let mut entry = RawFlashblocksEntry::new();
             entry.insert_flashblock(flashblock)?;
-            self.cache.push(entry);
+            self.cache.enqueue(entry);
         }
         Ok(())
+    }
+
+    fn take_buildable_for_height(
+        &self,
+        height: u64,
+    ) -> Option<BuildArgs<Vec<WithEncoded<Recovered<T>>>>> {
+        self.cache
+            .iter()
+            .find(|entry| entry.block_number() == Some(height))
+            .and_then(|entry| entry.to_buildable_args())
     }
 }
 
@@ -117,15 +133,13 @@ impl<T: SignedTransaction> RawFlashblocksEntry<T> {
     /// Inserts a flashblock into the sequence.
     fn insert_flashblock(&mut self, flashblock: OpFlashblockPayload) -> eyre::Result<()> {
         if !self.can_accept(&flashblock) {
-            warn!(
-                target: "flashblocks",
-                incoming_id = ?flashblock.payload_id,
-                current_id = ?self.payload_id(),
-                incoming_height = %flashblock.block_number(),
-                current_height = ?self.block_number(),
-                "Incoming flashblock failed to be accepted into the sequence, possible re-org detected",
-            );
-            return Err(eyre::eyre!("incoming flashblock failed to be accepted into the sequence, possible re-org detected"));
+            return Err(eyre::eyre!(
+                "Incoming flashblock failed to be accepted into the sequence, possible re-org detected: incoming_id={:?}, current_id={:?}, incoming_height={}, current_height={:?}",
+                flashblock.payload_id,
+                self.payload_id(),
+                flashblock.block_number(),
+                self.block_number(),
+            ));
         }
 
         if flashblock.index == 0 {
@@ -180,6 +194,31 @@ impl<T: SignedTransaction> RawFlashblocksEntry<T> {
 
     fn tx_hashes(&self) -> Vec<B256> {
         self.recovered_transactions_by_index.values().flatten().map(|tx| *tx.tx_hash()).collect()
+    }
+
+    fn base(&self) -> Option<&OpFlashblockPayloadBase> {
+        self.payloads.get(&0)?.base.as_ref()
+    }
+
+    fn withdrawals_at(&self, index: u64) -> Vec<Withdrawal> {
+        self.payloads.get(&index).map(|p| p.diff.withdrawals.clone()).unwrap_or_default()
+    }
+
+    fn transactions_up_to(&self, up_to: u64) -> Vec<WithEncoded<Recovered<T>>> {
+        self.recovered_transactions_by_index
+            .range(..=up_to)
+            .flat_map(|(_, txs)| txs.iter().cloned())
+            .collect()
+    }
+
+    fn to_buildable_args(&self) -> Option<BuildArgs<Vec<WithEncoded<Recovered<T>>>>> {
+        let best_revision = self.get_best_revision()?;
+        Some(BuildArgs {
+            base: self.base()?.clone(),
+            transactions: self.transactions_up_to(best_revision),
+            withdrawals: self.withdrawals_at(best_revision),
+            last_flashblock_index: best_revision,
+        })
     }
 
     #[cfg(test)]
@@ -476,7 +515,7 @@ mod tests {
     fn test_raw_flashblocks_cache_handle_flashblock_inserts_via_arc_rwlock() {
         let factory = TestFlashBlockFactory::new();
         let fb0 = factory.flashblock_at(0).build();
-        let mut cache = RawFlashblocksCache::<OpTransactionSigned>::new();
+        let cache = RawFlashblocksCache::<OpTransactionSigned>::new();
 
         let result = cache.handle_flashblock(fb0);
         assert!(result.is_ok(), "handle_flashblock via Arc<RwLock> wrapper should succeed");

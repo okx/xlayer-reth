@@ -16,13 +16,18 @@ use reth::{
     builder::{DebugNodeLauncher, EngineNodeLauncher, Node, NodeHandle, TreeConfig},
     providers::providers::BlockchainProvider,
 };
+use reth_chainspec::ChainSpecProvider;
 use reth_optimism_cli::Cli;
+use reth_optimism_evm::OpEvmConfig;
 use reth_optimism_node::{args::RollupArgs, OpNode};
+use reth_provider::CanonStateSubscriptions;
 use reth_rpc_server_types::RethRpcModule;
+use reth_tasks::Runtime;
 
 use xlayer_chainspec::XLayerChainSpecParser;
 use xlayer_flashblocks::{
-    FlashblockStateCache, FlashblocksPubSub, FlashblocksRpcService, WsFlashBlockStream,
+    FlashblockStateCache, FlashblocksPersistCtx, FlashblocksPubSub, FlashblocksRpcCtx,
+    FlashblocksRpcService, WsFlashBlockStream,
 };
 use xlayer_legacy_rpc::{layer::LegacyRpcRouterLayer, LegacyRpcRouterConfig};
 use xlayer_monitor::{start_monitor_handle, RpcMonitorLayer, XLayerMonitor};
@@ -125,6 +130,7 @@ fn main() {
             // Get the payload events tx for pre-warming the engine tree with locally built
             // pending flashblocks sequence.
             let events_sender = Arc::new(OnceLock::new());
+            let tree_config = builder.config().engine.tree_config();
 
             // Create the X Layer payload service builder
             // It handles both flashblocks and default modes internally
@@ -148,16 +154,26 @@ fn main() {
                     {
                         // Initialize flashblocks RPC
                         let flashblocks_state = FlashblockStateCache::new();
-                        let stream = WsFlashBlockStream::new(flashblock_url);
+                        let canon_state_rx = ctx.provider().canonical_state_stream();
                         let service = FlashblocksRpcService::new(
-                            ctx.node().task_executor.clone(),
-                            stream,
                             args.xlayer_args.builder.flashblocks,
-                            args.rollup_args.flashblocks_url.is_some(),
-                            events_sender.get().cloned(),
-                            datadir,
+                            flashblocks_state.clone(),
+                            ctx.node().task_executor.clone(),
+                            FlashblocksRpcCtx {
+                                provider: ctx.provider().clone(),
+                                canon_state_rx,
+                                evm_config: OpEvmConfig::optimism(ctx.provider().chain_spec()),
+                                chain_spec: ctx.provider().chain_spec(),
+                                tree_config,
+                            },
+                            FlashblocksPersistCtx {
+                                datadir,
+                                relay_flashblocks: args.rollup_args.flashblocks_url.is_some(),
+                            },
                         )?;
-                        service.spawn();
+                        service.spawn_prewarm(events_sender);
+                        service.spawn_persistence()?;
+                        service.spawn_rpc(WsFlashBlockStream::new(flashblock_url));
                         info!(target: "reth::cli", "xlayer flashblocks service initialized");
 
                         // Initialize custom flashblocks subscription

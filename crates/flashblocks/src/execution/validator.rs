@@ -145,8 +145,8 @@ where
         N::Block: From<alloy_consensus::Block<N::SignedTx>>,
     {
         // Pre-validate incoming flashblocks sequence
-        let pending_sequence = self
-            .prevalidate_incoming_sequence(args.base.block_number, args.start_flashblock_index)?;
+        let pending_sequence =
+            self.prevalidate_incoming_sequence(args.base.block_number, args.last_flashblock_index)?;
 
         let parent_hash = args.base.parent_hash;
         let block_transactions: Vec<_> = args.transactions.into_iter().collect();
@@ -434,7 +434,7 @@ where
     fn prevalidate_incoming_sequence(
         &self,
         incoming_block_number: u64,
-        incoming_index: u64,
+        incoming_last_index: u64,
     ) -> eyre::Result<Option<PendingSequence<N>>> {
         if let Some(pending) = self.flashblocks_state.get_pending_sequence() {
             // Validate incoming height continuity
@@ -449,18 +449,14 @@ where
             if pending_height == incoming_block_number {
                 // Validate states of last executed flashblock index
                 let last_index = pending.prefix_execution_meta.last_flashblock_index;
-                if last_index.saturating_add(1) != incoming_index {
+                if last_index >= incoming_last_index {
                     return Err(eyre::eyre!(
-                        "flashblock index mismatch: incoming={incoming_index}, pending={last_index}"
+                        "flashblock index mismatch: incoming={incoming_last_index}, pending={incoming_last_index}"
                     ));
                 }
                 return Ok(Some(pending));
-            } else if incoming_index != 0 {
-                // Optimistic fresh build. Validate that build is starting from index = 0.
-                return Err(eyre::eyre!(
-                    "flashblock index mismatch: should start from index 0 but incoming={incoming_index}"
-                ));
             }
+            // Optimistic fresh build
             return Ok(None);
         }
         // No pending sequence initialized yet. Validate with canonical chainstate height
