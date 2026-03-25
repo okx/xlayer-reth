@@ -176,6 +176,7 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
         let in_memory = match in_memory {
             Ok(blocks) => blocks,
             Err(e) => {
+                // Flush as the overlay is non-contiguous, indicating potential poluuted state.
                 warn!(target: "flashblocks", "Failed to get flashblocks state provider: {e}. Flushing cache");
                 self.inner.write().flush();
                 None
@@ -203,6 +204,7 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
         let in_memory = match in_memory {
             Ok(blocks) => blocks,
             Err(e) => {
+                // Flush as the overlay is non-contiguous, indicating potential poluuted state.
                 warn!(target: "flashblocks", "Failed to get flashblocks state provider: {e}. Flushing cache");
                 self.inner.write().flush();
                 None
@@ -233,6 +235,7 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
         let in_memory = match in_memory {
             Ok(blocks) => blocks,
             Err(e) => {
+                // Flush as the overlay is non-contiguous, indicating potential poluuted state.
                 warn!(target: "flashblocks", "Failed to get flashblocks state provider: {e}. Flushing cache");
                 self.inner.write().flush();
                 None

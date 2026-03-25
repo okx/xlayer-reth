@@ -12,7 +12,7 @@ use reth_chain_state::ExecutedBlock;
 use reth_primitives_traits::{BlockBody, NodePrimitives, ReceiptTy};
 use reth_rpc_eth_types::block::BlockAndReceipts;
 
-const DEFAULT_CONFIRM_BLOCK_CACHE_SIZE: usize = 1_000;
+const DEFAULT_CONFIRM_BLOCK_CACHE_SIZE: usize = 50;
 const DEFAULT_TX_CACHE_SIZE: usize = DEFAULT_CONFIRM_BLOCK_CACHE_SIZE * 10_000;
 
 #[derive(Debug)]
@@ -99,6 +99,12 @@ impl<N: NodePrimitives> ConfirmCache<N> {
                     receipt: receipt.clone(),
                 },
             );
+        }
+
+        if let Some((old_hash, old_block)) = self.blocks.remove(&height) {
+            // Clean up old height entries if exist
+            self.hash_to_number.remove(&old_hash);
+            self.remove_tx_index_for_block(&old_block);
         }
 
         // Build block index entries for block data
@@ -496,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn test_confirm_cache_insert_duplicate_height_leaks_stale_hash_index() {
+    fn test_confirm_cache_insert_duplicate_height_cleans_stale_indexes() {
         let mut cache = ConfirmCache::<OpPrimitives>::new();
         let block_a = make_executed_block(10, B256::ZERO);
         let hash_a = block_a.recovered_block.hash();
@@ -507,12 +513,11 @@ mod tests {
         cache.insert(10, block_b, empty_receipts()).expect("second insert");
 
         assert_eq!(cache.number_for_hash(&hash_b), Some(10));
-        // Documents known limitation: BTreeMap::insert overwrites the value
-        // but doesn't clean the old hash_to_number entry.
+        // Stale hash_to_number entry is cleaned up on overwrite.
         assert_eq!(
             cache.number_for_hash(&hash_a),
-            Some(10),
-            "stale hash_to_number entry remains (known limitation)"
+            None,
+            "stale hash_to_number entry should be removed on duplicate height insert"
         );
     }
 

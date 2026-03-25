@@ -420,6 +420,7 @@ where
             );
         }
         self.flashblocks_state.handle_pending_sequence(PendingSequence {
+            // Set pending block deadline to 1 second matching default blocktime.
             pending: PendingBlock::with_executed_block(
                 Instant::now() + Duration::from_secs(1),
                 executed_block,
@@ -473,7 +474,12 @@ where
         let canon_height = self.flashblocks_state.get_canon_height();
         if incoming_block_number > canon_height + 1 {
             return Err(eyre::eyre!(
-                "height mismatch: incoming={incoming_block_number}, canonical={canon_height}"
+                "flashblock height too far ahead: incoming={incoming_block_number}, canonical={canon_height}"
+            ));
+        }
+        if incoming_block_number <= canon_height {
+            return Err(eyre::eyre!(
+                "stale height: incoming={incoming_block_number}, canonical={canon_height}"
             ));
         }
         Ok(None)
