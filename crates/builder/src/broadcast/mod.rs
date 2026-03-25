@@ -166,6 +166,22 @@ impl Node {
                 Some(message) = outgoing_message_rx.recv() => {
                     let protocol = message.protocol();
                     debug!(target: "payload_builder::broadcast", "received message to broadcast on protocol {protocol}");
+
+                    // NOTE on broadcast ordering and failure semantics:
+                    // `broadcast_message` sends to all connected peers concurrently and
+                    // awaits until every peer's TCP send completes (or fails). This is a
+                    // blocking wait — WS publish below only runs after all peer sends have
+                    // resolved. TCP send success means the kernel accepted the bytes into
+                    // the send buffer.
+                    //
+                    // However this means that networking layer failures are swallowed, as
+                    // only serialization errors are propagated. This means WS publish may
+                    // proceed as networking failures can be silently drop.
+                    //
+                    // This design is intentional and the re-org risk the builder trade-off
+                    // for lower latency - since failures/switches in builder are very small.
+                    // The less strict (no ack of message deliveries) allow a lower latency
+                    // in the gossiping of new flashblock payloads to websocket subscribers.
                     if let Err(e) = outgoing_streams_handler.broadcast_message(message.clone()).await {
                         warn!(target: "payload_builder::broadcast", "failed to broadcast message on protocol {protocol}: {e:?}");
                     }
