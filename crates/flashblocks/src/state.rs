@@ -13,7 +13,7 @@ use tracing::*;
 
 use alloy_consensus::BlockHeader;
 use alloy_eips::eip2718::Encodable2718;
-use op_alloy_rpc_types_engine::{OpFlashblockPayload, OpFlashblockPayloadBase};
+use op_alloy_rpc_types_engine::OpFlashblockPayloadBase;
 
 use reth_chain_state::CanonStateNotificationStream;
 use reth_evm::ConfigureEvm;
@@ -23,15 +23,17 @@ use reth_provider::{
     BlockReader, HashedPostStateProvider, HeaderProvider, StateProviderFactory, StateReader,
 };
 
+use xlayer_builder::flashblocks::XLayerFlashblockPayload;
+
 const CONNECTION_BACKOUT_PERIOD: Duration = Duration::from_secs(5);
 
 pub async fn handle_incoming_flashblocks<S, N>(
     mut incoming_rx: S,
-    received_tx: Sender<Arc<OpFlashblockPayload>>,
+    received_tx: Sender<Arc<XLayerFlashblockPayload>>,
     raw_cache: Arc<RawFlashblocksCache<N::SignedTx>>,
     task_queue: ExecutionTaskQueue,
 ) where
-    S: Stream<Item = eyre::Result<OpFlashblockPayload>> + Unpin + Send + 'static,
+    S: Stream<Item = eyre::Result<XLayerFlashblockPayload>> + Unpin + Send + 'static,
     N: NodePrimitives,
 {
     info!(target: "flashblocks", "Flashblocks raw handle started");
@@ -94,17 +96,17 @@ pub async fn handle_incoming_flashblocks<S, N>(
 }
 
 fn process_flashblock_payload<N: NodePrimitives>(
-    flashblock: OpFlashblockPayload,
-    received_tx: &tokio::sync::broadcast::Sender<Arc<OpFlashblockPayload>>,
+    payload: XLayerFlashblockPayload,
+    received_tx: &tokio::sync::broadcast::Sender<Arc<XLayerFlashblockPayload>>,
     raw_cache: &RawFlashblocksCache<N::SignedTx>,
     task_queue: &ExecutionTaskQueue,
 ) -> eyre::Result<()> {
     if received_tx.receiver_count() > 0 {
-        let _ = received_tx.send(Arc::new(flashblock.clone()));
+        let _ = received_tx.send(Arc::new(payload.clone()));
     }
     // Insert into raw cache
-    let height = flashblock.block_number();
-    raw_cache.handle_flashblock(flashblock)?;
+    let height = payload.inner.block_number();
+    raw_cache.handle_flashblock(payload)?;
 
     // Enqueue to execution tasks
     let mut queue =

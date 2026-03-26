@@ -17,8 +17,8 @@ pub use service::{FlashblocksPersistCtx, FlashblocksRpcCtx, FlashblocksRpcServic
 pub use subscription::FlashblocksPubSub;
 pub use ws::WsFlashBlockStream;
 
-use op_alloy_rpc_types_engine::OpFlashblockPayload;
 use std::sync::Arc;
+use xlayer_builder::flashblocks::XLayerFlashblockPayload;
 
 pub type PendingSequenceRx<N> = tokio::sync::watch::Receiver<Option<PendingSequence<N>>>;
-pub type ReceivedFlashblocksRx = tokio::sync::broadcast::Receiver<Arc<OpFlashblockPayload>>;
+pub type ReceivedFlashblocksRx = tokio::sync::broadcast::Receiver<Arc<XLayerFlashblockPayload>>;

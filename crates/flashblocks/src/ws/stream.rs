@@ -18,9 +18,9 @@ use tokio_tungstenite::{
 use tracing::debug;
 use url::Url;
 
-use op_alloy_rpc_types_engine::OpFlashblockPayload;
+use xlayer_builder::flashblocks::XLayerFlashblockPayload;
 
-/// An asynchronous stream of [`OpFlashblockPayload`] from a websocket connection.
+/// An asynchronous stream of [`XLayerFlashblockPayload`] from a websocket connection.
 ///
 /// The stream attempts to connect to a websocket URL and then decode each received item.
 ///
@@ -50,7 +50,7 @@ impl WsFlashBlockStream<WsStream, WsSink, WsConnector> {
         }
     }
 
-    /// Sets the [`OpFlashblockPayload`] decoder for the websocket stream.
+    /// Sets the [`XLayerFlashblockPayload`] decoder for the websocket stream.
     pub fn with_decoder(self, decoder: Box<dyn FlashBlockDecoder>) -> Self {
         Self { decoder, ..self }
     }
@@ -77,7 +77,7 @@ where
     S: Sink<Message> + Send + Unpin,
     C: WsConnect<Stream = Str, Sink = S> + Clone + Send + 'static + Unpin,
 {
-    type Item = eyre::Result<OpFlashblockPayload>;
+    type Item = eyre::Result<XLayerFlashblockPayload>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -246,6 +246,7 @@ mod tests {
     use super::*;
     use alloy_primitives::bytes::Bytes;
     use brotli::enc::BrotliEncoderParams;
+    use op_alloy_rpc_types_engine::OpFlashblockPayload;
     use std::{future, iter};
     use tokio_tungstenite::tungstenite::{
         protocol::frame::{coding::CloseCode, Frame},
@@ -471,7 +472,8 @@ mod tests {
 
         let actual_messages: Vec<_> = stream.take(1).map(Result::unwrap).collect().await;
         let expected_messages = flashblocks.to_vec();
-
+        let actual_messages: Vec<_> = actual_messages.iter().map(|m| &m.inner).collect();
+        let expected_messages: Vec<_> = expected_messages.iter().collect();
         assert_eq!(actual_messages, expected_messages);
     }
 
@@ -488,7 +490,7 @@ mod tests {
         let actual_message =
             stream.next().await.expect("Binary message should not be ignored").unwrap();
 
-        assert_eq!(actual_message, expected_message)
+        assert_eq!(actual_message.inner, expected_message)
     }
 
     #[tokio::test]

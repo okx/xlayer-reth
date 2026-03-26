@@ -1,5 +1,5 @@
+use crate::flashblocks::XLayerFlashblockPayload;
 use alloy_primitives::U256;
-use op_alloy_rpc_types_engine::OpFlashblockPayload;
 use serde::{Deserialize, Serialize};
 
 use reth::{core::primitives::SealedBlock, payload::PayloadId};
@@ -13,7 +13,7 @@ pub(crate) const FLASHBLOCKS_STREAM_PROTOCOL: crate::p2p::StreamProtocol =
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub(crate) enum Message {
     OpBuiltPayload(OpBuiltPayload),
-    OpFlashblockPayload(OpFlashblockPayload),
+    OpFlashblockPayload(XLayerFlashblockPayload),
 }
 
 impl crate::p2p::Message for Message {
@@ -39,7 +39,7 @@ impl Message {
         Message::OpBuiltPayload(value.into())
     }
 
-    pub(crate) fn from_flashblock_payload(value: OpFlashblockPayload) -> Self {
+    pub(crate) fn from_flashblock_payload(value: XLayerFlashblockPayload) -> Self {
         Message::OpFlashblockPayload(value)
     }
 }

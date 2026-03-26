@@ -15,11 +15,13 @@ mod context;
 mod generator;
 mod handler;
 mod handler_ctx;
+mod payload;
 mod service;
 mod timing;
 pub(crate) mod utils;
 
 pub use context::FlashblocksBuilderCtx;
+pub use payload::XLayerFlashblockPayload;
 pub use service::{FlashblocksServiceBuilder, PayloadEventsSender};
 pub use utils::{cache::FlashblockPayloadsCache, wspub::WebSocketPublisher};
 

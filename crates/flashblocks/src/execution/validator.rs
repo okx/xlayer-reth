@@ -387,6 +387,7 @@ where
                 last_flashblock_index: args.last_flashblock_index,
             },
             block_transaction_count,
+            args.target_index,
         )?;
 
         Ok(())
@@ -400,6 +401,7 @@ where
         executed_block: ExecutedBlock<N>,
         prefix_execution_meta: PrefixExecutionMeta,
         transaction_count: usize,
+        target_index: u64,
     ) -> eyre::Result<()> {
         let block_hash = executed_block.recovered_block.hash();
         let parent_hash = base.parent_hash;
@@ -419,17 +421,20 @@ where
                 },
             );
         }
-        self.flashblocks_state.handle_pending_sequence(PendingSequence {
-            // Set pending block deadline to 1 second matching default blocktime.
-            pending: PendingBlock::with_executed_block(
-                Instant::now() + Duration::from_secs(1),
-                executed_block,
-            ),
-            prefix_execution_meta,
-            tx_index,
-            block_hash,
-            parent_hash,
-        })
+        self.flashblocks_state.handle_pending_sequence(
+            PendingSequence {
+                // Set pending block deadline to 1 second matching default blocktime.
+                pending: PendingBlock::with_executed_block(
+                    Instant::now() + Duration::from_secs(1),
+                    executed_block,
+                ),
+                prefix_execution_meta,
+                tx_index,
+                block_hash,
+                parent_hash,
+            },
+            target_index,
+        )
     }
 
     fn prevalidate_incoming_sequence<

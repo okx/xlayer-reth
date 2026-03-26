@@ -37,13 +37,15 @@ impl<N: NodePrimitives> PendingSequence<N> {
         self.pending.to_block_and_receipts()
     }
 
-    /// Returns the cached transaction info for the given tx hash, if present
-    /// in the pending sequence.
     pub fn get_tx_info(&self, tx_hash: &TxHash) -> Option<(CachedTxInfo<N>, BlockAndReceipts<N>)> {
         self.tx_index
             .get(tx_hash)
             .cloned()
             .map(|tx_info| (tx_info, self.pending.to_block_and_receipts()))
+    }
+
+    pub fn get_last_flashblock_index(&self) -> u64 {
+        self.prefix_execution_meta.last_flashblock_index
     }
 }
 

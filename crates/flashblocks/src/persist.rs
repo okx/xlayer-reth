@@ -19,7 +19,7 @@ pub async fn handle_persistence(mut rx: ReceivedFlashblocksRx, datadir: ChainPat
             result = rx.recv() => {
                 match result {
                     Ok(flashblock) => {
-                        if let Err(e) = cache.add_flashblock_payload(flashblock.as_ref().clone()) {
+                        if let Err(e) = cache.add_flashblock_payload(flashblock.inner.clone()) {
                             warn!(target: "flashblocks", "Failed to cache flashblock payload: {e}");
                             continue;
                         }
@@ -67,16 +67,16 @@ pub async fn handle_relay_flashblocks(
                 trace!(
                     target: "flashblocks",
                     "Received flashblock: index={}, block_hash={}",
-                    flashblock.index,
-                    flashblock.diff.block_hash
+                    flashblock.inner.index,
+                    flashblock.inner.diff.block_hash
                 );
                 match ws_pub.publish(&flashblock) {
                     Ok(_) => {
                         trace!(
                             target: "flashblocks",
                             "Published flashblock: index={}, block_hash={}",
-                            flashblock.index,
-                            flashblock.diff.block_hash
+                            flashblock.inner.index,
+                            flashblock.inner.diff.block_hash
                         );
                     }
                     Err(e) => {
