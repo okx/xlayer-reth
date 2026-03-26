@@ -581,7 +581,7 @@ impl FlashblocksBuilderCtx {
                         } else {
                             // if the transaction is invalid, we can skip it and all of its
                             // descendants
-                            log_txn(TxnExecutionResult::InternalError(err.clone()));
+                            log_txn(TxnExecutionResult::InternalError(err.0.clone()));
                             trace!(target: "payload_builder", %err, ?tx, "skipping invalid transaction and its descendants");
                             best_txs.mark_invalid(tx.signer(), tx.nonce());
                         }

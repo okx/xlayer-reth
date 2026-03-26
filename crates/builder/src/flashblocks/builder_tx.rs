@@ -26,6 +26,7 @@ use reth_evm::{
     EvmError, InvalidTxError,
 };
 use reth_node_api::PayloadBuilderError;
+use reth_optimism_evm::OpTx;
 use reth_optimism_primitives::OpTransactionSigned;
 use reth_primitives::Recovered;
 use reth_provider::{ProviderError, StateProvider};
@@ -260,7 +261,7 @@ impl FlashblocksBuilderTx {
         signer: Signer,
         flashblock_number_address: Address,
         ctx: &FlashblocksBuilderCtx,
-        evm: &mut OpEvm<impl Database + DatabaseRef, NoOpInspector, PrecompilesMap>,
+        evm: &mut OpEvm<impl Database + DatabaseRef, NoOpInspector, PrecompilesMap, OpTx>,
     ) -> Result<BuilderTransactionCtx, BuilderTransactionError> {
         let calldata = IFlashblockNumber::incrementFlashblockNumberCall {};
         Self::increment_flashblocks_tx(signer, flashblock_number_address, calldata, ctx, evm)
@@ -271,7 +272,7 @@ impl FlashblocksBuilderTx {
         flashblock_number_address: Address,
         calldata: T,
         ctx: &FlashblocksBuilderCtx,
-        evm: &mut OpEvm<impl Database + DatabaseRef, NoOpInspector, PrecompilesMap>,
+        evm: &mut OpEvm<impl Database + DatabaseRef, NoOpInspector, PrecompilesMap, OpTx>,
     ) -> Result<BuilderTransactionCtx, BuilderTransactionError> {
         let gas_used = Self::simulate_flashblocks_call(
             signer,
@@ -300,7 +301,7 @@ impl FlashblocksBuilderTx {
         calldata: T,
         expected_logs: Vec<B256>,
         ctx: &FlashblocksBuilderCtx,
-        evm: &mut OpEvm<impl Database + DatabaseRef, NoOpInspector, PrecompilesMap>,
+        evm: &mut OpEvm<impl Database + DatabaseRef, NoOpInspector, PrecompilesMap, OpTx>,
     ) -> Result<u64, BuilderTransactionError> {
         let tx_req = OpTransactionRequest::default()
             .gas_limit(ctx.block_gas_limit())
@@ -462,11 +463,11 @@ impl FlashblocksBuilderTx {
     fn simulate_call<T: SolCall, E: SolInterface + Debug>(
         tx: OpTransactionRequest,
         expected_logs: Vec<B256>,
-        evm: &mut OpEvm<impl Database, NoOpInspector, PrecompilesMap>,
+        evm: &mut OpEvm<impl Database, NoOpInspector, PrecompilesMap, OpTx>,
     ) -> Result<u64, BuilderTransactionError> {
         let evm_env = alloy_evm::EvmEnv::from((evm.cfg.clone(), evm.block.clone()));
-        let tx_env = tx.try_into_tx_env(&evm_env)?;
-        let to = tx_env.base.kind.into_to().unwrap_or_default();
+        let tx_env: OpTx = tx.try_into_tx_env(&evm_env)?;
+        let to = tx_env.0.base.kind.into_to().unwrap_or_default();
 
         let ResultAndState { result, .. } = match evm.transact(tx_env) {
             Ok(res) => res,
