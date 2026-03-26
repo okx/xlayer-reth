@@ -392,11 +392,24 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
         let pending_height = pending_sequence.get_height();
         let expected_height = self.confirm_height + 1;
 
-        if (target_index > 0 && pending_sequence.get_last_flashblock_index() >= target_index)
-            || pending_height == expected_height + 1
-        {
-            // Pending tip has advanced — update pending state, and optimistically
-            // commit current pending to confirm cache
+        if pending_height == expected_height {
+            let incoming_seq = pending_sequence.clone();
+            if target_index > 0 && pending_sequence.get_last_flashblock_index() >= target_index {
+                // Target flashblock. Promote to confirm, and clear pending state
+                self.handle_confirmed_block(
+                    expected_height,
+                    incoming_seq.pending.executed_block,
+                    incoming_seq.pending.receipts,
+                )?;
+                self.pending_cache = None;
+            } else {
+                // In-progress — replace pending with newer flashblock
+                self.pending_cache = Some(incoming_seq);
+            }
+        } else if pending_height == expected_height + 1 {
+            // The next block's flashblock arrived. Somehow target flashblocks was
+            // missed. Promote current pending to confirm, and set incoming as new
+            // pending sequence.
             let sequence = self.pending_cache.take().ok_or_else(|| {
                 eyre::eyre!(
                     "polluted state cache - trying to advance pending tip but no current pending"
@@ -408,16 +421,12 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
                 sequence.pending.receipts,
             )?;
             self.pending_cache = Some(pending_sequence.clone());
-            let _ = self.pending_sequence_tx.send(Some(pending_sequence));
-        } else if pending_height == expected_height {
-            // Replace the existing pending sequence
-            self.pending_cache = Some(pending_sequence.clone());
-            let _ = self.pending_sequence_tx.send(Some(pending_sequence));
         } else {
             return Err(eyre::eyre!(
                 "polluted state cache - not next consecutive pending height block"
             ));
         }
+        let _ = self.pending_sequence_tx.send(Some(pending_sequence));
         Ok(())
     }
 
@@ -516,8 +525,9 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
     ///
     /// Both failure modes reduce to: every height between `canonical_height + 1` and
     /// the target must be present in the overlay. This invariant is naturally maintained
-    /// by `handle_confirmed_block` (rejects non-consecutive heights) and the pending
-    /// block always being `confirm_height + 1`.
+    /// by `handle_confirmed_block` (rejects non-consecutive heights). The pending block,
+    /// if present, sits at `confirm_height + 1`; it may be absent after a complete
+    /// sequence is promoted directly to the confirm cache via `target_index`.
     ///
     /// On validation failure (non-contiguous overlay or gap to canonical), the cache is
     /// flushed and `None` is returned.

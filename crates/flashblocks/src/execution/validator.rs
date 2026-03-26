@@ -475,21 +475,21 @@ where
             // Optimistic fresh build
             return Ok(None);
         }
-        // No pending sequence initialized yet. Validate with canonical chainstate height.
-        let canon_height = self.flashblocks_state.get_canon_height();
-        if canon_height == 0 {
+        // No pending sequence. Validate with flashblocks state cache highest confirm height
+        let confirm_height = self.flashblocks_state.get_confirm_height();
+        if confirm_height == 0 {
             return Err(eyre::eyre!(
-                "canonical height not yet initialized, skipping: incoming={incoming_block_number}"
+                "confirm height not yet initialized, skipping: incoming={incoming_block_number}"
             ));
         }
-        if incoming_block_number > canon_height + 1 {
+        if incoming_block_number > confirm_height + 1 {
             return Err(eyre::eyre!(
-                "flashblock height too far ahead: incoming={incoming_block_number}, canonical={canon_height}"
+                "flashblock height too far ahead: incoming={incoming_block_number}, confirm={confirm_height}"
             ));
         }
-        if incoming_block_number <= canon_height {
+        if incoming_block_number <= confirm_height {
             return Err(eyre::eyre!(
-                "stale height: incoming={incoming_block_number}, canonical={canon_height}"
+                "stale height: incoming={incoming_block_number}, confirm={confirm_height}"
             ));
         }
         Ok(None)
