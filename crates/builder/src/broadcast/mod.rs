@@ -182,8 +182,35 @@ impl Node {
                     // for lower latency - since failures/switches in builder are very small.
                     // The less strict (no ack of message deliveries) allow a lower latency
                     // in the gossiping of new flashblock payloads to websocket subscribers.
-                    if let Err(e) = outgoing_streams_handler.broadcast_message(message.clone()).await {
-                        warn!(target: "payload_builder::broadcast", "failed to broadcast message on protocol {protocol}: {e:?}");
+                    match outgoing_streams_handler.broadcast_message(message.clone()).await {
+                        Ok(failed_peers) => {
+                            // For each peer whose stream send failed, immediately attempt to
+                            // re-open a new yamux stream on the existing TCP connection.
+                            // This recovers from application-level stream closes without
+                            // requiring a full TCP reconnect.
+                            for peer_id in failed_peers {
+                                for proto in &protocols {
+                                    match swarm
+                                        .behaviour_mut()
+                                        .new_control()
+                                        .open_stream(peer_id, proto.clone())
+                                        .await
+                                    {
+                                        Ok(stream) => {
+                                            outgoing_streams_handler
+                                                .insert_peer_and_stream(peer_id, proto.clone(), stream);
+                                            debug!(target: "payload_builder::broadcast", "recovered stream to peer {peer_id} on protocol {proto}");
+                                        }
+                                        Err(e) => {
+                                            warn!(target: "payload_builder::broadcast", "failed to recover stream to peer {peer_id}: {e:?}");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!(target: "payload_builder::broadcast", "failed to broadcast message on protocol {protocol}: {e:?}");
+                        }
                     }
                     if let Message::OpFlashblockPayload(ref fb_payload) = message {
                         match ws_pub.publish(fb_payload) {
@@ -626,5 +653,158 @@ mod test {
         .await
         .expect("message receive timed out");
         assert_eq!(recv_message, message);
+    }
+
+    /// Creates two minimal libp2p swarms (using only `libp2p_stream::Behaviour`),
+    /// connects them over TCP, and returns the peer ID of A plus `libp2p_stream::Control`
+    /// handles for both A and B.
+    ///
+    /// Both swarms are handed off to background tokio tasks after connection is
+    /// established; all further interaction uses the returned controls.
+    async fn connected_stream_swarms() -> (PeerId, libp2p_stream::Control, libp2p_stream::Control) {
+        use libp2p::{futures::StreamExt as _, identity, swarm::SwarmEvent};
+
+        let make_swarm = || {
+            let keypair = identity::Keypair::generate_ed25519();
+            let transport = create_transport(&keypair).unwrap();
+            libp2p::SwarmBuilder::with_existing_identity(keypair)
+                .with_tokio()
+                .with_other_transport(|_| transport)
+                .unwrap()
+                .with_behaviour(|_| libp2p_stream::Behaviour::new())
+                .unwrap()
+                .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(30)))
+                .build()
+        };
+
+        let mut swarm_a = make_swarm();
+        let mut swarm_b = make_swarm();
+        let peer_a = *swarm_a.local_peer_id();
+        let control_a = swarm_a.behaviour_mut().new_control();
+        let control_b = swarm_b.behaviour_mut().new_control();
+
+        swarm_a.listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
+
+        let addr_a = loop {
+            if let SwarmEvent::NewListenAddr { address, .. } = swarm_a.next().await.unwrap() {
+                break address.with(Protocol::P2p(peer_a));
+            }
+        };
+
+        swarm_b.dial(addr_a).unwrap();
+
+        // Drive both swarms until connection is established on both sides.
+        let mut a_conn = false;
+        let mut b_conn = false;
+        while !(a_conn && b_conn) {
+            tokio::select! {
+                event = swarm_a.next() => {
+                    if let Some(SwarmEvent::ConnectionEstablished { .. }) = event {
+                        a_conn = true;
+                    }
+                }
+                event = swarm_b.next() => {
+                    if let Some(SwarmEvent::ConnectionEstablished { .. }) = event {
+                        b_conn = true;
+                    }
+                }
+            }
+        }
+
+        tokio::spawn(async move {
+            loop {
+                swarm_a.next().await;
+            }
+        });
+        tokio::spawn(async move {
+            loop {
+                swarm_b.next().await;
+            }
+        });
+
+        (peer_a, control_a, control_b)
+    }
+
+    /// Verifies that when the remote end of a stream is closed, `broadcast_message`
+    /// returns the affected peer in `failed_peers` and evicts it from the handler.
+    #[tokio::test]
+    async fn broadcast_evicts_peer_on_stream_failure() {
+        use libp2p::futures::StreamExt as _;
+
+        const TEST_PROTO: StreamProtocol = StreamProtocol::new("/test/stream-failure/1.0.0");
+
+        let (peer_a, mut control_a, mut control_b) = connected_stream_swarms().await;
+
+        // A registers the protocol so B can open a stream to it.
+        let mut incoming_a = control_a.accept(TEST_PROTO).unwrap();
+
+        // B opens an outbound stream to A.
+        let stream =
+            tokio::time::timeout(Duration::from_secs(5), control_b.open_stream(peer_a, TEST_PROTO))
+                .await
+                .expect("open_stream timed out")
+                .expect("open_stream failed");
+
+        // A accepts the stream and immediately drops it, simulating a remote stream close.
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            if let Some((_, remote_stream)) = incoming_a.next().await {
+                drop(remote_stream);
+                let _ = closed_tx.send(());
+            }
+        });
+        closed_rx.await.expect("A never accepted the stream");
+
+        // Give the close a moment to propagate through yamux.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let mut handler = outgoing::StreamsHandler::new();
+        handler.insert_peer_and_stream(peer_a, TEST_PROTO, stream);
+        assert!(handler.has_peer(&peer_a));
+
+        let msg = Message::from_flashblock_payload(OpFlashblockPayload::default());
+        let failed = handler.broadcast_message(msg).await.expect("serialization must not fail");
+
+        assert_eq!(failed, vec![peer_a], "peer_a must be returned as a failed peer");
+        assert!(!handler.has_peer(&peer_a), "peer_a must be evicted from the handler");
+    }
+
+    /// Verifies that a successful broadcast returns an empty `failed_peers` list
+    /// and that the peer remains in the handler.
+    #[tokio::test]
+    async fn broadcast_returns_empty_failed_peers_on_success() {
+        use libp2p::futures::StreamExt as _;
+
+        const TEST_PROTO: StreamProtocol = StreamProtocol::new("/test/stream-success/1.0.0");
+
+        let (peer_a, mut control_a, mut control_b) = connected_stream_swarms().await;
+
+        let mut incoming_a = control_a.accept(TEST_PROTO).unwrap();
+
+        let stream =
+            tokio::time::timeout(Duration::from_secs(5), control_b.open_stream(peer_a, TEST_PROTO))
+                .await
+                .expect("open_stream timed out")
+                .expect("open_stream failed");
+
+        // A accepts the stream and keeps it alive for the duration of the test.
+        tokio::spawn(async move {
+            if let Some((_, stream)) = incoming_a.next().await {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                drop(stream);
+            }
+        });
+
+        let mut handler = outgoing::StreamsHandler::new();
+        handler.insert_peer_and_stream(peer_a, TEST_PROTO, stream);
+
+        let msg = Message::from_flashblock_payload(OpFlashblockPayload::default());
+        let failed = handler.broadcast_message(msg).await.expect("serialization must not fail");
+
+        assert!(failed.is_empty(), "no peers should fail on a healthy stream");
+        assert!(
+            handler.has_peer(&peer_a),
+            "peer must remain in the handler after a successful send"
+        );
     }
 }
