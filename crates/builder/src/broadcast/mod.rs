@@ -731,19 +731,18 @@ mod test {
     async fn broadcast_evicts_peer_on_stream_failure() {
         use libp2p::futures::StreamExt as _;
 
-        const TEST_PROTO: StreamProtocol = StreamProtocol::new("/test/stream-failure/1.0.0");
-
-        let (peer_a, mut control_a, mut control_b) = connected_stream_swarms().await;
-
         // A registers the protocol so B can open a stream to it.
-        let mut incoming_a = control_a.accept(TEST_PROTO).unwrap();
+        let (peer_a, mut control_a, mut control_b) = connected_stream_swarms().await;
+        let mut incoming_a = control_a.accept(types::FLASHBLOCKS_STREAM_PROTOCOL).unwrap();
 
         // B opens an outbound stream to A.
-        let stream =
-            tokio::time::timeout(Duration::from_secs(5), control_b.open_stream(peer_a, TEST_PROTO))
-                .await
-                .expect("open_stream timed out")
-                .expect("open_stream failed");
+        let stream = tokio::time::timeout(
+            Duration::from_secs(5),
+            control_b.open_stream(peer_a, types::FLASHBLOCKS_STREAM_PROTOCOL),
+        )
+        .await
+        .expect("open_stream timed out")
+        .expect("open_stream failed");
 
         // A accepts the stream and immediately drops it, simulating a remote stream close.
         let (closed_tx, closed_rx) = tokio::sync::oneshot::channel::<()>();
@@ -759,7 +758,7 @@ mod test {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let mut handler = outgoing::StreamsHandler::new();
-        handler.insert_peer_and_stream(peer_a, TEST_PROTO, stream);
+        handler.insert_peer_and_stream(peer_a, types::FLASHBLOCKS_STREAM_PROTOCOL, stream);
         assert!(handler.has_peer(&peer_a));
 
         let msg = Message::from_flashblock_payload(OpFlashblockPayload::default());
@@ -775,17 +774,17 @@ mod test {
     async fn broadcast_returns_empty_failed_peers_on_success() {
         use libp2p::futures::StreamExt as _;
 
-        const TEST_PROTO: StreamProtocol = StreamProtocol::new("/test/stream-success/1.0.0");
-
+        // A registers the protocol so B can open a stream to it.
         let (peer_a, mut control_a, mut control_b) = connected_stream_swarms().await;
+        let mut incoming_a = control_a.accept(types::FLASHBLOCKS_STREAM_PROTOCOL).unwrap();
 
-        let mut incoming_a = control_a.accept(TEST_PROTO).unwrap();
-
-        let stream =
-            tokio::time::timeout(Duration::from_secs(5), control_b.open_stream(peer_a, TEST_PROTO))
-                .await
-                .expect("open_stream timed out")
-                .expect("open_stream failed");
+        let stream = tokio::time::timeout(
+            Duration::from_secs(5),
+            control_b.open_stream(peer_a, types::FLASHBLOCKS_STREAM_PROTOCOL),
+        )
+        .await
+        .expect("open_stream timed out")
+        .expect("open_stream failed");
 
         // A accepts the stream and keeps it alive for the duration of the test.
         tokio::spawn(async move {
@@ -796,7 +795,7 @@ mod test {
         });
 
         let mut handler = outgoing::StreamsHandler::new();
-        handler.insert_peer_and_stream(peer_a, TEST_PROTO, stream);
+        handler.insert_peer_and_stream(peer_a, types::FLASHBLOCKS_STREAM_PROTOCOL, stream);
 
         let msg = Message::from_flashblock_payload(OpFlashblockPayload::default());
         let failed = handler.broadcast_message(msg).await.expect("serialization must not fail");
