@@ -1,8 +1,10 @@
 # XLayer Reth
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Rust](https://img.shields.io/badge/Rust-1.88+-orange.svg)](https://www.rust-lang.org/)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Rust](https://img.shields.io/badge/Rust-1.93+-orange.svg)](https://www.rust-lang.org/)
 [![GitHub release](https://img.shields.io/github/v/release/okx/xlayer-reth)](https://github.com/okx/xlayer-reth/releases)
+[![codecov](https://codecov.io/gh/okx/xlayer-reth/graph/badge.svg)](https://codecov.io/gh/okx/xlayer-reth)
 
 
 ## Overview
@@ -24,7 +26,7 @@ XLayer Reth is built on top of [Reth](https://github.com/paradigmxyz/reth), exte
 
 ### Prerequisites
 
-- **Rust**: Version 1.88 or higher
+- **Rust**: Version 1.93 or higher
 - **[just](https://github.com/casey/just)**: Command runner (install with `cargo install just`)
 - **Docker** (optional): For containerized builds
 
