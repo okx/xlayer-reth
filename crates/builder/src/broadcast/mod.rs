@@ -210,6 +210,7 @@ impl Node {
                         }
                         Err(e) => {
                             warn!(target: "payload_builder::broadcast", "failed to broadcast message on protocol {protocol}: {e:?}");
+                            continue;
                         }
                     }
                     if let Message::OpFlashblockPayload(ref fb_payload) = message {
