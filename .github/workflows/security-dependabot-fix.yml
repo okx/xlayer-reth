@@ -20,3 +20,5 @@ jobs:
       gh_pat: ${{ secrets.GH_SECURITY_PAT }}
       anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
       other_gh_token: ${{ secrets.GITHUB_TOKEN }}
+      jira_auth: ${{ secrets.JIRA_API_TOKEN }}
+      jira_account_id: ${{ secrets.JIRA_ACCOUNT }}
