@@ -30,7 +30,7 @@ pub use libp2p::{Multiaddr, StreamProtocol};
 pub(crate) use types::Message;
 
 const DEFAULT_MAX_PEER_COUNT: u32 = 50;
-const DEFAULT_PEER_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+const DEFAULT_PEER_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The broadcast node.
 ///
