@@ -188,8 +188,7 @@ impl Node {
                             // re-open a new yamux stream on the existing TCP connection.
                             // This recovers from application-level stream closes without
                             // requiring a full TCP reconnect.
-                            let has_failed_peers = !failed_peers.is_empty();
-                            for peer_id in failed_peers {
+                            for &peer_id in &failed_peers {
                                 for proto in &protocols {
                                     match swarm
                                         .behaviour_mut()
@@ -208,7 +207,7 @@ impl Node {
                                     }
                                 }
                             }
-                            if has_failed_peers {
+                            if !failed_peers.is_empty() {
                                 continue;
                             }
                         }
