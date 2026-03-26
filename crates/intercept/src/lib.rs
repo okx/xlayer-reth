@@ -1,5 +1,5 @@
 use alloy_primitives::{Address, B256, U256};
-use tracing::{debug};
+use tracing::debug;
 
 /// keccak256("BridgeEvent(uint8,uint32,address,uint32,address,uint256,bytes,uint32)")
 pub const BRIDGE_EVENT_SIGNATURE: B256 = B256::new([
