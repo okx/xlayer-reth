@@ -199,7 +199,7 @@ impl Node {
                                         Ok(stream) => {
                                             outgoing_streams_handler
                                                 .insert_peer_and_stream(peer_id, proto.clone(), stream);
-                                            debug!(target: "payload_builder::broadcast", "recovered stream to peer {peer_id} on protocol {proto}");
+                                            warn!(target: "payload_builder::broadcast", "recovered stream to peer {peer_id} on protocol {proto}");
                                         }
                                         Err(e) => {
                                             warn!(target: "payload_builder::broadcast", "failed to recover stream to peer {peer_id}: {e:?}");
