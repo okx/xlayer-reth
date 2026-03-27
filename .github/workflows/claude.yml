@@ -23,3 +23,4 @@ jobs:
     secrets:
       anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
       token: ${{ secrets.GITHUB_TOKEN }}
+      org_read_token: ${{ secrets.ORG_READ_TOKEN }}
