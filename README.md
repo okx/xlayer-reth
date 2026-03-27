@@ -1,7 +1,8 @@
 # XLayer Reth
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Rust](https://img.shields.io/badge/Rust-1.88+-orange.svg)](https://www.rust-lang.org/)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Rust](https://img.shields.io/badge/Rust-1.93+-orange.svg)](https://www.rust-lang.org/)
 [![GitHub release](https://img.shields.io/github/v/release/okx/xlayer-reth)](https://github.com/okx/xlayer-reth/releases)
 
 
@@ -24,7 +25,7 @@ XLayer Reth is built on top of [Reth](https://github.com/paradigmxyz/reth), exte
 
 ### Prerequisites
 
-- **Rust**: Version 1.88 or higher
+- **Rust**: Version 1.93 or higher
 - **[just](https://github.com/casey/just)**: Command runner (install with `cargo install just`)
 - **Docker** (optional): For containerized builds
 
@@ -112,7 +113,7 @@ Below are the XLayer-specific configuration options:
 ### Development Commands
 
 ```bash
-# Run all checks (format + clippy + tests)
+# Run all checks (sweep-check + format + clippy + tests)
 just check
 
 # Run tests
@@ -121,11 +122,17 @@ just test
 # Run tests including e2e tests
 just test true
 
+# Run flashblocks tests
+just test false true
+
 # Auto-fix formatting and clippy issues
 just fix
 
 # Watch mode - auto-run tests on file changes
 just watch-test
+
+# Watch mode - auto-run clippy on file changes
+just watch-check
 ```
 
 ## Testing
@@ -198,4 +205,4 @@ just xlayer
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is dual-licensed under the MIT License and the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
