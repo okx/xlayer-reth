@@ -14161,6 +14161,7 @@ dependencies = [
 name = "xlayer-e2e-test"
 version = "0.1.0"
 dependencies = [
+ "alloy-eips",
  "alloy-network",
  "alloy-primitives",
  "alloy-provider",

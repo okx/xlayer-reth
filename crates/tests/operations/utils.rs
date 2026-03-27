@@ -5,6 +5,7 @@ use crate::operations::{
     eth_get_transaction_count, eth_get_transaction_receipt, get_balance, manager::*, BlockId,
     HttpClient,
 };
+use alloy_eips::eip2718::Encodable2718;
 use alloy_network::{EthereumWallet, TransactionBuilder};
 use alloy_primitives::{hex, Address, Bytes, U256};
 use alloy_provider::{Provider, ProviderBuilder};
@@ -74,6 +75,35 @@ pub async fn native_balance_transfer(
     }
 
     Ok(format!("{tx_hash:#x}"))
+}
+
+/// Sign a native transfer transaction and return its raw encoded bytes as a hex string,
+/// without broadcasting it to the network.
+pub async fn sign_raw_transaction(
+    endpoint_url: &str,
+    amount: U256,
+    to_address: &str,
+) -> Result<String> {
+    let signer = PrivateKeySigner::from_str(DEFAULT_RICH_PRIVATE_KEY.trim_start_matches("0x"))?;
+    let wallet = EthereumWallet::from(signer.clone());
+    let provider =
+        ProviderBuilder::new().wallet(wallet.clone()).connect_http(endpoint_url.parse()?);
+
+    let from = signer.address();
+    let to = Address::from_str(to_address)?;
+    let nonce = provider.get_transaction_count(from).pending().await?;
+    let gas_price = provider.get_gas_price().await?;
+    let tx = TransactionRequest::default()
+        .with_from(from)
+        .with_to(to)
+        .with_value(amount)
+        .with_nonce(nonce)
+        .with_chain_id(DEFAULT_L2_CHAIN_ID)
+        .with_gas_limit(21_000)
+        .with_gas_price(gas_price);
+
+    let envelope = tx.build(&wallet).await?;
+    Ok(format!("0x{}", hex::encode(envelope.encoded_2718())))
 }
 
 /// Funds an address with native tokens and waits for the balance to be available

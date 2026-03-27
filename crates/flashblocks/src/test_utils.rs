@@ -1,7 +1,7 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use alloy_consensus::{Header, Receipt, TxEip7702};
-use alloy_primitives::{Address, Bloom, Bytes, Signature, B256, U256};
+use alloy_primitives::{Address, Bloom, Bytes, Signature, TxHash, B256, U256};
 use alloy_rpc_types_engine::PayloadId;
 use op_alloy_consensus::OpTypedTransaction;
 use op_alloy_rpc_types_engine::{
@@ -15,6 +15,9 @@ use reth_optimism_primitives::{
     OpBlock, OpBlockBody, OpPrimitives, OpReceipt, OpTransactionSigned,
 };
 use reth_primitives_traits::{RecoveredBlock, SealedBlock, SealedHeader};
+use reth_rpc_eth_types::PendingBlock;
+
+use crate::cache::{pending::PendingSequence, CachedTxInfo};
 
 pub(crate) fn mock_tx(nonce: u64) -> OpTransactionSigned {
     let tx = TxEip7702 {
@@ -292,5 +295,58 @@ impl TestFlashBlockBuilder {
                 new_account_balances: Default::default(),
             },
         }
+    }
+}
+
+/// Creates a `PendingSequence` at the given block number with the given parent hash.
+pub(crate) fn make_pending_sequence(
+    block_number: u64,
+    parent_hash: B256,
+) -> PendingSequence<OpPrimitives> {
+    let executed = make_executed_block(block_number, parent_hash);
+    let block_hash = executed.recovered_block.hash();
+    let pending_block = PendingBlock::with_executed_block(Instant::now(), executed);
+    PendingSequence {
+        pending: pending_block,
+        tx_index: HashMap::new(),
+        block_hash,
+        parent_hash,
+        prefix_execution_meta: Default::default(),
+    }
+}
+
+/// Creates a `PendingSequence` at the given block number with transactions and tx index.
+pub(crate) fn make_pending_sequence_with_txs(
+    block_number: u64,
+    parent_hash: B256,
+    nonce_start: u64,
+    tx_count: usize,
+) -> PendingSequence<OpPrimitives> {
+    let (executed, receipts) =
+        make_executed_block_with_txs(block_number, parent_hash, nonce_start, tx_count);
+    let block_hash = executed.recovered_block.hash();
+    let pending_block = PendingBlock::with_executed_block(Instant::now(), executed);
+
+    let mut tx_index: HashMap<TxHash, CachedTxInfo<OpPrimitives>> = HashMap::new();
+    for (i, tx) in pending_block.block().body().transactions.iter().enumerate() {
+        let tx_hash = *alloy_consensus::transaction::TxHashRef::tx_hash(tx);
+        tx_index.insert(
+            tx_hash,
+            CachedTxInfo {
+                block_number,
+                block_hash,
+                tx_index: i as u64,
+                tx: tx.clone(),
+                receipt: receipts[i].clone(),
+            },
+        );
+    }
+
+    PendingSequence {
+        pending: pending_block,
+        tx_index,
+        block_hash,
+        parent_hash,
+        prefix_execution_meta: Default::default(),
     }
 }
