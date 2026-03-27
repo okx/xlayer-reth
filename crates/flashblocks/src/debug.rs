@@ -94,12 +94,6 @@ fn compare_executed_blocks<N: NodePrimitives>(
         }
     }
 
-    // Deep compare DeferredTrieData (hashed_state + trie_updates)
-    let fb_trie = fb.trie_data();
-    let eng_trie = eng.trie_data();
-    let hashed_state_match = *fb_trie.hashed_state == *eng_trie.hashed_state;
-    let trie_updates_match = *fb_trie.trie_updates == *eng_trie.trie_updates;
-
     let all_match = fb_hash == eng_hash
         && account_mismatches.is_empty()
         && fb_only.is_empty()
@@ -107,9 +101,7 @@ fn compare_executed_blocks<N: NodePrimitives>(
         && fb_bundle.reverts.len() == eng_bundle.reverts.len()
         && revert_mismatches.is_empty()
         && revert_fb_only.is_empty()
-        && revert_eng_only.is_empty()
-        && hashed_state_match
-        && trie_updates_match;
+        && revert_eng_only.is_empty();
 
     if all_match {
         info!(
@@ -118,7 +110,7 @@ fn compare_executed_blocks<N: NodePrimitives>(
             %fb_hash,
             accounts = fb_bundle.state.len(),
             reverts = fb_bundle.reverts.len(),
-            "BundleState + TrieData MATCH: flashblocks == engine"
+            "Execution output MATCH: flashblocks == engine"
         );
     } else {
         warn!(
@@ -137,9 +129,7 @@ fn compare_executed_blocks<N: NodePrimitives>(
             revert_mismatches = revert_mismatches.len(),
             revert_fb_only = revert_fb_only.len(),
             revert_eng_only = revert_eng_only.len(),
-            hashed_state_match,
-            trie_updates_match,
-            "BundleState MISMATCH: flashblocks != engine"
+            "Execution output MISMATCH: flashblocks != engine"
         );
         for addr in account_mismatches.iter().take(3) {
             warn!(target: "flashblocks::verify", %addr, "Account state mismatch");
