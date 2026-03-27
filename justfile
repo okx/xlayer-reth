@@ -27,6 +27,10 @@ alias sc := sweep-check
 default:
     @just --list
 
+# Initialize git submodules if not already done
+init-submodules:
+    @git submodule update --init --recursive
+
 # Runs target checks on all crates, except [crate1], [crate2], ...
 sweep-check *crates="":
     #!/usr/bin/env bash
@@ -97,7 +101,7 @@ check-clippy:
 fix-clippy:
     cargo clippy --all-targets --workspace --fix --allow-dirty --allow-staged
 
-build:
+build: init-submodules
     @rm -rf .cargo  # Clean dev mode files
     cargo build --release
 
@@ -316,13 +320,13 @@ sync-dev-template reth_path:
         echo "✅ .reth-dev.toml already in sync"
     fi
 
-build-maxperf:
+build-maxperf: init-submodules
     RUSTFLAGS="-C target-cpu=native" cargo build --profile maxperf --features jemalloc,asm-keccak
 
-build-tools:
+build-tools: init-submodules
     cargo build --release --package xlayer-reth-tools
 
-build-tools-maxperf:
+build-tools-maxperf: init-submodules
     RUSTFLAGS="-C target-cpu=native" cargo build --package xlayer-reth-tools --profile maxperf --features jemalloc,asm-keccak
 
 install:
@@ -340,7 +344,7 @@ install-tools-maxperf:
 clean:
     cargo clean
 
-build-docker suffix="" git_sha="" git_timestamp="":
+build-docker suffix="" git_sha="" git_timestamp="": init-submodules
     #!/usr/bin/env bash
     set -e
     # Only clean .cargo in production mode, preserve it for dev builds
