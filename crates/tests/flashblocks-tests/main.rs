@@ -200,15 +200,6 @@ async fn fb_smoke_test() {
         .await
         .expect("Pending eth_getBlockReceipts failed");
 
-    println!(
-        "fb_block['hash']: {}",
-        fb_block["hash"].as_str().expect("Block hash should not be empty")
-    );
-    println!(
-        "fb_block['number']: {}",
-        fb_block["number"].as_str().expect("Block number should not be empty")
-    );
-
     // eth_getRawTransactionByBlockNumberAndIndex
     let fb_raw_transaction_by_block_number_and_index =
         operations::eth_get_raw_transaction_by_block_number_and_index(
@@ -300,18 +291,7 @@ async fn fb_negative_test() {
 
     let result =
         operations::eth_call(&fb_client, Some(call_args), Some(operations::BlockId::Pending)).await;
-
-    match result {
-        Err(e) => {
-            println!("eth_call reverted as expected: {e}");
-        }
-        Ok(data) => {
-            // Some contracts may return empty data for unknown selectors rather than reverting
-            println!(
-                "eth_call returned data (contract may not revert on unknown selector): {data}"
-            );
-        }
-    }
+    assert!(result.is_err(), "eth_call with invalid selector should revert, got: {result:?}");
 }
 
 /// Cache correctness test: snapshots all confirmed flashblock cache entries currently ahead
@@ -348,10 +328,11 @@ async fn fb_cache_correctness_test() {
             if let Some(n) = pending["number"]
                 .as_str()
                 .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-                && n > canonical_height + 1 {
-                    println!("Flashblock pending height: {n}");
-                    return n;
-                }
+                && n > canonical_height + 1
+            {
+                println!("Flashblock pending height: {n}");
+                return n;
+            }
             tokio::time::sleep(POLL_INTERVAL).await;
         }
     })

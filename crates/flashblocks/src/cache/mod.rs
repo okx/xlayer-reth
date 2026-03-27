@@ -617,7 +617,6 @@ mod tests {
         inner.handle_pending_sequence(seq2, 0).unwrap();
 
         assert!(inner.pending_cache.is_some());
-        // Block hash should have changed due to different parent hash
         assert_ne!(seq1_hash, seq2_hash);
         assert_eq!(inner.pending_cache.as_ref().unwrap().block_hash, seq2_hash);
         assert_eq!(inner.confirm_height, 0);
@@ -629,7 +628,6 @@ mod tests {
         let seq1 = make_pending_sequence(1, B256::ZERO);
         inner.handle_pending_sequence(seq1, 0).unwrap();
 
-        // Advance to height 2 — seq at height 1 should be committed to confirm
         let seq2 = make_pending_sequence(2, B256::repeat_byte(0xBB));
         inner.handle_pending_sequence(seq2, 0).unwrap();
 
@@ -685,7 +683,7 @@ mod tests {
         assert_eq!(inner.pending_cache.as_ref().unwrap().get_height(), 5);
 
         let flushed = inner.handle_canonical_block((2, B256::repeat_byte(0xFF)), false);
-        assert!(!flushed); // No full flush (pending at 5 > canon 2)
+        assert!(!flushed);
         assert_eq!(inner.canon_info.0, 2);
         assert!(inner.confirm_cache.get_block_by_number(1).is_none());
         assert!(inner.confirm_cache.get_block_by_number(2).is_none());
@@ -696,11 +694,9 @@ mod tests {
     #[test]
     fn test_handle_canonical_flush_on_pending_stale() {
         let mut inner = TestInner::new();
-        // Insert pending at height 1
         let seq = make_pending_sequence(1, B256::ZERO);
         inner.handle_pending_sequence(seq, 0).unwrap();
 
-        // Canonical catches up to height 1 — pending is stale
         let flushed = inner.handle_canonical_block((1, B256::repeat_byte(0xCC)), false);
         assert!(flushed);
         assert!(inner.pending_cache.is_none());
@@ -713,7 +709,6 @@ mod tests {
         let seq = make_pending_sequence(1, B256::ZERO);
         inner.handle_pending_sequence(seq, 0).unwrap();
 
-        // Even if pending is ahead, reorg flag forces full flush
         let flushed = inner.handle_canonical_block((0, B256::repeat_byte(0xDD)), true);
         assert!(flushed);
         assert!(inner.pending_cache.is_none());

@@ -77,7 +77,7 @@ pub async fn native_balance_transfer(
     Ok(format!("{tx_hash:#x}"))
 }
 
-/// Sign a native transfer transaction and return its raw EIP-2718 encoded bytes as a hex string,
+/// Sign a native transfer transaction and return its raw encoded bytes as a hex string,
 /// without broadcasting it to the network.
 pub async fn sign_raw_transaction(
     endpoint_url: &str,

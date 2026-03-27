@@ -258,12 +258,6 @@ impl TestFlashBlockBuilder {
         self
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn blob_gas_used(mut self, blob_gas_used: u64) -> Self {
-        self.blob_gas_used = Some(blob_gas_used);
-        self
-    }
-
     pub(crate) fn build(mut self) -> OpFlashblockPayload {
         // Auto-create base for index 0 if not set
         if self.index == 0 && self.base.is_none() {
