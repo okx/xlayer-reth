@@ -1,6 +1,7 @@
 //! X-Layer flashblocks crate.
 
 mod cache;
+mod debug;
 mod execution;
 mod persist;
 mod state;

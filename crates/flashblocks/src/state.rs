@@ -1,5 +1,6 @@
 use crate::{
     cache::RawFlashblocksCache,
+    debug::debug_compare_flashblocks_bundle_states,
     execution::validator::FlashblockSequenceValidator,
     execution::{FlashblockReceipt, OverlayProviderFactory},
     service::{ExecutionTaskQueue, ExecutionTaskQueueFlush, EXECUTION_TASK_QUEUE_CAPACITY},
@@ -203,6 +204,7 @@ pub async fn handle_canonical_stream<N: NodePrimitives>(
     flashblocks_state: FlashblockStateCache<N>,
     raw_cache: Arc<RawFlashblocksCache<N::SignedTx>>,
     task_queue: ExecutionTaskQueue,
+    debug_state_comparison: bool,
 ) {
     info!(target: "flashblocks", "Canonical state handler started");
     while let Some(notification) = canon_rx.next().await {
@@ -210,6 +212,15 @@ pub async fn handle_canonical_stream<N: NodePrimitives>(
         let block_hash = tip.hash();
         let block_number = tip.number();
         let is_reorg = notification.reverted().is_some();
+
+        // Debug mode - state comparison between flashblocks RPC generated execution state vs
+        // engine payload validator's execution state (`BundleState` + reverts).
+        //
+        // Note that engine pre-warming must also be disabled so engine payload validator will
+        // compute the new payload independently.
+        if debug_state_comparison {
+            debug_compare_flashblocks_bundle_states(&flashblocks_state, block_number, block_hash);
+        }
 
         raw_cache.handle_canonical_height(block_number);
         if flashblocks_state.handle_canonical_block((block_number, block_hash), is_reorg) {

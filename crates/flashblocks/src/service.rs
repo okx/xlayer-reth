@@ -86,6 +86,8 @@ pub struct FlashblocksRpcCtx<N: NodePrimitives, EvmConfig, Provider, ChainSpec> 
     pub chain_spec: Arc<ChainSpec>,
     /// Node engine tree configuration for the sequence validator.
     pub tree_config: TreeConfig,
+    /// Flashblocks RPC debug mode to enable state comparison.
+    pub debug_state_comparison: bool,
 }
 
 /// Context for handling flashblocks persistence and relaying.
@@ -242,6 +244,7 @@ where
                 self.flashblocks_state,
                 raw_cache,
                 task_queue,
+                self.rpc_ctx.debug_state_comparison,
             )),
         );
     }

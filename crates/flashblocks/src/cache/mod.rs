@@ -65,7 +65,7 @@ pub struct CachedTxInfo<N: NodePrimitives> {
 pub struct FlashblockStateCache<N: NodePrimitives> {
     inner: Arc<RwLock<FlashblockStateCacheInner<N>>>,
     changeset_cache: ChangesetCache,
-    canon_in_memory_state: CanonicalInMemoryState<N>,
+    pub(crate) canon_in_memory_state: CanonicalInMemoryState<N>,
 }
 
 // FlashblockStateCache read interfaces

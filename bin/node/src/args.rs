@@ -259,6 +259,22 @@ pub struct FlashblocksRpcArgs {
         default_value = "1000"
     )]
     pub flashblocks_subscription_max_addresses: usize,
+
+    /// Enable flashblocks RPC state comparison debug mode
+    #[arg(
+        long = "xlayer.flashblocks-debug-state-comparison",
+        help = "Enable flashblocks RPC state comparison debug mode",
+        default_value = "false"
+    )]
+    pub flashblocks_debug_state_comparison: bool,
+
+    /// Disable flashblocks RPC pre-warming engine state
+    #[arg(
+        long = "xlayer.flashblocks-disable-pre-warming",
+        help = "Disable flashblocks RPC pre-warming engine state",
+        default_value = "false"
+    )]
+    pub flashblocks_disable_pre_warming: bool,
 }
 
 #[cfg(test)]

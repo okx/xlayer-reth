@@ -164,13 +164,16 @@ fn main() {
                                 evm_config: OpEvmConfig::optimism(ctx.provider().chain_spec()),
                                 chain_spec: ctx.provider().chain_spec(),
                                 tree_config,
+                                debug_state_comparison: args.xlayer_args.flashblocks_rpc.flashblocks_debug_state_comparison,
                             },
                             FlashblocksPersistCtx {
                                 datadir,
                                 relay_flashblocks: args.rollup_args.flashblocks_url.is_some(),
                             },
                         )?;
-                        service.spawn_prewarm(events_sender);
+                        if !args.xlayer_args.flashblocks_rpc.flashblocks_disable_pre_warming {
+                            service.spawn_prewarm(events_sender);
+                        }
                         service.spawn_persistence()?;
                         service.spawn_rpc(WsFlashBlockStream::new(flashblock_url));
                         info!(target: "reth::cli", "xlayer flashblocks service initialized");
