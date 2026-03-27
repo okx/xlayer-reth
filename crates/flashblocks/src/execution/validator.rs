@@ -36,7 +36,7 @@ use reth_errors::BlockExecutionError;
 use reth_errors::RethError;
 use reth_evm::{
     execute::{BlockExecutor, ExecutableTxFor},
-    ConfigureEvm, Evm, TxEnvFor,
+    ConfigureEvm, Evm, EvmEnvFor, TxEnvFor,
 };
 use reth_execution_types::{BlockExecutionOutput, BlockExecutionResult};
 use reth_optimism_forks::OpHardforks;
@@ -159,20 +159,29 @@ where
         } else {
             block_transactions.clone()
         };
-        // Get state provider builder of parent hash
-        let (provider_builder, parent_header, overlay_data) =
-            self.state_provider_builder(parent_hash)?;
+
+        // Get state provider builder.
+        // 1. Fresh builds - get the provider builder from parent hash.
+        // 2. Incremental builds - get provider builder from pending sequence hash.
+        let hash = pending_sequence.as_ref().map_or(parent_hash, |seq| seq.get_hash());
+        let (provider_builder, header, overlay_data) = self.state_provider_builder(hash)?;
         let mut state_provider = provider_builder.build()?;
+
+        // For incremental builds, use the previous index's computed state root so the incremental
+        // prefix trie nodes (PreservedSparseTrie) are re-used.
+        let parent_state_root = header.state_root();
+        let parent_header =
+            pending_sequence.as_ref().map_or(header, |seq| seq.parent_header.clone());
 
         let attrs = args.base.clone().into();
         let evm_env =
             self.evm_config.next_evm_env(&parent_header, &attrs).map_err(RethError::other)?;
 
         let execution_env = ExecutionEnv {
-            evm_env,
+            evm_env: evm_env.clone(),
             hash: B256::ZERO,
             parent_hash,
-            parent_state_root: parent_header.state_root(),
+            parent_state_root,
             transaction_count: transactions.len(),
             withdrawals: Some(args.withdrawals),
         };
@@ -192,7 +201,7 @@ where
         // Create lazy overlay from ancestors - this doesn't block, allowing execution to start
         // before the trie data is ready. The overlay will be computed on first access.
         let (lazy_overlay, anchor_hash) =
-            Self::get_parent_lazy_overlay(overlay_data.as_ref(), parent_hash);
+            Self::get_parent_lazy_overlay(overlay_data.as_ref(), hash);
 
         // Create overlay factory for payload processor (StateRootTask path needs it for
         // multiproofs)
@@ -205,7 +214,7 @@ where
 
         // Spawn the appropriate processor based on strategy.
         let mut handle = self.spawn_payload_processor(
-            execution_env.clone(),
+            execution_env,
             transactions.clone(),
             provider_builder,
             overlay_factory.clone(),
@@ -225,7 +234,7 @@ where
         // as transactions complete, allowing parallel computation during execution.
         let (output, senders, receipt_root_rx, cached_reads) = self.execute_block(
             state_provider.as_ref(),
-            execution_env,
+            evm_env,
             &parent_header,
             attrs,
             transactions,
@@ -378,6 +387,7 @@ where
         self.commit_pending_sequence(
             args.base,
             executed_block,
+            parent_header,
             PrefixExecutionMeta {
                 payload_id: args.payload_id,
                 cached_reads,
@@ -399,16 +409,14 @@ where
         &self,
         base: OpFlashblockPayloadBase,
         executed_block: ExecutedBlock<N>,
+        parent_header: SealedHeaderFor<N>,
         prefix_execution_meta: PrefixExecutionMeta,
         transaction_count: usize,
         target_index: u64,
     ) -> eyre::Result<()> {
-        let block_hash = executed_block.recovered_block.hash();
-        let parent_hash = base.parent_hash;
-
         // Build tx index
+        let block_hash = executed_block.recovered_block.hash();
         let mut tx_index = HashMap::with_capacity(transaction_count);
-
         for (idx, tx) in executed_block.recovered_block.transactions_recovered().enumerate() {
             tx_index.insert(
                 *tx.tx_hash(),
@@ -421,6 +429,7 @@ where
                 },
             );
         }
+
         self.flashblocks_state.handle_pending_sequence(
             PendingSequence {
                 // Set pending block deadline to 1 second matching default blocktime.
@@ -428,10 +437,10 @@ where
                     Instant::now() + Duration::from_secs(1),
                     executed_block,
                 ),
-                prefix_execution_meta,
                 tx_index,
                 block_hash,
-                parent_hash,
+                parent_header,
+                prefix_execution_meta,
             },
             target_index,
         )
@@ -506,7 +515,7 @@ where
     fn execute_block<Err, T>(
         &mut self,
         state_provider: &dyn StateProvider,
-        execution_env: ExecutionEnv<EvmConfig>,
+        evm_env: EvmEnvFor<EvmConfig>,
         parent_header: &SealedHeaderFor<N>,
         attrs: EvmConfig::NextBlockEnvCtx,
         transactions: Vec<WithEncoded<Recovered<N::SignedTx>>>,
@@ -543,7 +552,7 @@ where
             db.set_state_clear_flag(true);
         }
 
-        let evm = self.evm_config.evm_with_env(&mut db, execution_env.evm_env);
+        let evm = self.evm_config.evm_with_env(&mut db, evm_env);
         let execution_ctx = self
             .evm_config
             .context_for_next_block(parent_header, attrs)
@@ -933,13 +942,13 @@ where
     /// block hash (the highest persisted ancestor). This allows execution to start immediately
     /// while the trie input computation is deferred until the overlay is actually needed.
     ///
-    /// If parent is on disk (no in-memory blocks), returns `(None, parent_hash)`.
+    /// If parent is on disk (no in-memory blocks), returns `(None, tip_hash)`.
     fn get_parent_lazy_overlay(
         overlay_data: Option<&(Vec<ExecutedBlock<N>>, B256)>,
-        parent_hash: B256,
+        tip_hash: B256,
     ) -> (Option<LazyOverlay>, B256) {
         let Some((blocks, anchor)) = overlay_data else {
-            return (None, parent_hash);
+            return (None, tip_hash);
         };
         let anchor_hash = *anchor;
 

@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use alloy_consensus::BlockHeader;
 use alloy_primitives::{TxHash, B256};
 use reth_primitives_traits::NodePrimitives;
+use reth_primitives_traits::SealedHeader;
 use reth_rpc_eth_types::{block::BlockAndReceipts, PendingBlock};
 
 /// The pending flashblocks sequence built with all received `OpFlashblockPayload`
@@ -19,7 +20,7 @@ pub struct PendingSequence<N: NodePrimitives> {
     /// The current block hash of the latest flashblocks sequence.
     pub block_hash: B256,
     /// Parent hash of the built block (may be non-canonical or canonical).
-    pub parent_hash: B256,
+    pub parent_header: SealedHeader<N::BlockHeader>,
     /// Prefix execution metadata for incremental builds.
     pub prefix_execution_meta: PrefixExecutionMeta,
 }
@@ -65,13 +66,12 @@ mod tests {
     fn make_pending_sequence(block_number: u64) -> PendingSequence<OpPrimitives> {
         let executed = make_executed_block(block_number, B256::ZERO);
         let block_hash = executed.recovered_block.hash();
-        let parent_hash = executed.recovered_block.parent_hash();
         let pending_block = PendingBlock::with_executed_block(Instant::now(), executed);
         PendingSequence {
             pending: pending_block,
             tx_index: HashMap::new(),
             block_hash,
-            parent_hash,
+            parent_header: Default::default(),
             prefix_execution_meta: Default::default(),
         }
     }
@@ -82,8 +82,6 @@ mod tests {
     ) -> PendingSequence<OpPrimitives> {
         let executed = make_executed_block(block_number, B256::ZERO);
         let block_hash = executed.recovered_block.hash();
-        let parent_hash = executed.recovered_block.parent_hash();
-
         let mut tx_index = HashMap::new();
         for i in 0..tx_count {
             let tx = mock_tx(i as u64);
@@ -104,7 +102,7 @@ mod tests {
             pending: pending_block,
             tx_index,
             block_hash,
-            parent_hash,
+            parent_header: Default::default(),
             prefix_execution_meta: Default::default(),
         }
     }
