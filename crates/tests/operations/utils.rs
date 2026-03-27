@@ -86,7 +86,8 @@ pub async fn sign_raw_transaction(
 ) -> Result<String> {
     let signer = PrivateKeySigner::from_str(DEFAULT_RICH_PRIVATE_KEY.trim_start_matches("0x"))?;
     let wallet = EthereumWallet::from(signer.clone());
-    let provider = ProviderBuilder::new().wallet(wallet.clone()).connect_http(endpoint_url.parse()?);
+    let provider =
+        ProviderBuilder::new().wallet(wallet.clone()).connect_http(endpoint_url.parse()?);
 
     let from = signer.address();
     let to = Address::from_str(to_address)?;

@@ -178,7 +178,10 @@ async fn fb_smoke_test() {
     )
     .await
     .expect("eth_getBlockByNumber with actual block number failed");
-    assert!(!fb_block_by_number.is_null(), "Pending block should be queryable by its actual block number");
+    assert!(
+        !fb_block_by_number.is_null(),
+        "Pending block should be queryable by its actual block number"
+    );
 
     // eth_getBlockTransactionCountByNumber
     let fb_block_transaction_count = operations::eth_get_block_transaction_count_by_number_or_hash(
@@ -197,18 +200,28 @@ async fn fb_smoke_test() {
         .await
         .expect("Pending eth_getBlockReceipts failed");
 
-    println!("fb_block['hash']: {}", fb_block["hash"].as_str().expect("Block hash should not be empty"));
-    println!("fb_block['number']: {}", fb_block["number"].as_str().expect("Block number should not be empty"));
+    println!(
+        "fb_block['hash']: {}",
+        fb_block["hash"].as_str().expect("Block hash should not be empty")
+    );
+    println!(
+        "fb_block['number']: {}",
+        fb_block["number"].as_str().expect("Block number should not be empty")
+    );
 
     // eth_getRawTransactionByBlockNumberAndIndex
-    let fb_raw_transaction_by_block_number_and_index = operations::eth_get_raw_transaction_by_block_number_and_index(
-        &fb_client,
-        fb_block["number"].as_str().expect("Block number should not be empty"),
-        "0x0",
-    )
-    .await
-    .expect("Pending eth_getRawTransactionByBlockNumberAndIndex failed");
-    assert!(!fb_raw_transaction_by_block_number_and_index.is_null(), "Raw transaction should not be empty");
+    let fb_raw_transaction_by_block_number_and_index =
+        operations::eth_get_raw_transaction_by_block_number_and_index(
+            &fb_client,
+            fb_block["number"].as_str().expect("Block number should not be empty"),
+            "0x0",
+        )
+        .await
+        .expect("Pending eth_getRawTransactionByBlockNumberAndIndex failed");
+    assert!(
+        !fb_raw_transaction_by_block_number_and_index.is_null(),
+        "Raw transaction should not be empty"
+    );
 
     // eth_sendRawTransactionSync
     let raw_tx = operations::sign_raw_transaction(
@@ -219,26 +232,91 @@ async fn fb_smoke_test() {
     .await
     .expect("Failed to sign raw transaction");
     println!("Raw tx: {raw_tx}");
-    let fb_send_raw_transaction_sync = operations::eth_send_raw_transaction_sync(&fb_client, &raw_tx)
-        .await
-        .expect("Pending eth_sendRawTransactionSync failed");
-    assert!(!fb_send_raw_transaction_sync.is_null(), "Send raw transaction sync should not be empty");
-    let sync_tx_hash = fb_send_raw_transaction_sync["transactionHash"].as_str().expect("eth_sendRawTransactionSync result should contain a transactionHash");
+    let fb_send_raw_transaction_sync =
+        operations::eth_send_raw_transaction_sync(&fb_client, &raw_tx)
+            .await
+            .expect("Pending eth_sendRawTransactionSync failed");
+    assert!(
+        !fb_send_raw_transaction_sync.is_null(),
+        "Send raw transaction sync should not be empty"
+    );
+    let sync_tx_hash = fb_send_raw_transaction_sync["transactionHash"]
+        .as_str()
+        .expect("eth_sendRawTransactionSync result should contain a transactionHash");
     assert!(sync_tx_hash.starts_with("0x"), "Transaction hash should start with 0x");
     let sync_tx = operations::eth_get_transaction_by_hash(&fb_client, sync_tx_hash)
         .await
         .expect("eth_getTransactionByHash after sendRawTransactionSync failed");
-    assert!(!sync_tx.is_null(), "Transaction should be visible in pending state after eth_sendRawTransactionSync");
+    assert!(
+        !sync_tx.is_null(),
+        "Transaction should be visible in pending state after eth_sendRawTransactionSync"
+    );
+}
 
+/// Negative tests for flashblock RPCs
+#[tokio::test]
+async fn fb_negative_test() {
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+
+    // Non-existent block returns null
+    let result = operations::eth_get_block_by_number_or_hash(
+        &fb_client,
+        operations::BlockId::Number(0xFFFFFFFF),
+        false,
+    )
+    .await
+    .expect("eth_getBlockByNumber should not return an RPC error for non-existent block");
+    assert!(result.is_null(), "Non-existent block should return null, got: {result}");
+
+    // Non-existent tx returns null
+    let fake_hash = "0x0000000000000000000000000000000000000000000000000000000000000001";
+
+    let tx = operations::eth_get_transaction_by_hash(&fb_client, fake_hash)
+        .await
+        .expect("eth_getTransactionByHash should not return an RPC error for non-existent tx");
+    assert!(tx.is_null(), "Non-existent tx should return null, got: {tx}");
+
+    let receipt = operations::eth_get_transaction_receipt(&fb_client, fake_hash)
+        .await
+        .expect("eth_getTransactionReceipt should not return an RPC error for non-existent tx");
+    assert!(receipt.is_null(), "Non-existent tx receipt should return null, got: {receipt}");
+
+    // Invalid raw tx is rejected
+    let result = operations::eth_send_raw_transaction_sync(&fb_client, "0xdeadbeef").await;
+    assert!(
+        result.is_err(),
+        "eth_sendRawTransactionSync with invalid tx should return an error, got: {result:?}"
+    );
+
+    // eth_call with invalid selector reverts
+    let contracts = operations::try_deploy_contracts().await.expect("Failed to deploy contracts");
+
+    let call_args = json!({
+        "from": operations::DEFAULT_RICH_ADDRESS,
+        "to": contracts.erc20,
+        "gas": "0x100000",
+        "data": "0xdeadbeef",
+    });
+
+    let result =
+        operations::eth_call(&fb_client, Some(call_args), Some(operations::BlockId::Pending)).await;
+
+    match result {
+        Err(e) => {
+            println!("eth_call reverted as expected: {e}");
+        }
+        Ok(data) => {
+            // Some contracts may return empty data for unknown selectors rather than reverting
+            println!(
+                "eth_call returned data (contract may not revert on unknown selector): {data}"
+            );
+        }
+    }
 }
 
 /// Cache correctness test: snapshots all confirmed flashblock cache entries currently ahead
 /// of the canonical chain, writes them to a file, waits for canonical to catch up, then
-/// compares block hash, stateRoot, transactionsRoot, receiptsRoot, gasUsed, and receipts
-/// against the non-flashblock canonical node to verify the cache was correct.
-///
-/// Only compares blocks from the confirm cache (not the pending cache), since the pending
-/// block is still being built and its contents may change before finalization.
+/// compares against the non-flashblock canonical node to verify the cache was correct.
 #[ignore = "Requires a second non-flashblock RPC node to be running"]
 #[tokio::test]
 async fn fb_cache_correctness_test() {
@@ -249,14 +327,14 @@ async fn fb_cache_correctness_test() {
     let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
     let canonical_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_NO_FB);
 
-    // Step 1: record current canonical height and wait for at least two blocks ahead
-    // (so we have at least one confirmed block between canonical and pending)
     let canonical_height = operations::eth_block_number(&canonical_client)
         .await
         .expect("Failed to get canonical block number");
     println!("Canonical height: {canonical_height}");
 
-    println!("Waiting for at least two flashblocks ahead of canonical (need confirmed + pending)...");
+    println!(
+        "Waiting for at least two flashblocks ahead of canonical (need confirmed + pending)..."
+    );
     let pending_number = tokio::time::timeout(CATCHUP_TIMEOUT, async {
         loop {
             let pending = operations::eth_get_block_by_number_or_hash(
@@ -270,24 +348,19 @@ async fn fb_cache_correctness_test() {
             if let Some(n) = pending["number"]
                 .as_str()
                 .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-            {
-                // Need at least 2 blocks ahead: one confirmed, one pending
-                if n > canonical_height + 1 {
+                && n > canonical_height + 1 {
                     println!("Flashblock pending height: {n}");
                     return n;
                 }
-            }
             tokio::time::sleep(POLL_INTERVAL).await;
         }
     })
     .await
     .expect("Timed out waiting for confirmed flashblocks ahead of canonical");
 
-    // Step 2: discover confirmed cache entries by querying canonical+1 up to pending-1
-    // (exclude pending_number since that block is still being built)
-    let confirm_upper = pending_number - 1;
+    let confirmed_block = pending_number - 1;
     let mut snapshot = Vec::new();
-    for height in (canonical_height + 1)..=confirm_upper {
+    for height in (canonical_height + 1)..=confirmed_block {
         let block = operations::eth_get_block_by_number_or_hash(
             &fb_client,
             operations::BlockId::Number(height),
@@ -296,18 +369,15 @@ async fn fb_cache_correctness_test() {
         .await
         .unwrap_or(Value::Null);
 
-        // Stop if the cache doesn't have this height (gap or eviction)
         if block.is_null() {
             println!("Cache has no block at height {height}, stopping discovery at {}", height - 1);
             break;
         }
 
-        let receipts = operations::eth_get_block_receipts(
-            &fb_client,
-            operations::BlockId::Number(height),
-        )
-        .await
-        .unwrap_or(Value::Null);
+        let receipts =
+            operations::eth_get_block_receipts(&fb_client, operations::BlockId::Number(height))
+                .await
+                .unwrap_or(Value::Null);
 
         println!(
             "Snapshotted height {height}: hash={} stateRoot={}",
@@ -317,17 +387,18 @@ async fn fb_cache_correctness_test() {
         snapshot.push(json!({ "height": height, "block": block, "receipts": receipts }));
     }
 
-    assert!(!snapshot.is_empty(), "No flashblock cache entries found ahead of canonical height {canonical_height}");
+    assert!(
+        !snapshot.is_empty(),
+        "No flashblock cache entries found ahead of canonical height {canonical_height}"
+    );
     println!("Snapshotted {} block(s) from flashblock cache", snapshot.len());
     let snapshot_target = snapshot.last().unwrap()["height"].as_u64().unwrap();
 
-    // Step 4: write snapshot to file
     let snapshot_json =
         serde_json::to_string_pretty(&json!(snapshot)).expect("Failed to serialize snapshot");
     fs::write(SNAPSHOT_FILE, &snapshot_json).expect("Failed to write snapshot file");
     println!("Snapshot written to {SNAPSHOT_FILE} ({} bytes)", snapshot_json.len());
 
-    // Step 5: wait for the non-FB canonical node to reach snapshot_target
     println!("Waiting for canonical node to reach height {snapshot_target}...");
     tokio::time::timeout(CATCHUP_TIMEOUT, async {
         loop {
@@ -342,7 +413,6 @@ async fn fb_cache_correctness_test() {
     .await
     .expect("Timed out waiting for canonical node to catch up");
 
-    // Step 6: read snapshot and compare each block against canonical
     let saved: Vec<Value> =
         serde_json::from_str(&fs::read_to_string(SNAPSHOT_FILE).expect("Failed to read snapshot"))
             .expect("Failed to parse snapshot");
