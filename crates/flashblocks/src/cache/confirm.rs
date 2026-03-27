@@ -135,6 +135,14 @@ impl<N: NodePrimitives> ConfirmCache<N> {
         self.blocks.get(&block_number).map(|(_, entry)| entry.to_block_and_receipts())
     }
 
+    /// Returns the `ExecutedBlock` for the given block number, if present.
+    pub(crate) fn get_executed_block_by_number(
+        &self,
+        block_number: u64,
+    ) -> Option<ExecutedBlock<N>> {
+        self.blocks.get(&block_number).map(|(_, entry)| entry.executed_block.clone())
+    }
+
     /// Returns the cached transaction info for the given tx hash, if present.
     pub(crate) fn get_tx_info(
         &self,

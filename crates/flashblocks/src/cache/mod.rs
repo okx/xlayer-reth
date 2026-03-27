@@ -92,6 +92,21 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
         self.inner.read().confirm_height
     }
 
+    /// Returns the `ExecutedBlock` for the given block number from pending or confirm cache.
+    /// Used for diagnostic comparison with the engine's execution.
+    pub fn get_executed_block_by_number(
+        &self,
+        block_number: u64,
+    ) -> Option<reth_chain_state::ExecutedBlock<N>> {
+        let guard = self.inner.read();
+        if let Some(seq) = guard.pending_cache.as_ref()
+            && seq.get_height() == block_number
+        {
+            return Some(seq.pending.executed_block.clone());
+        }
+        guard.confirm_cache.get_executed_block_by_number(block_number)
+    }
+
     /// Return the current canonical height, if any.
     pub fn get_canon_height(&self) -> u64 {
         self.inner.read().canon_info.0
