@@ -381,6 +381,12 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
         }
         self.confirm_height = block_number;
         self.confirm_cache.insert(block_number, executed_block, receipts)?;
+        info!(
+            target: "flashblocks",
+            confirm_height = self.confirm_height,
+            canonical_height = self.canon_info.0,
+            "Committed pending block to confirm flashblocks state cache",
+        );
         Ok(())
     }
 
@@ -438,7 +444,7 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
             warn!(
                 target: "flashblocks",
                 canonical_height = canon_info.0,
-                cache_height = self.confirm_height,
+                confirm_height = self.confirm_height,
                 canonical_reorg = reorg,
                 pending_stale,
                 "Reorg or pending stale detected on handle canonical block",
@@ -448,7 +454,7 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
             debug!(
                 target: "flashblocks",
                 canonical_height = canon_info.0,
-                cache_height = self.confirm_height,
+                confirm_height = self.confirm_height,
                 "Evicting flashblocks state inner cache"
             );
 

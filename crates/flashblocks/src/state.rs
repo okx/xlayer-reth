@@ -183,6 +183,7 @@ pub fn handle_execution_tasks<N, EvmConfig, Provider, ChainSpec>(
             target: "flashblocks",
             execute_height,
             last_index = args.last_flashblock_index,
+            target_index = args.target_index,
             "Executing flashblocks sequence"
         );
 

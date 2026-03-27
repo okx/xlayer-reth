@@ -570,7 +570,7 @@ where
         }
 
         // Execute all transactions and finalize
-        let (executor, suffix_senders) = self.execute_transactions(
+        let (executor, suffix_senders, suffix_receipts) = self.execute_transactions(
             executor,
             pending_sequence,
             transaction_count,
@@ -579,8 +579,9 @@ where
         )?;
         drop(receipt_tx);
 
-        // Finish execution and get the result
+        // Finish execution and replace with the generated suffix receipts
         let (_evm, mut result) = executor.finish().map(|(evm, result)| (evm.into_db(), result))?;
+        result.receipts = suffix_receipts;
         if let Some(seq) = pending_sequence {
             result = Self::merge_suffix_results(
                 &seq.prefix_execution_meta,
@@ -611,6 +612,7 @@ where
         Ok((output, senders, result_rx, read_cache))
     }
 
+    #[expect(clippy::type_complexity)]
     fn execute_transactions<Executor, Err, T>(
         &self,
         mut executor: Executor,
@@ -618,7 +620,7 @@ where
         transaction_count: usize,
         handle: &mut PayloadHandle<T, Err, N::Receipt>,
         receipt_tx: &crossbeam_channel::Sender<IndexedReceipt<N::Receipt>>,
-    ) -> eyre::Result<(Executor, Vec<Address>), BlockExecutionError>
+    ) -> eyre::Result<(Executor, Vec<Address>, Vec<N::Receipt>), BlockExecutionError>
     where
         T: ExecutableTxFor<EvmConfig>
             + ExecutableTxParts<
@@ -642,6 +644,7 @@ where
         };
 
         let mut senders = Vec::with_capacity(transaction_count);
+        let mut receipts = Vec::new();
         let mut transactions = handle.iter_transactions();
 
         // Some executors may execute transactions that do not append receipts during the
@@ -649,6 +652,7 @@ where
         // In that case, invoking the callback on every transaction would resend the previous
         // receipt with the same index and can panic the ordered root builder.
         let mut last_sent_len = 0usize;
+        let prefix_gas_used = pending_sequence.map_or(0, |seq| seq.prefix_execution_meta.gas_used);
         loop {
             let Some(tx_result) = transactions.next() else { break };
 
@@ -663,13 +667,15 @@ where
             if current_len > last_sent_len {
                 last_sent_len = current_len;
                 // Send the latest receipt to the background task for incremental root computation.
-                if let Some(receipt) = executor.receipts().last() {
+                if let Some(mut receipt) = executor.receipts().last().cloned() {
                     let tx_index = receipt_index_offset + current_len - 1;
-                    let _ = receipt_tx.send(IndexedReceipt::new(tx_index, receipt.clone()));
+                    receipt.add_cumulative_gas_offset(prefix_gas_used);
+                    receipts.push(receipt.clone());
+                    let _ = receipt_tx.send(IndexedReceipt::new(tx_index, receipt));
                 }
             }
         }
-        Ok((executor, senders))
+        Ok((executor, senders, receipts))
     }
 
     /// Determines the state root computation strategy based on configuration.
@@ -860,10 +866,8 @@ where
     fn merge_suffix_results(
         cached_prefix: &PrefixExecutionMeta,
         cached_receipts: Vec<N::Receipt>,
-        mut suffix_result: BlockExecutionResult<N::Receipt>,
+        suffix_result: BlockExecutionResult<N::Receipt>,
     ) -> BlockExecutionResult<N::Receipt> {
-        N::Receipt::add_cumulative_gas_offset(&mut suffix_result.receipts, cached_prefix.gas_used);
-
         let mut receipts = cached_receipts;
         receipts.extend(suffix_result.receipts);
 
