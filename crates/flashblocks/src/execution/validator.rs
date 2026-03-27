@@ -51,7 +51,13 @@ use reth_provider::{
 use reth_revm::{
     cached::CachedReads,
     database::StateProviderDatabase,
-    db::{states::bundle_state::BundleRetention, State},
+    db::{
+        states::{
+            bundle_state::BundleRetention,
+            reverts::{AccountRevert, Reverts},
+        },
+        State,
+    },
 };
 use reth_rpc_eth_types::PendingBlock;
 use reth_tasks::Runtime;
@@ -612,8 +618,35 @@ where
 
         // Explicitly drop db to release the mutable borrow on read_cache held via cached_db,
         // allowing read_cache to be moved into the return value.
-        let bundle = db.take_bundle();
+        let mut bundle = db.take_bundle();
         drop(db);
+
+        // For incremental builds, the bundle accumulates one revert entry per flashblock
+        // index (from with_bundle_prestate + merge_transitions at each index). The engine
+        // persistence service expects a single revert entry per block. Flatten all revert
+        // transitions into one:
+        // - Keep the earliest (parent-state) account info revert per address
+        // - Merge storage reverts across transitions (earliest per slot via or_insert)
+        if pending_sequence.is_some() && bundle.reverts.len() > 1 {
+            let mut reverts_map = HashMap::<Address, AccountRevert>::new();
+            for reverts in bundle.reverts.iter() {
+                for (addr, new_revert) in reverts {
+                    if let Some(revert_entry) = reverts_map.get_mut(addr) {
+                        // Merge new storage slots from later transitions and keep the
+                        // earliest value per slot (parent-state revert entry).
+                        for (slot, slot_revert) in &new_revert.storage {
+                            revert_entry.storage.entry(*slot).or_insert(*slot_revert);
+                        }
+                        // Propagate wipe_storage if any transition triggers it, such as
+                        // SELFDESTRUCT in a later flashblock index.
+                        revert_entry.wipe_storage |= new_revert.wipe_storage;
+                    } else {
+                        reverts_map.insert(*addr, new_revert.clone());
+                    }
+                }
+            }
+            bundle.reverts = Reverts::new(vec![reverts_map.into_iter().collect()]);
+        }
 
         let output = BlockExecutionOutput { result, state: bundle };
         debug!(target: "flashblocks::validator", "Executed block");
