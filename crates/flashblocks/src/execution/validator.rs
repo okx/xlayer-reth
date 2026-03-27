@@ -482,7 +482,7 @@ where
                 let pending_last_index = pending.prefix_execution_meta.last_flashblock_index;
                 if pending_last_index >= incoming_last_index {
                     return Err(eyre::eyre!(
-                        "flashblock index mismatch: incoming={incoming_last_index}, pending={pending_last_index}"
+                        "skipping, flashblock index already validated: incoming={incoming_last_index}, pending={pending_last_index}"
                     ));
                 }
                 return Ok(Some(pending));
