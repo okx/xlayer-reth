@@ -1,9 +1,13 @@
 mod behaviour;
 mod outgoing;
+pub(crate) mod types;
+pub(crate) mod wspub;
 
 use behaviour::Behaviour;
 use libp2p_stream::IncomingStreams;
+use wspub::WebSocketPublisher;
 
+use crate::metrics::BuilderMetrics;
 use eyre::Context;
 use libp2p::{
     dns,
@@ -15,6 +19,7 @@ use libp2p::{
 use multiaddr::Protocol;
 use std::{
     collections::{HashMap, HashSet},
+    sync::Arc,
     time::Duration,
 };
 use tokio::sync::mpsc;
@@ -22,38 +27,26 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 pub use libp2p::{Multiaddr, StreamProtocol};
+pub(crate) use types::Message;
 
 const DEFAULT_MAX_PEER_COUNT: u32 = 50;
-const DEFAULT_PEER_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+const DEFAULT_PEER_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
-/// A message that can be sent between peers.
-pub trait Message:
-    serde::Serialize + for<'de> serde::Deserialize<'de> + Send + Sync + Clone + std::fmt::Debug
-{
-    fn protocol(&self) -> StreamProtocol;
-
-    fn to_string(&self) -> eyre::Result<String> {
-        serde_json::to_string(self).wrap_err("failed to serialize message to string")
-    }
-
-    fn from_str(s: &str) -> eyre::Result<Self>
-    where
-        Self: Sized,
-    {
-        serde_json::from_str(s).wrap_err("failed to deserialize message from string")
-    }
-}
-
-/// The libp2p node.
+/// The broadcast node.
 ///
 /// The current behaviour of the node regarding messaging protocols is as follows:
-/// - for each supported protocol, the node will accept incoming streams from remote peers on that protocol.
-/// - when a new connection is established with a peer, the node will open outbound streams to that peer for each supported protocol.
-/// - when a new outgoing message is received on `outgoing_message_rx`, the node will broadcast that message to all connected peers that have an outbound stream open for the message's protocol.
-/// - incoming messages received on incoming streams are handled by `IncomingStreamsHandler`, which reads messages from the stream and sends them to a channel for processing by the consumer of this library.
+/// - for each supported protocol, the node will accept incoming streams from remote peers on that
+///   protocol.
+/// - when a new connection is established with a peer, the node will open outbound streams to that
+///   peer for each supported protocol.
+/// - when a new outgoing message is received on `outgoing_message_rx`, the node will broadcast that
+///   message to all connected peers that have an outbound stream open for the message's protocol.
+/// - incoming messages received on incoming streams are handled by `IncomingStreamsHandler`, which
+///   reads messages from the stream and sends them to a channel for processing by the consumer of
+///   this library.
 ///
 /// Currently, there is no gossip implemented; messages are simply broadcast to connected peers.
-pub struct Node<M> {
+pub struct Node {
     /// The peer ID of this node.
     peer_id: PeerId,
 
@@ -68,7 +61,7 @@ pub struct Node<M> {
     known_peers: Vec<Multiaddr>,
 
     /// Receiver for outgoing messages to be sent to peers.
-    outgoing_message_rx: mpsc::Receiver<M>,
+    outgoing_message_rx: mpsc::Receiver<Message>,
 
     /// Handler for managing outgoing streams to peers.
     /// Used to determine what peers to broadcast to when a
@@ -76,16 +69,23 @@ pub struct Node<M> {
     outgoing_streams_handler: outgoing::StreamsHandler,
 
     /// Handlers for incoming streams (streams which remote peers have opened with us).
-    incoming_streams_handlers: Vec<IncomingStreamsHandler<M>>,
+    incoming_streams_handlers: Vec<IncomingStreamsHandler>,
 
     /// The protocols this node supports.
     protocols: Vec<StreamProtocol>,
 
     /// Cancellation token to shut down the node.
     cancellation_token: CancellationToken,
+
+    /// WebSocket publisher for broadcasting flashblocks
+    /// to all connected subscribers.
+    ws_pub: Arc<WebSocketPublisher>,
+
+    /// The metrics for the builder
+    metrics: Arc<BuilderMetrics>,
 }
 
-impl<M: Message + 'static> Node<M> {
+impl Node {
     /// Returns the multiaddresses that this node is listening on, with the peer ID included.
     pub fn multiaddrs(&self) -> Vec<libp2p::Multiaddr> {
         self.listen_addrs
@@ -94,7 +94,9 @@ impl<M: Message + 'static> Node<M> {
             .collect()
     }
 
-    /// Runs the p2p node, dials known peers, and starts listening for incoming connections and messages.
+    /// Runs the broadcast node.
+    /// 1. Dials known peers, and starts listening for incoming connections and messages.
+    /// 2. Publishes flashblocks to websocket subscribers
     ///
     /// This function will run until the cancellation token is triggered.
     /// If an error occurs, it will be logged, but the node will continue running.
@@ -111,6 +113,8 @@ impl<M: Message + 'static> Node<M> {
             cancellation_token,
             incoming_streams_handlers,
             protocols,
+            ws_pub,
+            metrics,
         } = self;
 
         for addr in listen_addrs {
@@ -142,7 +146,7 @@ impl<M: Message + 'static> Node<M> {
             tokio::select! {
                 biased;
                 _ = cancellation_token.cancelled() => {
-                    debug!(target: "flashblocks-p2p", "cancellation token triggered, shutting down node");
+                    debug!(target: "payload_builder::broadcast", "cancellation token triggered, shutting down node");
                     handles.into_iter().for_each(|h| h.abort());
                     break Ok(());
                 }
@@ -151,19 +155,76 @@ impl<M: Message + 'static> Node<M> {
                     let connected_peers: HashSet<PeerId> = swarm.connected_peers().copied().collect();
                     for (peer_id, address) in &known_peers_info {
                         if !connected_peers.contains(peer_id) {
-                            debug!(target: "flashblocks-p2p", "retrying connection to disconnected known peer {peer_id} at {address}");
+                            debug!(target: "payload_builder::broadcast", "retrying connection to disconnected known peer {peer_id} at {address}");
                             swarm.add_peer_address(*peer_id, address.clone());
                             if let Err(e) = swarm.dial(address.clone()) {
-                                warn!(target: "flashblocks-p2p", "failed to retry dial to known peer {peer_id} at {address}: {e:?}");
+                                warn!(target: "payload_builder::broadcast", "failed to retry dial to known peer {peer_id} at {address}: {e:?}");
                             }
                         }
                     }
                 }
                 Some(message) = outgoing_message_rx.recv() => {
                     let protocol = message.protocol();
-                    debug!(target: "flashblocks-p2p", "received message to broadcast on protocol {protocol}");
-                    if let Err(e) = outgoing_streams_handler.broadcast_message(message).await {
-                        warn!(target: "flashblocks-p2p", "failed to broadcast message on protocol {protocol}: {e:?}");
+                    debug!(target: "payload_builder::broadcast", "received message to broadcast on protocol {protocol}");
+
+                    // NOTE on broadcast ordering and failure semantics:
+                    // `broadcast_message` sends to all connected peers concurrently and
+                    // awaits until every peer's TCP send completes (or fails). This is a
+                    // blocking wait — WS publish below only runs after all peer sends have
+                    // resolved. TCP send success means the kernel accepted the bytes into
+                    // the send buffer.
+                    //
+                    // However this means that networking layer failures are swallowed, as
+                    // only serialization errors are propagated. This means WS publish may
+                    // proceed as networking failures can be silently drop.
+                    //
+                    // This design is intentional and the re-org risk the builder trade-off
+                    // for lower latency - since failures/switches in builder are very small.
+                    // The less strict (no ack of message deliveries) allow a lower latency
+                    // in the gossiping of new flashblock payloads to websocket subscribers.
+                    match outgoing_streams_handler.broadcast_message(message.clone()).await {
+                        Ok(failed_peers) => {
+                            // For each peer whose stream send failed, immediately attempt to
+                            // re-open a new yamux stream on the existing TCP connection.
+                            // This recovers from application-level stream closes without
+                            // requiring a full TCP reconnect.
+                            for &peer_id in &failed_peers {
+                                for proto in &protocols {
+                                    match swarm
+                                        .behaviour_mut()
+                                        .new_control()
+                                        .open_stream(peer_id, proto.clone())
+                                        .await
+                                    {
+                                        Ok(stream) => {
+                                            outgoing_streams_handler
+                                                .insert_peer_and_stream(peer_id, proto.clone(), stream);
+                                            warn!(target: "payload_builder::broadcast", "recovered stream to peer {peer_id} on protocol {proto}");
+                                        }
+                                        Err(e) => {
+                                            warn!(target: "payload_builder::broadcast", "failed to recover stream to peer {peer_id}: {e:?}");
+                                        }
+                                    }
+                                }
+                            }
+                            if !failed_peers.is_empty() {
+                                continue;
+                            }
+                        }
+                        Err(e) => {
+                            warn!(target: "payload_builder::broadcast", "failed to broadcast message on protocol {protocol}: {e:?}");
+                            continue;
+                        }
+                    }
+                    if let Message::OpFlashblockPayload(ref fb_payload) = message {
+                        match ws_pub.publish(fb_payload) {
+                            Ok(flashblock_byte_size) => {
+                                metrics.flashblock_byte_size_histogram.record(flashblock_byte_size as f64);
+                            }
+                            Err(e) => {
+                                warn!(target: "payload_builder::broadcast", "failed to publish flashblock to ws subscribers: {e:?}");
+                            }
+                        }
                     }
                 }
                 event = swarm.select_next_some() => {
@@ -172,10 +233,10 @@ impl<M: Message + 'static> Node<M> {
                             address,
                             ..
                         } => {
-                            debug!(target: "flashblocks-p2p", "new listen address: {address}");
+                            debug!(target: "payload_builder::broadcast", "new listen address: {address}");
                         }
                         SwarmEvent::ExternalAddrConfirmed { address } => {
-                            debug!(target: "flashblocks-p2p", "external address confirmed: {address}");
+                            debug!(target: "payload_builder::broadcast", "external address confirmed: {address}");
                         }
                         SwarmEvent::ConnectionEstablished {
                             peer_id,
@@ -184,7 +245,7 @@ impl<M: Message + 'static> Node<M> {
                         } => {
                             // when a new connection is established, open outbound streams for each protocol
                             // and add them to the outgoing streams handler.
-                            debug!(target: "flashblocks-p2p", "fb p2p connection established with peer {peer_id}");
+                            debug!(target: "payload_builder::broadcast", "fb p2p connection established with peer {peer_id}");
                             if !outgoing_streams_handler.has_peer(&peer_id) {
                                 for protocol in &protocols {
                                         match swarm
@@ -194,10 +255,10 @@ impl<M: Message + 'static> Node<M> {
                                         .await
                                     {
                                         Ok(stream) => { outgoing_streams_handler.insert_peer_and_stream(peer_id, protocol.clone(), stream);
-                                            debug!(target: "flashblocks-p2p", "opened outbound stream with peer {peer_id} with protocol {protocol} on connection {connection_id}");
+                                            debug!(target: "payload_builder::broadcast", "opened outbound stream with peer {peer_id} with protocol {protocol} on connection {connection_id}");
                                         }
                                         Err(e) => {
-                                            warn!(target: "flashblocks-p2p", "failed to open stream with peer {peer_id} on connection {connection_id}: {e:?}");
+                                            warn!(target: "payload_builder::broadcast", "failed to open stream with peer {peer_id} on connection {connection_id}: {e:?}");
                                         }
                                     }
                                 }
@@ -208,7 +269,7 @@ impl<M: Message + 'static> Node<M> {
                             cause,
                             ..
                         } => {
-                            debug!(target: "flashblocks-p2p", "connection closed with peer {peer_id}: {cause:?}");
+                            debug!(target: "payload_builder::broadcast", "connection closed with peer {peer_id}: {cause:?}");
                             outgoing_streams_handler.remove_peer(&peer_id);
                         }
                         SwarmEvent::Behaviour(event) => event.handle(&mut swarm),
@@ -220,10 +281,10 @@ impl<M: Message + 'static> Node<M> {
     }
 }
 
-pub struct NodeBuildResult<M> {
-    pub node: Node<M>,
-    pub outgoing_message_tx: mpsc::Sender<M>,
-    pub incoming_message_rxs: HashMap<StreamProtocol, mpsc::Receiver<M>>,
+pub struct NodeBuildResult {
+    pub node: Node,
+    pub outgoing_message_tx: mpsc::Sender<Message>,
+    pub incoming_message_rxs: HashMap<StreamProtocol, mpsc::Receiver<Message>>,
 }
 
 pub struct NodeBuilder {
@@ -235,16 +296,12 @@ pub struct NodeBuilder {
     protocols: Vec<StreamProtocol>,
     max_peer_count: Option<u32>,
     cancellation_token: Option<CancellationToken>,
-}
-
-impl Default for NodeBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
+    ws_pub: Arc<WebSocketPublisher>,
+    metrics: Arc<BuilderMetrics>,
 }
 
 impl NodeBuilder {
-    pub fn new() -> Self {
+    pub fn new(ws_pub: Arc<WebSocketPublisher>, metrics: Arc<BuilderMetrics>) -> Self {
         Self {
             port: None,
             listen_addrs: Vec::new(),
@@ -254,6 +311,8 @@ impl NodeBuilder {
             protocols: Vec::new(),
             max_peer_count: None,
             cancellation_token: None,
+            ws_pub,
+            metrics,
         }
     }
 
@@ -307,7 +366,7 @@ impl NodeBuilder {
         self
     }
 
-    pub fn try_build<M: Message + 'static>(self) -> eyre::Result<NodeBuildResult<M>> {
+    pub fn try_build(self) -> eyre::Result<NodeBuildResult> {
         let Self {
             port,
             listen_addrs,
@@ -317,6 +376,8 @@ impl NodeBuilder {
             protocols,
             max_peer_count,
             cancellation_token,
+            ws_pub,
+            metrics,
         } = self;
 
         // TODO: caller should be forced to provide this
@@ -401,6 +462,8 @@ impl NodeBuilder {
                 cancellation_token,
                 incoming_streams_handlers,
                 protocols,
+                ws_pub,
+                metrics,
             },
             outgoing_message_tx,
             incoming_message_rxs,
@@ -408,19 +471,19 @@ impl NodeBuilder {
     }
 }
 
-struct IncomingStreamsHandler<M> {
+struct IncomingStreamsHandler {
     protocol: StreamProtocol,
     incoming: IncomingStreams,
-    tx: mpsc::Sender<M>,
+    tx: mpsc::Sender<Message>,
     cancellation_token: CancellationToken,
 }
 
-impl<M: Message + 'static> IncomingStreamsHandler<M> {
+impl IncomingStreamsHandler {
     fn new(
         protocol: StreamProtocol,
         incoming: IncomingStreams,
         cancellation_token: CancellationToken,
-    ) -> (Self, mpsc::Receiver<M>) {
+    ) -> (Self, mpsc::Receiver<Message>) {
         const CHANNEL_SIZE: usize = 100;
         let (tx, rx) = mpsc::channel(CHANNEL_SIZE);
         (Self { protocol, incoming, tx, cancellation_token }, rx)
@@ -435,21 +498,21 @@ impl<M: Message + 'static> IncomingStreamsHandler<M> {
         loop {
             tokio::select! {
                 _ = cancellation_token.cancelled() => {
-                    debug!(target: "flashblocks-p2p", "cancellation token triggered, shutting down incoming streams handler for protocol {protocol}");
+                    debug!(target: "payload_builder::broadcast", "cancellation token triggered, shutting down incoming streams handler for protocol {protocol}");
                     return;
                 }
                 Some((from, stream)) = incoming.next() => {
-                    debug!(target: "flashblocks-p2p", "new incoming stream on protocol {protocol} from peer {from}");
+                    debug!(target: "payload_builder::broadcast", "new incoming stream on protocol {protocol} from peer {from}");
                     handle_stream_futures.push(tokio::spawn(handle_incoming_stream(from, stream, tx.clone())));
                 }
                 Some(res) = handle_stream_futures.next() => {
                     match res {
                         Ok(Ok(())) => {}
                         Ok(Err(e)) => {
-                            warn!(target: "flashblocks-p2p", "error handling incoming stream: {e:?}");
+                            warn!(target: "payload_builder::broadcast", "error handling incoming stream: {e:?}");
                         }
                         Err(e) => {
-                            warn!(target: "flashblocks-p2p", "task handling incoming stream panicked: {e:?}");
+                            warn!(target: "payload_builder::broadcast", "task handling incoming stream panicked: {e:?}");
                         }
                     }
                 }
@@ -458,10 +521,10 @@ impl<M: Message + 'static> IncomingStreamsHandler<M> {
     }
 }
 
-async fn handle_incoming_stream<M: Message>(
+async fn handle_incoming_stream(
     peer_id: PeerId,
     stream: libp2p::Stream,
-    payload_tx: mpsc::Sender<M>,
+    payload_tx: mpsc::Sender<Message>,
 ) -> eyre::Result<()> {
     use futures::StreamExt as _;
     use tokio_util::{
@@ -475,8 +538,9 @@ async fn handle_incoming_stream<M: Message>(
     while let Some(res) = reader.next().await {
         match res {
             Ok(str) => {
-                let payload = M::from_str(&str).wrap_err("failed to decode stream message")?;
-                debug!(target: "flashblocks-p2p", "got message from peer {peer_id}: {payload:?}");
+                let payload = serde_json::from_str::<Message>(&str)
+                    .wrap_err("failed to decode stream message")?;
+                debug!(target: "payload_builder::broadcast", "got message from peer {peer_id}: {payload:?}");
                 let _ = payload_tx.send(payload).await;
             }
             Err(e) => {
@@ -507,9 +571,11 @@ fn create_transport(
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::broadcast::wspub::WebSocketPublisher;
+    use crate::metrics::{tokio::FlashblocksTaskMetrics, BuilderMetrics};
+    use op_alloy_rpc_types_engine::OpFlashblockPayload;
 
     const TEST_AGENT_VERSION: &str = "test/1.0.0";
-    const TEST_PROTOCOL: StreamProtocol = StreamProtocol::new("/test/1.0.0");
 
     /// Binds two ephemeral ports on 127.0.0.1, guaranteeing they are distinct.
     /// Returns `(port1, port2, guard1, guard2)` — callers must hold the guards
@@ -532,34 +598,19 @@ mod test {
         panic!("failed to obtain two distinct ephemeral ports after {MAX_RETRIES} retries");
     }
 
-    #[derive(Debug, PartialEq, Eq, Clone)]
-    struct TestMessage {
-        content: String,
-    }
-
-    impl Message for TestMessage {
-        fn protocol(&self) -> StreamProtocol {
-            TEST_PROTOCOL
-        }
-    }
-
-    impl serde::Serialize for TestMessage {
-        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: serde::Serializer,
-        {
-            serializer.serialize_str(&self.content)
-        }
-    }
-
-    impl<'de> serde::Deserialize<'de> for TestMessage {
-        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where
-            D: serde::Deserializer<'de>,
-        {
-            let s = String::deserialize(deserializer)?;
-            Ok(TestMessage { content: s })
-        }
+    fn make_test_node_builder() -> NodeBuilder {
+        let task_metrics = FlashblocksTaskMetrics::new();
+        let metrics = Arc::new(BuilderMetrics::default());
+        let ws_pub = Arc::new(
+            WebSocketPublisher::new(
+                "127.0.0.1:0".parse().unwrap(),
+                metrics.clone(),
+                &task_metrics.websocket_publisher,
+                None,
+            )
+            .expect("can create test WebSocketPublisher"),
+        );
+        NodeBuilder::new(ws_pub, metrics)
     }
 
     #[tokio::test]
@@ -572,26 +623,26 @@ mod test {
         drop(_guard2);
 
         let NodeBuildResult { node: node1, outgoing_message_tx: _, incoming_message_rxs: mut rx1 } =
-            NodeBuilder::new()
+            make_test_node_builder()
                 .with_listen_addr(format!("/ip4/127.0.0.1/tcp/{port1}").parse().unwrap())
                 .with_agent_version(TEST_AGENT_VERSION.to_string())
-                .with_protocol(TEST_PROTOCOL)
-                .try_build::<TestMessage>()
+                .with_protocol(types::FLASHBLOCKS_STREAM_PROTOCOL)
+                .try_build()
                 .unwrap();
         let NodeBuildResult { node: node2, outgoing_message_tx: tx2, incoming_message_rxs: _ } =
-            NodeBuilder::new()
+            make_test_node_builder()
                 .with_known_peers(node1.multiaddrs())
-                .with_protocol(TEST_PROTOCOL)
+                .with_protocol(types::FLASHBLOCKS_STREAM_PROTOCOL)
                 .with_listen_addr(format!("/ip4/127.0.0.1/tcp/{port2}").parse().unwrap())
                 .with_agent_version(TEST_AGENT_VERSION.to_string())
-                .try_build::<TestMessage>()
+                .try_build()
                 .unwrap();
 
         tokio::spawn(async move { node1.run().await });
         tokio::spawn(async move { node2.run().await });
-        let message = TestMessage { content: "message".to_string() };
-        let mut rx = rx1.remove(&TEST_PROTOCOL).unwrap();
-        let recv_message: TestMessage = tokio::time::timeout(Duration::from_secs(10), async {
+        let message = Message::from_flashblock_payload(OpFlashblockPayload::default());
+        let mut rx = rx1.remove(&types::FLASHBLOCKS_STREAM_PROTOCOL).unwrap();
+        let recv_message = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 // Use try_send to avoid panicking if the channel is full
                 // (e.g. connection not yet established and messages are buffered).
@@ -606,5 +657,157 @@ mod test {
         .await
         .expect("message receive timed out");
         assert_eq!(recv_message, message);
+    }
+
+    /// Creates two minimal libp2p swarms (using only `libp2p_stream::Behaviour`),
+    /// connects them over TCP, and returns the peer ID of A plus `libp2p_stream::Control`
+    /// handles for both A and B.
+    ///
+    /// Both swarms are handed off to background tokio tasks after connection is
+    /// established; all further interaction uses the returned controls.
+    async fn connected_stream_swarms() -> (PeerId, libp2p_stream::Control, libp2p_stream::Control) {
+        use libp2p::{futures::StreamExt as _, identity, swarm::SwarmEvent};
+
+        let make_swarm = || {
+            let keypair = identity::Keypair::generate_ed25519();
+            let transport = create_transport(&keypair).unwrap();
+            libp2p::SwarmBuilder::with_existing_identity(keypair)
+                .with_tokio()
+                .with_other_transport(|_| transport)
+                .unwrap()
+                .with_behaviour(|_| libp2p_stream::Behaviour::new())
+                .unwrap()
+                .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(30)))
+                .build()
+        };
+
+        let mut swarm_a = make_swarm();
+        let mut swarm_b = make_swarm();
+        let peer_a = *swarm_a.local_peer_id();
+        let control_a = swarm_a.behaviour_mut().new_control();
+        let control_b = swarm_b.behaviour_mut().new_control();
+
+        swarm_a.listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
+
+        let addr_a = loop {
+            if let SwarmEvent::NewListenAddr { address, .. } = swarm_a.next().await.unwrap() {
+                break address.with(Protocol::P2p(peer_a));
+            }
+        };
+
+        swarm_b.dial(addr_a).unwrap();
+
+        // Drive both swarms until connection is established on both sides.
+        let mut a_conn = false;
+        let mut b_conn = false;
+        while !(a_conn && b_conn) {
+            tokio::select! {
+                event = swarm_a.next() => {
+                    if let Some(SwarmEvent::ConnectionEstablished { .. }) = event {
+                        a_conn = true;
+                    }
+                }
+                event = swarm_b.next() => {
+                    if let Some(SwarmEvent::ConnectionEstablished { .. }) = event {
+                        b_conn = true;
+                    }
+                }
+            }
+        }
+
+        tokio::spawn(async move {
+            loop {
+                swarm_a.next().await;
+            }
+        });
+        tokio::spawn(async move {
+            loop {
+                swarm_b.next().await;
+            }
+        });
+
+        (peer_a, control_a, control_b)
+    }
+
+    /// Verifies that when the remote end of a stream is closed, `broadcast_message`
+    /// returns the affected peer in `failed_peers` and evicts it from the handler.
+    #[tokio::test]
+    async fn broadcast_evicts_peer_on_stream_failure() {
+        use libp2p::futures::StreamExt as _;
+
+        // A registers the protocol so B can open a stream to it.
+        let (peer_a, mut control_a, mut control_b) = connected_stream_swarms().await;
+        let mut incoming_a = control_a.accept(types::FLASHBLOCKS_STREAM_PROTOCOL).unwrap();
+
+        // B opens an outbound stream to A.
+        let stream = tokio::time::timeout(
+            Duration::from_secs(5),
+            control_b.open_stream(peer_a, types::FLASHBLOCKS_STREAM_PROTOCOL),
+        )
+        .await
+        .expect("open_stream timed out")
+        .expect("open_stream failed");
+
+        // A accepts the stream and immediately drops it, simulating a remote stream close.
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            if let Some((_, remote_stream)) = incoming_a.next().await {
+                drop(remote_stream);
+                let _ = closed_tx.send(());
+            }
+        });
+        closed_rx.await.expect("A never accepted the stream");
+
+        // Give the close a moment to propagate through yamux.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let mut handler = outgoing::StreamsHandler::new();
+        handler.insert_peer_and_stream(peer_a, types::FLASHBLOCKS_STREAM_PROTOCOL, stream);
+        assert!(handler.has_peer(&peer_a));
+
+        let msg = Message::from_flashblock_payload(OpFlashblockPayload::default());
+        let failed = handler.broadcast_message(msg).await.expect("serialization must not fail");
+
+        assert_eq!(failed, vec![peer_a], "peer_a must be returned as a failed peer");
+        assert!(!handler.has_peer(&peer_a), "peer_a must be evicted from the handler");
+    }
+
+    /// Verifies that a successful broadcast returns an empty `failed_peers` list
+    /// and that the peer remains in the handler.
+    #[tokio::test]
+    async fn broadcast_returns_empty_failed_peers_on_success() {
+        use libp2p::futures::StreamExt as _;
+
+        // A registers the protocol so B can open a stream to it.
+        let (peer_a, mut control_a, mut control_b) = connected_stream_swarms().await;
+        let mut incoming_a = control_a.accept(types::FLASHBLOCKS_STREAM_PROTOCOL).unwrap();
+
+        let stream = tokio::time::timeout(
+            Duration::from_secs(5),
+            control_b.open_stream(peer_a, types::FLASHBLOCKS_STREAM_PROTOCOL),
+        )
+        .await
+        .expect("open_stream timed out")
+        .expect("open_stream failed");
+
+        // A accepts the stream and keeps it alive for the duration of the test.
+        tokio::spawn(async move {
+            if let Some((_, stream)) = incoming_a.next().await {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                drop(stream);
+            }
+        });
+
+        let mut handler = outgoing::StreamsHandler::new();
+        handler.insert_peer_and_stream(peer_a, types::FLASHBLOCKS_STREAM_PROTOCOL, stream);
+
+        let msg = Message::from_flashblock_payload(OpFlashblockPayload::default());
+        let failed = handler.broadcast_message(msg).await.expect("serialization must not fail");
+
+        assert!(failed.is_empty(), "no peers should fail on a healthy stream");
+        assert!(
+            handler.has_peer(&peer_a),
+            "peer must remain in the handler after a successful send"
+        );
     }
 }

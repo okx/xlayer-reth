@@ -1,15 +1,12 @@
 use crate::{
+    broadcast::{
+        types::{AGENT_VERSION, FLASHBLOCKS_STREAM_PROTOCOL},
+        wspub::WebSocketPublisher,
+    },
     flashblocks::{
-        builder::FlashblocksBuilder,
-        builder_tx::FlashblocksBuilderTx,
-        generator::BlockPayloadJobGenerator,
-        handler::FlashblocksPayloadHandler,
-        handler_ctx::FlashblockHandlerContext,
-        utils::{
-            cache::FlashblockPayloadsCache,
-            p2p::{Message, AGENT_VERSION, FLASHBLOCKS_STREAM_PROTOCOL},
-            wspub::WebSocketPublisher,
-        },
+        builder::FlashblocksBuilder, builder_tx::FlashblocksBuilderTx,
+        generator::BlockPayloadJobGenerator, handler::FlashblocksPayloadHandler,
+        handler_ctx::FlashblockHandlerContext, utils::cache::FlashblockPayloadsCache,
         BuilderConfig,
     },
     metrics::{tokio::FlashblocksTaskMetrics, BuilderMetrics},
@@ -54,62 +51,67 @@ impl FlashblocksServiceBuilder {
         // this is effectively unused right now due to the usage of reth's `task_executor`.
         let cancel = tokio_util::sync::CancellationToken::new();
 
-        let (incoming_message_rx, outgoing_message_tx) = if self.config.flashblocks.p2p_enabled {
-            let mut builder = crate::p2p::NodeBuilder::new();
-
-            if let Some(ref private_key_file) = self.config.flashblocks.p2p_private_key_file
-                && !private_key_file.is_empty()
-            {
-                let private_key_hex = std::fs::read_to_string(private_key_file)
-                    .wrap_err_with(|| {
-                        format!("failed to read p2p private key file: {private_key_file}")
-                    })?
-                    .trim()
-                    .to_string();
-                builder = builder.with_keypair_hex_string(private_key_hex);
-            }
-
-            let known_peers: Vec<crate::p2p::Multiaddr> =
-                if let Some(ref p2p_known_peers) = self.config.flashblocks.p2p_known_peers {
-                    p2p_known_peers
-                        .split(',')
-                        .map(|s| s.to_string())
-                        .filter_map(|s| s.parse().ok())
-                        .collect()
-                } else {
-                    vec![]
-                };
-
-            let crate::p2p::NodeBuildResult { node, outgoing_message_tx, mut incoming_message_rxs } =
-                builder
-                    .with_agent_version(AGENT_VERSION.to_string())
-                    .with_protocol(FLASHBLOCKS_STREAM_PROTOCOL)
-                    .with_known_peers(known_peers)
-                    .with_port(self.config.flashblocks.p2p_port)
-                    .with_cancellation_token(cancel.clone())
-                    .with_max_peer_count(self.config.flashblocks.p2p_max_peer_count)
-                    .try_build::<Message>()
-                    .wrap_err("failed to build flashblocks p2p node")?;
-            let multiaddrs = node.multiaddrs();
-            ctx.task_executor().spawn_task(async move {
-                if let Err(e) = node.run().await {
-                    tracing::error!(error = %e, "p2p node exited");
-                }
-            });
-            tracing::info!(target: "payload_builder", multiaddrs = ?multiaddrs, "flashblocks p2p node started");
-
-            let incoming_message_rx = incoming_message_rxs
-                .remove(&FLASHBLOCKS_STREAM_PROTOCOL)
-                .expect("flashblocks p2p protocol must be found in receiver map");
-            (incoming_message_rx, outgoing_message_tx)
-        } else {
-            let (_incoming_message_tx, incoming_message_rx) = tokio::sync::mpsc::channel(16);
-            let (outgoing_message_tx, _outgoing_message_rx) = tokio::sync::mpsc::channel(16);
-            (incoming_message_rx, outgoing_message_tx)
-        };
-
         let metrics = Arc::new(BuilderMetrics::default());
         let task_metrics = Arc::new(FlashblocksTaskMetrics::new());
+        let ws_pub: Arc<WebSocketPublisher> = WebSocketPublisher::new(
+            self.config.flashblocks.ws_addr,
+            metrics.clone(),
+            &task_metrics.websocket_publisher,
+            self.config.flashblocks.ws_subscriber_limit,
+        )
+        .wrap_err("failed to create ws publisher")?
+        .into();
+
+        let mut broadcast_builder =
+            crate::broadcast::NodeBuilder::new(ws_pub.clone(), metrics.clone());
+
+        if let Some(ref private_key_file) = self.config.flashblocks.p2p_private_key_file
+            && !private_key_file.is_empty()
+        {
+            let private_key_hex = std::fs::read_to_string(private_key_file)
+                .wrap_err_with(|| {
+                    format!("failed to read p2p private key file: {private_key_file}")
+                })?
+                .trim()
+                .to_string();
+            broadcast_builder = broadcast_builder.with_keypair_hex_string(private_key_hex);
+        }
+
+        let known_peers: Vec<crate::broadcast::Multiaddr> =
+            if let Some(ref p2p_known_peers) = self.config.flashblocks.p2p_known_peers {
+                p2p_known_peers
+                    .split(',')
+                    .map(|s| s.to_string())
+                    .filter_map(|s| s.parse().ok())
+                    .collect()
+            } else {
+                vec![]
+            };
+
+        let crate::broadcast::NodeBuildResult {
+            node,
+            outgoing_message_tx,
+            mut incoming_message_rxs,
+        } = broadcast_builder
+            .with_agent_version(AGENT_VERSION.to_string())
+            .with_protocol(FLASHBLOCKS_STREAM_PROTOCOL)
+            .with_known_peers(known_peers)
+            .with_port(self.config.flashblocks.p2p_port)
+            .with_cancellation_token(cancel.clone())
+            .with_max_peer_count(self.config.flashblocks.p2p_max_peer_count)
+            .try_build()
+            .wrap_err("failed to build flashblocks p2p node")?;
+        let multiaddrs = node.multiaddrs();
+        ctx.task_executor().spawn_task(async move {
+            if let Err(e) = node.run().await {
+                tracing::error!(error = %e, "p2p node exited");
+            }
+        });
+        tracing::info!(target: "payload_builder", multiaddrs = ?multiaddrs, "flashblocks p2p node started");
+
+        let incoming_message_rx = incoming_message_rxs
+            .remove(&FLASHBLOCKS_STREAM_PROTOCOL)
+            .expect("flashblocks p2p protocol must be found in receiver map");
 
         // Channels for built flashblock payloads
         let (built_fb_payload_tx, built_fb_payload_rx) = tokio::sync::mpsc::channel(16);
@@ -122,14 +124,6 @@ impl FlashblocksServiceBuilder {
             FlashblockPayloadsCache::new(None)
         };
 
-        let ws_pub: Arc<WebSocketPublisher> = WebSocketPublisher::new(
-            self.config.flashblocks.ws_addr,
-            metrics.clone(),
-            &task_metrics.websocket_publisher,
-            self.config.flashblocks.ws_subscriber_limit,
-        )
-        .wrap_err("failed to create ws publisher")?
-        .into();
         let mut payload_builder = FlashblocksBuilder::new(
             OpEvmConfig::optimism(ctx.chain_spec()),
             pool,
@@ -140,7 +134,6 @@ impl FlashblocksServiceBuilder {
             built_fb_payload_tx,
             built_payload_tx,
             p2p_cache.clone(),
-            ws_pub.clone(),
             metrics.clone(),
             task_metrics.clone(),
         );
