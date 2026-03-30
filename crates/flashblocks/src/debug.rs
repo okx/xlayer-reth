@@ -10,6 +10,7 @@ pub(crate) fn debug_compare_flashblocks_bundle_states<N: NodePrimitives + 'stati
     flashblocks_state: &FlashblockStateCache<N>,
     block_number: u64,
     block_hash: alloy_primitives::B256,
+    mut fb_trie_updates: Option<reth_trie::updates::TrieUpdatesSorted>,
 ) {
     // Capture data synchronously (before handle_canonical_block evicts the cache).
     // These are cheap — ExecutedBlock internals are Arc'd.
@@ -18,11 +19,14 @@ pub(crate) fn debug_compare_flashblocks_bundle_states<N: NodePrimitives + 'stati
         .canon_in_memory_state
         .state_by_hash(block_hash)
         .map(|state| state.block());
-    // Capture accumulated trie_updates from the pending sequence for trie comparison.
-    let fb_trie_updates = flashblocks_state
-        .get_pending_sequence()
-        .filter(|seq| seq.get_height() == block_number)
-        .map(|seq| seq.prefix_execution_meta.accumulated_trie_updates.clone());
+
+    if fb_trie_updates.is_none() {
+        // Flashblocks state cache might be lagging behind canonical chainstate. Check pending sequence
+        fb_trie_updates = flashblocks_state
+            .get_pending_sequence()
+            .filter(|seq| seq.get_height() == block_number)
+            .map(|seq| seq.prefix_execution_meta.accumulated_trie_updates.clone().into_sorted());
+    }
 
     // Spawn the heavy comparison on a blocking thread so the canonical stream handler
     // stays responsive. trie_data() is synchronous (parking_lot::Mutex, no async).
@@ -36,7 +40,7 @@ fn compare_executed_blocks<N: NodePrimitives>(
     fb_block: Option<ExecutedBlock<N>>,
     engine_block: Option<ExecutedBlock<N>>,
     block_number: u64,
-    fb_trie_updates: Option<reth_trie::updates::TrieUpdates>,
+    fb_trie_updates: Option<reth_trie::updates::TrieUpdatesSorted>,
 ) {
     let (Some(fb), Some(eng)) = (fb_block, engine_block) else {
         debug!(
@@ -160,8 +164,7 @@ fn compare_executed_blocks<N: NodePrimitives>(
     let Some(fb_updates) = fb_trie_updates else {
         return;
     };
-    let fb_sorted = fb_updates.into_sorted();
-    if fb_sorted == *eng_trie.trie_updates {
+    if fb_updates == *eng_trie.trie_updates {
         info!(
             target: "flashblocks::verify",
             block_number,
