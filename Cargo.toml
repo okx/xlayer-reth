@@ -276,3 +276,7 @@ op-alloy = { path = "deps/optimism/rust/op-alloy/crates/op-alloy" }
 # alloy-rpc-types-engine 1.6.3 requires jsonwebtoken ^9.3.0 (^9 semver),
 # which does not include 10.x. This local fork pins jsonwebtoken to 10.3.0.
 alloy-rpc-types-engine = { path = "deps/alloy-rpc-types-engine" }
+# Security patch: remove yamux 0.12.x (CVE-2026-32314) from libp2p-yamux 0.47.0.
+# libp2p-yamux 0.47.0 depends on both yamux 0.12.x (legacy) and 0.13.x (default).
+# This local fork drops yamux012 and uses only yamux 0.13.x (already patched).
+libp2p-yamux = { path = "deps/libp2p-yamux" }
