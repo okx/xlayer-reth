@@ -460,29 +460,9 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
     }
 
     fn handle_canonical_block(&mut self, canon_info: (u64, B256), reorg: bool) -> bool {
-        // If the pending sequence matches the canonical block exactly, the target flashblocks
-        // was missed on the builder. Promote the current pending to confirm, and set the
-        // pending state to none.
-        if let Some(sequence) = self.pending_cache.as_ref()
-            && sequence.get_height() == canon_info.0
-            && sequence.get_hash() == canon_info.1
-            && canon_info.0 == self.confirm_height + 1
-        {
-            let sequence = self.pending_cache.take().expect("just confirmed is_some");
-            if let Err(e) = self.handle_confirmed_block(
-                canon_info.0,
-                sequence.pending.executed_block,
-                sequence.pending.receipts,
-            ) {
-                warn!(target: "flashblocks", err = %e, "Canonical block handle failed to promote pending sequence to confirm");
-            }
-        }
-
-        let pending_stale =
-            self.pending_cache.as_ref().is_some_and(|p| p.get_height() <= canon_info.0);
         let hash_mismatch = self.confirm_cache.number_for_hash(&canon_info.1).is_none()
             && self.confirm_cache.get_block_by_number(canon_info.0).is_some();
-        if hash_mismatch || reorg {
+        if reorg || hash_mismatch {
             warn!(
                 target: "flashblocks",
                 canonical_height = canon_info.0,
@@ -496,24 +476,21 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
             return true;
         }
 
-        if pending_stale {
-            // Pending is stale but confirm cache is valid. Just clear pending —
-            // the canonical chainstate serves this block. The validator's in-flight
-            // commit (if any) will get a benign "polluted" error and move on.
+        // Clear pending if at or below canonical height — the canonical chainstate
+        // already serves this block. The validator's in-flight commit (if any) will
+        // get a benign "polluted" error and move on.
+        if self.pending_cache.as_ref().is_some_and(|p| p.get_height() <= canon_info.0) {
             debug!(
                 target: "flashblocks",
                 canonical_height = canon_info.0,
                 confirm_height = self.confirm_height,
-                "Clearing stale pending on canonical block (confirm cache preserved)",
+                "Clearing stale pending on canonical block",
             );
             self.pending_cache = None;
         }
-        debug!(
-            target: "flashblocks",
-            canonical_height = canon_info.0,
-            confirm_height = self.confirm_height,
-            "Evicting flashblocks state inner cache"
-        );
+
+        // Evict confirmed blocks at or below canonical height. The executed block state
+        // will now be served by the in-memory canonical chainstate.
         self.confirm_cache.flush_up_to_height(canon_info.0);
 
         // Update state heights
