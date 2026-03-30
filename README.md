@@ -1,16 +1,38 @@
-# XLayer Reth
+<p align="">
+  <img src="./xlayer-logo.png" alt="XLayer" width="325" />
+</p>
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Rust](https://img.shields.io/badge/Rust-1.93+-orange.svg)](https://www.rust-lang.org/)
 [![GitHub release](https://img.shields.io/github/v/release/okx/xlayer-reth)](https://github.com/okx/xlayer-reth/releases)
+[![Reth](https://img.shields.io/badge/reth-v1.11.3-purple.svg)](https://github.com/paradigmxyz/reth/releases/tag/v1.11.3)
 
-
-## Overview
+# XLayer Reth
 
 XLayer Reth is a customized implementation of [Reth](https://github.com/paradigmxyz/reth) optimized for the XLayer network, an Optimism-based Layer 2 solution.
 
 This project provides a high-performance, production-ready Ethereum execution client tailored for XLayer's specific requirements. It builds upon the upstream Reth codebase with custom optimizations and features for the XLayer network.
+
+**[Run a dev node](#running-a-dev-node)** | **[Build a node](#building-from-source)** | **[Contribute to XLayer Reth](#contributing)**
+
+---
+
+## Table of Contents
+
+- [Getting Started](#getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Building from Source](#building-from-source)
+  - [Docker Build](#docker-build)
+- [Initialization](#initialization)
+- [Running a Dev Node](#running-a-dev-node)
+- [Configuration](#configuration)
+- [Development](#development)
+- [Testing](#testing)
+  - [End-to-end Testing](#end-to-end-testing)
+  - [Flashblocks Tests](#flashblocks-tests)
+- [Contributing](#contributing)
+- [License](#license)
 
 ### Why built on top of Reth
 
@@ -95,6 +117,38 @@ xlayer-reth-node init --chain /path/to/genesis.json --datadir /data/xlayer
 ```
 
 > **Note**: The `init` command only needs to be run once before the first start. It creates the database and writes the genesis block.
+
+## Running a Dev Node
+
+For local development and testing, you can run a dev node without requiring an external sequencer or L1 connection. The dev mode automatically mines blocks at a configurable interval.
+
+```bash
+OTEL_EXPORTER_OTLP_PROTOCOL=http cargo r -p xlayer-reth-node node \
+  --datadir .op-reth-ttt \
+  --engine.legacy-state-root \
+  --dev \
+  --dev.block-time 1s \
+  --builder.gaslimit 1500000000 \
+  --txpool.pending-max-count 10000000 \
+  --txpool.pending-max-size 10000 \
+  --txpool.basefee-max-count 10000000 \
+  --txpool.basefee-max-size 10000 \
+  --txpool.queued-max-count 10000000 \
+  --txpool.queued-max-size 10000 \
+  --txpool.blobpool-max-count 10000000 \
+  --txpool.blobpool-max-size 10000 \
+  --txpool.max-account-slots 10000000 \
+  --http \
+  --http.api eth,debug,net,web3,txpool \
+  --log.stdout.filter "info,engine::tree::payload_validator=debug"
+```
+
+Key flags:
+- `--dev`: Enables dev mode (auto-mining, no consensus required)
+- `--dev.block-time 1s`: Mine a new block every second
+- `--engine.legacy-state-root`: Use legacy state root computation
+- `--http` / `--http.api`: Enable HTTP RPC with the listed namespaces
+- `--datadir`: Directory for node data (created automatically if it doesn't exist)
 
 ## Configuration
 
