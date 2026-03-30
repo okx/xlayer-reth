@@ -1,15 +1,13 @@
 mod confirm;
-mod execution;
 pub mod pending;
 pub(crate) mod raw;
+pub(crate) mod task;
 pub(crate) mod utils;
 
 pub(crate) use confirm::ConfirmCache;
-pub(crate) use execution::{
-    ExecutionTaskQueue, ExecutionTaskQueueFlush, EXECUTION_TASK_QUEUE_CAPACITY,
-};
 pub use pending::PendingSequence;
 pub(crate) use raw::RawFlashblocksCache;
+pub(crate) use task::{ExecutionTaskQueue, ExecutionTaskQueueFlush, EXECUTION_TASK_QUEUE_CAPACITY};
 
 use crate::PendingSequenceRx;
 use parking_lot::RwLock;
