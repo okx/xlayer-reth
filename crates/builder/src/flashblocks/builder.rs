@@ -468,7 +468,7 @@ where
         let target_flashblocks = flashblock_scheduler.target_flashblocks();
         if target_flashblocks == 0 {
             self.resolve_best_payload(&ctx, best_payload, fallback_payload, &resolve_payload);
-            self.record_flashblocks_metrics(&ctx, &fb_state, &info, 0);
+            self.record_flashblocks_metrics(&ctx, 0, &info, 0);
             return Ok(());
         }
 
@@ -547,14 +547,24 @@ where
             } else {
                 // Channel closed - block building cancelled
                 self.resolve_best_payload(&ctx, best_payload, fallback_payload, &resolve_payload);
-                self.record_flashblocks_metrics(&ctx, &fb_state, &info, target_flashblocks);
+                self.record_flashblocks_metrics(
+                    &ctx,
+                    fb_state.flashblock_index().saturating_sub(1),
+                    &info,
+                    target_flashblocks,
+                );
                 return Ok(());
             }
 
             // Check if we have reached target flashblocks count
             if fb_state.flashblock_index() > fb_state.target_flashblock_count() {
                 self.resolve_best_payload(&ctx, best_payload, fallback_payload, &resolve_payload);
-                self.record_flashblocks_metrics(&ctx, &fb_state, &info, target_flashblocks);
+                self.record_flashblocks_metrics(
+                    &ctx,
+                    fb_state.flashblock_index().saturating_sub(1),
+                    &info,
+                    target_flashblocks,
+                );
                 return Ok(());
             }
 
@@ -577,7 +587,12 @@ where
                         fallback_payload,
                         &resolve_payload,
                     );
-                    self.record_flashblocks_metrics(&ctx, &fb_state, &info, target_flashblocks);
+                    self.record_flashblocks_metrics(
+                        &ctx,
+                        fb_state.flashblock_index(),
+                        &info,
+                        target_flashblocks,
+                    );
                     return Ok(());
                 }
                 Err(err) => {
@@ -871,15 +886,15 @@ where
     fn record_flashblocks_metrics(
         &self,
         ctx: &FlashblocksBuilderCtx,
-        fb_state: &FlashblocksState,
+        fb_index: u64,
         info: &ExecutionInfo,
         flashblocks_per_block: u64,
     ) {
         ctx.metrics.block_built_success.increment(1);
-        ctx.metrics.flashblock_count.record(fb_state.flashblock_index() as f64);
+        ctx.metrics.flashblock_count.record(fb_index as f64);
         ctx.metrics
             .missing_flashblocks_count
-            .record(flashblocks_per_block.saturating_sub(fb_state.flashblock_index()) as f64);
+            .record(flashblocks_per_block.saturating_sub(fb_index) as f64);
         ctx.metrics.payload_num_tx.record(info.executed_transactions.len() as f64);
         ctx.metrics.payload_num_tx_gauge.set(info.executed_transactions.len() as f64);
 
@@ -888,7 +903,7 @@ where
             event = "build_complete",
             id = %ctx.payload_id(),
             flashblocks_per_block = flashblocks_per_block,
-            flashblock_index = fb_state.flashblock_index(),
+            flashblock_index = fb_index,
             "Flashblocks building complete"
         );
     }
