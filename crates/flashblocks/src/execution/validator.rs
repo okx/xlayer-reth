@@ -249,6 +249,12 @@ where
             pending_sequence.as_ref(),
             &mut handle,
         )?;
+        debug!(
+            target: "flashblocks::validator",
+            execute_height = args.base.block_number,
+            flashblock_index = args.last_flashblock_index,
+            "Executed block",
+        );
 
         // After executing the block we can stop prewarming transactions
         handle.stop_prewarming_execution();
@@ -312,29 +318,59 @@ where
                     Ok(StateRootComputeOutcome { state_root, trie_updates }) => {
                         let elapsed = root_time.elapsed();
                         maybe_state_root = Some((state_root, trie_updates));
-                        info!(target: "flashblocks::validator", execute_height = args.base.block_number, ?state_root, ?elapsed, "State root task finished");
+                        info!(
+                            target: "flashblocks::validator",
+                            execute_height = args.base.block_number,
+                            flashblock_index = args.last_flashblock_index,
+                            target_index = args.target_index,
+                            ?state_root,
+                            ?elapsed,
+                            "State root task finished",
+                        );
                     }
                     Err(error) => {
-                        debug!(target: "flashblocks::validator", %error, "State root task failed");
+                        debug!(
+                            target: "flashblocks::validator",
+                            execute_height = args.base.block_number,
+                            flashblock_index = args.last_flashblock_index,
+                            target_index = args.target_index,
+                            %error,
+                            "State root task failed",
+                        );
                     }
                 }
             }
             StateRootStrategy::Parallel => {
-                debug!(target: "flashblocks::validator", execute_height = args.base.block_number, "Using parallel state root algorithm");
+                debug!(
+                    target: "flashblocks::validator",
+                    execute_height = args.base.block_number,
+                    flashblock_index = args.last_flashblock_index,
+                    target_index = args.target_index,
+                    "Using parallel state root algorithm",
+                );
                 match self.compute_state_root_parallel(overlay_factory.clone(), &hashed_state) {
                     Ok(result) => {
                         let elapsed = root_time.elapsed();
                         info!(
                             target: "flashblocks::validator",
                             execute_height = args.base.block_number,
+                            flashblock_index = args.last_flashblock_index,
+                            target_index = args.target_index,
                             regular_state_root = ?result.0,
                             ?elapsed,
-                            "Regular root task finished"
+                            "Parallel state root computation finished"
                         );
                         maybe_state_root = Some((result.0, result.1));
                     }
                     Err(error) => {
-                        debug!(target: "flashblocks::validator", execute_height = args.base.block_number, err = %error, "Parallel state root computation failed");
+                        debug!(
+                            target: "flashblocks::validator",
+                            execute_height = args.base.block_number,
+                            flashblock_index = args.last_flashblock_index,
+                            target_index = args.target_index,
+                            err = %error,
+                            "Parallel state root computation failed",
+                        );
                     }
                 }
             }
@@ -348,7 +384,13 @@ where
             maybe_state_root
         } else {
             // fallback is to compute the state root regularly in sync
-            warn!(target: "flashblocks::validator", execute_height = args.base.block_number, "Failed to compute state root");
+            warn!(
+                target: "flashblocks::validator",
+                execute_height = args.base.block_number,
+                flashblock_index = args.last_flashblock_index,
+                target_index = args.target_index,
+                "Failed to compute state root",
+            );
             let (root, updates) =
                 Self::compute_state_root_serial(overlay_factory.clone(), &hashed_state)?;
             (root, updates)
@@ -403,6 +445,9 @@ where
             &executed_block.execution_output.state,
         );
 
+        let execution_height = args.base.block_number;
+        let last_index = args.last_flashblock_index;
+        let target_index = args.target_index;
         self.commit_pending_sequence(
             args.base,
             executed_block,
@@ -420,6 +465,7 @@ where
             args.target_index,
         )?;
 
+        info!(target: "flashblocks", execution_height, last_index, target_index, "Executed and validated flashblocks sequence");
         Ok(())
     }
 
@@ -664,8 +710,6 @@ where
         }
 
         let output = BlockExecutionOutput { result, state: bundle };
-        debug!(target: "flashblocks::validator", execute_height, "Executed block");
-
         Ok((output, senders, result_rx, read_cache))
     }
 
@@ -1117,7 +1161,7 @@ where
 
             if result.is_err() {
                 error!(
-                    target: "flashblocks::validator",
+                    target: "flashblocks::changeset",
                     "Deferred trie task panicked; fallback computation will be used when trie data is accessed"
                 );
             }
