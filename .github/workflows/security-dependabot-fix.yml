@@ -22,3 +22,4 @@ jobs:
       other_gh_token: ${{ secrets.GITHUB_TOKEN }}
       jira_auth: ${{ secrets.JIRA_API_TOKEN }}
       jira_account_id: ${{ secrets.JIRA_ACCOUNT }}
+      jira_domain: ${{ secrets.JIRA_DOMAIN }}
