@@ -1,5 +1,9 @@
 # XLayer Reth
 
+<p align="center">
+  <img src="./xlayer-logo.png" alt="XLayer" width="320" />
+</p>
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Rust](https://img.shields.io/badge/Rust-1.93+-orange.svg)](https://www.rust-lang.org/)
