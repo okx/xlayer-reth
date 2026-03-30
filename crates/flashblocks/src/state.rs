@@ -1,9 +1,8 @@
 use crate::{
-    cache::RawFlashblocksCache,
+    cache::{ExecutionTaskQueue, RawFlashblocksCache, EXECUTION_TASK_QUEUE_CAPACITY},
     debug::debug_compare_flashblocks_bundle_states,
     execution::validator::FlashblockSequenceValidator,
     execution::{FlashblockReceipt, OverlayProviderFactory},
-    service::{ExecutionTaskQueue, ExecutionTaskQueueFlush, EXECUTION_TASK_QUEUE_CAPACITY},
     FlashblockStateCache,
 };
 use futures_util::{FutureExt, Stream, StreamExt};
@@ -203,7 +202,6 @@ pub async fn handle_canonical_stream<N: NodePrimitives>(
     mut canon_rx: CanonStateNotificationStream<N>,
     flashblocks_state: FlashblockStateCache<N>,
     raw_cache: Arc<RawFlashblocksCache<N::SignedTx>>,
-    task_queue: ExecutionTaskQueue,
     debug_state_comparison: bool,
 ) {
     let mut trie_updates = None;
@@ -257,10 +255,7 @@ pub async fn handle_canonical_stream<N: NodePrimitives>(
         }
 
         raw_cache.handle_canonical_height(block_number);
-        if flashblocks_state.handle_canonical_block((block_number, block_hash), is_reorg) {
-            task_queue.flush();
-        }
-
+        flashblocks_state.handle_canonical_block((block_number, block_hash), is_reorg);
         debug!(
             target: "flashblocks",
             block_number,

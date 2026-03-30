@@ -1,16 +1,22 @@
 mod confirm;
+mod execution;
 pub mod pending;
 pub(crate) mod raw;
 pub(crate) mod utils;
 
 pub(crate) use confirm::ConfirmCache;
-pub(crate) use raw::RawFlashblocksCache;
-
+pub(crate) use execution::{
+    ExecutionTaskQueue, ExecutionTaskQueueFlush, EXECUTION_TASK_QUEUE_CAPACITY,
+};
 pub use pending::PendingSequence;
+pub(crate) use raw::RawFlashblocksCache;
 
 use crate::PendingSequenceRx;
 use parking_lot::RwLock;
-use std::sync::Arc;
+use std::{
+    collections::BTreeSet,
+    sync::{Arc, Condvar, Mutex},
+};
 use tokio::sync::watch;
 use tracing::*;
 
@@ -66,6 +72,7 @@ pub struct FlashblockStateCache<N: NodePrimitives> {
     inner: Arc<RwLock<FlashblockStateCacheInner<N>>>,
     changeset_cache: ChangesetCache,
     pub(crate) canon_in_memory_state: CanonicalInMemoryState<N>,
+    pub(crate) task_queue: ExecutionTaskQueue,
 }
 
 // FlashblockStateCache read interfaces
@@ -76,6 +83,7 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
             inner: Arc::new(RwLock::new(FlashblockStateCacheInner::new())),
             changeset_cache: ChangesetCache::new(),
             canon_in_memory_state,
+            task_queue: Arc::new((Mutex::new(BTreeSet::new()), Condvar::new())),
         }
     }
 }
@@ -176,6 +184,7 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
                 // Flush as the overlay is non-contiguous, indicating potential poluuted state.
                 warn!(target: "flashblocks", "Failed to get flashblocks state provider: {e}. Flushing cache");
                 self.inner.write().flush();
+                self.task_queue.flush();
                 None
             }
         }?;
@@ -204,6 +213,7 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
                 // Flush as the overlay is non-contiguous, indicating potential poluuted state.
                 warn!(target: "flashblocks", "Failed to get flashblocks state provider: {e}. Flushing cache");
                 self.inner.write().flush();
+                self.task_queue.flush();
                 None
             }
         }?;
@@ -243,6 +253,7 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
             Some(Err(e)) => {
                 warn!(target: "flashblocks", "Failed to get flashblocks state provider: {e}. Flushing cache");
                 self.inner.write().flush();
+                self.task_queue.flush();
                 return Err(e);
             }
         };
@@ -311,14 +322,10 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
 
     /// Handles a canonical block committed to the canonical chainstate.
     ///
-    /// This method will flush the confirm cache up to the canonical block height and
-    /// commits the pending state to the confirm cache if it matches the committed block.
-    /// This ensures that the flashblocks state cache memory does not grow unbounded.
-    ///
-    /// It also detects chainstate re-orgs (set with re-org arg flag) and flashblocks
-    /// state cache pollution. By default once error is detected, we will automatically
-    /// flush the flashblocks state cache.
-    pub fn handle_canonical_block(&self, canon_info: (u64, B256), reorg: bool) -> bool {
+    /// Evicts confirmed blocks at or below the canonical height and clears any stale
+    /// pending state. On reorg or hash mismatch, flushes the entire state cache and
+    /// drains the execution task queue.
+    pub fn handle_canonical_block(&self, canon_info: (u64, B256), reorg: bool) {
         debug!(
             target: "flashblocks",
             canonical_height = canon_info.0,
@@ -336,7 +343,9 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
             "Evicting changesets below threshold"
         );
         self.changeset_cache.evict(eviction_threshold);
-        self.inner.write().handle_canonical_block(canon_info, reorg)
+        if self.inner.write().handle_canonical_block(canon_info, reorg) {
+            self.task_queue.flush();
+        }
     }
 }
 

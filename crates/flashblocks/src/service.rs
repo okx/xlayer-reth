@@ -7,9 +7,8 @@ use crate::{
 };
 use futures_util::Stream;
 use std::{
-    collections::BTreeSet,
     net::SocketAddr,
-    sync::{Arc, Condvar, Mutex, OnceLock},
+    sync::{Arc, OnceLock},
 };
 use tokio::sync::broadcast::Sender;
 use tracing::*;
@@ -34,46 +33,6 @@ use xlayer_builder::{
     flashblocks::PayloadEventsSender,
     metrics::{tokio::FlashblocksTaskMetrics, BuilderMetrics},
 };
-
-pub const EXECUTION_TASK_QUEUE_CAPACITY: usize = 5;
-
-pub type ExecutionTaskQueue = Arc<(Mutex<BTreeSet<u64>>, Condvar)>;
-
-/// Extension trait for [`ExecutionTaskQueue`] providing a flush operation.
-pub trait ExecutionTaskQueueFlush {
-    /// Clears all pending execution tasks from the queue.
-    ///
-    /// Called when a flush is detected on the flashblocks state layer (reorg or stale
-    /// pending) to drain any queued block heights that were built against now-invalidated
-    /// state. The execution worker will re-enter its wait loop and pick up fresh tasks
-    /// from incoming flashblocks after this call.
-    fn flush(&self);
-}
-
-impl ExecutionTaskQueueFlush for ExecutionTaskQueue {
-    fn flush(&self) {
-        match self.0.lock() {
-            Ok(mut queue) => {
-                let flushed = queue.len();
-                queue.clear();
-                if flushed > 0 {
-                    warn!(
-                        target: "flashblocks",
-                        flushed,
-                        "Execution task queue flushed on state reset"
-                    );
-                }
-            }
-            Err(err) => {
-                warn!(
-                    target: "flashblocks",
-                    %err,
-                    "Failed to flush execution task queue: mutex poisoned"
-                );
-            }
-        }
-    }
-}
 
 /// Context for flashblocks RPC state handles.
 pub struct FlashblocksRpcCtx<N: NodePrimitives, EvmConfig, Provider, ChainSpec> {
@@ -216,7 +175,6 @@ where
             self.task_executor.clone(),
             self.rpc_ctx.tree_config,
         );
-        let task_queue = Arc::new((Mutex::new(BTreeSet::new()), Condvar::new()));
 
         // Spawn incoming raw flashblocks handle.
         let received_tx = self.received_flashblocks_tx.clone();
@@ -226,13 +184,13 @@ where
                 incoming_rx,
                 received_tx,
                 raw_cache.clone(),
-                task_queue.clone(),
+                self.flashblocks_state.task_queue.clone(),
             )),
         );
 
         // Spawn the flashblocks sequence execution task on a dedicated OS thread.
         let cache = raw_cache.clone();
-        let queue = task_queue.clone();
+        let queue = self.flashblocks_state.task_queue.clone();
         reth_tasks::spawn_os_thread("xlayer-flashblocks-execution", move || {
             handle_execution_tasks::<N, EvmConfig, Provider, ChainSpec>(validator, cache, queue);
         });
@@ -244,7 +202,6 @@ where
                 self.rpc_ctx.canon_state_rx,
                 self.flashblocks_state,
                 raw_cache,
-                task_queue,
                 self.rpc_ctx.debug_state_comparison,
             )),
         );
