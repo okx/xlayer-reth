@@ -307,8 +307,8 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
     /// Handles a canonical block committed to the canonical chainstate.
     ///
     /// This method will flush the confirm cache up to the canonical block height and
-    /// the pending state if it matches the committed block to ensure flashblocks state
-    /// cache memory does not grow unbounded.
+    /// commits the pending state to the confirm cache if it matches the committed block.
+    /// This ensures that the flashblocks state cache memory does not grow unbounded.
     ///
     /// It also detects chainstate re-orgs (set with re-org arg flag) and flashblocks
     /// state cache pollution. By default once error is detected, we will automatically
@@ -427,8 +427,8 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
                 self.pending_cache = Some(incoming_seq);
             }
         } else if pending_height == expected_height + 1 {
-            // The next block's flashblock arrived. Somehow target flashblocks was
-            // missed. Promote current pending to confirm, and set incoming as new
+            // The next block's flashblock arrived. The target flashblocks was missed on
+            // the builder. Promote current pending to confirm, and set incoming as new
             // pending sequence.
             let sequence = self.pending_cache.take().ok_or_else(|| {
                 eyre::eyre!(
@@ -451,6 +451,24 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
     }
 
     fn handle_canonical_block(&mut self, canon_info: (u64, B256), reorg: bool) -> bool {
+        // If the pending sequence matches the canonical block exactly, the target flashblocks
+        // was missed on the builder. Promote the current pending to confirm, and set the
+        // pending state to none.
+        if let Some(sequence) = self.pending_cache.as_ref()
+            && sequence.get_height() == canon_info.0
+            && sequence.get_hash() == canon_info.1
+            && canon_info.0 == self.confirm_height + 1
+        {
+            let sequence = self.pending_cache.take().expect("just confirmed is_some");
+            if let Err(e) = self.handle_confirmed_block(
+                canon_info.0,
+                sequence.pending.executed_block,
+                sequence.pending.receipts,
+            ) {
+                warn!(target: "flashblocks", err = %e, "Canonical block handle failed to promote pending sequence to confirm");
+            }
+        }
+
         let pending_stale =
             self.pending_cache.as_ref().is_some_and(|p| p.get_height() <= canon_info.0);
         let hash_mismatch = self.confirm_cache.number_for_hash(&canon_info.1).is_none()
