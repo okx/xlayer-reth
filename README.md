@@ -96,6 +96,38 @@ xlayer-reth-node init --chain /path/to/genesis.json --datadir /data/xlayer
 
 > **Note**: The `init` command only needs to be run once before the first start. It creates the database and writes the genesis block.
 
+## Running a Dev Node
+
+For local development and testing, you can run a dev node without requiring an external sequencer or L1 connection. The dev mode automatically mines blocks at a configurable interval.
+
+```bash
+OTEL_EXPORTER_OTLP_PROTOCOL=http cargo r -p xlayer-reth-node node \
+  --datadir .op-reth-ttt \
+  --engine.legacy-state-root \
+  --dev \
+  --dev.block-time 1s \
+  --builder.gaslimit 1500000000 \
+  --txpool.pending-max-count 10000000 \
+  --txpool.pending-max-size 10000 \
+  --txpool.basefee-max-count 10000000 \
+  --txpool.basefee-max-size 10000 \
+  --txpool.queued-max-count 10000000 \
+  --txpool.queued-max-size 10000 \
+  --txpool.blobpool-max-count 10000000 \
+  --txpool.blobpool-max-size 10000 \
+  --txpool.max-account-slots 10000000 \
+  --http \
+  --http.api eth,debug,net,web3,txpool \
+  --log.stdout.filter "info,engine::tree::payload_validator=debug"
+```
+
+Key flags:
+- `--dev`: Enables dev mode (auto-mining, no consensus required)
+- `--dev.block-time 1s`: Mine a new block every second
+- `--engine.legacy-state-root`: Use legacy state root computation
+- `--http` / `--http.api`: Enable HTTP RPC with the listed namespaces
+- `--datadir`: Directory for node data (created automatically if it doesn't exist)
+
 ## Configuration
 
 XLayer Reth inherits all configuration options from [Reth](https://reth.rs/) and [OP Reth](https://github.com/paradigmxyz/reth). Run `xlayer-reth-node --help` for a complete list.
