@@ -30,7 +30,8 @@ use reth_tasks::TaskExecutor;
 
 use xlayer_builder::{
     args::FlashblocksArgs,
-    flashblocks::{PayloadEventsSender, WebSocketPublisher, XLayerFlashblockPayload},
+    broadcast::{WebSocketPublisher, XLayerFlashblockPayload},
+    flashblocks::PayloadEventsSender,
     metrics::{tokio::FlashblocksTaskMetrics, BuilderMetrics},
 };
 

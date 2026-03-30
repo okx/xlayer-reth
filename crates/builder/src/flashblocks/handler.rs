@@ -1,11 +1,8 @@
 use crate::{
+    broadcast::{Message, WebSocketPublisher, XLayerFlashblockPayload},
     flashblocks::{
         handler_ctx::FlashblockHandlerContext,
-        utils::{
-            cache::FlashblockPayloadsCache, execution::ExecutionInfo, p2p::Message,
-            wspub::WebSocketPublisher,
-        },
-        XLayerFlashblockPayload,
+        utils::{cache::FlashblockPayloadsCache, execution::ExecutionInfo},
     },
     traits::ClientBounds,
 };
@@ -125,7 +122,7 @@ where
         loop {
             tokio::select! {
                 Some(payload) = built_fb_payload_rx.recv() => {
-                    // ignore error here; if p2p was disabled, the channel will be closed.
+                    // ignore send error (broadcast node may have shut down)
                     let _ = p2p_tx.send(Message::from_flashblock_payload(payload)).await;
                 }
                 Some(payload) = built_payload_rx.recv() => {
@@ -134,7 +131,7 @@ where
                         warn!(target: "payload_builder", e = ?e, "failed to send BuiltPayload event");
                     }
                     if p2p_send_full_payload_flag {
-                        // ignore error here; if p2p was disabled, the channel will be closed.
+                        // ignore send error (broadcast node may have shut down)
                         let _ = p2p_tx.send(Message::from_built_payload(payload)).await;
                     }
                 }

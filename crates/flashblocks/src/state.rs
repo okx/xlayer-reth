@@ -24,7 +24,7 @@ use reth_provider::{
     BlockReader, HashedPostStateProvider, HeaderProvider, StateProviderFactory, StateReader,
 };
 
-use xlayer_builder::flashblocks::XLayerFlashblockPayload;
+use xlayer_builder::broadcast::XLayerFlashblockPayload;
 
 const CONNECTION_BACKOUT_PERIOD: Duration = Duration::from_secs(5);
 

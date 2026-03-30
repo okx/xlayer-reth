@@ -1,14 +1,13 @@
 use crate::{
+    broadcast::XLayerFlashblockPayload,
     flashblocks::{
         best_txs::BestFlashblocksTxs,
         builder_tx::FlashblocksBuilderTx,
         context::FlashblocksBuilderCtx,
         generator::{BlockCell, BuildArguments, PayloadBuilder},
         timing::FlashblockScheduler,
-        utils::{
-            cache::FlashblockPayloadsCache, execution::ExecutionInfo, wspub::WebSocketPublisher,
-        },
-        BuilderConfig, XLayerFlashblockPayload,
+        utils::{cache::FlashblockPayloadsCache, execution::ExecutionInfo},
+        BuilderConfig,
     },
     metrics::tokio::FlashblocksTaskMetrics,
     metrics::BuilderMetrics,
@@ -201,9 +200,6 @@ pub(super) struct FlashblocksBuilder<Pool, Client, Tasks> {
     pub built_payload_tx: mpsc::Sender<OpBuiltPayload>,
     /// Cache for externally received pending flashblocks transactions received via p2p.
     pub p2p_cache: FlashblockPayloadsCache,
-    /// WebSocket publisher for broadcasting flashblocks
-    /// to all connected subscribers.
-    pub ws_pub: Arc<WebSocketPublisher>,
     /// System configuration for the builder
     pub config: BuilderConfig,
     /// The metrics for the builder
@@ -229,7 +225,6 @@ impl<Pool, Client, Tasks> FlashblocksBuilder<Pool, Client, Tasks> {
         built_fb_payload_tx: mpsc::Sender<XLayerFlashblockPayload>,
         built_payload_tx: mpsc::Sender<OpBuiltPayload>,
         p2p_cache: FlashblockPayloadsCache,
-        ws_pub: Arc<WebSocketPublisher>,
         metrics: Arc<BuilderMetrics>,
         task_metrics: Arc<FlashblocksTaskMetrics>,
     ) -> Self {
@@ -241,7 +236,6 @@ impl<Pool, Client, Tasks> FlashblocksBuilder<Pool, Client, Tasks> {
             built_fb_payload_tx,
             built_payload_tx,
             p2p_cache,
-            ws_pub,
             config,
             metrics,
             builder_tx,
@@ -434,14 +428,9 @@ where
         if !ctx.attributes().no_tx_pool && !rebuild_external_payload {
             // For X Layer - skip if replaying
             let fb_payload_with_count = XLayerFlashblockPayload::new(fb_payload.clone(), 0);
-            let flashblock_byte_size =
-                self.ws_pub.publish(&fb_payload_with_count).map_err(PayloadBuilderError::other)?;
-            if !rebuild_external_payload {
-                self.built_fb_payload_tx
-                    .try_send(fb_payload_with_count)
-                    .map_err(PayloadBuilderError::other)?;
-            }
-            ctx.metrics.flashblock_byte_size_histogram.record(flashblock_byte_size as f64);
+            self.built_fb_payload_tx
+                .try_send(fb_payload_with_count.clone())
+                .map_err(PayloadBuilderError::other)?;
 
             // For X Layer, full link monitoring support
             crate::flashblocks::utils::monitor::monitor(
@@ -762,10 +751,6 @@ where
                     fb_payload.clone(),
                     fb_state.target_flashblock_count(),
                 );
-                let flashblock_byte_size = self
-                    .ws_pub
-                    .publish(&fb_payload_with_count)
-                    .wrap_err("failed to publish flashblock via websocket")?;
                 self.built_fb_payload_tx
                     .try_send(fb_payload_with_count)
                     .wrap_err("failed to send built payload to handler")?;
@@ -773,7 +758,6 @@ where
 
                 // Record flashblock build duration
                 ctx.metrics.flashblock_build_duration.record(flashblock_build_start_time.elapsed());
-                ctx.metrics.flashblock_byte_size_histogram.record(flashblock_byte_size as f64);
                 ctx.metrics
                     .flashblock_num_tx_histogram
                     .record(info.executed_transactions.len() as f64);

@@ -18,7 +18,7 @@ use tokio_tungstenite::{
 use tracing::debug;
 use url::Url;
 
-use xlayer_builder::flashblocks::XLayerFlashblockPayload;
+use xlayer_builder::broadcast::XLayerFlashblockPayload;
 
 /// An asynchronous stream of [`XLayerFlashblockPayload`] from a websocket connection.
 ///

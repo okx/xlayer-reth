@@ -1,5 +1,5 @@
 use crate::{
-    flashblocks::XLayerFlashblockPayload, metrics::tokio::MonitoredTask, metrics::BuilderMetrics,
+    broadcast::XLayerFlashblockPayload, metrics::tokio::MonitoredTask, metrics::BuilderMetrics,
 };
 use core::{
     fmt::{Debug, Formatter},
@@ -70,7 +70,7 @@ impl WebSocketPublisher {
         // serialize only once, then just copy around only a pointer
         // to the serialized data for each subscription.
         info!(
-            target: "payload_builder",
+            target: "payload_builder::broadcast",
             event = "flashblock_sent",
             message = "Sending flashblock to subscribers",
             id = %payload.inner.payload_id,
@@ -94,7 +94,7 @@ impl Drop for WebSocketPublisher {
     fn drop(&mut self) {
         // Notify the listener loop to terminate
         let _ = self.term.send(true);
-        info!(target: "payload_builder", "WebSocketPublisher dropped, terminating listener loop");
+        info!(target: "payload_builder::broadcast", "WebSocketPublisher dropped, terminating listener loop");
     }
 }
 
@@ -113,7 +113,7 @@ async fn listener_loop(
         .expect("Failed to convert TcpListener to tokio TcpListener");
 
     let listen_addr = listener.local_addr().expect("Failed to get local address of listener");
-    info!(target: "payload_builder", "Flashblocks WebSocketPublisher listening on {listen_addr}");
+    info!(target: "payload_builder::broadcast", "Flashblocks WebSocketPublisher listening on {listen_addr}");
 
     let mut term = term;
 
@@ -141,7 +141,7 @@ async fn listener_loop(
                     Ok(mut stream) => {
                         tokio::spawn(async move {
                             if let Some(limit) = subscriber_limit && subs.load(Ordering::Relaxed) >= limit as usize {
-                                    warn!(target: "payload_builder", "WebSocket connection for {peer_addr} rejected: subscriber limit reached");
+                                    warn!(target: "payload_builder::broadcast", "WebSocket connection for {peer_addr} rejected: subscriber limit reached");
                                     let _ = stream.close(Some(CloseFrame {
                                         code: CloseCode::Again,
                                         reason: "subscriber limit reached, please try again later".into(),
@@ -149,17 +149,17 @@ async fn listener_loop(
                                     return;
                             }
                             subs.fetch_add(1, Ordering::Relaxed);
-                            debug!(target: "payload_builder", "WebSocket connection established with {}", peer_addr);
+                            debug!(target: "payload_builder::broadcast", "WebSocket connection established with {}", peer_addr);
 
                             // Handle the WebSocket connection in a dedicated task
                             broadcast_loop(stream, metrics, term, receiver_clone, sent).await;
 
                             subs.fetch_sub(1, Ordering::Relaxed);
-                            debug!(target: "payload_builder", "WebSocket connection closed for {}", peer_addr);
+                            debug!(target: "payload_builder::broadcast", "WebSocket connection closed for {}", peer_addr);
                         });
                     }
                     Err(e) => {
-                        warn!(target: "payload_builder", "Failed to accept WebSocket connection from {peer_addr}: {e}");
+                        warn!(target: "payload_builder::broadcast", "Failed to accept WebSocket connection from {peer_addr}: {e}");
                     }
                 }
             }
@@ -193,7 +193,7 @@ async fn broadcast_loop(
             // Check if the publisher is terminated
             _ = term.changed() => {
                 if *term.borrow() {
-                    info!(target: "payload_builder", "WebSocketPublisher is terminating, closing broadcast loop");
+                    info!(target: "payload_builder::broadcast", "WebSocketPublisher is terminating, closing broadcast loop");
                     return;
                 }
             }
@@ -206,18 +206,18 @@ async fn broadcast_loop(
                     sent.fetch_add(1, Ordering::Relaxed);
                     metrics.messages_sent_count.increment(1);
 
-                    trace!(target: "payload_builder", "Broadcasted payload: {:?}", payload);
+                    trace!(target: "payload_builder::broadcast", "Broadcasted payload: {:?}", payload);
                     if let Err(e) = stream.send(Message::Text(payload)).await {
-                        debug!(target: "payload_builder", "Send payload error for flashblocks subscription {peer_addr}: {e}");
+                        debug!(target: "payload_builder::broadcast", "Send payload error for flashblocks subscription {peer_addr}: {e}");
                         break; // Exit the loop if sending fails
                     }
                 }
                 Err(RecvError::Closed) => {
-                    debug!(target: "payload_builder", "Broadcast channel closed, exiting broadcast loop");
+                    debug!(target: "payload_builder::broadcast", "Broadcast channel closed, exiting broadcast loop");
                     return;
                 }
                 Err(RecvError::Lagged(_)) => {
-                    warn!(target: "payload_builder", "Broadcast channel lagged, some messages were dropped");
+                    warn!(target: "payload_builder::broadcast", "Broadcast channel lagged, some messages were dropped");
                 }
             },
 
@@ -225,11 +225,11 @@ async fn broadcast_loop(
             message = stream.next() => if let Some(message) = message { match message {
                 // We handle only close frame to highlight conn closing
                 Ok(Message::Close(_)) => {
-                    info!(target: "payload_builder", "Closing frame received, stopping connection for {peer_addr}");
+                    info!(target: "payload_builder::broadcast", "Closing frame received, stopping connection for {peer_addr}");
                     break;
                 }
                 Err(e) => {
-                    warn!(target: "payload_builder", "Received error. Closing flashblocks subscription for {peer_addr}: {e}");
+                    warn!(target: "payload_builder::broadcast", "Received error. Closing flashblocks subscription for {peer_addr}: {e}");
                     break;
                 }
                 _ => (),

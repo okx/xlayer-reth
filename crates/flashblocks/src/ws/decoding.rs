@@ -1,7 +1,7 @@
 use alloy_primitives::bytes::Bytes;
 use std::io;
 
-use xlayer_builder::flashblocks::XLayerFlashblockPayload;
+use xlayer_builder::broadcast::XLayerFlashblockPayload;
 
 /// A trait for decoding flashblocks from bytes.
 pub trait FlashBlockDecoder: Send + 'static {

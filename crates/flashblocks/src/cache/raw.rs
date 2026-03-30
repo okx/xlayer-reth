@@ -6,10 +6,9 @@ use std::{collections::BTreeMap, sync::Arc};
 use alloy_eips::{eip2718::WithEncoded, eip4895::Withdrawal};
 use alloy_rpc_types_engine::PayloadId;
 use op_alloy_rpc_types_engine::{OpFlashblockPayload, OpFlashblockPayloadBase};
-
 use reth_primitives_traits::{Recovered, SignedTransaction};
 
-use xlayer_builder::flashblocks::XLayerFlashblockPayload;
+use xlayer_builder::broadcast::XLayerFlashblockPayload;
 
 const MAX_RAW_CACHE_SIZE: usize = 10;
 

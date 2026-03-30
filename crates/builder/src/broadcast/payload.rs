@@ -1,7 +1,7 @@
 use op_alloy_rpc_types_engine::OpFlashblockPayload;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct XLayerFlashblockPayload {
     #[serde(flatten)]
     pub inner: OpFlashblockPayload,

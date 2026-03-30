@@ -4,7 +4,7 @@ use tracing::*;
 
 use reth_node_core::dirs::{ChainPath, DataDirPath};
 
-use xlayer_builder::flashblocks::{FlashblockPayloadsCache, WebSocketPublisher};
+use xlayer_builder::{broadcast::WebSocketPublisher, flashblocks::FlashblockPayloadsCache};
 
 /// Handles the persistence of the pending flashblocks sequence to disk.
 pub async fn handle_persistence(mut rx: ReceivedFlashblocksRx, datadir: ChainPath<DataDirPath>) {

@@ -15,15 +15,13 @@ mod context;
 mod generator;
 mod handler;
 mod handler_ctx;
-mod payload;
 mod service;
 mod timing;
 pub(crate) mod utils;
 
 pub use context::FlashblocksBuilderCtx;
-pub use payload::XLayerFlashblockPayload;
 pub use service::{FlashblocksServiceBuilder, PayloadEventsSender};
-pub use utils::{cache::FlashblockPayloadsCache, wspub::WebSocketPublisher};
+pub use utils::cache::FlashblockPayloadsCache;
 
 /// Configuration values that are specific to the flashblocks builder.
 #[derive(Debug, Clone)]
@@ -55,9 +53,6 @@ pub struct FlashblocksConfig {
     /// Time in milliseconds to build the last flashblock early before the end of the slot.
     /// This serves as a buffer time to account for the last flashblock being delayed.
     pub end_buffer_ms: u64,
-
-    /// Whether to enable the p2p node for flashblocks
-    pub p2p_enabled: bool,
 
     /// Port for the p2p node
     pub p2p_port: u16,
@@ -94,7 +89,6 @@ impl Default for FlashblocksConfig {
             number_contract_address: None,
             send_offset_ms: 0,
             end_buffer_ms: 0,
-            p2p_enabled: false,
             p2p_port: 9009,
             p2p_private_key_file: None,
             p2p_known_peers: None,
@@ -214,7 +208,6 @@ impl TryFrom<BuilderArgs> for BuilderConfig {
                 number_contract_address,
                 send_offset_ms: args.flashblocks.flashblocks_send_offset_ms,
                 end_buffer_ms: args.flashblocks.flashblocks_end_buffer_ms,
-                p2p_enabled: args.flashblocks.p2p.p2p_enabled,
                 p2p_port: args.flashblocks.p2p.p2p_port,
                 p2p_private_key_file: args.flashblocks.p2p.p2p_private_key_file,
                 p2p_known_peers: args.flashblocks.p2p.p2p_known_peers,

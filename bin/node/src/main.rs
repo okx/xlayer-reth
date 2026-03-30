@@ -13,7 +13,7 @@ use tracing::info;
 
 use reth::rpc::eth::EthApiTypes;
 use reth::{
-    builder::{DebugNodeLauncher, EngineNodeLauncher, Node, NodeHandle, TreeConfig},
+    builder::{DebugNodeLauncher, EngineNodeLauncher, Node, NodeHandle},
     providers::providers::BlockchainProvider,
 };
 use reth_chainspec::ChainSpecProvider;
@@ -219,11 +219,7 @@ fn main() {
                     Ok(())
                 })
                 .launch_with_fn(|builder| {
-                    let engine_tree_config = TreeConfig::default()
-                        .with_persistence_threshold(builder.config().engine.persistence_threshold)
-                        .with_memory_block_buffer_target(
-                            builder.config().engine.memory_block_buffer_target,
-                        );
+                    let engine_tree_config = builder.config().engine.tree_config();
 
                     let dev_mode = builder.config().dev.dev;
                     if dev_mode {
