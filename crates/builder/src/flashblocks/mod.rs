@@ -226,6 +226,6 @@ impl BuilderConfig {
         if self.block_time.as_millis() == 0 || self.flashblocks.interval.as_millis() == 0 {
             return 0;
         }
-        (self.block_time.as_millis() / self.flashblocks.interval.as_millis()) as u64
+        self.block_time.as_millis().div_ceil(self.flashblocks.interval.as_millis()) as u64
     }
 }
