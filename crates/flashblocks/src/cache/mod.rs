@@ -233,14 +233,19 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
         let guard = self.inner.read();
         let mut header =
             guard.get_block_by_hash(block_hash).map(|bar| bar.block.clone_sealed_header());
-        let mut overlay = if let Some(ref h) = header {
-            let block_num = h.number();
-            guard.get_executed_blocks_up_to_height(block_num)?.unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+        let executed = header.as_ref().map(|h| guard.get_executed_blocks_up_to_height(h.number()));
         let canon_hash = guard.get_canon_info().1;
         drop(guard);
+
+        let mut overlay = match executed {
+            Some(Ok(Some(blocks))) => blocks,
+            Some(Ok(None)) | None => Vec::new(),
+            Some(Err(e)) => {
+                warn!(target: "flashblocks", "Failed to get flashblocks state provider: {e}. Flushing cache");
+                self.inner.write().flush();
+                return Err(e);
+            }
+        };
 
         // 2. Retrieve engine canonical in-memory blocks
         let anchor_hash =
@@ -413,23 +418,25 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
         let expected_height = self.confirm_height + 1;
 
         if pending_height == expected_height {
-            let incoming_seq = pending_sequence.clone();
+            let broadcast = pending_sequence.clone();
             if pending_sequence.is_target_flashblock() {
-                // Target flashblock. Promote to confirm, and clear pending state
+                // Target flashblock. Promote to confirm, and clear pending state.
                 self.handle_confirmed_block(
                     expected_height,
-                    incoming_seq.pending.executed_block,
-                    incoming_seq.pending.receipts,
+                    pending_sequence.pending.executed_block,
+                    pending_sequence.pending.receipts,
                 )?;
                 self.pending_cache = None;
             } else {
                 // In-progress — replace pending with newer flashblock
-                self.pending_cache = Some(incoming_seq);
+                self.pending_cache = Some(pending_sequence);
             }
+            let _ = self.pending_sequence_tx.send(Some(broadcast));
         } else if pending_height == expected_height + 1 {
             // The next block's flashblock arrived. The target flashblocks was missed on
             // the builder. Promote current pending to confirm, and set incoming as new
             // pending sequence.
+            let broadcast = pending_sequence.clone();
             let sequence = self.pending_cache.take().ok_or_else(|| {
                 eyre::eyre!(
                     "polluted state cache - trying to advance pending tip but no current pending"
@@ -440,13 +447,15 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
                 sequence.pending.executed_block,
                 sequence.pending.receipts,
             )?;
-            self.pending_cache = Some(pending_sequence.clone());
+            self.pending_cache = Some(pending_sequence);
+            let _ = self.pending_sequence_tx.send(Some(broadcast));
+        } else if pending_height <= self.confirm_height {
+            // State cache may have advanced from canonical block stream. Skip
         } else {
             return Err(eyre::eyre!(
                 "polluted state cache - not next consecutive pending height block"
             ));
         }
-        let _ = self.pending_sequence_tx.send(Some(pending_sequence));
         Ok(())
     }
 
@@ -473,19 +482,30 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
             self.pending_cache.as_ref().is_some_and(|p| p.get_height() <= canon_info.0);
         let hash_mismatch = self.confirm_cache.number_for_hash(&canon_info.1).is_none()
             && self.confirm_cache.get_block_by_number(canon_info.0).is_some();
-        let flush = pending_stale || hash_mismatch || reorg;
+        let flush = hash_mismatch || reorg;
         if flush {
             warn!(
                 target: "flashblocks",
                 canonical_height = canon_info.0,
                 confirm_height = self.confirm_height,
                 canonical_reorg = reorg,
-                pending_stale,
                 hash_mismatch,
-                "Reorg or pending stale detected on handle canonical block",
+                "Reorg or hash mismatch detected, flushing entire flashblocks state cache",
             );
             self.flush();
         } else {
+            if pending_stale {
+                // Pending is stale but confirm cache is valid. Just clear pending —
+                // the canonical chainstate serves this block. The validator's in-flight
+                // commit (if any) will get a benign "polluted" error and move on.
+                debug!(
+                    target: "flashblocks",
+                    canonical_height = canon_info.0,
+                    confirm_height = self.confirm_height,
+                    "Clearing stale pending on canonical block (confirm cache preserved)",
+                );
+                self.pending_cache = None;
+            }
             debug!(
                 target: "flashblocks",
                 canonical_height = canon_info.0,
