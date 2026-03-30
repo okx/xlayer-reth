@@ -1,7 +1,5 @@
-# XLayer Reth
-
-<p align="center">
-  <img src="./xlayer-logo.png" alt="XLayer" width="320" />
+<p align="">
+  <img src="./xlayer-logo.png" alt="XLayer" width="325" />
 </p>
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
@@ -9,10 +7,18 @@
 [![Rust](https://img.shields.io/badge/Rust-1.93+-orange.svg)](https://www.rust-lang.org/)
 [![GitHub release](https://img.shields.io/github/v/release/okx/xlayer-reth)](https://github.com/okx/xlayer-reth/releases)
 
+# XLayer Reth
 
-## Contents
+XLayer Reth is a customized implementation of [Reth](https://github.com/paradigmxyz/reth) optimized for the XLayer network, an Optimism-based Layer 2 solution.
 
-- [Overview](#overview)
+This project provides a high-performance, production-ready Ethereum execution client tailored for XLayer's specific requirements. It builds upon the upstream Reth codebase with custom optimizations and features for the XLayer network.
+
+**[Run a dev node](#running-a-dev-node)** | **[Build a node](#building-from-source)** | **[Contribute to XLayer Reth](#contributing)**
+
+---
+
+## Table of Contents
+
 - [Getting Started](#getting-started)
   - [Prerequisites](#prerequisites)
   - [Building from Source](#building-from-source)
@@ -26,12 +32,6 @@
   - [Flashblocks Tests](#flashblocks-tests)
 - [Contributing](#contributing)
 - [License](#license)
-
-## Overview
-
-XLayer Reth is a customized implementation of [Reth](https://github.com/paradigmxyz/reth) optimized for the XLayer network, an Optimism-based Layer 2 solution.
-
-This project provides a high-performance, production-ready Ethereum execution client tailored for XLayer's specific requirements. It builds upon the upstream Reth codebase with custom optimizations and features for the XLayer network.
 
 ### Why built on top of Reth
 
