@@ -482,8 +482,7 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
             self.pending_cache.as_ref().is_some_and(|p| p.get_height() <= canon_info.0);
         let hash_mismatch = self.confirm_cache.number_for_hash(&canon_info.1).is_none()
             && self.confirm_cache.get_block_by_number(canon_info.0).is_some();
-        let flush = hash_mismatch || reorg;
-        if flush {
+        if hash_mismatch || reorg {
             warn!(
                 target: "flashblocks",
                 canonical_height = canon_info.0,
@@ -492,32 +491,35 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
                 hash_mismatch,
                 "Reorg or hash mismatch detected, flushing entire flashblocks state cache",
             );
+            self.canon_info = canon_info;
             self.flush();
-        } else {
-            if pending_stale {
-                // Pending is stale but confirm cache is valid. Just clear pending —
-                // the canonical chainstate serves this block. The validator's in-flight
-                // commit (if any) will get a benign "polluted" error and move on.
-                debug!(
-                    target: "flashblocks",
-                    canonical_height = canon_info.0,
-                    confirm_height = self.confirm_height,
-                    "Clearing stale pending on canonical block (confirm cache preserved)",
-                );
-                self.pending_cache = None;
-            }
+            return true;
+        }
+
+        if pending_stale {
+            // Pending is stale but confirm cache is valid. Just clear pending —
+            // the canonical chainstate serves this block. The validator's in-flight
+            // commit (if any) will get a benign "polluted" error and move on.
             debug!(
                 target: "flashblocks",
                 canonical_height = canon_info.0,
                 confirm_height = self.confirm_height,
-                "Evicting flashblocks state inner cache"
+                "Clearing stale pending on canonical block (confirm cache preserved)",
             );
-            self.confirm_cache.flush_up_to_height(canon_info.0);
+            self.pending_cache = None;
         }
+        debug!(
+            target: "flashblocks",
+            canonical_height = canon_info.0,
+            confirm_height = self.confirm_height,
+            "Evicting flashblocks state inner cache"
+        );
+        self.confirm_cache.flush_up_to_height(canon_info.0);
+
         // Update state heights
         self.canon_info = canon_info;
         self.confirm_height = self.confirm_height.max(canon_info.0);
-        flush
+        false
     }
 
     pub fn get_confirmed_block(&self) -> Option<BlockAndReceipts<N>> {
