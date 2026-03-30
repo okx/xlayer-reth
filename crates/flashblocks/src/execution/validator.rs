@@ -174,7 +174,8 @@ where
         let mut state_provider = provider_builder.build()?;
 
         // For incremental builds, use the previous index's computed state root so the incremental
-        // prefix trie nodes (PreservedSparseTrie) are re-used.
+        // prefix trie nodes (PreservedSparseTrie) are re-used, to ensure SR calculation is only
+        // done on suffix changes and optimized.
         let parent_state_root = header.state_root();
         let parent_header =
             pending_sequence.as_ref().map_or(header, |seq| seq.parent_header.clone());
@@ -357,6 +358,13 @@ where
         let prefix_gas_used = output.result.gas_used;
         let prefix_blob_gas_used = output.result.blob_gas_used;
 
+        // Accumulate trie_updates across sequence incremental executions.
+        let mut accumulated_trie_updates = pending_sequence
+            .as_ref()
+            .map(|seq| seq.prefix_execution_meta.accumulated_trie_updates.clone())
+            .unwrap_or_default();
+        accumulated_trie_updates.extend(trie_output.clone());
+
         // Assemble the block using pre-computed roots (avoids recomputation).
         let block = assemble_flashblock(
             self.chain_spec.as_ref(),
@@ -383,6 +391,7 @@ where
             block,
             output,
             hashed_state,
+            // Only pass prefix trie updates to the deferred trie task
             trie_output,
             overlay_data,
             overlay_factory,
@@ -405,6 +414,7 @@ where
                 gas_used: prefix_gas_used,
                 blob_gas_used: prefix_blob_gas_used,
                 last_flashblock_index: args.last_flashblock_index,
+                accumulated_trie_updates,
             },
             block_transaction_count,
             args.target_index,
@@ -440,20 +450,18 @@ where
             );
         }
 
-        self.flashblocks_state.handle_pending_sequence(
-            PendingSequence {
-                // Set pending block deadline to 1 second matching default blocktime.
-                pending: PendingBlock::with_executed_block(
-                    Instant::now() + Duration::from_secs(1),
-                    executed_block,
-                ),
-                tx_index,
-                block_hash,
-                parent_header,
-                prefix_execution_meta,
-            },
+        self.flashblocks_state.handle_pending_sequence(PendingSequence {
+            // Set pending block deadline to 1 second matching default blocktime.
+            pending: PendingBlock::with_executed_block(
+                Instant::now() + Duration::from_secs(1),
+                executed_block,
+            ),
+            tx_index,
+            block_hash,
+            parent_header,
+            prefix_execution_meta,
             target_index,
-        )
+        })
     }
 
     fn prevalidate_incoming_sequence<

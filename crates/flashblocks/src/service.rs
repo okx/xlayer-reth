@@ -268,22 +268,30 @@ where
                     use reth_payload_builder_primitives::Events;
 
                     while pending_rx.changed().await.is_ok() {
-                        let Some(pending_sequence) = pending_rx.borrow_and_update().clone() else {
+                        let Some(pending_sequence) = pending_rx
+                            .borrow_and_update()
+                            .clone()
+                            .filter(|s| s.is_target_flashblock())
+                        else {
                             continue;
                         };
                         let executed = &pending_sequence.executed_block;
                         let block = executed.recovered_block.clone_sealed_block();
                         let trie_data = executed.trie_data();
+                        // Use accumulated trie_updates from all incremental sequence executions.
+                        let accumulated_trie_updates = Arc::new(
+                            pending_sequence
+                                .prefix_execution_meta
+                                .accumulated_trie_updates
+                                .clone()
+                                .into_sorted(),
+                        );
                         let built =
                             reth_payload_primitives::BuiltPayloadExecutedBlock::<OpPrimitives> {
                                 recovered_block: executed.recovered_block.clone(),
                                 execution_output: executed.execution_output.clone(),
                                 hashed_state: Either::Right(trie_data.hashed_state),
-                                // Send empty trie_updates to avoid polluting the engine's overlay trie
-                                // state. The incremental PreservedSparseTrie produces incomplete
-                                // trie_updates (missing prefix leaf changes folded into pruned branches).
-                                // The engine will compute its own trie data fresh from hashed_state.
-                                trie_updates: Either::Right(Arc::default()),
+                                trie_updates: Either::Right(accumulated_trie_updates),
                             };
                         // Use default zero id — to avoid accumulating stale entries in the engine state tree.
                         let payload = OpBuiltPayload::<OpPrimitives>::new(

@@ -299,9 +299,8 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
     pub fn handle_pending_sequence(
         &self,
         pending_sequence: PendingSequence<N>,
-        target_index: u64,
     ) -> eyre::Result<()> {
-        self.inner.write().handle_pending_sequence(pending_sequence, target_index)
+        self.inner.write().handle_pending_sequence(pending_sequence)
     }
 
     /// Handles a canonical block committed to the canonical chainstate.
@@ -408,14 +407,13 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
     fn handle_pending_sequence(
         &mut self,
         pending_sequence: PendingSequence<N>,
-        target_index: u64,
     ) -> eyre::Result<()> {
         let pending_height = pending_sequence.get_height();
         let expected_height = self.confirm_height + 1;
 
         if pending_height == expected_height {
             let incoming_seq = pending_sequence.clone();
-            if target_index > 0 && pending_sequence.get_last_flashblock_index() >= target_index {
+            if pending_sequence.is_target_flashblock() {
                 // Target flashblock. Promote to confirm, and clear pending state
                 self.handle_confirmed_block(
                     expected_height,
