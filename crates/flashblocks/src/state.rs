@@ -230,7 +230,7 @@ pub async fn handle_canonical_stream<N: NodePrimitives>(
                     if let Some(seq) = rx.borrow_and_update().as_ref()
                         .filter(|s| s.is_target_flashblock())
                     {
-                        trie_updates = Some(seq.prefix_execution_meta.accumulated_trie_updates.clone().into_sorted());
+                        trie_updates = Some((seq.get_height(), seq.prefix_execution_meta.accumulated_trie_updates.clone().into_sorted()));
                     }
                     continue;
                 }
@@ -252,7 +252,7 @@ pub async fn handle_canonical_stream<N: NodePrimitives>(
                 &flashblocks_state,
                 block_number,
                 block_hash,
-                trie_updates.take(),
+                trie_updates.take().filter(|t| t.0 == block_number).map(|t| t.1),
             );
         }
 

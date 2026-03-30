@@ -267,14 +267,6 @@ pub struct FlashblocksRpcArgs {
         default_value = "false"
     )]
     pub flashblocks_debug_state_comparison: bool,
-
-    /// Disable flashblocks RPC pre-warming engine state
-    #[arg(
-        long = "xlayer.flashblocks-disable-pre-warming",
-        help = "Disable flashblocks RPC pre-warming engine state",
-        default_value = "false"
-    )]
-    pub flashblocks_disable_pre_warming: bool,
 }
 
 #[cfg(test)]

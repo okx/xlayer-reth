@@ -21,10 +21,12 @@ pub(crate) fn debug_compare_flashblocks_bundle_states<N: NodePrimitives + 'stati
         .map(|state| state.block());
 
     if fb_trie_updates.is_none() {
-        // Flashblocks state cache might be lagging behind canonical chainstate. Check pending sequence
+        // Flashblocks state cache might be lagging behind canonical chainstate. Check pending sequence.
+        // Only use target flashblock's accumulated trie_updates — non-target sequences have incomplete
+        // accumulation and would produce false-positive mismatches.
         fb_trie_updates = flashblocks_state
             .get_pending_sequence()
-            .filter(|seq| seq.get_height() == block_number)
+            .filter(|seq| seq.get_height() == block_number && seq.is_target_flashblock())
             .map(|seq| seq.prefix_execution_meta.accumulated_trie_updates.clone().into_sorted());
     }
 

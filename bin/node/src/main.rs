@@ -171,7 +171,7 @@ fn main() {
                                 relay_flashblocks: args.rollup_args.flashblocks_url.is_some(),
                             },
                         )?;
-                        if !args.xlayer_args.flashblocks_rpc.flashblocks_disable_pre_warming {
+                        if !args.xlayer_args.flashblocks_rpc.flashblocks_debug_state_comparison {
                             service.spawn_prewarm(events_sender);
                         }
                         service.spawn_persistence()?;
