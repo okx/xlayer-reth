@@ -94,6 +94,13 @@ fn compare_executed_blocks<N: NodePrimitives>(
         }
     }
 
+    // Compare hashed_state (the state diff input to trie computation).
+    // This confirms the incremental BundleState produces the same hashed diff
+    // as a fresh execution — critical since we send hashed_state to the engine pre-warm.
+    let fb_trie = fb.trie_data();
+    let eng_trie = eng.trie_data();
+    let hashed_state_match = *fb_trie.hashed_state == *eng_trie.hashed_state;
+
     let all_match = fb_hash == eng_hash
         && account_mismatches.is_empty()
         && fb_only.is_empty()
@@ -101,7 +108,8 @@ fn compare_executed_blocks<N: NodePrimitives>(
         && fb_bundle.reverts.len() == eng_bundle.reverts.len()
         && revert_mismatches.is_empty()
         && revert_fb_only.is_empty()
-        && revert_eng_only.is_empty();
+        && revert_eng_only.is_empty()
+        && hashed_state_match;
 
     if all_match {
         info!(
@@ -129,6 +137,7 @@ fn compare_executed_blocks<N: NodePrimitives>(
             revert_mismatches = revert_mismatches.len(),
             revert_fb_only = revert_fb_only.len(),
             revert_eng_only = revert_eng_only.len(),
+            hashed_state_match,
             "Execution output MISMATCH: flashblocks != engine"
         );
         for addr in account_mismatches.iter().take(3) {

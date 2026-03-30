@@ -279,7 +279,11 @@ where
                                 recovered_block: executed.recovered_block.clone(),
                                 execution_output: executed.execution_output.clone(),
                                 hashed_state: Either::Right(trie_data.hashed_state),
-                                trie_updates: Either::Right(trie_data.trie_updates),
+                                // Send empty trie_updates to avoid polluting the engine's overlay trie
+                                // state. The incremental PreservedSparseTrie produces incomplete
+                                // trie_updates (missing prefix leaf changes folded into pruned branches).
+                                // The engine will compute its own trie data fresh from hashed_state.
+                                trie_updates: Either::Right(Arc::default()),
                             };
                         // Use default zero id — to avoid accumulating stale entries in the engine state tree.
                         let payload = OpBuiltPayload::<OpPrimitives>::new(
