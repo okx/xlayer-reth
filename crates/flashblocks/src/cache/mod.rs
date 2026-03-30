@@ -267,13 +267,14 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
 
     /// Returns the `ExecutedBlock` for the given block number from pending or confirm cache.
     /// Used for diagnostic comparison with the engine's execution.
-    pub fn get_executed_block_by_number(
+    pub fn debug_get_executed_block_by_number(
         &self,
         block_number: u64,
     ) -> Option<reth_chain_state::ExecutedBlock<N>> {
         let guard = self.inner.read();
         if let Some(seq) = guard.pending_cache.as_ref()
             && seq.get_height() == block_number
+            && seq.is_target_flashblock()
         {
             return Some(seq.pending.executed_block.clone());
         }

@@ -14,7 +14,7 @@ pub(crate) fn debug_compare_flashblocks_bundle_states<N: NodePrimitives + 'stati
 ) {
     // Capture data synchronously (before handle_canonical_block evicts the cache).
     // These are cheap — ExecutedBlock internals are Arc'd.
-    let fb_block = flashblocks_state.get_executed_block_by_number(block_number);
+    let fb_block = flashblocks_state.debug_get_executed_block_by_number(block_number);
     let engine_block = flashblocks_state
         .canon_in_memory_state
         .state_by_hash(block_hash)
