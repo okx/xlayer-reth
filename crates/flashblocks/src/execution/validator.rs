@@ -197,6 +197,7 @@ where
 
         debug!(
             target: "flashblocks::validator",
+            execute_height = args.base.block_number,
             ?strategy,
             "Decided which state root algorithm to run"
         );
@@ -280,6 +281,7 @@ where
                         .inspect_err(|_| {
                             tracing::error!(
                                 target: "flashblocks::validator",
+                                execute_height = args.base.block_number,
                                 "Receipt root task dropped sender without result, receipt root calculation likely aborted"
                             );
                         })?
@@ -296,19 +298,20 @@ where
         let mut maybe_state_root = None;
         match strategy {
             StateRootStrategy::StateRootTask => {
-                debug!(target: "flashblocks::validator", "Using sparse trie state root algorithm");
+                debug!(target: "flashblocks::validator", execute_height = args.base.block_number, "Using sparse trie state root algorithm");
 
                 let task_result = self.await_state_root_with_timeout(
                     &mut handle,
                     overlay_factory.clone(),
                     &hashed_state,
+                    args.base.block_number,
                 )?;
 
                 match task_result {
                     Ok(StateRootComputeOutcome { state_root, trie_updates }) => {
                         let elapsed = root_time.elapsed();
                         maybe_state_root = Some((state_root, trie_updates));
-                        info!(target: "flashblocks::validator", ?state_root, ?elapsed, "State root task finished");
+                        info!(target: "flashblocks::validator", execute_height = args.base.block_number, ?state_root, ?elapsed, "State root task finished");
                     }
                     Err(error) => {
                         debug!(target: "flashblocks::validator", %error, "State root task failed");
@@ -316,12 +319,13 @@ where
                 }
             }
             StateRootStrategy::Parallel => {
-                debug!(target: "flashblocks::validator", "Using parallel state root algorithm");
+                debug!(target: "flashblocks::validator", execute_height = args.base.block_number, "Using parallel state root algorithm");
                 match self.compute_state_root_parallel(overlay_factory.clone(), &hashed_state) {
                     Ok(result) => {
                         let elapsed = root_time.elapsed();
                         info!(
                             target: "flashblocks::validator",
+                            execute_height = args.base.block_number,
                             regular_state_root = ?result.0,
                             ?elapsed,
                             "Regular root task finished"
@@ -329,7 +333,7 @@ where
                         maybe_state_root = Some((result.0, result.1));
                     }
                     Err(error) => {
-                        debug!(target: "flashblocks::validator", %error, "Parallel state root computation failed");
+                        debug!(target: "flashblocks::validator", execute_height = args.base.block_number, err = %error, "Parallel state root computation failed");
                     }
                 }
             }
@@ -343,7 +347,7 @@ where
             maybe_state_root
         } else {
             // fallback is to compute the state root regularly in sync
-            warn!(target: "flashblocks::validator", "Failed to compute state root");
+            warn!(target: "flashblocks::validator", execute_height = args.base.block_number, "Failed to compute state root");
             let (root, updates) =
                 Self::compute_state_root_serial(overlay_factory.clone(), &hashed_state)?;
             (root, updates)
@@ -536,6 +540,7 @@ where
     where
         T: ExecutableTxFor<EvmConfig> + ExecutableTxParts<TxEnvFor<EvmConfig>, N::SignedTx>,
         Err: core::error::Error + Send + Sync + 'static,
+        N::SignedTx: TxHashRef,
         EvmConfig: ConfigureEvm<Primitives = N, NextBlockEnvCtx: From<OpFlashblockPayloadBase> + Unpin>
             + 'static,
     {
@@ -585,12 +590,14 @@ where
         }
 
         // Execute all transactions and finalize
+        let execute_height = parent_header.number() + 1;
         let (executor, suffix_senders, suffix_receipts) = self.execute_transactions(
             executor,
             pending_sequence,
             transaction_count,
             handle,
             &receipt_tx,
+            execute_height,
         )?;
         drop(receipt_tx);
 
@@ -649,7 +656,7 @@ where
         }
 
         let output = BlockExecutionOutput { result, state: bundle };
-        debug!(target: "flashblocks::validator", "Executed block");
+        debug!(target: "flashblocks::validator", execute_height, "Executed block");
 
         Ok((output, senders, result_rx, read_cache))
     }
@@ -662,6 +669,7 @@ where
         transaction_count: usize,
         handle: &mut PayloadHandle<T, Err, N::Receipt>,
         receipt_tx: &crossbeam_channel::Sender<IndexedReceipt<N::Receipt>>,
+        execute_height: u64,
     ) -> eyre::Result<(Executor, Vec<Address>, Vec<N::Receipt>), BlockExecutionError>
     where
         T: ExecutableTxFor<EvmConfig>
@@ -671,6 +679,7 @@ where
             >,
         Executor: BlockExecutor<Receipt = N::Receipt>,
         Err: core::error::Error + Send + Sync + 'static,
+        N::SignedTx: TxHashRef,
         EvmConfig: ConfigureEvm<Primitives = N, NextBlockEnvCtx: From<OpFlashblockPayloadBase> + Unpin>
             + 'static,
     {
@@ -702,7 +711,7 @@ where
             let tx_signer = *tx.signer();
             senders.push(tx_signer);
 
-            trace!(target: "flashblocks::validator", "Executing transaction");
+            trace!(target: "flashblocks::validator", execute_height, txhash = %tx.tx().tx_hash(), "Executing transaction");
             executor.execute_transaction(tx)?;
 
             let current_len = executor.receipts().len();
@@ -786,6 +795,7 @@ where
         handle: &mut PayloadHandle<Tx, Err, R>,
         overlay_factory: OverlayStateProviderFactory<Provider>,
         hashed_state: &HashedPostState,
+        execute_height: u64,
     ) -> eyre::Result<Result<StateRootComputeOutcome, ParallelStateRootError>> {
         let Some(timeout) = self.tree_config.state_root_task_timeout() else {
             return Ok(handle.state_root());
@@ -801,6 +811,7 @@ where
             Err(RecvTimeoutError::Timeout) => {
                 warn!(
                     target: "flashblocks::validator",
+                    execute_height,
                     ?timeout,
                     "State root task timed out, spawning sequential fallback"
                 );
@@ -823,6 +834,7 @@ where
                             debug!(
                                 target: "flashblocks::validator",
                                 source = "task",
+                                execute_height,
                                 "State root timeout race won"
                             );
                             return Ok(result);
@@ -830,6 +842,7 @@ where
                         Err(RecvTimeoutError::Disconnected) => {
                             debug!(
                                 target: "flashblocks::validator",
+                                execute_height,
                                 "State root task dropped, waiting for sequential fallback"
                             );
                             let result = seq_rx.recv().map_err(|_| {
@@ -847,6 +860,7 @@ where
                         debug!(
                             target: "flashblocks::validator",
                             source = "sequential",
+                            execute_height,
                             "State root timeout race won"
                         );
                         let (state_root, trie_updates) = result?;
