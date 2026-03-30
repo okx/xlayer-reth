@@ -18,11 +18,16 @@ pub(crate) fn debug_compare_flashblocks_bundle_states<N: NodePrimitives + 'stati
         .canon_in_memory_state
         .state_by_hash(block_hash)
         .map(|state| state.block());
+    // Capture accumulated trie_updates from the pending sequence for trie comparison.
+    let fb_trie_updates = flashblocks_state
+        .get_pending_sequence()
+        .filter(|seq| seq.get_height() == block_number)
+        .map(|seq| seq.prefix_execution_meta.accumulated_trie_updates.clone());
 
     // Spawn the heavy comparison on a blocking thread so the canonical stream handler
     // stays responsive. trie_data() is synchronous (parking_lot::Mutex, no async).
     tokio::task::spawn_blocking(move || {
-        compare_executed_blocks(fb_block, engine_block, block_number);
+        compare_executed_blocks(fb_block, engine_block, block_number, fb_trie_updates);
     });
 }
 
@@ -31,6 +36,7 @@ fn compare_executed_blocks<N: NodePrimitives>(
     fb_block: Option<ExecutedBlock<N>>,
     engine_block: Option<ExecutedBlock<N>>,
     block_number: u64,
+    fb_trie_updates: Option<reth_trie::updates::TrieUpdates>,
 ) {
     let (Some(fb), Some(eng)) = (fb_block, engine_block) else {
         debug!(
@@ -146,5 +152,26 @@ fn compare_executed_blocks<N: NodePrimitives>(
         for addr in revert_mismatches.iter().take(3) {
             warn!(target: "flashblocks::verify", %addr, "Revert mismatch");
         }
+    }
+
+    // Compare accumulated trie_updates (merged across all flashblock indices) with
+    // the engine's fresh trie_updates. This validates that the incremental accumulation
+    // via TrieUpdates::extend() produces the same result as a fresh single-pass computation.
+    let Some(fb_updates) = fb_trie_updates else {
+        return;
+    };
+    let fb_sorted = fb_updates.into_sorted();
+    if fb_sorted == *eng_trie.trie_updates {
+        info!(
+            target: "flashblocks::verify",
+            block_number,
+            "Trie updates MATCH: flashblocks == engine"
+        );
+    } else {
+        warn!(
+            target: "flashblocks::verify",
+            block_number,
+            "Trie updates MISMATCH: flashblocks != engine"
+        );
     }
 }
