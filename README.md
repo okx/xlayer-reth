@@ -6,6 +6,23 @@
 [![GitHub release](https://img.shields.io/github/v/release/okx/xlayer-reth)](https://github.com/okx/xlayer-reth/releases)
 
 
+## Contents
+
+- [Overview](#overview)
+- [Getting Started](#getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Building from Source](#building-from-source)
+  - [Docker Build](#docker-build)
+- [Initialization](#initialization)
+- [Running a Dev Node](#running-a-dev-node)
+- [Configuration](#configuration)
+- [Development](#development)
+- [Testing](#testing)
+  - [End-to-end Testing](#end-to-end-testing)
+  - [Flashblocks Tests](#flashblocks-tests)
+- [Contributing](#contributing)
+- [License](#license)
+
 ## Overview
 
 XLayer Reth is a customized implementation of [Reth](https://github.com/paradigmxyz/reth) optimized for the XLayer network, an Optimism-based Layer 2 solution.
