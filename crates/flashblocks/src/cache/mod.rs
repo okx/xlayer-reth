@@ -393,8 +393,8 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
                 "polluted state cache - not next consecutive target confirm height block"
             ));
         }
-        self.confirm_height = block_number;
         self.confirm_cache.insert(block_number, executed_block, receipts)?;
+        self.confirm_height = block_number;
         info!(
             target: "flashblocks",
             confirm_height = self.confirm_height,
@@ -543,7 +543,7 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
     /// the target must be present in the overlay. This invariant is naturally maintained
     /// by `handle_confirmed_block` (rejects non-consecutive heights). The pending block,
     /// if present, sits at `confirm_height + 1`; it may be absent after a complete
-    /// sequence is promoted directly to the confirm cache via `target_index`.
+    /// sequence is promoted directly to the confirm cache via `sequence_end` signal.
     ///
     /// On validation failure (non-contiguous overlay or gap to canonical), the cache is
     /// flushed and `None` is returned.
