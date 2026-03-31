@@ -102,7 +102,7 @@ impl<N, EvmConfig, Provider, ChainSpec>
 where
     N: NodePrimitives,
     N::Receipt: FlashblockReceipt,
-    EvmConfig: ConfigureEvm<Primitives = N, NextBlockEnvCtx: From<OpFlashblockPayloadBase> + Unpin>
+    EvmConfig: ConfigureEvm<Primitives = N, NextBlockEnvCtx: From<OpFlashblockPayloadBase> + Unpin + Send>
         + 'static,
     Provider: StateProviderFactory
         + HeaderProvider<Header = HeaderTy<N>>
@@ -141,7 +141,9 @@ where
 
     /// Executes the incoming flashblocks sequence transactions delta and commits the
     /// result to the flashblocks state cache.
-    pub(crate) fn execute_sequence<I: IntoIterator<Item = WithEncoded<Recovered<N::SignedTx>>>>(
+    pub(crate) async fn execute_sequence<
+        I: IntoIterator<Item = WithEncoded<Recovered<N::SignedTx>>>,
+    >(
         &mut self,
         args: BuildArgs<I>,
     ) -> eyre::Result<()>
@@ -283,7 +285,7 @@ where
         let (receipts_root, logs_bloom) = {
             debug!(target: "flashblocks::validator", "wait_receipt_root");
             receipt_root_rx
-                        .blocking_recv()
+                        .await
                         .inspect_err(|_| {
                             tracing::error!(
                                 target: "flashblocks::validator",
@@ -292,7 +294,7 @@ where
                             );
                         })?
         };
-        let transactions_root = result_rx.blocking_recv().inspect_err(|_| {
+        let transactions_root = result_rx.await.inspect_err(|_| {
             tracing::error!(
                 target: "flashblocks::validator",
                 "Transaction root task dropped sender without result, transaction root calculation likely aborted"
@@ -841,14 +843,14 @@ where
     /// If a timeout is configured (`state_root_task_timeout`), this method first waits for the
     /// state root task up to the timeout duration. If the task doesn't complete in time, a
     /// sequential state root computation is spawned via `spawn_blocking`. Both computations
-    /// then race: the main thread polls the task receiver and the sequential result channel
-    /// in a loop, returning whichever finishes first.
+    /// send results into a single unified channel — one `recv()` returns whichever finishes
+    /// first, with no polling.
     ///
     /// If no timeout is configured, this simply awaits the state root task without any fallback.
     ///
-    /// Returns `ProviderResult<Result<...>>` where the outer `ProviderResult` captures
-    /// unrecoverable errors from the sequential fallback (e.g. DB errors), while the inner
-    /// `Result` captures parallel state root task errors that can still fall back to serial.
+    /// Returns `eyre::Result<Result<...>>` where the outer result captures unrecoverable errors
+    /// from the sequential fallback (e.g. DB errors), while the inner `Result` captures parallel
+    /// state root task errors that can still fall back to serial.
     fn await_state_root_with_timeout<Tx, Err, R: Send + Sync + 'static>(
         &self,
         handle: &mut PayloadHandle<Tx, Err, R>,
@@ -875,57 +877,44 @@ where
                     "State root task timed out, spawning sequential fallback"
                 );
 
-                let (seq_tx, seq_rx) =
-                    std::sync::mpsc::channel::<eyre::Result<(B256, TrieUpdates)>>();
+                let (race_tx, race_rx) = std::sync::mpsc::channel::<
+                    eyre::Result<Result<StateRootComputeOutcome, ParallelStateRootError>>,
+                >();
 
+                // Bridge the original task receiver into the unified channel.
+                let task_race_tx = race_tx.clone();
+                self.payload_processor.executor().spawn_blocking(move || {
+                    if let Ok(result) = task_rx.recv() {
+                        debug!(
+                            target: "flashblocks::validator",
+                            source = "task",
+                            "State root timeout race won"
+                        );
+                        let _ = task_race_tx.send(Ok(result));
+                    }
+                });
+
+                // Spawn the sequential fallback.
                 let seq_overlay = overlay_factory;
                 let seq_hashed_state = hashed_state.clone();
                 self.payload_processor.executor().spawn_blocking(move || {
                     let result = Self::compute_state_root_serial(seq_overlay, &seq_hashed_state);
-                    let _ = seq_tx.send(result);
+                    debug!(
+                        target: "flashblocks::validator",
+                        source = "sequential",
+                        "State root timeout race won"
+                    );
+                    let _ = race_tx.send(match result {
+                        Ok((state_root, trie_updates)) => {
+                            Ok(Ok(StateRootComputeOutcome { state_root, trie_updates }))
+                        }
+                        Err(e) => Err(e),
+                    });
                 });
 
-                const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
-
-                loop {
-                    match task_rx.recv_timeout(POLL_INTERVAL) {
-                        Ok(result) => {
-                            debug!(
-                                target: "flashblocks::validator",
-                                source = "task",
-                                execute_height,
-                                "State root timeout race won"
-                            );
-                            return Ok(result);
-                        }
-                        Err(RecvTimeoutError::Disconnected) => {
-                            debug!(
-                                target: "flashblocks::validator",
-                                execute_height,
-                                "State root task dropped, waiting for sequential fallback"
-                            );
-                            let result = seq_rx.recv().map_err(|_| {
-                                eyre::eyre!(std::io::Error::other(
-                                    "both state root computations failed",
-                                ))
-                            })?;
-                            let (state_root, trie_updates) = result?;
-                            return Ok(Ok(StateRootComputeOutcome { state_root, trie_updates }));
-                        }
-                        Err(RecvTimeoutError::Timeout) => {}
-                    }
-
-                    if let Ok(result) = seq_rx.try_recv() {
-                        debug!(
-                            target: "flashblocks::validator",
-                            source = "sequential",
-                            execute_height,
-                            "State root timeout race won"
-                        );
-                        let (state_root, trie_updates) = result?;
-                        return Ok(Ok(StateRootComputeOutcome { state_root, trie_updates }));
-                    }
-                }
+                race_rx.recv().map_err(|_| {
+                    eyre::eyre!(std::io::Error::other("both state root computations failed"))
+                })?
             }
         }
     }

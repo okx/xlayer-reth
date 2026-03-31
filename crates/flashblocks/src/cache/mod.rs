@@ -7,14 +7,11 @@ pub(crate) mod utils;
 pub(crate) use confirm::ConfirmCache;
 pub use pending::PendingSequence;
 pub(crate) use raw::RawFlashblocksCache;
-pub(crate) use task::{ExecutionTaskQueue, ExecutionTaskQueueFlush, EXECUTION_TASK_QUEUE_CAPACITY};
+pub(crate) use task::ExecutionTaskQueue;
 
 use crate::PendingSequenceRx;
 use parking_lot::RwLock;
-use std::{
-    collections::BTreeSet,
-    sync::{Arc, Condvar, Mutex},
-};
+use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::*;
 
@@ -81,7 +78,7 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
             inner: Arc::new(RwLock::new(FlashblockStateCacheInner::new())),
             changeset_cache: ChangesetCache::new(),
             canon_in_memory_state,
-            task_queue: Arc::new((Mutex::new(BTreeSet::new()), Condvar::new())),
+            task_queue: ExecutionTaskQueue::new(),
         }
     }
 }

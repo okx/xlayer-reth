@@ -84,7 +84,7 @@ where
     N::Receipt: FlashblockReceipt,
     N::SignedTx: Encodable2718,
     N::Block: From<alloy_consensus::Block<N::SignedTx>>,
-    EvmConfig: ConfigureEvm<Primitives = N, NextBlockEnvCtx: From<OpFlashblockPayloadBase> + Unpin>
+    EvmConfig: ConfigureEvm<Primitives = N, NextBlockEnvCtx: From<OpFlashblockPayloadBase> + Unpin + Send>
         + Send
         + 'static,
     Provider: StateProviderFactory
@@ -188,12 +188,14 @@ where
             )),
         );
 
-        // Spawn the flashblocks sequence execution task on a dedicated OS thread.
         let cache = raw_cache.clone();
         let queue = self.flashblocks_state.task_queue.clone();
-        reth_tasks::spawn_os_thread("xlayer-flashblocks-execution", move || {
-            handle_execution_tasks::<N, EvmConfig, Provider, ChainSpec>(validator, cache, queue);
-        });
+        self.task_executor.spawn_critical_blocking_task(
+            "xlayer-flashblocks-execution",
+            Box::pin(handle_execution_tasks::<N, EvmConfig, Provider, ChainSpec>(
+                validator, cache, queue,
+            )),
+        );
 
         // Spawn the canonical stream handle.
         self.task_executor.spawn_critical_task(

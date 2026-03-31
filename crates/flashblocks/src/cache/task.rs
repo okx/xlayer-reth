@@ -1,45 +1,61 @@
-use std::{
-    collections::BTreeSet,
-    sync::{Arc, Condvar, Mutex},
-};
+use parking_lot::Mutex;
+use std::{collections::BTreeSet, sync::Arc};
+use tokio::sync::Notify;
 use tracing::*;
 
 pub const EXECUTION_TASK_QUEUE_CAPACITY: usize = 5;
 
-pub type ExecutionTaskQueue = Arc<(Mutex<BTreeSet<u64>>, Condvar)>;
-
-/// Extension trait for [`ExecutionTaskQueue`] providing a flush operation.
-pub trait ExecutionTaskQueueFlush {
-    /// Clears all pending execution tasks from the queue.
-    ///
-    /// Called when a flush is detected on the flashblocks state layer (reorg or stale
-    /// pending) to drain any queued block heights that were built against now-invalidated
-    /// state. The execution worker will re-enter its wait loop and pick up fresh tasks
-    /// from incoming flashblocks after this call.
-    fn flush(&self);
+#[derive(Debug, Clone, Default)]
+pub struct ExecutionTaskQueue {
+    queue: Arc<Mutex<BTreeSet<u64>>>,
+    notify: Arc<Notify>,
 }
 
-impl ExecutionTaskQueueFlush for ExecutionTaskQueue {
-    fn flush(&self) {
-        match self.0.lock() {
-            Ok(mut queue) => {
-                let flushed = queue.len();
-                queue.clear();
-                if flushed > 0 {
-                    warn!(
-                        target: "flashblocks",
-                        flushed,
-                        "Execution task queue flushed on state reset"
-                    );
+impl ExecutionTaskQueue {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&self, height: u64) {
+        let mut queue = self.queue.lock();
+        if !queue.contains(&height) && queue.len() >= EXECUTION_TASK_QUEUE_CAPACITY {
+            let evicted = queue.pop_first();
+            warn!(
+                target: "flashblocks",
+                ?evicted,
+                new_height = height,
+                "Execution task queue full, evicting lowest height"
+            );
+        }
+        queue.insert(height);
+        self.notify.notify_one();
+    }
+
+    pub async fn next(&self) -> u64 {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let mut queue = self.queue.lock();
+                if let Some(height) = queue.pop_first() {
+                    return height;
                 }
             }
-            Err(err) => {
-                warn!(
-                    target: "flashblocks",
-                    %err,
-                    "Failed to flush execution task queue: mutex poisoned"
-                );
-            }
+            notified.await;
+        }
+    }
+
+    pub fn flush(&self) {
+        let mut queue = self.queue.lock();
+        let flushed = queue.len();
+        queue.clear();
+        if flushed > 0 {
+            warn!(
+                target: "flashblocks",
+                flushed,
+                "Execution task queue flushed on state reset"
+            );
         }
     }
 }

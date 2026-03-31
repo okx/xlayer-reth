@@ -1,5 +1,5 @@
 use crate::{
-    cache::{ExecutionTaskQueue, RawFlashblocksCache, EXECUTION_TASK_QUEUE_CAPACITY},
+    cache::{ExecutionTaskQueue, RawFlashblocksCache},
     debug::debug_compare_flashblocks_bundle_states,
     execution::validator::FlashblockSequenceValidator,
     execution::{FlashblockReceipt, OverlayProviderFactory},
@@ -75,8 +75,6 @@ pub async fn handle_incoming_flashblocks<S, N>(
                         }
                     }
                 }
-                // Schedule executor
-                task_queue.1.notify_one();
             }
             Some(Err(err)) => {
                 warn!(
@@ -109,23 +107,11 @@ fn process_flashblock_payload<N: NodePrimitives>(
     raw_cache.handle_flashblock(payload)?;
 
     // Enqueue to execution tasks
-    let mut queue =
-        task_queue.0.lock().map_err(|e| eyre::eyre!("Task queue lock poisoned: {e}"))?;
-    if !queue.contains(&height) && queue.len() >= EXECUTION_TASK_QUEUE_CAPACITY {
-        // Queue is full — evict the lowest block height before inserting.
-        let evicted = queue.pop_first();
-        warn!(
-            target: "flashblocks",
-            ?evicted,
-            new_height = height,
-            "Execution task queue full, evicting lowest height"
-        );
-    }
-    queue.insert(height);
+    task_queue.insert(height);
     Ok(())
 }
 
-pub fn handle_execution_tasks<N, EvmConfig, Provider, ChainSpec>(
+pub async fn handle_execution_tasks<N, EvmConfig, Provider, ChainSpec>(
     mut validator: FlashblockSequenceValidator<N, EvmConfig, Provider, ChainSpec>,
     raw_cache: Arc<RawFlashblocksCache<N::SignedTx>>,
     task_queue: ExecutionTaskQueue,
@@ -134,7 +120,7 @@ pub fn handle_execution_tasks<N, EvmConfig, Provider, ChainSpec>(
     N::Receipt: FlashblockReceipt,
     N::SignedTx: Encodable2718,
     N::Block: From<alloy_consensus::Block<N::SignedTx>>,
-    EvmConfig: ConfigureEvm<Primitives = N, NextBlockEnvCtx: From<OpFlashblockPayloadBase> + Unpin>
+    EvmConfig: ConfigureEvm<Primitives = N, NextBlockEnvCtx: From<OpFlashblockPayloadBase> + Unpin + Send>
         + Send
         + 'static,
     Provider: StateProviderFactory
@@ -150,25 +136,8 @@ pub fn handle_execution_tasks<N, EvmConfig, Provider, ChainSpec>(
     ChainSpec: OpHardforks + Send + Sync + 'static,
 {
     info!(target: "flashblocks", "Flashblocks execution handle started");
-    let (queue_mutex, condvar) = &*task_queue;
     loop {
-        let execute_height = {
-            let guard = match queue_mutex.lock() {
-                Ok(g) => g,
-                Err(err) => {
-                    warn!(target: "flashblocks", %err, "Task queue mutex poisoned, retrying");
-                    continue;
-                }
-            };
-            let mut queue = match condvar.wait_while(guard, |q| q.is_empty()) {
-                Ok(g) => g,
-                Err(err) => {
-                    warn!(target: "flashblocks", %err, "Task queue condvar wait poisoned, retrying");
-                    continue;
-                }
-            };
-            queue.pop_first().unwrap()
-        };
+        let execute_height = task_queue.next().await;
 
         // Extract buildable sequence for this height from raw cache
         let Some(args) = raw_cache.try_get_buildable_args(execute_height) else {
@@ -187,7 +156,7 @@ pub fn handle_execution_tasks<N, EvmConfig, Provider, ChainSpec>(
             "Executing flashblocks sequence"
         );
 
-        if let Err(err) = validator.execute_sequence(args) {
+        if let Err(err) = validator.execute_sequence(args).await {
             warn!(
                 target: "flashblocks",
                 %err,
