@@ -21,7 +21,7 @@ use alloy_evm::block::ExecutableTxParts;
 use alloy_primitives::{Address, B256};
 use op_alloy_rpc_types_engine::OpFlashblockPayloadBase;
 
-use reth_chain_state::{DeferredTrieData, ExecutedBlock, LazyOverlay};
+use reth_chain_state::{ComputedTrieData, DeferredTrieData, ExecutedBlock, LazyOverlay};
 use reth_engine_primitives::TreeConfig;
 use reth_engine_tree::tree::{
     payload_processor::{
@@ -154,10 +154,26 @@ where
         // Pre-validate incoming flashblocks sequence
         let pending_sequence = self.prevalidate_incoming_sequence(&args)?;
 
+        // Only compute state root on the final flashblock (target_index == last_index) or when
+        // sequence end is received.
+        //
+        // Intermediate flashblocks use spawn_cache_exclusive() for execution + prewarming only,
+        // skipping the sparse trie pipeline, deferred trie tasks, and changeset cache population.
+        // This reduces MDBX read contention with the engine's persistence writes.
+        let calculate_state_root =
+            args.last_flashblock_index == args.target_index || args.sequence_end;
+        let strategy = if calculate_state_root {
+            self.plan_state_root_computation()
+        } else {
+            // No SR calculation logic - always use cache-exclusive
+            StateRootStrategy::Synchronous
+        };
+
         let parent_hash = args.base.parent_hash;
         let block_transactions: Vec<_> = args.transactions.into_iter().collect();
         let block_transaction_count = block_transactions.len();
-        let transactions: Vec<_> = if let Some(ref seq) = pending_sequence {
+
+        let mut transactions: Vec<_> = if let Some(ref seq) = pending_sequence {
             block_transactions
                 .iter()
                 .skip(seq.prefix_execution_meta.cached_tx_count)
@@ -167,21 +183,36 @@ where
             block_transactions.clone()
         };
 
-        // Get state provider builder.
+        // Hash to get state provider builder for overlay data.
         // 1. Fresh builds - get the provider builder from parent hash.
         // 2. Incremental builds - get provider builder from pending sequence hash.
-        let hash = pending_sequence.as_ref().map_or(parent_hash, |seq| seq.get_hash());
+        let mut hash = pending_sequence.as_ref().map_or(parent_hash, |seq| seq.get_hash());
+
+        // Re-execute the full pending sequence for concurrent state root task. We use:
+        // 1. Parent block's state root to get the trie nodes (PreservedSparseTrie) from
+        //    the previous block's computed state root.
+        // 2. Parent hash to get the state overlay provider builder at start of block.
+        // 3. Full block transactions to execute.
+        // 4. Re-use cache reads in pending sequence for fast re-execution with pre-warm
+        //    state accounts.
+        if calculate_state_root {
+            match strategy {
+                StateRootStrategy::StateRootTask => {
+                    transactions = block_transactions.clone();
+                    hash = parent_hash;
+                }
+                // Parallel and synchronous state root strategies will use incremental
+                // execution of tx deltas, using the pending sequence
+                _ => {}
+            }
+        }
+
         let (provider_builder, header, overlay_data) = self.state_provider_builder(hash)?;
         let mut state_provider = provider_builder.build()?;
 
-        // For incremental builds, use the previous index's computed state root so the incremental
-        // prefix trie nodes (PreservedSparseTrie) are re-used, to ensure SR calculation is only
-        // done on suffix changes and optimized.
-        let parent_state_root = header.state_root();
+        let attrs = args.base.clone().into();
         let parent_header =
             pending_sequence.as_ref().map_or(header, |seq| seq.parent_header.clone());
-
-        let attrs = args.base.clone().into();
         let evm_env =
             self.evm_config.next_evm_env(&parent_header, &attrs).map_err(RethError::other)?;
 
@@ -189,20 +220,10 @@ where
             evm_env: evm_env.clone(),
             hash: B256::ZERO,
             parent_hash,
-            parent_state_root,
+            parent_state_root: parent_header.state_root(),
             transaction_count: transactions.len(),
             withdrawals: Some(args.withdrawals),
         };
-
-        // Plan the strategy used for state root computation.
-        let strategy = self.plan_state_root_computation();
-
-        debug!(
-            target: "flashblocks::validator",
-            execute_height = args.base.block_number,
-            ?strategy,
-            "Decided which state root algorithm to run"
-        );
 
         // TODO: Extract the BAL once flashblocks BAL is supported
         let bal = None;
@@ -249,6 +270,7 @@ where
             transactions,
             pending_sequence.as_ref(),
             &mut handle,
+            calculate_state_root && strategy == StateRootStrategy::StateRootTask,
         )?;
         debug!(
             target: "flashblocks::validator",
@@ -301,112 +323,106 @@ where
             );
         })?;
 
-        let root_time = Instant::now();
-        let hashed_state = self.provider.hashed_post_state(&output.state);
-        let mut maybe_state_root = None;
-        match strategy {
-            StateRootStrategy::StateRootTask => {
-                debug!(target: "flashblocks::validator", execute_height = args.base.block_number, "Using sparse trie state root algorithm");
+        let (state_root, trie_output, hashed_state) = if calculate_state_root {
+            let root_time = Instant::now();
+            let hashed_state = self.provider.hashed_post_state(&output.state);
+            let mut maybe_state_root = None;
+            match strategy {
+                StateRootStrategy::StateRootTask => {
+                    debug!(target: "flashblocks::validator", execute_height = args.base.block_number, "Using sparse trie state root algorithm");
 
-                let task_result = self.await_state_root_with_timeout(
-                    &mut handle,
-                    overlay_factory.clone(),
-                    &hashed_state,
-                    args.base.block_number,
-                )?;
+                    let task_result = self.await_state_root_with_timeout(
+                        &mut handle,
+                        overlay_factory.clone(),
+                        &hashed_state,
+                        args.base.block_number,
+                    )?;
 
-                match task_result {
-                    Ok(StateRootComputeOutcome { state_root, trie_updates }) => {
-                        let elapsed = root_time.elapsed();
-                        maybe_state_root = Some((state_root, trie_updates));
-                        info!(
-                            target: "flashblocks::validator",
-                            execute_height = args.base.block_number,
-                            flashblock_index = args.last_flashblock_index,
-                            target_index = args.target_index,
-                            ?state_root,
-                            ?elapsed,
-                            "State root task finished",
-                        );
-                    }
-                    Err(error) => {
-                        debug!(
-                            target: "flashblocks::validator",
-                            execute_height = args.base.block_number,
-                            flashblock_index = args.last_flashblock_index,
-                            target_index = args.target_index,
-                            %error,
-                            "State root task failed",
-                        );
+                    match task_result {
+                        Ok(StateRootComputeOutcome { state_root, trie_updates }) => {
+                            let elapsed = root_time.elapsed();
+                            maybe_state_root = Some((state_root, trie_updates));
+                            info!(
+                                target: "flashblocks::validator",
+                                execute_height = args.base.block_number,
+                                flashblock_index = args.last_flashblock_index,
+                                target_index = args.target_index,
+                                ?state_root,
+                                ?elapsed,
+                                "State root task finished",
+                            );
+                        }
+                        Err(error) => {
+                            debug!(
+                                target: "flashblocks::validator",
+                                execute_height = args.base.block_number,
+                                flashblock_index = args.last_flashblock_index,
+                                target_index = args.target_index,
+                                %error,
+                                "State root task failed",
+                            );
+                        }
                     }
                 }
+                StateRootStrategy::Parallel => {
+                    debug!(
+                        target: "flashblocks::validator",
+                        execute_height = args.base.block_number,
+                        flashblock_index = args.last_flashblock_index,
+                        target_index = args.target_index,
+                        "Using parallel state root algorithm",
+                    );
+                    match self.compute_state_root_parallel(overlay_factory.clone(), &hashed_state) {
+                        Ok(result) => {
+                            let elapsed = root_time.elapsed();
+                            info!(
+                                target: "flashblocks::validator",
+                                execute_height = args.base.block_number,
+                                flashblock_index = args.last_flashblock_index,
+                                target_index = args.target_index,
+                                regular_state_root = ?result.0,
+                                ?elapsed,
+                                "Parallel state root computation finished"
+                            );
+                            maybe_state_root = Some((result.0, result.1));
+                        }
+                        Err(error) => {
+                            debug!(
+                                target: "flashblocks::validator",
+                                execute_height = args.base.block_number,
+                                flashblock_index = args.last_flashblock_index,
+                                target_index = args.target_index,
+                                err = %error,
+                                "Parallel state root computation failed",
+                            );
+                        }
+                    }
+                }
+                StateRootStrategy::Synchronous => {}
             }
-            StateRootStrategy::Parallel => {
-                debug!(
+
+            // Determine the state root.
+            if let Some(maybe_state_root) = maybe_state_root {
+                (maybe_state_root.0, maybe_state_root.1, hashed_state)
+            } else {
+                warn!(
                     target: "flashblocks::validator",
                     execute_height = args.base.block_number,
                     flashblock_index = args.last_flashblock_index,
                     target_index = args.target_index,
-                    "Using parallel state root algorithm",
+                    "Failed to compute state root",
                 );
-                match self.compute_state_root_parallel(overlay_factory.clone(), &hashed_state) {
-                    Ok(result) => {
-                        let elapsed = root_time.elapsed();
-                        info!(
-                            target: "flashblocks::validator",
-                            execute_height = args.base.block_number,
-                            flashblock_index = args.last_flashblock_index,
-                            target_index = args.target_index,
-                            regular_state_root = ?result.0,
-                            ?elapsed,
-                            "Parallel state root computation finished"
-                        );
-                        maybe_state_root = Some((result.0, result.1));
-                    }
-                    Err(error) => {
-                        debug!(
-                            target: "flashblocks::validator",
-                            execute_height = args.base.block_number,
-                            flashblock_index = args.last_flashblock_index,
-                            target_index = args.target_index,
-                            err = %error,
-                            "Parallel state root computation failed",
-                        );
-                    }
-                }
+                let (state_root, trie_output) =
+                    Self::compute_state_root_serial(overlay_factory.clone(), &hashed_state)?;
+                (state_root, trie_output, hashed_state)
             }
-            StateRootStrategy::Synchronous => {}
-        }
-
-        // Determine the state root.
-        // If the state root was computed in parallel, we use it.
-        // Otherwise, we fall back to computing it synchronously.
-        let (state_root, trie_output) = if let Some(maybe_state_root) = maybe_state_root {
-            maybe_state_root
         } else {
-            // fallback is to compute the state root regularly in sync
-            warn!(
-                target: "flashblocks::validator",
-                execute_height = args.base.block_number,
-                flashblock_index = args.last_flashblock_index,
-                target_index = args.target_index,
-                "Failed to compute state root",
-            );
-            let (root, updates) =
-                Self::compute_state_root_serial(overlay_factory.clone(), &hashed_state)?;
-            (root, updates)
+            (B256::ZERO, TrieUpdates::default(), HashedPostState::default())
         };
 
         // Capture execution metrics before `output` is moved into the deferred trie task.
         let prefix_gas_used = output.result.gas_used;
         let prefix_blob_gas_used = output.result.blob_gas_used;
-
-        // Accumulate trie_updates across sequence incremental executions.
-        let mut accumulated_trie_updates = pending_sequence
-            .as_ref()
-            .map(|seq| seq.prefix_execution_meta.accumulated_trie_updates.clone())
-            .unwrap_or_default();
-        accumulated_trie_updates.extend(trie_output.clone());
 
         // Assemble the block using pre-computed roots (avoids recomputation).
         let block = assemble_flashblock(
@@ -430,15 +446,25 @@ where
         if let Some(valid_block_tx) = valid_block_tx {
             let _ = valid_block_tx.send(());
         }
-        let executed_block = self.spawn_deferred_trie_task(
-            block,
-            output,
-            hashed_state,
-            // Only pass prefix trie updates to the deferred trie task
-            trie_output,
-            overlay_data,
-            overlay_factory,
-        );
+        let executed_block = if calculate_state_root {
+            self.spawn_deferred_trie_task(
+                block,
+                output,
+                hashed_state,
+                trie_output,
+                overlay_data,
+                overlay_factory,
+            )
+        } else {
+            ExecutedBlock::new(
+                Arc::new(block),
+                output,
+                ComputedTrieData::without_trie_input(
+                    Arc::new(hashed_state.into_sorted()),
+                    Arc::new(trie_output.into_sorted()),
+                ),
+            )
+        };
 
         // Update `PayloadProcessor`'s execution cache for next block's prewarming
         self.payload_processor.on_inserted_executed_block(
@@ -461,7 +487,6 @@ where
                 gas_used: prefix_gas_used,
                 blob_gas_used: prefix_blob_gas_used,
                 last_flashblock_index: args.last_flashblock_index,
-                accumulated_trie_updates,
             },
             block_transaction_count,
             args.target_index,
@@ -547,7 +572,7 @@ where
                     ));
                 }
                 let pending_last_index = pending.prefix_execution_meta.last_flashblock_index;
-                if pending_last_index >= incoming_last_index {
+                if !args.sequence_end && pending_last_index >= incoming_last_index {
                     return Err(eyre::eyre!(
                         "skipping, flashblock index already validated: incoming={incoming_last_index}, pending={pending_last_index}"
                     ));
@@ -594,6 +619,7 @@ where
         transactions: Vec<WithEncoded<Recovered<N::SignedTx>>>,
         pending_sequence: Option<&PendingSequence<N>>,
         handle: &mut PayloadHandle<T, Err, N::Receipt>,
+        state_root_task: bool,
     ) -> eyre::Result<(
         BlockExecutionOutput<N::Receipt>,
         Vec<Address>,
@@ -613,7 +639,7 @@ where
             .unwrap_or_default();
         let cached_db = read_cache.as_db_mut(StateProviderDatabase::new(state_provider));
         let mut state_builder = State::builder().with_database(cached_db).with_bundle_update();
-        if let Some(seq) = pending_sequence {
+        if !state_root_task && let Some(seq) = pending_sequence {
             state_builder = state_builder
                 .with_bundle_prestate(seq.pending.executed_block.execution_output.state.clone());
         }
@@ -622,7 +648,7 @@ where
         // For incremental builds, the only pre-execution effect we need is set_state_clear_flag,
         // which configures EVM empty-account handling (OP Stack chains activate Spurious Dragon
         // at genesis, so this is always true).
-        if pending_sequence.is_some() {
+        if !state_root_task && pending_sequence.is_some() {
             db.set_state_clear_flag(true);
         }
 
@@ -637,7 +663,9 @@ where
 
         // Spawn background task to compute receipt root and logs bloom incrementally.
         // Unbounded channel is used since tx count bounds capacity anyway (max ~30k txs per block).
-        let prefix_receipt_count = pending_sequence.map_or(0, |s| s.pending.receipts.len());
+        let prefix_receipt_count =
+            pending_sequence.filter(|_| !state_root_task).map_or(0, |s| s.pending.receipts.len());
+
         let receipts_len = prefix_receipt_count + transactions.len();
         let (receipt_tx, receipt_rx) = crossbeam_channel::unbounded();
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
@@ -648,7 +676,7 @@ where
         let mut executor = executor.with_state_hook(Some(Box::new(handle.state_hook())));
 
         // Apply pre-execution changes for fresh builds
-        if pending_sequence.is_none() {
+        if state_root_task || pending_sequence.is_none() {
             executor.apply_pre_execution_changes()?;
         }
 
@@ -661,13 +689,14 @@ where
             handle,
             &receipt_tx,
             execute_height,
+            state_root_task,
         )?;
         drop(receipt_tx);
 
         // Finish execution and replace with the generated suffix receipts
         let (_evm, mut result) = executor.finish().map(|(evm, result)| (evm.into_db(), result))?;
         result.receipts = suffix_receipts;
-        if let Some(seq) = pending_sequence {
+        if !state_root_task && let Some(seq) = pending_sequence {
             result = Self::merge_suffix_results(
                 &seq.prefix_execution_meta,
                 (*seq.pending.receipts).clone(),
@@ -675,7 +704,7 @@ where
             );
         }
         // Reconstruct full senders list
-        let senders = if let Some(seq) = pending_sequence {
+        let senders = if !state_root_task && let Some(seq) = pending_sequence {
             let mut all_senders = seq.pending.executed_block.recovered_block.senders().to_vec();
             all_senders.extend(suffix_senders);
             all_senders
@@ -697,7 +726,7 @@ where
         // transitions into one:
         // - Keep the earliest (parent-state) account info revert per address
         // - Merge storage reverts across transitions (earliest per slot via or_insert)
-        if pending_sequence.is_some() && bundle.reverts.len() > 1 {
+        if !state_root_task && pending_sequence.is_some() && bundle.reverts.len() > 1 {
             let mut reverts_map = HashMap::<Address, AccountRevert>::new();
             for reverts in bundle.reverts.iter() {
                 for (addr, new_revert) in reverts {
@@ -731,6 +760,7 @@ where
         handle: &mut PayloadHandle<T, Err, N::Receipt>,
         receipt_tx: &crossbeam_channel::Sender<IndexedReceipt<N::Receipt>>,
         execute_height: u64,
+        state_root_task: bool,
     ) -> eyre::Result<(Executor, Vec<Address>, Vec<N::Receipt>), BlockExecutionError>
     where
         T: ExecutableTxFor<EvmConfig>
@@ -745,7 +775,7 @@ where
             + 'static,
     {
         // Send all previously executed receipts to the receipt root task for incremental builds.
-        let receipt_index_offset = if let Some(seq) = pending_sequence {
+        let receipt_index_offset = if !state_root_task && let Some(seq) = pending_sequence {
             let prefix_count = seq.pending.receipts.len();
             for (index, receipt) in seq.pending.receipts.iter().enumerate() {
                 let _ = receipt_tx.send(IndexedReceipt::new(index, receipt.clone()));
@@ -764,7 +794,9 @@ where
         // In that case, invoking the callback on every transaction would resend the previous
         // receipt with the same index and can panic the ordered root builder.
         let mut last_sent_len = 0usize;
-        let prefix_gas_used = pending_sequence.map_or(0, |seq| seq.prefix_execution_meta.gas_used);
+        let prefix_gas_used = pending_sequence
+            .filter(|_| !state_root_task)
+            .map_or(0, |seq| seq.prefix_execution_meta.gas_used);
         loop {
             let Some(tx_result) = transactions.next() else { break };
 

@@ -13,7 +13,6 @@ use reth_provider::{
     StageCheckpointReader, StorageChangeSetReader, StorageSettingsCache,
 };
 use reth_revm::cached::CachedReads;
-use reth_trie::updates::TrieUpdates;
 
 pub(crate) struct BuildArgs<I> {
     pub(crate) base: OpFlashblockPayloadBase,
@@ -40,8 +39,6 @@ pub struct PrefixExecutionMeta {
     pub(crate) blob_gas_used: u64,
     /// The last flashblock index of the latest flashblocks sequence.
     pub(crate) last_flashblock_index: u64,
-    /// Accumulated trie updates across sequence incremental executions.
-    pub(crate) accumulated_trie_updates: TrieUpdates,
 }
 
 /// Strategy describing how to compute the state root.
