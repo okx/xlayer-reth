@@ -339,12 +339,13 @@ impl FlashblocksListener {
                     }
                     Some(Ok(Message::Text(text))) = read.next() => {
                         let message: XLayerFlashblockMessage = serde_json::from_str(&text).unwrap();
-                        let payload = message.as_payload().unwrap().inner.clone();
-                        let timestamped = TimestampedFlashblock {
-                            payload,
-                            received_at: Instant::now(),
-                        };
-                        flashblocks_clone.lock().push(timestamped);
+                        if let Some(payload) = message.as_payload() {
+                            let timestamped = TimestampedFlashblock {
+                                payload: payload.inner.clone(),
+                                received_at: Instant::now(),
+                            };
+                            flashblocks_clone.lock().push(timestamped);
+                        }
                     }
                 }
             }
