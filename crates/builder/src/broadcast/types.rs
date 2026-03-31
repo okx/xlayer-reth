@@ -12,7 +12,7 @@ pub(crate) const FLASHBLOCKS_STREAM_PROTOCOL: crate::broadcast::StreamProtocol =
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub enum Message {
-    OpBuiltPayload(OpBuiltPayload),
+    OpBuiltPayload(Box<OpBuiltPayload>),
     OpFlashblockPayload(XLayerFlashblockMessage),
 }
 
@@ -36,7 +36,7 @@ pub struct OpBuiltPayload {
 
 impl Message {
     pub(crate) fn from_built_payload(value: RethOpBuiltPayload) -> Self {
-        Message::OpBuiltPayload(value.into())
+        Message::OpBuiltPayload(Box::new(value.into()))
     }
 
     pub(crate) fn from_flashblock_payload(value: XLayerFlashblockMessage) -> Self {

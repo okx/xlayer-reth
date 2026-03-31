@@ -22,6 +22,7 @@ pub(crate) struct BuildArgs<I> {
     pub(crate) withdrawals: Vec<Withdrawal>,
     pub(crate) last_flashblock_index: u64,
     pub(crate) target_index: u64,
+    pub(crate) sequence_end: bool,
 }
 
 /// Cached prefix execution data used to resume canonical builds.

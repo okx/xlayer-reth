@@ -1,5 +1,6 @@
 use crate::{
     args::BuilderArgs,
+    broadcast::XLayerFlashblockMessage,
     flashblocks::{BuilderConfig, FlashblocksServiceBuilder},
     signer::Signer,
     tests::{
@@ -337,7 +338,8 @@ impl FlashblocksListener {
                         break Ok(());
                     }
                     Some(Ok(Message::Text(text))) = read.next() => {
-                        let payload = serde_json::from_str(&text).unwrap();
+                        let message: XLayerFlashblockMessage = serde_json::from_str(&text).unwrap();
+                        let payload = message.as_payload().unwrap().inner.clone();
                         let timestamped = TimestampedFlashblock {
                             payload,
                             received_at: Instant::now(),

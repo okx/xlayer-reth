@@ -4,7 +4,10 @@ use tracing::*;
 
 use reth_node_core::dirs::{ChainPath, DataDirPath};
 
-use xlayer_builder::{broadcast::WebSocketPublisher, flashblocks::FlashblockPayloadsCache};
+use xlayer_builder::{
+    broadcast::{WebSocketPublisher, XLayerFlashblockMessage},
+    flashblocks::FlashblockPayloadsCache,
+};
 
 /// Handles the persistence of the pending flashblocks sequence to disk.
 pub async fn handle_persistence(mut rx: ReceivedFlashblocksRx, datadir: ChainPath<DataDirPath>) {
@@ -18,8 +21,11 @@ pub async fn handle_persistence(mut rx: ReceivedFlashblocksRx, datadir: ChainPat
         tokio::select! {
             result = rx.recv() => {
                 match result {
-                    Ok(flashblock) => {
-                        if let Err(e) = cache.add_flashblock_payload(flashblock.inner.clone()) {
+                    Ok(fb_payload) => {
+                        if let XLayerFlashblockMessage::Payload(payload) = &*fb_payload
+                            && let Err(e) =
+                                cache.add_flashblock_payload(payload.inner.clone())
+                        {
                             warn!(target: "flashblocks", "Failed to cache flashblock payload: {e}");
                             continue;
                         }
@@ -64,27 +70,11 @@ pub async fn handle_relay_flashblocks(
     loop {
         match rx.recv().await {
             Ok(flashblock) => {
-                trace!(
-                    target: "flashblocks",
-                    "Received flashblock: index={}, block_hash={}",
-                    flashblock.inner.index,
-                    flashblock.inner.diff.block_hash
-                );
-                match ws_pub.publish(&flashblock) {
-                    Ok(_) => {
-                        trace!(
-                            target: "flashblocks",
-                            "Published flashblock: index={}, block_hash={}",
-                            flashblock.inner.index,
-                            flashblock.inner.diff.block_hash
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            target: "flashblocks",
-                            "Failed to publish flashblock: {:?}", e
-                        );
-                    }
+                if let Err(e) = ws_pub.publish(&flashblock) {
+                    warn!(
+                        target: "flashblocks",
+                        "Failed to relay flashblock to websocket subscribers: {:?}", e
+                    );
                 }
             }
             Err(e) => {

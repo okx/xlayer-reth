@@ -19,7 +19,7 @@ pub use subscription::FlashblocksPubSub;
 pub use ws::WsFlashBlockStream;
 
 use std::sync::Arc;
-use xlayer_builder::broadcast::XLayerFlashblockPayload;
+use xlayer_builder::broadcast::XLayerFlashblockMessage;
 
 pub type PendingSequenceRx<N> = tokio::sync::watch::Receiver<Option<PendingSequence<N>>>;
-pub type ReceivedFlashblocksRx = tokio::sync::broadcast::Receiver<Arc<XLayerFlashblockPayload>>;
+pub type ReceivedFlashblocksRx = tokio::sync::broadcast::Receiver<Arc<XLayerFlashblockMessage>>;

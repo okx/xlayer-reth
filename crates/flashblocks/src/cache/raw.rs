@@ -8,7 +8,7 @@ use alloy_rpc_types_engine::PayloadId;
 use op_alloy_rpc_types_engine::{OpFlashblockPayload, OpFlashblockPayloadBase};
 use reth_primitives_traits::{Recovered, SignedTransaction};
 
-use xlayer_builder::broadcast::XLayerFlashblockPayload;
+use xlayer_builder::broadcast::{XLayerFlashblockMessage, XLayerFlashblockPayload};
 
 const MAX_RAW_CACHE_SIZE: usize = 10;
 
@@ -36,8 +36,15 @@ impl<T: SignedTransaction> RawFlashblocksCache<T> {
         self.inner.write().handle_canonical_height(height);
     }
 
-    pub fn handle_flashblock(&self, payload: XLayerFlashblockPayload) -> eyre::Result<()> {
-        self.inner.write().handle_flashblock(payload)
+    pub fn handle_message(&self, payload: XLayerFlashblockMessage) -> eyre::Result<u64> {
+        match payload {
+            XLayerFlashblockMessage::Payload(payload) => {
+                self.inner.write().handle_flashblock(*payload)
+            }
+            XLayerFlashblockMessage::PayloadEnd(payload) => {
+                self.inner.write().handle_end_sequence(payload.payload_id)
+            }
+        }
     }
 
     pub(crate) fn try_get_buildable_args(
@@ -72,7 +79,7 @@ impl<T: SignedTransaction> RawFlashblocksCacheInner<T> {
         }
     }
 
-    pub fn handle_flashblock(&mut self, payload: XLayerFlashblockPayload) -> eyre::Result<()> {
+    pub fn handle_flashblock(&mut self, payload: XLayerFlashblockPayload) -> eyre::Result<u64> {
         let XLayerFlashblockPayload { inner: flashblock, target_index } = payload;
         let incoming_height = flashblock.block_number();
         if incoming_height <= self.canon_height {
@@ -96,7 +103,15 @@ impl<T: SignedTransaction> RawFlashblocksCacheInner<T> {
             entry.insert_flashblock(flashblock, target_index)?;
             self.cache.enqueue(entry);
         }
-        Ok(())
+        Ok(incoming_height)
+    }
+
+    fn handle_end_sequence(&mut self, payload_id: PayloadId) -> eyre::Result<u64> {
+        // Search for an existing entry matching this payload_id.
+        let existing = self.cache.iter_mut().find(|entry| entry.payload_id() == Some(payload_id));
+        existing
+            .and_then(|entry| entry.set_end_sequence())
+            .ok_or(eyre::eyre!("no entry found for payload end, payload_id: {:?}", payload_id))
     }
 
     fn try_get_buildable_args(
@@ -125,6 +140,8 @@ struct RawFlashblocksEntry<T: SignedTransaction> {
     has_base: bool,
     /// The sequencer's target flashblock index. Zero if unset.
     target_index: u64,
+    /// Tracks if the sequence has received the end-of-sequence signal
+    sequence_end: bool,
 }
 
 impl<T: SignedTransaction> RawFlashblocksEntry<T> {
@@ -134,6 +151,7 @@ impl<T: SignedTransaction> RawFlashblocksEntry<T> {
             recovered_transactions_by_index: BTreeMap::new(),
             has_base: false,
             target_index: 0,
+            sequence_end: false,
         }
     }
 
@@ -164,6 +182,11 @@ impl<T: SignedTransaction> RawFlashblocksEntry<T> {
         self.payloads.insert(flashblock_index, flashblock);
         self.recovered_transactions_by_index.insert(flashblock_index, recovered_txs);
         Ok(())
+    }
+
+    fn set_end_sequence(&mut self) -> Option<u64> {
+        self.sequence_end = true;
+        self.block_number()
     }
 
     /// Returns whether this flashblock would be accepted into the current sequence.
@@ -228,6 +251,7 @@ impl<T: SignedTransaction> RawFlashblocksEntry<T> {
             withdrawals: self.withdrawals_at(best_revision),
             last_flashblock_index: best_revision,
             target_index: self.target_index,
+            sequence_end: self.sequence_end,
         })
     }
 
@@ -529,7 +553,8 @@ mod tests {
         let fb0 = factory.flashblock_at(0).build();
         let cache = RawFlashblocksCache::<OpTransactionSigned>::new();
 
-        let result = cache.handle_flashblock(wrap(fb0));
+        let result =
+            cache.handle_message(XLayerFlashblockMessage::from_flashblock_payload(wrap(fb0)));
         assert!(result.is_ok(), "handle_flashblock via Arc<RwLock> wrapper should succeed");
     }
 
@@ -615,6 +640,61 @@ mod tests {
         );
         let entry = cache.cache.iter().next().expect("entry should exist");
         assert_eq!(entry.payloads.len(), 4, "entry should contain 4 payloads");
+    }
+
+    #[test]
+    fn test_handle_end_sequence_sets_flag_and_returns_block_number() {
+        let factory = TestFlashBlockFactory::new();
+        let fb0 = factory.flashblock_at(0).build();
+        let payload_id = fb0.payload_id;
+        let expected_block = fb0.metadata.block_number;
+        let mut cache = TestRawCache::new();
+
+        cache.handle_flashblock(wrap(fb0)).expect("fb0 insert");
+        let block_number = cache.handle_end_sequence(payload_id).expect("should succeed");
+        assert_eq!(block_number, expected_block);
+
+        let entry = cache.cache.iter().next().expect("entry should exist");
+        assert!(entry.sequence_end);
+    }
+
+    #[test]
+    fn test_handle_end_sequence_errors_for_unknown_payload_id() {
+        let mut cache = TestRawCache::new();
+        let result = cache.handle_end_sequence(PayloadId::new([0xAA; 8]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_buildable_args_reflects_sequence_end_flag() {
+        let factory = TestFlashBlockFactory::new();
+        let fb0 = factory.flashblock_at(0).build();
+        let payload_id = fb0.payload_id;
+        let block_number = fb0.metadata.block_number;
+        let mut cache = TestRawCache::new();
+
+        cache.handle_flashblock(wrap(fb0)).expect("fb0 insert");
+        let args_before = cache.try_get_buildable_args(block_number).expect("should be buildable");
+        assert!(!args_before.sequence_end);
+
+        cache.handle_end_sequence(payload_id).expect("end sequence");
+        let args_after = cache.try_get_buildable_args(block_number).expect("should be buildable");
+        assert!(args_after.sequence_end);
+    }
+
+    #[test]
+    fn test_handle_message_payload_end_via_public_api() {
+        let factory = TestFlashBlockFactory::new();
+        let fb0 = factory.flashblock_at(0).build();
+        let payload_id = fb0.payload_id;
+        let expected_block = fb0.metadata.block_number;
+        let cache = RawFlashblocksCache::<OpTransactionSigned>::new();
+
+        cache
+            .handle_message(XLayerFlashblockMessage::from_flashblock_payload(wrap(fb0)))
+            .expect("insert");
+        let result = cache.handle_message(XLayerFlashblockMessage::from_flashblock_end(payload_id));
+        assert_eq!(result.expect("should succeed"), expected_block);
     }
 
     #[test]

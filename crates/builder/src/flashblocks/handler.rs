@@ -142,7 +142,7 @@ where
                                 continue;
                             }
 
-                            let payload: OpBuiltPayload = payload.into();
+                            let payload: OpBuiltPayload = (*payload).into();
                             let block_hash = payload.block().hash();
                             // Check if this block is already the pending block in canonical state
                             if let Ok(Some(pending)) = client.pending_block()
@@ -185,7 +185,8 @@ where
                             }));
                         }
                         Message::OpFlashblockPayload(fb_payload) => {
-                            if let XLayerFlashblockMessage::Payload(payload) = &fb_payload && let Err(e) = p2p_cache.add_flashblock_payload(payload.inner.clone()) {
+                            if let XLayerFlashblockMessage::Payload(payload) = &fb_payload &&
+                                let Err(e) = p2p_cache.add_flashblock_payload(payload.inner.clone()) {
                                 warn!(target: "payload_builder", e = ?e, "failed to add flashblock txs to cache");
                             }
                             if let Err(e) = ws_pub.publish(&fb_payload) {

@@ -23,25 +23,25 @@ use reth_provider::{
     BlockReader, HashedPostStateProvider, HeaderProvider, StateProviderFactory, StateReader,
 };
 
-use xlayer_builder::broadcast::XLayerFlashblockPayload;
+use xlayer_builder::broadcast::XLayerFlashblockMessage;
 
 const CONNECTION_BACKOUT_PERIOD: Duration = Duration::from_secs(5);
 
 pub async fn handle_incoming_flashblocks<S, N>(
     mut incoming_rx: S,
-    received_tx: Sender<Arc<XLayerFlashblockPayload>>,
+    received_tx: Sender<Arc<XLayerFlashblockMessage>>,
     raw_cache: Arc<RawFlashblocksCache<N::SignedTx>>,
     task_queue: ExecutionTaskQueue,
 ) where
-    S: Stream<Item = eyre::Result<XLayerFlashblockPayload>> + Unpin + Send + 'static,
+    S: Stream<Item = eyre::Result<XLayerFlashblockMessage>> + Unpin + Send + 'static,
     N: NodePrimitives,
 {
     info!(target: "flashblocks", "Flashblocks raw handle started");
     loop {
         match incoming_rx.next().await {
-            Some(Ok(payload)) => {
+            Some(Ok(message)) => {
                 if let Err(err) =
-                    process_flashblock_payload::<N>(payload, &received_tx, &raw_cache, &task_queue)
+                    process_flashblock_payload::<N>(message, &received_tx, &raw_cache, &task_queue)
                 {
                     warn!(
                         target: "flashblocks",
@@ -54,9 +54,9 @@ pub async fn handle_incoming_flashblocks<S, N>(
                 // Batch process all other immediately available flashblocks
                 while let Some(result) = incoming_rx.next().now_or_never().flatten() {
                     match result {
-                        Ok(payload) => {
+                        Ok(message) => {
                             if let Err(err) = process_flashblock_payload::<N>(
-                                payload,
+                                message,
                                 &received_tx,
                                 &raw_cache,
                                 &task_queue,
@@ -94,20 +94,16 @@ pub async fn handle_incoming_flashblocks<S, N>(
 }
 
 fn process_flashblock_payload<N: NodePrimitives>(
-    payload: XLayerFlashblockPayload,
-    received_tx: &tokio::sync::broadcast::Sender<Arc<XLayerFlashblockPayload>>,
+    message: XLayerFlashblockMessage,
+    received_tx: &tokio::sync::broadcast::Sender<Arc<XLayerFlashblockMessage>>,
     raw_cache: &RawFlashblocksCache<N::SignedTx>,
     task_queue: &ExecutionTaskQueue,
 ) -> eyre::Result<()> {
     if received_tx.receiver_count() > 0 {
-        let _ = received_tx.send(Arc::new(payload.clone()));
+        let _ = received_tx.send(Arc::new(message.clone()));
     }
-    // Insert into raw cache
-    let height = payload.inner.block_number();
-    raw_cache.handle_flashblock(payload)?;
-
-    // Enqueue to execution tasks
-    task_queue.insert(height);
+    // Insert into raw cache and enqueue to execution tasks
+    task_queue.insert(raw_cache.handle_message(message)?);
     Ok(())
 }
 

@@ -18,9 +18,9 @@ use tokio_tungstenite::{
 use tracing::debug;
 use url::Url;
 
-use xlayer_builder::broadcast::XLayerFlashblockPayload;
+use xlayer_builder::broadcast::XLayerFlashblockMessage;
 
-/// An asynchronous stream of [`XLayerFlashblockPayload`] from a websocket connection.
+/// An asynchronous stream of [`XLayerFlashblockMessage`] from a websocket connection.
 ///
 /// The stream attempts to connect to a websocket URL and then decode each received item.
 ///
@@ -50,7 +50,7 @@ impl WsFlashBlockStream<WsStream, WsSink, WsConnector> {
         }
     }
 
-    /// Sets the [`XLayerFlashblockPayload`] decoder for the websocket stream.
+    /// Sets the [`XLayerFlashblockMessage`] decoder for the websocket stream.
     pub fn with_decoder(self, decoder: Box<dyn FlashBlockDecoder>) -> Self {
         Self { decoder, ..self }
     }
@@ -77,7 +77,7 @@ where
     S: Sink<Message> + Send + Unpin,
     C: WsConnect<Stream = Str, Sink = S> + Clone + Send + 'static + Unpin,
 {
-    type Item = eyre::Result<XLayerFlashblockPayload>;
+    type Item = eyre::Result<XLayerFlashblockMessage>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -472,7 +472,8 @@ mod tests {
 
         let actual_messages: Vec<_> = stream.take(1).map(Result::unwrap).collect().await;
         let expected_messages = flashblocks.to_vec();
-        let actual_messages: Vec<_> = actual_messages.iter().map(|m| &m.inner).collect();
+        let actual_messages: Vec<_> =
+            actual_messages.iter().map(|m| &m.as_payload().unwrap().inner).collect();
         let expected_messages: Vec<_> = expected_messages.iter().collect();
         assert_eq!(actual_messages, expected_messages);
     }
@@ -490,7 +491,7 @@ mod tests {
         let actual_message =
             stream.next().await.expect("Binary message should not be ignored").unwrap();
 
-        assert_eq!(actual_message.inner, expected_message)
+        assert_eq!(actual_message.as_payload().unwrap().inner, expected_message)
     }
 
     #[tokio::test]

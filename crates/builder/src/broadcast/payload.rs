@@ -27,18 +27,26 @@ pub struct XLayerFlashblockEnd {
 #[serde(untagged)]
 pub enum XLayerFlashblockMessage {
     /// Flashblock payload wrap with the target index.
-    Payload(XLayerFlashblockPayload),
+    Payload(Box<XLayerFlashblockPayload>),
     /// End-of-sequence signal — no more flashblocks for the current block.
     PayloadEnd(XLayerFlashblockEnd),
 }
 
 impl XLayerFlashblockMessage {
     pub fn from_flashblock_payload(payload: XLayerFlashblockPayload) -> Self {
-        Self::Payload(payload)
+        Self::Payload(Box::new(payload))
     }
 
     pub fn from_flashblock_end(payload_id: PayloadId) -> Self {
         Self::PayloadEnd(XLayerFlashblockEnd { payload_id })
+    }
+
+    pub fn as_payload(&self) -> Option<&XLayerFlashblockPayload> {
+        if let Self::Payload(payload) = self {
+            Some(payload)
+        } else {
+            None
+        }
     }
 }
 
@@ -79,7 +87,7 @@ mod tests {
     fn test_message_payload_serializes_same_as_struct() {
         let payload = XLayerFlashblockPayload::new(OpFlashblockPayload::default(), 7);
         let direct_json = serde_json::to_string(&payload).unwrap();
-        let message = XLayerFlashblockMessage::Payload(payload);
+        let message = XLayerFlashblockMessage::from_flashblock_payload(payload);
         let message_json = serde_json::to_string(&message).unwrap();
         assert_eq!(direct_json, message_json, "Payload variant must serialize identically");
     }
@@ -98,7 +106,7 @@ mod tests {
     #[test]
     fn test_message_payload_round_trip() {
         let payload = XLayerFlashblockPayload::new(OpFlashblockPayload::default(), 7);
-        let message = XLayerFlashblockMessage::Payload(payload);
+        let message = XLayerFlashblockMessage::from_flashblock_payload(payload);
         let json = serde_json::to_string(&message).unwrap();
         let deserialized: XLayerFlashblockMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, message);

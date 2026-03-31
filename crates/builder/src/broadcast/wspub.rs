@@ -82,7 +82,7 @@ impl WebSocketPublisher {
                 );
             }
             XLayerFlashblockMessage::PayloadEnd(payload) => {
-                debug!(
+                info!(
                     target: "payload_builder::broadcast",
                     event = "flashblock_end_sent",
                     message = "Sending flashblock to subscribers",

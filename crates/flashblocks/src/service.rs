@@ -29,7 +29,7 @@ use reth_tasks::TaskExecutor;
 
 use xlayer_builder::{
     args::FlashblocksArgs,
-    broadcast::{WebSocketPublisher, XLayerFlashblockPayload},
+    broadcast::{WebSocketPublisher, XLayerFlashblockMessage},
     flashblocks::PayloadEventsSender,
     metrics::{tokio::FlashblocksTaskMetrics, BuilderMetrics},
 };
@@ -75,7 +75,7 @@ where
     /// Task executor.
     task_executor: TaskExecutor,
     /// Broadcast channel to forward received flashblocks from the subscription.
-    received_flashblocks_tx: Sender<Arc<XLayerFlashblockPayload>>,
+    received_flashblocks_tx: Sender<Arc<XLayerFlashblockMessage>>,
 }
 
 impl<N, EvmConfig, Provider, ChainSpec> FlashblocksRpcService<N, EvmConfig, Provider, ChainSpec>
@@ -163,7 +163,7 @@ where
 
     pub fn spawn_rpc<S>(self, incoming_rx: S)
     where
-        S: Stream<Item = eyre::Result<XLayerFlashblockPayload>> + Unpin + Send + 'static,
+        S: Stream<Item = eyre::Result<XLayerFlashblockMessage>> + Unpin + Send + 'static,
     {
         debug!(target: "flashblocks", "Initializing flashblocks rpc");
         let raw_cache = Arc::new(RawFlashblocksCache::new());
