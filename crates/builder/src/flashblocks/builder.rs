@@ -592,7 +592,7 @@ where
                     );
                     self.record_flashblocks_metrics(
                         &ctx,
-                        fb_state.flashblock_index(),
+                        fb_state.flashblock_index().saturating_sub(1),
                         &info,
                         target_flashblocks,
                     );
