@@ -228,19 +228,21 @@ where
         // TODO: Extract the BAL once flashblocks BAL is supported
         let bal = None;
 
-        // Create lazy overlay from ancestors - this doesn't block, allowing execution to start
-        // before the trie data is ready. The overlay will be computed on first access.
-        let (lazy_overlay, anchor_hash) =
-            Self::get_parent_lazy_overlay(overlay_data.as_ref(), hash);
+        let overlay_factory = calculate_state_root.then(|| {
+            // Create lazy overlay from ancestors - this doesn't block, allowing execution to start
+            // before the trie data is ready. The overlay will be computed on first access.
+            let (lazy_overlay, anchor_hash) =
+                Self::get_parent_lazy_overlay(overlay_data.as_ref(), hash);
 
-        // Create overlay factory for payload processor (StateRootTask path needs it for
-        // multiproofs)
-        let overlay_factory = OverlayStateProviderFactory::new(
-            self.provider.clone(),
-            self.flashblocks_state.get_changeset_cache(),
-        )
-        .with_block_hash(Some(anchor_hash))
-        .with_lazy_overlay(lazy_overlay);
+            // Create overlay factory for payload processor (StateRootTask path needs it for
+            // multiproofs)
+            OverlayStateProviderFactory::new(
+                self.provider.clone(),
+                self.flashblocks_state.get_changeset_cache(),
+            )
+            .with_block_hash(Some(anchor_hash))
+            .with_lazy_overlay(lazy_overlay)
+        });
 
         // Spawn the appropriate processor based on strategy.
         let mut handle = self.spawn_payload_processor(
@@ -324,6 +326,9 @@ where
         })?;
 
         let (state_root, trie_output, hashed_state) = if calculate_state_root {
+            let overlay_factory = overlay_factory
+                .as_ref()
+                .expect("overlay factory must exist when calculate_state_root is set");
             let root_time = Instant::now();
             let hashed_state = self.provider.hashed_post_state(&output.state);
             let mut maybe_state_root = None;
@@ -453,7 +458,8 @@ where
                 hashed_state,
                 trie_output,
                 overlay_data,
-                overlay_factory,
+                overlay_factory
+                    .expect("overlay factory must exist when calculate_state_root is set"),
             )
         } else {
             ExecutedBlock::new(
@@ -841,7 +847,7 @@ where
         env: ExecutionEnv<EvmConfig>,
         txs: Vec<WithEncoded<Recovered<N::SignedTx>>>,
         provider_builder: StateProviderBuilder<N, Provider>,
-        overlay_factory: OverlayStateProviderFactory<Provider>,
+        overlay_factory: Option<OverlayStateProviderFactory<Provider>>,
         strategy: StateRootStrategy,
         bal: Option<Arc<BlockAccessList>>,
     ) -> eyre::Result<
@@ -859,7 +865,7 @@ where
                     env,
                     tx_iter,
                     provider_builder,
-                    overlay_factory,
+                    overlay_factory.expect("overlay factory must exist for StateRootTask strategy"),
                     &self.tree_config,
                     bal,
                 ))
