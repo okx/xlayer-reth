@@ -9,7 +9,6 @@ use crate::{
 use std::{
     collections::HashMap,
     convert::Infallible,
-    panic::{self, AssertUnwindSafe},
     sync::{mpsc::RecvTimeoutError, Arc},
     time::{Duration, Instant},
 };
@@ -448,6 +447,7 @@ where
         let execution_height = args.base.block_number;
         let last_index = args.last_flashblock_index;
         let target_index = args.target_index;
+        let block_hash = executed_block.recovered_block.hash();
         self.commit_pending_sequence(
             args.base,
             executed_block,
@@ -465,7 +465,14 @@ where
             args.target_index,
         )?;
 
-        info!(target: "flashblocks", execution_height, last_index, target_index, "Executed and validated flashblocks sequence");
+        info!(
+            target: "flashblocks",
+            execution_height,
+            last_index,
+            target_index,
+            ?block_hash,
+            "Executed and validated flashblocks sequence",
+        );
         Ok(())
     }
 
@@ -1117,6 +1124,8 @@ where
 
         // Spawn background task to compute trie data. Calling `wait_cloned` will compute from
         // the stored inputs and cache the result, so subsequent calls return immediately.
+        // If this task panics, the `DeferredTrieData` fallback computes from stored inputs
+        // on access, and the changeset cache miss is handled by `get_or_compute`.
         let compute_trie_input_task = move || {
             debug!(
                 target: "flashblocks::changeset",
@@ -1124,46 +1133,33 @@ where
                 "compute_trie_input_task",
             );
 
-            let result = panic::catch_unwind(AssertUnwindSafe(|| {
-                let computed = deferred_handle_task.wait_cloned();
-                // Compute and cache changesets using the computed trie_updates
-                // Get a provider from the overlay factory for trie cursor access
-                let changeset_start = Instant::now();
-                let changeset_result =
-                    overlay_factory.database_provider_ro().and_then(|provider| {
-                        reth_trie::changesets::compute_trie_changesets(
-                            &provider,
-                            &computed.trie_updates,
-                        )
-                        .map_err(ProviderError::Database)
-                    });
+            let computed = deferred_handle_task.wait_cloned();
+            // Compute and cache changesets using the computed trie_updates.
+            // Get a provider from the overlay factory for trie cursor access.
+            let changeset_start = Instant::now();
+            let changeset_result = overlay_factory.database_provider_ro().and_then(|provider| {
+                reth_trie::changesets::compute_trie_changesets(&provider, &computed.trie_updates)
+                    .map_err(ProviderError::Database)
+            });
 
-                match changeset_result {
-                    Ok(changesets) => {
-                        debug!(
+            match changeset_result {
+                Ok(changesets) => {
+                    debug!(
                         target: "flashblocks::changeset",
-                                    ?block_number,
-                                    elapsed = ?changeset_start.elapsed(),
-                                    "Computed and caching changesets"
-                                );
-                        changeset_cache.insert(block_hash, block_number, Arc::new(changesets));
-                    }
-                    Err(e) => {
-                        warn!(
-                        target: "flashblocks::changeset",
-                            ?block_number,
-                            ?e,
-                            "Failed to compute changesets in deferred trie task"
-                        );
-                    }
+                        ?block_number,
+                        elapsed = ?changeset_start.elapsed(),
+                        "Computed and caching changesets"
+                    );
+                    changeset_cache.insert(block_hash, block_number, Arc::new(changesets));
                 }
-            }));
-
-            if result.is_err() {
-                error!(
-                    target: "flashblocks::changeset",
-                    "Deferred trie task panicked; fallback computation will be used when trie data is accessed"
-                );
+                Err(e) => {
+                    warn!(
+                        target: "flashblocks::changeset",
+                        ?block_number,
+                        ?e,
+                        "Failed to compute changesets in deferred trie task"
+                    );
+                }
             }
         };
 
