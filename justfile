@@ -205,14 +205,7 @@ _gen-dev-config reth_src reth_cfg:
         if [ "$has_rocksdb_feature" != "yes" ]; then
             echo "ℹ️  Local reth-provider: 'rocksdb' is a required dep (not optional feature) — rocksdb is always included"
             echo "   Patching bin/tools/Cargo.toml to remove explicit feature request..."
-            python3 -c "
-content = open('bin/tools/Cargo.toml').read()
-patched = content.replace(
-    'reth-provider = { workspace = true, features = [\"rocksdb\"] }',
-    'reth-provider.workspace = true'
-)
-open('bin/tools/Cargo.toml', 'w').write(patched)
-"
+            python3 -c "import sys; f='bin/tools/Cargo.toml'; open(f,'w').write(open(f).read().replace('reth-provider = { workspace = true, features = [\"rocksdb\"] }', 'reth-provider.workspace = true'))"
             touch .cargo/.tools-toml-patched
             echo "   ✅ Patched. Restore any time with: git checkout bin/tools/Cargo.toml"
         fi
