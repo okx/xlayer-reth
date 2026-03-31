@@ -189,11 +189,12 @@ where
         );
 
         let cache = raw_cache.clone();
-        let queue = self.flashblocks_state.task_queue.clone();
         self.task_executor.spawn_critical_blocking_task(
             "xlayer-flashblocks-execution",
             Box::pin(handle_execution_tasks::<N, EvmConfig, Provider, ChainSpec>(
-                validator, cache, queue,
+                validator,
+                cache,
+                self.flashblocks_state.clone(),
             )),
         );
 

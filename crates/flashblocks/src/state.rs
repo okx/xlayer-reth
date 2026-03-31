@@ -110,7 +110,7 @@ fn process_flashblock_payload<N: NodePrimitives>(
 pub async fn handle_execution_tasks<N, EvmConfig, Provider, ChainSpec>(
     mut validator: FlashblockSequenceValidator<N, EvmConfig, Provider, ChainSpec>,
     raw_cache: Arc<RawFlashblocksCache<N::SignedTx>>,
-    task_queue: ExecutionTaskQueue,
+    flashblocks_state: FlashblockStateCache<N>,
 ) where
     N: NodePrimitives,
     N::Receipt: FlashblockReceipt,
@@ -133,7 +133,11 @@ pub async fn handle_execution_tasks<N, EvmConfig, Provider, ChainSpec>(
 {
     info!(target: "flashblocks", "Flashblocks execution handle started");
     loop {
-        let execute_height = task_queue.next().await;
+        let execute_height = flashblocks_state.task_queue.next().await;
+        if execute_height <= flashblocks_state.get_confirm_height() {
+            // End signal already processed for this height, skip
+            continue;
+        }
 
         // Extract buildable sequence for this height from raw cache
         let Some(args) = raw_cache.try_get_buildable_args(execute_height) else {
