@@ -96,7 +96,12 @@ fix-clippy:
     cargo clippy --all-targets --workspace --fix --allow-dirty --allow-staged
 
 build:
-    @rm -rf .cargo  # Clean dev mode files
+    #!/usr/bin/env bash
+    # Restore any dev-mode patches before production build
+    if [ -f .cargo/.tools-toml-patched ]; then
+        git checkout bin/tools/Cargo.toml 2>/dev/null && echo "🔄 Restored bin/tools/Cargo.toml from dev-mode patch"
+    fi
+    rm -rf .cargo  # Clean dev mode files
     cargo build --release
 
 [no-exit-message]
@@ -176,6 +181,42 @@ _gen-dev-config reth_src reth_cfg:
     done < "$NEEDED"
 
     rm -f "$CRATE_MAP" "$NEEDED"
+
+    # Restore any previous rocksdb patch before re-checking compatibility
+    if [ -f .cargo/.tools-toml-patched ]; then
+        git checkout bin/tools/Cargo.toml 2>/dev/null || true
+        rm -f .cargo/.tools-toml-patched
+    fi
+
+    # Check if local reth-provider exposes 'rocksdb' as an optional feature.
+    # Some reth versions have rocksdb as a non-optional (always-included) dep instead.
+    # In that case, requesting features = ["rocksdb"] in consumers fails at workspace
+    # feature resolution, so we strip the request from bin/tools/Cargo.toml.
+    local_provider_toml=$(find "$RETH_SRC" -name "Cargo.toml" -not -path "*/target/*" \
+        -exec grep -l '^name = "reth-provider"$' {} \; 2>/dev/null | head -1)
+
+    if [ -n "$local_provider_toml" ]; then
+        has_rocksdb_feature=$(awk '
+            /^\[features\]/ { in_features=1; next }
+            /^\[/ { in_features=0 }
+            in_features && /^rocksdb/ { print "yes"; exit }
+        ' "$local_provider_toml")
+
+        if [ "$has_rocksdb_feature" != "yes" ]; then
+            echo "ℹ️  Local reth-provider: 'rocksdb' is a required dep (not optional feature) — rocksdb is always included"
+            echo "   Patching bin/tools/Cargo.toml to remove explicit feature request..."
+            python3 -c "
+content = open('bin/tools/Cargo.toml').read()
+patched = content.replace(
+    'reth-provider = { workspace = true, features = [\"rocksdb\"] }',
+    'reth-provider.workspace = true'
+)
+open('bin/tools/Cargo.toml', 'w').write(patched)
+"
+            touch .cargo/.tools-toml-patched
+            echo "   ✅ Patched. Restore any time with: git checkout bin/tools/Cargo.toml"
+        fi
+    fi
 
 build-maxperf:
     RUSTFLAGS="-C target-cpu=native" cargo build --profile maxperf --features jemalloc,asm-keccak
