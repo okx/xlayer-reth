@@ -576,3 +576,489 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
         self.pending_sequence_rx.clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::{
+        make_executed_block, make_pending_sequence, make_pending_sequence_end,
+        make_pending_sequence_with_txs,
+    };
+    use alloy_consensus::BlockHeader;
+    use reth_chain_state::CanonicalInMemoryState;
+    use reth_optimism_primitives::OpPrimitives;
+
+    type TestCache = FlashblockStateCache<OpPrimitives>;
+    type TestInner = FlashblockStateCacheInner<OpPrimitives>;
+
+    fn make_test_cache() -> TestCache {
+        TestCache::new(CanonicalInMemoryState::new(
+            Default::default(),
+            Default::default(),
+            None,
+            None,
+            None,
+        ))
+    }
+
+    /// Helper: promote heights 1..=n to confirm cache via `sequence_end: true`,
+    /// then insert height n+1 as pending with `sequence_end: false`.
+    fn populate_inner_with_confirmed_and_pending(inner: &mut TestInner, confirmed_count: u64) {
+        for i in 1..=confirmed_count {
+            let seq = make_pending_sequence_end(i, B256::repeat_byte(i as u8));
+            inner.handle_pending_sequence(seq).unwrap();
+        }
+        let pending_height = confirmed_count + 1;
+        let seq = make_pending_sequence(pending_height, B256::repeat_byte(pending_height as u8));
+        inner.handle_pending_sequence(seq).unwrap();
+    }
+
+    // ========================================================================
+    // Defaults
+    // ========================================================================
+
+    #[test]
+    fn test_new_defaults() {
+        let inner = TestInner::new();
+        assert_eq!(inner.confirm_height, 0);
+        assert_eq!(inner.canon_info, (0, B256::ZERO));
+        assert!(inner.pending_cache.is_none());
+    }
+
+    // ========================================================================
+    // handle_pending_sequence — insertion, replacement, promotion
+    // ========================================================================
+
+    #[test]
+    fn test_handle_pending_first_at_expected_height() {
+        let mut inner = TestInner::new();
+        let seq = make_pending_sequence(1, B256::ZERO);
+        inner.handle_pending_sequence(seq).unwrap();
+
+        assert!(inner.pending_cache.is_some());
+        assert_eq!(inner.pending_cache.as_ref().unwrap().get_height(), 1);
+        assert_eq!(inner.confirm_height, 0);
+    }
+
+    #[test]
+    fn test_handle_pending_replace_same_height() {
+        let mut inner = TestInner::new();
+        let seq1 = make_pending_sequence(1, B256::ZERO);
+        inner.handle_pending_sequence(seq1).unwrap();
+
+        let seq2 = make_pending_sequence(1, B256::repeat_byte(0xAA));
+        let seq2_hash = seq2.block_hash;
+        inner.handle_pending_sequence(seq2).unwrap();
+
+        assert!(inner.pending_cache.is_some());
+        assert_eq!(inner.pending_cache.as_ref().unwrap().block_hash, seq2_hash);
+        assert_eq!(inner.confirm_height, 0);
+    }
+
+    #[test]
+    fn test_sequence_end_promotes_to_confirm() {
+        let mut inner = TestInner::new();
+        // Insert with sequence_end: true → promotes to confirm, clears pending
+        let seq = make_pending_sequence_end(1, B256::ZERO);
+        inner.handle_pending_sequence(seq).unwrap();
+
+        assert_eq!(inner.confirm_height, 1);
+        assert!(inner.pending_cache.is_none());
+        assert!(inner.confirm_cache.get_block_by_number(1).is_some());
+
+        // Now height 2 is accepted as next pending
+        let seq2 = make_pending_sequence(2, B256::repeat_byte(0xBB));
+        inner.handle_pending_sequence(seq2).unwrap();
+        assert_eq!(inner.pending_cache.as_ref().unwrap().get_height(), 2);
+    }
+
+    #[test]
+    fn test_sequence_end_false_does_not_promote() {
+        let mut inner = TestInner::new();
+        // Multiple inserts at same height with sequence_end: false
+        inner.handle_pending_sequence(make_pending_sequence(1, B256::ZERO)).unwrap();
+        inner.handle_pending_sequence(make_pending_sequence(1, B256::repeat_byte(0x01))).unwrap();
+
+        assert_eq!(inner.confirm_height, 0);
+        assert!(inner.pending_cache.is_some());
+        assert!(inner.confirm_cache.is_empty());
+    }
+
+    #[test]
+    fn test_handle_pending_gap_height_errors() {
+        let mut inner = TestInner::new();
+        // Height 2 when confirm_height=0 → expected_height=1, gap error
+        let seq = make_pending_sequence(2, B256::ZERO);
+        let result = inner.handle_pending_sequence(seq);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not next consecutive pending height block"));
+    }
+
+    #[test]
+    fn test_handle_pending_wrong_height_errors() {
+        let mut inner = TestInner::new();
+        let seq = make_pending_sequence(5, B256::ZERO);
+        let result = inner.handle_pending_sequence(seq);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not next consecutive pending height block"));
+    }
+
+    #[test]
+    fn test_handle_pending_skip_already_confirmed_height() {
+        let mut inner = TestInner::new();
+        // Promote height 1 to confirm
+        inner.handle_pending_sequence(make_pending_sequence_end(1, B256::ZERO)).unwrap();
+        assert_eq!(inner.confirm_height, 1);
+
+        // Re-sending height 1 is silently skipped (height <= confirm_height)
+        let result = inner.handle_pending_sequence(make_pending_sequence(1, B256::ZERO));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_handle_confirmed_block_non_consecutive_errors() {
+        let mut inner = TestInner::new();
+        let executed = make_executed_block(5, B256::ZERO);
+        let result = inner.handle_confirmed_block(5, executed, Arc::new(vec![]));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not next consecutive target confirm height block"));
+    }
+
+    // ========================================================================
+    // handle_canonical_block — eviction, stale clearing, reorg flush
+    // ========================================================================
+
+    #[test]
+    fn test_handle_canonical_evicts_confirm() {
+        let mut inner = TestInner::new();
+        // Promote heights 1-4 to confirm, height 5 as pending
+        populate_inner_with_confirmed_and_pending(&mut inner, 4);
+        assert_eq!(inner.confirm_height, 4);
+        assert_eq!(inner.pending_cache.as_ref().unwrap().get_height(), 5);
+
+        // Use the actual hash of the confirmed block at height 2 to avoid hash_mismatch
+        let block2_hash = inner.confirm_cache.get_block_by_number(2).unwrap().block.hash();
+        let flushed = inner.handle_canonical_block((2, block2_hash), false);
+        assert!(!flushed);
+        assert_eq!(inner.canon_info.0, 2);
+        assert_eq!(inner.confirm_height, 4); // confirm_height unchanged
+        assert!(inner.confirm_cache.get_block_by_number(1).is_none());
+        assert!(inner.confirm_cache.get_block_by_number(2).is_none());
+        assert!(inner.confirm_cache.get_block_by_number(3).is_some());
+        assert!(inner.confirm_cache.get_block_by_number(4).is_some());
+    }
+
+    #[test]
+    fn test_handle_canonical_clears_stale_pending() {
+        let mut inner = TestInner::new();
+        let seq = make_pending_sequence(1, B256::ZERO);
+        inner.handle_pending_sequence(seq).unwrap();
+
+        // Canonical at height 1 — pending is stale, cleared (not a full flush)
+        let flushed = inner.handle_canonical_block((1, B256::repeat_byte(0xCC)), false);
+        assert!(!flushed);
+        assert!(inner.pending_cache.is_none());
+        assert_eq!(inner.confirm_height, 1); // max(0, 1)
+    }
+
+    #[test]
+    fn test_handle_canonical_flush_on_reorg() {
+        let mut inner = TestInner::new();
+        let seq = make_pending_sequence(1, B256::ZERO);
+        inner.handle_pending_sequence(seq).unwrap();
+
+        let flushed = inner.handle_canonical_block((0, B256::repeat_byte(0xDD)), true);
+        assert!(flushed);
+        assert!(inner.pending_cache.is_none());
+    }
+
+    // ========================================================================
+    // get_block_by_number — pending priority, confirm fallback
+    // ========================================================================
+
+    #[test]
+    fn test_get_block_by_number_pending_priority() {
+        let cache = make_test_cache();
+        // Promote height 1 to confirm, height 2 pending
+        cache.handle_pending_sequence(make_pending_sequence_end(1, B256::ZERO)).unwrap();
+        cache.handle_pending_sequence(make_pending_sequence(2, B256::repeat_byte(0x01))).unwrap();
+
+        // Replace pending at height 2 with new block
+        let new_pending = make_pending_sequence(2, B256::repeat_byte(0x02));
+        let new_pending_hash = new_pending.block_hash;
+        cache.handle_pending_sequence(new_pending).unwrap();
+
+        let result = cache.get_block_by_number(2).unwrap();
+        assert_eq!(result.block.hash(), new_pending_hash);
+    }
+
+    #[test]
+    fn test_get_block_by_number_falls_to_confirm() {
+        let cache = make_test_cache();
+        let seq1 = make_pending_sequence_end(1, B256::ZERO);
+        let seq1_hash = seq1.block_hash;
+        cache.handle_pending_sequence(seq1).unwrap();
+        cache.handle_pending_sequence(make_pending_sequence(2, B256::repeat_byte(0x01))).unwrap();
+
+        // Height 1 is in confirm, not pending
+        let result = cache.get_block_by_number(1).unwrap();
+        assert_eq!(result.block.hash(), seq1_hash);
+    }
+
+    // ========================================================================
+    // get_block_by_hash — pending priority, confirm fallback
+    // ========================================================================
+
+    #[test]
+    fn test_get_block_by_hash_returns_pending() {
+        let cache = make_test_cache();
+        let seq = make_pending_sequence(1, B256::ZERO);
+        let pending_hash = seq.block_hash;
+        cache.handle_pending_sequence(seq).unwrap();
+
+        let result = cache.get_block_by_hash(&pending_hash).unwrap();
+        assert_eq!(result.block.number(), 1);
+    }
+
+    #[test]
+    fn test_get_block_by_hash_returns_from_confirm_cache() {
+        let cache = make_test_cache();
+        let seq = make_pending_sequence_end(1, B256::ZERO);
+        let confirmed_hash = seq.block_hash;
+        cache.handle_pending_sequence(seq).unwrap();
+        // Height 1 promoted to confirm, pending is empty
+        cache.handle_pending_sequence(make_pending_sequence(2, B256::repeat_byte(0x01))).unwrap();
+
+        let result = cache.get_block_by_hash(&confirmed_hash).unwrap();
+        assert_eq!(result.block.number(), 1);
+    }
+
+    // ========================================================================
+    // get_rpc_block — Pending, Latest, Number(n), empty cache
+    // ========================================================================
+
+    #[test]
+    fn test_get_rpc_block_pending_returns_pending() {
+        let cache = make_test_cache();
+        let seq = make_pending_sequence(1, B256::ZERO);
+        let pending_hash = seq.block_hash;
+        cache.handle_pending_sequence(seq).unwrap();
+
+        let result = cache.get_rpc_block(BlockNumberOrTag::Pending).unwrap();
+        assert_eq!(result.block.hash(), pending_hash);
+    }
+
+    #[test]
+    fn test_get_rpc_block_latest_returns_confirmed() {
+        let cache = make_test_cache();
+        let seq1 = make_pending_sequence_end(1, B256::ZERO);
+        let seq1_hash = seq1.block_hash;
+        cache.handle_pending_sequence(seq1).unwrap();
+        cache.handle_pending_sequence(make_pending_sequence(2, B256::repeat_byte(0x01))).unwrap();
+
+        let result = cache.get_rpc_block(BlockNumberOrTag::Latest).unwrap();
+        assert_eq!(result.block.hash(), seq1_hash);
+        assert_eq!(result.block.number(), 1);
+    }
+
+    #[test]
+    fn test_get_rpc_block_number_tag_returns_block() {
+        let cache = make_test_cache();
+        let seq = make_pending_sequence_end(1, B256::ZERO);
+        let hash = seq.block_hash;
+        cache.handle_pending_sequence(seq).unwrap();
+
+        let result = cache.get_rpc_block(BlockNumberOrTag::Number(1)).unwrap();
+        assert_eq!(result.block.hash(), hash);
+    }
+
+    #[test]
+    fn test_get_rpc_block_returns_none_on_empty_cache() {
+        let cache = make_test_cache();
+        assert!(cache.get_rpc_block(BlockNumberOrTag::Pending).is_none());
+        assert!(cache.get_rpc_block(BlockNumberOrTag::Latest).is_none());
+    }
+
+    // ========================================================================
+    // get_tx_info — pending, confirm, missing (split into 3 tests)
+    // ========================================================================
+
+    #[test]
+    fn test_get_tx_info_returns_from_pending() {
+        let cache = make_test_cache();
+        let seq = make_pending_sequence_with_txs(1, B256::ZERO, 0, 2);
+        let tx_hash = *seq.tx_index.keys().next().unwrap();
+        cache.handle_pending_sequence(seq).unwrap();
+
+        let (info, _) = cache.get_tx_info(&tx_hash).unwrap();
+        assert_eq!(info.block_number, 1);
+    }
+
+    #[test]
+    fn test_get_tx_info_falls_back_to_confirm() {
+        let cache = make_test_cache();
+        // Promote height 1 with txs to confirm
+        let mut seq1 = make_pending_sequence_with_txs(1, B256::ZERO, 0, 2);
+        let confirm_tx_hash = *seq1.tx_index.keys().next().unwrap();
+        seq1.sequence_end = true;
+        cache.handle_pending_sequence(seq1).unwrap();
+
+        // Height 2 as pending (no overlap with height 1's txs)
+        cache.handle_pending_sequence(make_pending_sequence(2, B256::repeat_byte(0x01))).unwrap();
+
+        let (info, _) = cache.get_tx_info(&confirm_tx_hash).unwrap();
+        assert_eq!(info.block_number, 1);
+    }
+
+    #[test]
+    fn test_get_tx_info_returns_none_for_unknown_hash() {
+        let cache = make_test_cache();
+        cache.handle_pending_sequence(make_pending_sequence(1, B256::ZERO)).unwrap();
+        assert!(cache.get_tx_info(&B256::repeat_byte(0xFF)).is_none());
+    }
+
+    // ========================================================================
+    // get_executed_blocks_up_to_height
+    // ========================================================================
+
+    #[test]
+    fn test_get_executed_blocks_returns_none_when_uninitialized() {
+        let inner = TestInner::new();
+        let result = inner.get_executed_blocks_up_to_height(1).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_get_executed_blocks_contiguous() {
+        let mut inner = TestInner::new();
+        inner.canon_info = (1, B256::repeat_byte(0x01));
+        inner.confirm_height = 1;
+
+        // Heights 2-3 promoted to confirm
+        for i in 2..=3 {
+            let seq = make_pending_sequence_end(i, B256::repeat_byte(i as u8));
+            inner.handle_pending_sequence(seq).unwrap();
+        }
+        // Height 4 as pending
+        let seq = make_pending_sequence(4, B256::repeat_byte(0x04));
+        inner.handle_pending_sequence(seq).unwrap();
+
+        let blocks = inner.get_executed_blocks_up_to_height(4).unwrap().unwrap();
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0].recovered_block.number(), 4);
+    }
+
+    #[test]
+    fn test_get_executed_blocks_returns_none_for_target_below_canon() {
+        let mut inner = TestInner::new();
+        inner.canon_info = (5, B256::repeat_byte(0x01));
+        inner.confirm_height = 5;
+
+        let result = inner.get_executed_blocks_up_to_height(5).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_get_executed_blocks_returns_none_above_confirm_plus_one() {
+        let mut inner = TestInner::new();
+        inner.canon_info = (1, B256::repeat_byte(0x01));
+        inner.confirm_height = 2;
+
+        // Target far above confirm_height + 1
+        let result = inner.get_executed_blocks_up_to_height(5).unwrap();
+        assert!(result.is_none());
+    }
+
+    // ========================================================================
+    // subscribe_pending_sequence
+    // ========================================================================
+
+    #[test]
+    fn test_subscribe_receives_update_on_pending_insert() {
+        let cache = make_test_cache();
+        let mut rx = cache.subscribe_pending_sequence();
+
+        let seq = make_pending_sequence(1, B256::ZERO);
+        cache.handle_pending_sequence(seq).unwrap();
+
+        assert!(rx.has_changed().unwrap());
+        let val = rx.borrow_and_update();
+        assert!(val.is_some());
+        assert_eq!(val.as_ref().unwrap().get_height(), 1);
+    }
+
+    #[test]
+    fn test_subscribe_sees_replacement() {
+        let cache = make_test_cache();
+        let mut rx = cache.subscribe_pending_sequence();
+
+        cache.handle_pending_sequence(make_pending_sequence(1, B256::ZERO)).unwrap();
+        rx.borrow_and_update(); // consume first update
+
+        let replacement = make_pending_sequence(1, B256::repeat_byte(0xAA));
+        let replacement_hash = replacement.block_hash;
+        cache.handle_pending_sequence(replacement).unwrap();
+
+        assert!(rx.has_changed().unwrap());
+        let val = rx.borrow_and_update();
+        assert_eq!(val.as_ref().unwrap().block_hash, replacement_hash);
+    }
+
+    #[test]
+    fn test_subscribe_receives_on_advance() {
+        let cache = make_test_cache();
+        let mut rx = cache.subscribe_pending_sequence();
+
+        // Promote height 1 to confirm
+        cache.handle_pending_sequence(make_pending_sequence_end(1, B256::ZERO)).unwrap();
+        rx.borrow_and_update(); // consume
+
+        // Insert height 2 as pending
+        let seq2 = make_pending_sequence(2, B256::repeat_byte(0x01));
+        let seq2_hash = seq2.block_hash;
+        cache.handle_pending_sequence(seq2).unwrap();
+
+        assert!(rx.has_changed().unwrap());
+        let val = rx.borrow_and_update();
+        assert_eq!(val.as_ref().unwrap().get_height(), 2);
+        assert_eq!(val.as_ref().unwrap().block_hash, seq2_hash);
+    }
+
+    // ========================================================================
+    // Outer FlashblockStateCache methods
+    // ========================================================================
+
+    #[test]
+    fn test_outer_handle_canonical_block_updates_canon_info() {
+        let cache = make_test_cache();
+        // Promote height 1, then height 2 as pending
+        cache.handle_pending_sequence(make_pending_sequence_end(1, B256::ZERO)).unwrap();
+        cache.handle_pending_sequence(make_pending_sequence(2, B256::repeat_byte(0x01))).unwrap();
+
+        let canon_hash = B256::repeat_byte(0xCC);
+        cache.handle_canonical_block((1, canon_hash), false);
+
+        assert_eq!(cache.get_canon_height(), 1);
+    }
+
+    #[test]
+    fn test_flush_resets_confirm_height_to_canon() {
+        let mut inner = TestInner::new();
+        inner.handle_pending_sequence(make_pending_sequence(1, B256::ZERO)).unwrap();
+
+        // Canonical at height 1 clears stale pending, confirm_height = max(0, 1) = 1
+        inner.handle_canonical_block((1, B256::repeat_byte(0xAA)), false);
+
+        assert_eq!(inner.confirm_height, 1);
+        assert!(inner.pending_cache.is_none());
+    }
+}
