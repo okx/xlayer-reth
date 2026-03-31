@@ -1,5 +1,5 @@
 use crate::{
-    broadcast::XLayerFlashblockPayload,
+    broadcast::{XLayerFlashblockMessage, XLayerFlashblockPayload},
     flashblocks::{
         best_txs::BestFlashblocksTxs,
         builder_tx::FlashblocksBuilderTx,
@@ -194,7 +194,7 @@ pub(super) struct FlashblocksBuilder<Pool, Client, Tasks> {
     pub task_executor: Tasks,
     /// Sender for sending built flashblock payloads to [`PayloadHandler`],
     /// which broadcasts outgoing flashblock payloads via p2p.
-    pub built_fb_payload_tx: mpsc::Sender<XLayerFlashblockPayload>,
+    pub built_fb_payload_tx: mpsc::Sender<XLayerFlashblockMessage>,
     /// Sender for sending built full block payloads to [`PayloadHandler`],
     /// which updates the engine tree state.
     pub built_payload_tx: mpsc::Sender<OpBuiltPayload>,
@@ -222,7 +222,7 @@ impl<Pool, Client, Tasks> FlashblocksBuilder<Pool, Client, Tasks> {
         task_executor: Tasks,
         config: BuilderConfig,
         builder_tx: FlashblocksBuilderTx,
-        built_fb_payload_tx: mpsc::Sender<XLayerFlashblockPayload>,
+        built_fb_payload_tx: mpsc::Sender<XLayerFlashblockMessage>,
         built_payload_tx: mpsc::Sender<OpBuiltPayload>,
         p2p_cache: FlashblockPayloadsCache,
         metrics: Arc<BuilderMetrics>,
@@ -429,7 +429,9 @@ where
             // For X Layer - skip if replaying
             let fb_payload_with_count = XLayerFlashblockPayload::new(fb_payload.clone(), 0);
             self.built_fb_payload_tx
-                .try_send(fb_payload_with_count.clone())
+                .try_send(XLayerFlashblockMessage::from_flashblock_payload(
+                    fb_payload_with_count.clone(),
+                ))
                 .map_err(PayloadBuilderError::other)?;
 
             // For X Layer, full link monitoring support
@@ -453,7 +455,8 @@ where
             ctx.metrics.payload_num_tx_gauge.set(info.executed_transactions.len() as f64);
 
             // return early since we don't need to build a block with transactions from the pool
-            self.resolve_best_payload(&ctx, best_payload, fallback_payload, &resolve_payload);
+            self.resolve_best_payload(&ctx, best_payload, fallback_payload, &resolve_payload)
+                .map_err(|e| PayloadBuilderError::Other(e.into()))?;
             return Ok(());
         }
 
@@ -470,7 +473,8 @@ where
         // Get target number of flashblocks to build. If no flashblocks are scheduled, return early.
         let target_flashblocks = flashblock_scheduler.target_flashblocks();
         if target_flashblocks == 0 {
-            self.resolve_best_payload(&ctx, best_payload, fallback_payload, &resolve_payload);
+            self.resolve_best_payload(&ctx, best_payload, fallback_payload, &resolve_payload)
+                .map_err(|e| PayloadBuilderError::Other(e.into()))?;
             self.record_flashblocks_metrics(&ctx, 0, &info, 0);
             return Ok(());
         }
@@ -549,7 +553,8 @@ where
                 ctx = ctx.with_cancel(new_fb_cancel);
             } else {
                 // Channel closed - block building cancelled
-                self.resolve_best_payload(&ctx, best_payload, fallback_payload, &resolve_payload);
+                self.resolve_best_payload(&ctx, best_payload, fallback_payload, &resolve_payload)
+                    .map_err(|e| PayloadBuilderError::Other(e.into()))?;
                 self.record_flashblocks_metrics(
                     &ctx,
                     fb_state.flashblock_index().saturating_sub(1),
@@ -561,7 +566,8 @@ where
 
             // Check if we have reached target flashblocks count
             if fb_state.flashblock_index() > fb_state.target_flashblock_count() {
-                self.resolve_best_payload(&ctx, best_payload, fallback_payload, &resolve_payload);
+                self.resolve_best_payload(&ctx, best_payload, fallback_payload, &resolve_payload)
+                    .map_err(|e| PayloadBuilderError::Other(e.into()))?;
                 self.record_flashblocks_metrics(
                     &ctx,
                     fb_state.flashblock_index().saturating_sub(1),
@@ -589,7 +595,8 @@ where
                         best_payload,
                         fallback_payload,
                         &resolve_payload,
-                    );
+                    )
+                    .map_err(|e| PayloadBuilderError::Other(e.into()))?;
                     self.record_flashblocks_metrics(
                         &ctx,
                         fb_state.flashblock_index().saturating_sub(1),
@@ -612,7 +619,8 @@ where
                         best_payload,
                         fallback_payload,
                         &resolve_payload,
-                    );
+                    )
+                    .map_err(|e| PayloadBuilderError::Other(e.into()))?;
                     return Err(PayloadBuilderError::Other(err.into()));
                 }
             };
@@ -767,7 +775,9 @@ where
                     fb_state.target_flashblock_count(),
                 );
                 self.built_fb_payload_tx
-                    .try_send(fb_payload_with_count)
+                    .try_send(XLayerFlashblockMessage::from_flashblock_payload(
+                        fb_payload_with_count,
+                    ))
                     .wrap_err("failed to send built payload to handler")?;
                 *best_payload = (new_payload, bundle_state);
 
@@ -830,9 +840,9 @@ where
         best_payload: (OpBuiltPayload, BundleState),
         fallback_payload: OpBuiltPayload,
         resolve_payload: &BlockCell<OpBuiltPayload>,
-    ) {
+    ) -> eyre::Result<()> {
         if resolve_payload.get().is_some() {
-            return;
+            return Ok(());
         }
 
         let payload = match best_payload.0.block().header().state_root {
@@ -887,6 +897,10 @@ where
             _ => best_payload.0,
         };
         resolve_payload.set(payload);
+        self.built_fb_payload_tx
+            .try_send(XLayerFlashblockMessage::from_flashblock_end(ctx.payload_id()))
+            .wrap_err("failed to send built payload to handler")?;
+        Ok(())
     }
 
     /// Do some logging and metric recording when we stop build flashblocks

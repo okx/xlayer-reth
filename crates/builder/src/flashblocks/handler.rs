@@ -1,5 +1,5 @@
 use crate::{
-    broadcast::{Message, WebSocketPublisher, XLayerFlashblockPayload},
+    broadcast::{Message, WebSocketPublisher, XLayerFlashblockMessage},
     flashblocks::{
         handler_ctx::FlashblockHandlerContext,
         utils::{cache::FlashblockPayloadsCache, execution::ExecutionInfo},
@@ -40,7 +40,7 @@ pub(crate) struct FlashblocksPayloadHandler<Client, Tasks> {
     // handler context for external flashblock execution
     ctx: FlashblockHandlerContext,
     // receives new flashblock payloads built by this builder.
-    built_fb_payload_rx: mpsc::Receiver<XLayerFlashblockPayload>,
+    built_fb_payload_rx: mpsc::Receiver<XLayerFlashblockMessage>,
     // receives new full block payloads built by this builder.
     built_payload_rx: mpsc::Receiver<OpBuiltPayload>,
     // receives incoming p2p messages from peers.
@@ -70,7 +70,7 @@ where
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         ctx: FlashblockHandlerContext,
-        built_fb_payload_rx: mpsc::Receiver<XLayerFlashblockPayload>,
+        built_fb_payload_rx: mpsc::Receiver<XLayerFlashblockMessage>,
         built_payload_rx: mpsc::Receiver<OpBuiltPayload>,
         p2p_rx: mpsc::Receiver<Message>,
         p2p_tx: mpsc::Sender<Message>,
@@ -185,7 +185,7 @@ where
                             }));
                         }
                         Message::OpFlashblockPayload(fb_payload) => {
-                            if let Err(e) = p2p_cache.add_flashblock_payload(fb_payload.inner.clone()) {
+                            if let XLayerFlashblockMessage::Payload(payload) = &fb_payload && let Err(e) = p2p_cache.add_flashblock_payload(payload.inner.clone()) {
                                 warn!(target: "payload_builder", e = ?e, "failed to add flashblock txs to cache");
                             }
                             if let Err(e) = ws_pub.publish(&fb_payload) {

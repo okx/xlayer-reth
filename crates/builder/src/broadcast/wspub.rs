@@ -1,5 +1,5 @@
 use crate::{
-    broadcast::XLayerFlashblockPayload, metrics::tokio::MonitoredTask, metrics::BuilderMetrics,
+    broadcast::XLayerFlashblockMessage, metrics::tokio::MonitoredTask, metrics::BuilderMetrics,
 };
 use core::{
     fmt::{Debug, Formatter},
@@ -65,19 +65,31 @@ impl WebSocketPublisher {
         Ok(Self { sent, subs, term, pipe, subscriber_limit })
     }
 
-    pub fn publish(&self, payload: &XLayerFlashblockPayload) -> io::Result<usize> {
+    pub fn publish(&self, payload: &XLayerFlashblockMessage) -> io::Result<usize> {
         // Serialize the payload to a UTF-8 string
         // serialize only once, then just copy around only a pointer
         // to the serialized data for each subscription.
-        info!(
-            target: "payload_builder::broadcast",
-            event = "flashblock_sent",
-            message = "Sending flashblock to subscribers",
-            id = %payload.inner.payload_id,
-            index = payload.inner.index,
-            base = payload.inner.base.is_some(),
-            target_index = payload.target_index,
-        );
+        match payload {
+            XLayerFlashblockMessage::Payload(payload) => {
+                info!(
+                    target: "payload_builder::broadcast",
+                    event = "flashblock_sent",
+                    message = "Sending flashblock to subscribers",
+                    id = %payload.inner.payload_id,
+                    index = payload.inner.index,
+                    base = payload.inner.base.is_some(),
+                    target_index = payload.target_index,
+                );
+            }
+            XLayerFlashblockMessage::PayloadEnd(payload) => {
+                debug!(
+                    target: "payload_builder::broadcast",
+                    event = "flashblock_end_sent",
+                    message = "Sending flashblock to subscribers",
+                    id = %payload.payload_id,
+                );
+            }
+        }
 
         let serialized = serde_json::to_string(payload)?;
         let utf8_bytes = Utf8Bytes::from(serialized);

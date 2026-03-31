@@ -6,7 +6,7 @@ pub(crate) mod wspub;
 
 use behaviour::Behaviour;
 pub use libp2p::{Multiaddr, StreamProtocol};
-pub use payload::XLayerFlashblockPayload;
+pub use payload::{XLayerFlashblockEnd, XLayerFlashblockMessage, XLayerFlashblockPayload};
 pub use types::Message;
 pub use wspub::WebSocketPublisher;
 
@@ -640,7 +640,9 @@ mod test {
 
         tokio::spawn(async move { node1.run().await });
         tokio::spawn(async move { node2.run().await });
-        let message = Message::from_flashblock_payload(XLayerFlashblockPayload::default());
+        let message = Message::from_flashblock_payload(XLayerFlashblockMessage::Payload(
+            XLayerFlashblockPayload::default(),
+        ));
         let mut rx = rx1.remove(&types::FLASHBLOCKS_STREAM_PROTOCOL).unwrap();
         let recv_message = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -765,7 +767,9 @@ mod test {
         handler.insert_peer_and_stream(peer_a, types::FLASHBLOCKS_STREAM_PROTOCOL, stream);
         assert!(handler.has_peer(&peer_a));
 
-        let msg = Message::from_flashblock_payload(XLayerFlashblockPayload::default());
+        let msg = Message::from_flashblock_payload(XLayerFlashblockMessage::Payload(
+            XLayerFlashblockPayload::default(),
+        ));
         let failed = handler.broadcast_message(msg).await.expect("serialization must not fail");
 
         assert_eq!(failed, vec![peer_a], "peer_a must be returned as a failed peer");
@@ -801,7 +805,9 @@ mod test {
         let mut handler = outgoing::StreamsHandler::new();
         handler.insert_peer_and_stream(peer_a, types::FLASHBLOCKS_STREAM_PROTOCOL, stream);
 
-        let msg = Message::from_flashblock_payload(XLayerFlashblockPayload::default());
+        let msg = Message::from_flashblock_payload(XLayerFlashblockMessage::Payload(
+            XLayerFlashblockPayload::default(),
+        ));
         let failed = handler.broadcast_message(msg).await.expect("serialization must not fail");
 
         assert!(failed.is_empty(), "no peers should fail on a healthy stream");

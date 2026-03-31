@@ -1,4 +1,4 @@
-use crate::broadcast::XLayerFlashblockPayload;
+use crate::broadcast::XLayerFlashblockMessage;
 use alloy_primitives::U256;
 use serde::{Deserialize, Serialize};
 
@@ -13,7 +13,7 @@ pub(crate) const FLASHBLOCKS_STREAM_PROTOCOL: crate::broadcast::StreamProtocol =
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub enum Message {
     OpBuiltPayload(OpBuiltPayload),
-    OpFlashblockPayload(XLayerFlashblockPayload),
+    OpFlashblockPayload(XLayerFlashblockMessage),
 }
 
 impl Message {
@@ -39,7 +39,7 @@ impl Message {
         Message::OpBuiltPayload(value.into())
     }
 
-    pub(crate) fn from_flashblock_payload(value: XLayerFlashblockPayload) -> Self {
+    pub(crate) fn from_flashblock_payload(value: XLayerFlashblockMessage) -> Self {
         Message::OpFlashblockPayload(value)
     }
 }

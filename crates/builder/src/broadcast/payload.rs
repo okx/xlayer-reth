@@ -1,4 +1,5 @@
 use op_alloy_rpc_types_engine::OpFlashblockPayload;
+use reth::payload::PayloadId;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -14,6 +15,30 @@ pub struct XLayerFlashblockPayload {
 impl XLayerFlashblockPayload {
     pub fn new(inner: OpFlashblockPayload, target_index: u64) -> Self {
         Self { inner, target_index }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct XLayerFlashblockEnd {
+    pub payload_id: PayloadId,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum XLayerFlashblockMessage {
+    /// Flashblock payload wrap with the target index.
+    Payload(XLayerFlashblockPayload),
+    /// End-of-sequence signal — no more flashblocks for the current block.
+    PayloadEnd(XLayerFlashblockEnd),
+}
+
+impl XLayerFlashblockMessage {
+    pub fn from_flashblock_payload(payload: XLayerFlashblockPayload) -> Self {
+        Self::Payload(payload)
+    }
+
+    pub fn from_flashblock_end(payload_id: PayloadId) -> Self {
+        Self::PayloadEnd(XLayerFlashblockEnd { payload_id })
     }
 }
 
@@ -48,5 +73,44 @@ mod tests {
         // New consumer deserializes as XLayerFlashblockPayload — target_index defaults to 0
         let wrapped: XLayerFlashblockPayload = serde_json::from_str(&json).unwrap();
         assert_eq!(wrapped.target_index, 0);
+    }
+
+    #[test]
+    fn test_message_payload_serializes_same_as_struct() {
+        let payload = XLayerFlashblockPayload::new(OpFlashblockPayload::default(), 7);
+        let direct_json = serde_json::to_string(&payload).unwrap();
+        let message = XLayerFlashblockMessage::Payload(payload);
+        let message_json = serde_json::to_string(&message).unwrap();
+        assert_eq!(direct_json, message_json, "Payload variant must serialize identically");
+    }
+
+    #[test]
+    fn test_message_end_of_sequence_round_trip() {
+        let signal = XLayerFlashblockEnd { payload_id: PayloadId::new([1; 8]) };
+        let message = XLayerFlashblockMessage::PayloadEnd(signal.clone());
+        let json = serde_json::to_string(&message).unwrap();
+        assert!(json.contains("\"payload_id\""));
+
+        let deserialized: XLayerFlashblockMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, message);
+    }
+
+    #[test]
+    fn test_message_payload_round_trip() {
+        let payload = XLayerFlashblockPayload::new(OpFlashblockPayload::default(), 7);
+        let message = XLayerFlashblockMessage::Payload(payload);
+        let json = serde_json::to_string(&message).unwrap();
+        let deserialized: XLayerFlashblockMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, message);
+    }
+
+    #[test]
+    fn test_end_of_sequence_not_deserializable_as_payload() {
+        let signal = XLayerFlashblockEnd { payload_id: PayloadId::new([1; 8]) };
+        let json = serde_json::to_string(&signal).unwrap();
+        // Deserializing an EndOfSequence JSON as XLayerFlashblockMessage should yield
+        // the EndOfSequence variant, not Payload
+        let message: XLayerFlashblockMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(message, XLayerFlashblockMessage::PayloadEnd(_)));
     }
 }
