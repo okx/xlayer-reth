@@ -276,25 +276,15 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
         Ok(Some((overlay, header.expect("valid cached header"), anchor_hash)))
     }
 
-    /// Returns the `ExecutedBlock` for the given block number from pending or confirm cache.
+    /// Returns the `ExecutedBlock` for the given block number from confirm cache.
     /// Used for diagnostic comparison with the engine's execution.
     pub fn debug_get_executed_block_by_number(
         &self,
         block_number: u64,
     ) -> Option<reth_chain_state::ExecutedBlock<N>> {
-        let guard = self.inner.read();
-        if let Some(seq) = guard.pending_cache.as_ref()
-            && seq.get_height() == block_number
-            && seq.is_target_flashblock()
-        {
-            return Some(seq.pending.executed_block.clone());
-        }
-        guard.confirm_cache.get_executed_block_by_number(block_number)
+        self.inner.read().confirm_cache.get_executed_block_by_number(block_number)
     }
-}
 
-// FlashblockStateCache state mutation interfaces.
-impl<N: NodePrimitives> FlashblockStateCache<N> {
     /// Handles updating the latest pending state by the flashblocks rpc handle.
     ///
     /// This method detects when the flashblocks sequencer has advanced to the next
@@ -423,8 +413,8 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
 
         if pending_height == expected_height {
             let broadcast = pending_sequence.clone();
-            if pending_sequence.is_target_flashblock() {
-                // Target flashblock. Promote to confirm, and clear pending state.
+            if pending_sequence.is_sequence_end() {
+                // Sequence end. Promote to confirm, and clear pending state.
                 self.handle_confirmed_block(
                     expected_height,
                     pending_sequence.pending.executed_block,
@@ -435,23 +425,6 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
                 // In-progress — replace pending with newer flashblock
                 self.pending_cache = Some(pending_sequence);
             }
-            let _ = self.pending_sequence_tx.send(Some(broadcast));
-        } else if pending_height == expected_height + 1 {
-            // The next block's flashblock arrived. The target flashblocks was missed on
-            // the builder. Promote current pending to confirm, and set incoming as new
-            // pending sequence.
-            let broadcast = pending_sequence.clone();
-            let sequence = self.pending_cache.take().ok_or_else(|| {
-                eyre::eyre!(
-                    "polluted state cache - trying to advance pending tip but no current pending"
-                )
-            })?;
-            self.handle_confirmed_block(
-                expected_height,
-                sequence.pending.executed_block,
-                sequence.pending.receipts,
-            )?;
-            self.pending_cache = Some(pending_sequence);
             let _ = self.pending_sequence_tx.send(Some(broadcast));
         } else if pending_height <= self.confirm_height {
             // State cache may have advanced from canonical block stream. Skip

@@ -23,8 +23,8 @@ pub struct PendingSequence<N: NodePrimitives> {
     pub parent_header: SealedHeader<N::BlockHeader>,
     /// Prefix execution metadata for incremental builds.
     pub prefix_execution_meta: PrefixExecutionMeta,
-    /// Target index of the latest flashblock in the sequence.
-    pub target_index: u64,
+    /// Whether the pending sequence is sequence end
+    pub sequence_end: bool,
 }
 
 impl<N: NodePrimitives> PendingSequence<N> {
@@ -51,8 +51,8 @@ impl<N: NodePrimitives> PendingSequence<N> {
         self.prefix_execution_meta.last_flashblock_index
     }
 
-    pub fn is_target_flashblock(&self) -> bool {
-        self.target_index > 0 && self.get_last_flashblock_index() >= self.target_index
+    pub fn is_sequence_end(&self) -> bool {
+        self.sequence_end
     }
 }
 
@@ -79,7 +79,7 @@ mod tests {
             block_hash,
             parent_header: Default::default(),
             prefix_execution_meta: Default::default(),
-            target_index: 0,
+            sequence_end: false,
         }
     }
 
@@ -111,7 +111,7 @@ mod tests {
             block_hash,
             parent_header: Default::default(),
             prefix_execution_meta: Default::default(),
-            target_index: 0,
+            sequence_end: false,
         }
     }
 

@@ -154,14 +154,19 @@ where
         // Pre-validate incoming flashblocks sequence
         let pending_sequence = self.prevalidate_incoming_sequence(&args)?;
 
-        // Only compute state root on the final flashblock (target_index == last_index) or when
-        // sequence end is received.
+        // Compute SR only when:
+        // 1. `sequence_end` signal is received
+        // 2. Final flashblock arrived (last_index == target_index AND target > 0)
         //
-        // Intermediate flashblocks use spawn_cache_exclusive() for execution + prewarming only,
-        // skipping the sparse trie pipeline, deferred trie tasks, and changeset cache population.
-        // This reduces MDBX read contention with the engine's persistence writes.
-        let calculate_state_root =
-            args.last_flashblock_index == args.target_index || args.sequence_end;
+        // Skip computing SR when:
+        // 1. Intermediate flashblock sequence (last_index < target_index)
+        // 2. Base payload at index 0 with target still unknown (target == 0)
+        //
+        // Skipped flashblocks use `spawn_cache_exclusive()` for execution + prewarming only,
+        // bypassing the sparse trie pipeline, deferred trie tasks, and changeset cache
+        // population. This reduces MDBX read contention with the engine's persistence writes.
+        let calculate_state_root = args.sequence_end
+            || (args.last_flashblock_index == args.target_index && args.target_index > 0);
         let strategy = if calculate_state_root {
             self.plan_state_root_computation()
         } else {
@@ -195,16 +200,11 @@ where
         // 3. Full block transactions to execute.
         // 4. Re-use cache reads in pending sequence for fast re-execution with pre-warm
         //    state accounts.
-        if calculate_state_root {
-            match strategy {
-                StateRootStrategy::StateRootTask => {
-                    transactions = block_transactions.clone();
-                    hash = parent_hash;
-                }
-                // Parallel and synchronous state root strategies will use incremental
-                // execution of tx deltas, using the pending sequence
-                _ => {}
-            }
+        if calculate_state_root && strategy == StateRootStrategy::StateRootTask {
+            // Re-execute all transactions from parent state for concurrent sparse trie SR.
+            // Parallel and synchronous strategies use incremental suffix execution instead.
+            transactions = block_transactions.clone();
+            hash = parent_hash;
         }
 
         let (provider_builder, header, overlay_data) = self.state_provider_builder(hash)?;
@@ -489,7 +489,7 @@ where
                 last_flashblock_index: args.last_flashblock_index,
             },
             block_transaction_count,
-            args.target_index,
+            calculate_state_root,
         )?;
 
         info!(
@@ -512,7 +512,7 @@ where
         parent_header: SealedHeaderFor<N>,
         prefix_execution_meta: PrefixExecutionMeta,
         transaction_count: usize,
-        target_index: u64,
+        sequence_end: bool,
     ) -> eyre::Result<()> {
         // Build tx index
         let block_hash = executed_block.recovered_block.hash();
@@ -540,7 +540,7 @@ where
             block_hash,
             parent_header,
             prefix_execution_meta,
-            target_index,
+            sequence_end,
         })
     }
 
@@ -751,7 +751,7 @@ where
         Ok((output, senders, result_rx, read_cache))
     }
 
-    #[expect(clippy::type_complexity)]
+    #[expect(clippy::type_complexity, clippy::too_many_arguments)]
     fn execute_transactions<Executor, Err, T>(
         &self,
         mut executor: Executor,

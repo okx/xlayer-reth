@@ -10,7 +10,6 @@ pub(crate) fn debug_compare_flashblocks_bundle_states<N: NodePrimitives + 'stati
     flashblocks_state: &FlashblockStateCache<N>,
     block_number: u64,
     block_hash: alloy_primitives::B256,
-    mut fb_trie_updates: Option<reth_trie::updates::TrieUpdatesSorted>,
 ) {
     // Capture data synchronously (before handle_canonical_block evicts the cache).
     // These are cheap — ExecutedBlock internals are Arc'd.
@@ -20,20 +19,10 @@ pub(crate) fn debug_compare_flashblocks_bundle_states<N: NodePrimitives + 'stati
         .state_by_hash(block_hash)
         .map(|state| state.block());
 
-    if fb_trie_updates.is_none() {
-        // Flashblocks state cache might be lagging behind canonical chainstate. Check pending sequence.
-        // Only use target flashblock's accumulated trie_updates — non-target sequences have incomplete
-        // accumulation and would produce false-positive mismatches.
-        fb_trie_updates = flashblocks_state
-            .get_pending_sequence()
-            .filter(|seq| seq.get_height() == block_number && seq.is_target_flashblock())
-            .map(|seq| seq.prefix_execution_meta.accumulated_trie_updates.clone().into_sorted());
-    }
-
     // Spawn the heavy comparison on a blocking thread so the canonical stream handler
     // stays responsive. trie_data() is synchronous (parking_lot::Mutex, no async).
     tokio::task::spawn_blocking(move || {
-        compare_executed_blocks(fb_block, engine_block, block_number, fb_trie_updates);
+        compare_executed_blocks(fb_block, engine_block, block_number);
     });
 }
 
@@ -42,7 +31,6 @@ fn compare_executed_blocks<N: NodePrimitives>(
     fb_block: Option<ExecutedBlock<N>>,
     engine_block: Option<ExecutedBlock<N>>,
     block_number: u64,
-    fb_trie_updates: Option<reth_trie::updates::TrieUpdatesSorted>,
 ) {
     let (Some(fb), Some(eng)) = (fb_block, engine_block) else {
         debug!(
@@ -112,6 +100,7 @@ fn compare_executed_blocks<N: NodePrimitives>(
     let fb_trie = fb.trie_data();
     let eng_trie = eng.trie_data();
     let hashed_state_match = *fb_trie.hashed_state == *eng_trie.hashed_state;
+    let trie_updates_match = *fb_trie.trie_updates == *eng_trie.trie_updates;
 
     let all_match = fb_hash == eng_hash
         && account_mismatches.is_empty()
@@ -121,7 +110,8 @@ fn compare_executed_blocks<N: NodePrimitives>(
         && revert_mismatches.is_empty()
         && revert_fb_only.is_empty()
         && revert_eng_only.is_empty()
-        && hashed_state_match;
+        && hashed_state_match
+        && trie_updates_match;
 
     if all_match {
         info!(
@@ -150,6 +140,7 @@ fn compare_executed_blocks<N: NodePrimitives>(
             revert_fb_only = revert_fb_only.len(),
             revert_eng_only = revert_eng_only.len(),
             hashed_state_match,
+            trie_updates_match,
             "Execution output MISMATCH: flashblocks != engine"
         );
         for addr in account_mismatches.iter().take(3) {
@@ -158,25 +149,5 @@ fn compare_executed_blocks<N: NodePrimitives>(
         for addr in revert_mismatches.iter().take(3) {
             warn!(target: "flashblocks::verify", %addr, "Revert mismatch");
         }
-    }
-
-    // Compare accumulated trie_updates (merged across all flashblock indices) with
-    // the engine's fresh trie_updates. This validates that the incremental accumulation
-    // via TrieUpdates::extend() produces the same result as a fresh single-pass computation.
-    let Some(fb_updates) = fb_trie_updates else {
-        return;
-    };
-    if fb_updates == *eng_trie.trie_updates {
-        info!(
-            target: "flashblocks::verify",
-            block_number,
-            "Trie updates MATCH: flashblocks == engine"
-        );
-    } else {
-        warn!(
-            target: "flashblocks::verify",
-            block_number,
-            "Trie updates MISMATCH: flashblocks != engine"
-        );
     }
 }

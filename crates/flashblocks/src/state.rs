@@ -169,54 +169,20 @@ pub async fn handle_canonical_stream<N: NodePrimitives>(
     raw_cache: Arc<RawFlashblocksCache<N::SignedTx>>,
     debug_state_comparison: bool,
 ) {
-    let mut trie_updates = None;
-    let mut pending_rx = if debug_state_comparison {
-        Some(flashblocks_state.subscribe_pending_sequence())
-    } else {
-        None
-    };
-
     info!(target: "flashblocks", "Canonical state handler started");
-    loop {
-        // Use select! to race canonical notifications with pending sequence updates.
-        // Pending sequence updates are only processed in debug mode to capture
-        // accumulated trie_updates before the block is promoted to confirm.
-        let notification = if let Some(ref mut rx) = pending_rx {
-            tokio::select! {
-                result = canon_rx.next() => {
-                    match result {
-                        Some(notification) => notification,
-                        None => break,
-                    }
-                },
-                Ok(()) = rx.changed() => {
-                    if let Some(seq) = rx.borrow_and_update().as_ref()
-                        .filter(|s| s.is_target_flashblock())
-                    {
-                        trie_updates = Some((seq.get_height(), seq.prefix_execution_meta.accumulated_trie_updates.clone().into_sorted()));
-                    }
-                    continue;
-                }
-            }
-        } else {
-            match canon_rx.next().await {
-                Some(n) => n,
-                None => break,
-            }
-        };
-
+    while let Some(notification) = canon_rx.next().await {
         let tip = notification.tip();
         let block_hash = tip.hash();
         let block_number = tip.number();
         let is_reorg = notification.reverted().is_some();
 
+        // Debug mode - state comparison between flashblocks RPC generated execution state vs
+        // engine payload validator's execution state (`BundleState` + reverts).
+        //
+        // Note that engine pre-warming must also be disabled so engine payload validator will
+        // compute the new payload independently.
         if debug_state_comparison {
-            debug_compare_flashblocks_bundle_states(
-                &flashblocks_state,
-                block_number,
-                block_hash,
-                trie_updates.take().filter(|t| t.0 == block_number).map(|t| t.1),
-            );
+            debug_compare_flashblocks_bundle_states(&flashblocks_state, block_number, block_hash);
         }
 
         raw_cache.handle_canonical_height(block_number);
