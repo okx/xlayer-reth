@@ -25,12 +25,6 @@ use reth_rpc_eth_types::block::BlockAndReceipts;
 use reth_storage_api::StateProviderBox;
 use reth_trie_db::ChangesetCache;
 
-/// The minimum number of blocks to retain in the changeset cache after eviction.
-///
-/// This ensures that recent trie changesets are kept in memory for potential reorgs,
-/// even when the finalized block is not set (e.g., on L2s like Optimism).
-const CHANGESET_CACHE_RETENTION_BLOCKS: u64 = 64;
-
 /// Cached transaction info (block context, receipt and tx data) for O(1) lookups
 /// by transaction hash.
 #[derive(Debug, Clone)]
@@ -313,6 +307,9 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
     /// Evicts confirmed blocks at or below the canonical height and clears any stale
     /// pending state. On reorg or hash mismatch, flushes the entire state cache and
     /// drains the execution task queue.
+    ///
+    /// Note that the changeset cache is not evicted here as it is managed and shared
+    /// by the engine.
     pub fn handle_canonical_block(&self, canon_info: (u64, B256), reorg: bool) {
         debug!(
             target: "flashblocks",
@@ -320,17 +317,6 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
             "Flashblocks state cache received canonical block"
         );
 
-        // Evict trie changesets for blocks below the eviction threshold.
-        // Keep at least CHANGESET_CACHE_RETENTION_BLOCKS from the persisted tip, and also respect
-        // the finalized block if set.
-        let eviction_threshold = canon_info.0.saturating_sub(CHANGESET_CACHE_RETENTION_BLOCKS);
-        debug!(
-            target: "flashblocks",
-            canonical_height = canon_info.0,
-            eviction_threshold = eviction_threshold,
-            "Evicting changesets below threshold"
-        );
-        self.changeset_cache.evict(eviction_threshold);
         if self.inner.write().handle_canonical_block(canon_info, reorg) {
             self.task_queue.flush();
         }
