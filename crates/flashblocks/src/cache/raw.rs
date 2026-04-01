@@ -10,7 +10,7 @@ use reth_primitives_traits::{Recovered, SignedTransaction};
 
 use xlayer_builder::broadcast::{XLayerFlashblockMessage, XLayerFlashblockPayload};
 
-const MAX_RAW_CACHE_SIZE: usize = 10;
+const MAX_RAW_CACHE_SIZE: usize = 50;
 
 /// The raw flashblocks sequence cache for new incoming flashblocks from the sequencer.
 /// The cache accumulates last two flashblocks sequences in memory, to handle scenario
