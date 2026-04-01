@@ -22,6 +22,7 @@ use reth_optimism_evm::OpEvmConfig;
 use reth_optimism_node::{args::RollupArgs, OpNode};
 use reth_provider::CanonStateSubscriptions;
 use reth_rpc_server_types::RethRpcModule;
+use reth_trie_db::ChangesetCache;
 
 use xlayer_chainspec::XLayerChainSpecParser;
 use xlayer_flashblocks::{
@@ -131,6 +132,10 @@ fn main() {
             let events_sender = Arc::new(OnceLock::new());
             let tree_config = builder.config().engine.tree_config();
 
+            // Create a shared changeset cache for flashblocks RPC validator and the
+            // engine tree validator to operate on the same trie changeset data.
+            let changeset_cache = ChangesetCache::new();
+
             // Create the X Layer payload service builder
             // It handles both flashblocks and default modes internally
             let payload_builder = XLayerPayloadServiceBuilder::new(
@@ -141,6 +146,7 @@ fn main() {
             )?
             .with_bridge_config(bridge_config);
 
+            let changeset_cache_rpc = changeset_cache.clone();
             let NodeHandle { node, node_exit_future } = builder
                 .with_types_and_provider::<OpNode, BlockchainProvider<_>>()
                 .with_components(op_node.components().payload(payload_builder))
@@ -151,8 +157,11 @@ fn main() {
                     let flashblocks_state = if let Some(flashblock_url) =
                         args.xlayer_args.flashblocks_rpc.flashblock_url
                     {
-                        // Initialize flashblocks RPC
-                        let flashblocks_state = FlashblockStateCache::new(ctx.provider().canonical_in_memory_state());
+                        // Initialize flashblocks RPC with the shared changeset cache
+                        let flashblocks_state = FlashblockStateCache::new(
+                            ctx.provider().canonical_in_memory_state(),
+                            changeset_cache_rpc,
+                        );
                         let canon_state_rx = ctx.provider().canonical_state_stream();
                         let service = FlashblocksRpcService::new(
                             args.xlayer_args.builder.flashblocks,
@@ -224,11 +233,14 @@ fn main() {
                     let dev_mode = builder.config().dev.dev;
                     if dev_mode {
                         tracing::warn!("Running in debug mode");
-                        let launcher = DebugNodeLauncher::new(EngineNodeLauncher::new(
-                            builder.task_executor().clone(),
-                            builder.config().datadir(),
-                            engine_tree_config,
-                        ));
+                        let launcher = DebugNodeLauncher::new(
+                            EngineNodeLauncher::new(
+                                builder.task_executor().clone(),
+                                builder.config().datadir(),
+                                engine_tree_config,
+                            )
+                            .with_changeset_cache(changeset_cache),
+                        );
 
                         Either::Left(builder.launch_with(launcher))
                     } else {
@@ -236,7 +248,8 @@ fn main() {
                             builder.task_executor().clone(),
                             builder.config().datadir(),
                             engine_tree_config,
-                        );
+                        )
+                        .with_changeset_cache(changeset_cache);
 
                         Either::Right(builder.launch_with(launcher))
                     }

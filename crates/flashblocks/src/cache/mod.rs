@@ -73,10 +73,13 @@ pub struct FlashblockStateCache<N: NodePrimitives> {
 // FlashblockStateCache read interfaces
 impl<N: NodePrimitives> FlashblockStateCache<N> {
     /// Creates a new [`FlashblockStateCache`].
-    pub fn new(canon_in_memory_state: CanonicalInMemoryState<N>) -> Self {
+    pub fn new(
+        canon_in_memory_state: CanonicalInMemoryState<N>,
+        changeset_cache: ChangesetCache,
+    ) -> Self {
         Self {
             inner: Arc::new(RwLock::new(FlashblockStateCacheInner::new())),
-            changeset_cache: ChangesetCache::new(),
+            changeset_cache,
             canon_in_memory_state,
             task_queue: ExecutionTaskQueue::new(),
         }
@@ -592,13 +595,10 @@ mod tests {
     type TestInner = FlashblockStateCacheInner<OpPrimitives>;
 
     fn make_test_cache() -> TestCache {
-        TestCache::new(CanonicalInMemoryState::new(
-            Default::default(),
-            Default::default(),
-            None,
-            None,
-            None,
-        ))
+        TestCache::new(
+            CanonicalInMemoryState::new(Default::default(), Default::default(), None, None, None),
+            ChangesetCache::new(),
+        )
     }
 
     /// Helper: promote heights 1..=n to confirm cache via `sequence_end: true`,

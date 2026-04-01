@@ -47,6 +47,7 @@ tokio-stream.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+reth-trie-db.workspace = true
 tokio = { workspace = true, features = ["rt", "macros"] }
 
 [lints]

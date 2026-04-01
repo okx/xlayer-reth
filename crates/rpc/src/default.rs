@@ -51,6 +51,7 @@ impl DefaultRpcExtApiServer for DefaultRpcExt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reth_trie_db::ChangesetCache;
 
     #[test]
     fn test_flashblocks_disabled_when_no_cache() {
@@ -68,6 +69,7 @@ mod tests {
                 None,
                 None,
             ),
+            ChangesetCache::new(),
         );
         let ext = DefaultRpcExt::new(Some(cache));
         assert!(ext.flashblocks_state.as_ref().unwrap().get_confirm_height() == 0);
