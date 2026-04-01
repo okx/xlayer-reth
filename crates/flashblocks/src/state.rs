@@ -43,7 +43,7 @@ pub async fn handle_incoming_flashblocks<S, N>(
                 if let Err(err) =
                     process_flashblock_payload::<N>(message, &received_tx, &raw_cache, &task_queue)
                 {
-                    warn!(
+                    debug!(
                         target: "flashblocks",
                         %err,
                         "Error receiving flashblock payload"
@@ -61,7 +61,7 @@ pub async fn handle_incoming_flashblocks<S, N>(
                                 &raw_cache,
                                 &task_queue,
                             ) {
-                                warn!(
+                                debug!(
                                     target: "flashblocks",
                                     %err,
                                     "Error receiving flashblock payload"
