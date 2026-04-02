@@ -4,21 +4,26 @@ pub(crate) mod types;
 pub(crate) mod wspub;
 
 use behaviour::Behaviour;
-use libp2p_stream::IncomingStreams;
-use wspub::WebSocketPublisher;
+pub use libp2p::{Multiaddr, StreamProtocol};
+pub use types::Message;
+pub use wspub::WebSocketPublisher;
 
 use crate::metrics::BuilderMetrics;
 use eyre::Context;
+use futures::stream::FuturesUnordered;
 use libp2p::{
     dns,
     identity::{self, ed25519},
     noise,
-    swarm::SwarmEvent,
+    swarm::{Stream, SwarmEvent},
     tcp, yamux, PeerId, Swarm, Transport as _,
 };
+use libp2p_stream::IncomingStreams;
 use multiaddr::Protocol;
 use std::{
     collections::{HashMap, HashSet},
+    future::Future,
+    pin::Pin,
     sync::Arc,
     time::Duration,
 };
@@ -26,8 +31,11 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-pub use libp2p::{Multiaddr, StreamProtocol};
-pub(crate) use types::Message;
+/// Future type for pending `open_stream` operations that are polled concurrently
+/// with the swarm event loop, avoiding the deadlock that occurs when awaiting
+/// `open_stream` inline (which blocks the swarm from being polled).
+type PendingStreamFuture =
+    Pin<Box<dyn Future<Output = (PeerId, StreamProtocol, eyre::Result<Stream>)> + Send>>;
 
 const DEFAULT_MAX_PEER_COUNT: u32 = 50;
 const DEFAULT_PEER_RETRY_INTERVAL: Duration = Duration::from_secs(1);
@@ -142,6 +150,14 @@ impl Node {
             .map(|handler| tokio::spawn(handler.run()))
             .collect::<Vec<_>>();
 
+        // Pending `open_stream` futures polled concurrently with the swarm.
+        // Awaiting `open_stream` inline inside the `select!` loop would block the
+        // swarm from being polled, which is required for `libp2p_stream::Control`
+        // to dispatch the open-stream command — causing a deadlock (manifests as
+        // a yamux timeout after ~10s). By collecting these futures here and polling
+        // them as a separate `select!` branch, the swarm remains drivable.
+        let mut pending_streams: FuturesUnordered<PendingStreamFuture> = FuturesUnordered::new();
+
         loop {
             tokio::select! {
                 biased;
@@ -151,15 +167,39 @@ impl Node {
                     break Ok(());
                 }
                 _ = retry_interval.tick() => {
-                    // Check for disconnected known peers and retry connection
                     let connected_peers: HashSet<PeerId> = swarm.connected_peers().copied().collect();
                     for (peer_id, address) in &known_peers_info {
                         if !connected_peers.contains(peer_id) {
+                            // TCP disconnected — redial
                             debug!(target: "payload_builder::broadcast", "retrying connection to disconnected known peer {peer_id} at {address}");
                             swarm.add_peer_address(*peer_id, address.clone());
                             if let Err(e) = swarm.dial(address.clone()) {
                                 warn!(target: "payload_builder::broadcast", "failed to retry dial to known peer {peer_id} at {address}: {e:?}");
                             }
+                        } else if !outgoing_streams_handler.has_peer(peer_id) {
+                            // TCP connected but no application stream — retry open_stream
+                            debug!(target: "payload_builder::broadcast", "retrying open_stream to connected peer {peer_id} (no application stream)");
+                            for proto in &protocols {
+                                let mut control = swarm.behaviour_mut().new_control();
+                                let p = proto.clone();
+                                let pid = *peer_id;
+                                pending_streams.push(Box::pin(async move {
+                                    let result = control.open_stream(pid, p.clone()).await.map_err(Into::into);
+                                    (pid, p, result)
+                                }));
+                            }
+                        }
+                    }
+                }
+                // Handle completed open_stream futures
+                Some((peer_id, protocol, result)) = pending_streams.next() => {
+                    match result {
+                        Ok(stream) => {
+                            outgoing_streams_handler.insert_peer_and_stream(peer_id, protocol.clone(), stream);
+                            debug!(target: "payload_builder::broadcast", "opened outbound stream with peer {peer_id} on protocol {protocol}");
+                        }
+                        Err(e) => {
+                            warn!(target: "payload_builder::broadcast", "failed to open stream with peer {peer_id} on protocol {protocol}: {e:?}");
                         }
                     }
                 }
@@ -184,27 +224,17 @@ impl Node {
                     // in the gossiping of new flashblock payloads to websocket subscribers.
                     match outgoing_streams_handler.broadcast_message(message.clone()).await {
                         Ok(failed_peers) => {
-                            // For each peer whose stream send failed, immediately attempt to
-                            // re-open a new yamux stream on the existing TCP connection.
-                            // This recovers from application-level stream closes without
-                            // requiring a full TCP reconnect.
+                            // For each peer whose stream send failed, push non-blocking
+                            // open_stream futures to recover the yamux stream on the
+                            // existing TCP connection.
                             for &peer_id in &failed_peers {
                                 for proto in &protocols {
-                                    match swarm
-                                        .behaviour_mut()
-                                        .new_control()
-                                        .open_stream(peer_id, proto.clone())
-                                        .await
-                                    {
-                                        Ok(stream) => {
-                                            outgoing_streams_handler
-                                                .insert_peer_and_stream(peer_id, proto.clone(), stream);
-                                            warn!(target: "payload_builder::broadcast", "recovered stream to peer {peer_id} on protocol {proto}");
-                                        }
-                                        Err(e) => {
-                                            warn!(target: "payload_builder::broadcast", "failed to recover stream to peer {peer_id}: {e:?}");
-                                        }
-                                    }
+                                    let mut control = swarm.behaviour_mut().new_control();
+                                    let p = proto.clone();
+                                    pending_streams.push(Box::pin(async move {
+                                        let result = control.open_stream(peer_id, p.clone()).await.map_err(Into::into);
+                                        (peer_id, p, result)
+                                    }));
                                 }
                             }
                             if !failed_peers.is_empty() {
@@ -243,24 +273,18 @@ impl Node {
                             connection_id,
                             ..
                         } => {
-                            // when a new connection is established, open outbound streams for each protocol
-                            // and add them to the outgoing streams handler.
-                            debug!(target: "payload_builder::broadcast", "fb p2p connection established with peer {peer_id}");
+                            // Push non-blocking open_stream futures for each protocol.
+                            // These are polled in the `pending_streams` select branch,
+                            // allowing the swarm to continue being driven.
+                            debug!(target: "payload_builder::broadcast", "fb p2p connection established with peer {peer_id} on connection {connection_id}");
                             if !outgoing_streams_handler.has_peer(&peer_id) {
                                 for protocol in &protocols {
-                                        match swarm
-                                        .behaviour_mut()
-                                        .new_control()
-                                        .open_stream(peer_id, protocol.clone())
-                                        .await
-                                    {
-                                        Ok(stream) => { outgoing_streams_handler.insert_peer_and_stream(peer_id, protocol.clone(), stream);
-                                            debug!(target: "payload_builder::broadcast", "opened outbound stream with peer {peer_id} with protocol {protocol} on connection {connection_id}");
-                                        }
-                                        Err(e) => {
-                                            warn!(target: "payload_builder::broadcast", "failed to open stream with peer {peer_id} on connection {connection_id}: {e:?}");
-                                        }
-                                    }
+                                    let mut control = swarm.behaviour_mut().new_control();
+                                    let p = protocol.clone();
+                                    pending_streams.push(Box::pin(async move {
+                                        let result = control.open_stream(peer_id, p.clone()).await.map_err(Into::into);
+                                        (peer_id, p, result)
+                                    }));
                                 }
                             }
                         }
