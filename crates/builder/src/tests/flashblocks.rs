@@ -209,10 +209,7 @@ async fn smoke_basic(rbuilder: LocalInstance) -> eyre::Result<()> {
     // Expected: ~5 flashblocks per block (1000ms / 250ms interval, with end_buffer_ms applied).
     // Allow ±1 per block to tolerate timing variance on CI runners.
     let count = flashblocks.len();
-    assert!(
-        (20..=30).contains(&count),
-        "Expected ~25 flashblocks (20–30), got {count}"
-    );
+    assert!((20..=30).contains(&count), "Expected ~25 flashblocks (20–30), got {count}");
 
     flashblocks_listener.stop().await
 }
