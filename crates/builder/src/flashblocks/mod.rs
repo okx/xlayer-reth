@@ -19,7 +19,6 @@ mod service;
 mod timing;
 pub(crate) mod utils;
 
-pub use crate::broadcast::wspub::WebSocketPublisher;
 pub use context::FlashblocksBuilderCtx;
 pub use service::FlashblocksServiceBuilder;
 pub use utils::cache::FlashblockPayloadsCache;

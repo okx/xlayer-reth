@@ -1,12 +1,14 @@
+use jsonrpsee::types::ErrorObject;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+
 use alloy_primitives::{Address, TxHash};
 use alloy_rpc_types_eth::{
     pubsub::{Params as AlloyParams, SubscriptionKind as AlloySubscriptionKind},
     Header,
 };
-use jsonrpsee::types::ErrorObject;
+
 use reth_rpc_server_types::result::invalid_params_rpc_err;
-use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 
 const FLASHBLOCKS: &str = "flashblocks";
 

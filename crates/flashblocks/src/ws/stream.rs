@@ -1,4 +1,4 @@
-use crate::{ws::FlashBlockDecoder, FlashBlock};
+use crate::ws::FlashBlockDecoder;
 use futures_util::{
     stream::{SplitSink, SplitStream},
     FutureExt, Sink, Stream, StreamExt,
@@ -18,7 +18,9 @@ use tokio_tungstenite::{
 use tracing::debug;
 use url::Url;
 
-/// An asynchronous stream of [`FlashBlock`] from a websocket connection.
+use xlayer_builder::broadcast::XLayerFlashblockMessage;
+
+/// An asynchronous stream of [`XLayerFlashblockMessage`] from a websocket connection.
 ///
 /// The stream attempts to connect to a websocket URL and then decode each received item.
 ///
@@ -48,7 +50,7 @@ impl WsFlashBlockStream<WsStream, WsSink, WsConnector> {
         }
     }
 
-    /// Sets the [`FlashBlock`] decoder for the websocket stream.
+    /// Sets the [`XLayerFlashblockMessage`] decoder for the websocket stream.
     pub fn with_decoder(self, decoder: Box<dyn FlashBlockDecoder>) -> Self {
         Self { decoder, ..self }
     }
@@ -75,7 +77,7 @@ where
     S: Sink<Message> + Send + Unpin,
     C: WsConnect<Stream = Str, Sink = S> + Clone + Send + 'static + Unpin,
 {
-    type Item = eyre::Result<FlashBlock>;
+    type Item = eyre::Result<XLayerFlashblockMessage>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -244,6 +246,7 @@ mod tests {
     use super::*;
     use alloy_primitives::bytes::Bytes;
     use brotli::enc::BrotliEncoderParams;
+    use op_alloy_rpc_types_engine::OpFlashblockPayload;
     use std::{future, iter};
     use tokio_tungstenite::tungstenite::{
         protocol::frame::{coding::CloseCode, Frame},
@@ -424,22 +427,22 @@ mod tests {
 
     fn to_json_message<B: TryFrom<Bytes, Error: Debug>, F: Fn(B) -> Message>(
         wrapper_f: F,
-    ) -> impl Fn(&FlashBlock) -> Result<Message, Error> + use<F, B> {
+    ) -> impl Fn(&OpFlashblockPayload) -> Result<Message, Error> + use<F, B> {
         move |block| to_json_message_using(block, &wrapper_f)
     }
 
-    fn to_json_binary_message(block: &FlashBlock) -> Result<Message, Error> {
+    fn to_json_binary_message(block: &OpFlashblockPayload) -> Result<Message, Error> {
         to_json_message_using(block, Message::Binary)
     }
 
     fn to_json_message_using<B: TryFrom<Bytes, Error: Debug>, F: Fn(B) -> Message>(
-        block: &FlashBlock,
+        block: &OpFlashblockPayload,
         wrapper_f: F,
     ) -> Result<Message, Error> {
         Ok(wrapper_f(B::try_from(Bytes::from(serde_json::to_vec(block).unwrap())).unwrap()))
     }
 
-    fn to_brotli_message(block: &FlashBlock) -> Result<Message, Error> {
+    fn to_brotli_message(block: &OpFlashblockPayload) -> Result<Message, Error> {
         let json = serde_json::to_vec(block).unwrap();
         let mut compressed = Vec::new();
         brotli::BrotliCompress(
@@ -451,7 +454,7 @@ mod tests {
         Ok(Message::Binary(Bytes::from(compressed)))
     }
 
-    fn flashblock() -> FlashBlock {
+    fn flashblock() -> OpFlashblockPayload {
         Default::default()
     }
 
@@ -460,7 +463,7 @@ mod tests {
     #[test_case::test_case(to_brotli_message; "brotli")]
     #[tokio::test]
     async fn test_stream_decodes_messages_successfully(
-        to_message: impl Fn(&FlashBlock) -> Result<Message, Error>,
+        to_message: impl Fn(&OpFlashblockPayload) -> Result<Message, Error>,
     ) {
         let flashblocks = [flashblock()];
         let connector = FakeConnector::from(flashblocks.iter().map(to_message));
@@ -469,7 +472,9 @@ mod tests {
 
         let actual_messages: Vec<_> = stream.take(1).map(Result::unwrap).collect().await;
         let expected_messages = flashblocks.to_vec();
-
+        let actual_messages: Vec<_> =
+            actual_messages.iter().map(|m| &m.as_payload().unwrap().inner).collect();
+        let expected_messages: Vec<_> = expected_messages.iter().collect();
         assert_eq!(actual_messages, expected_messages);
     }
 
@@ -486,7 +491,7 @@ mod tests {
         let actual_message =
             stream.next().await.expect("Binary message should not be ignored").unwrap();
 
-        assert_eq!(actual_message, expected_message)
+        assert_eq!(actual_message.as_payload().unwrap().inner, expected_message)
     }
 
     #[tokio::test]

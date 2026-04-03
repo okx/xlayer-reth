@@ -1,11 +1,14 @@
 mod behaviour;
 mod outgoing;
+pub(crate) mod payload;
 pub(crate) mod types;
 pub(crate) mod wspub;
 
 use behaviour::Behaviour;
-use libp2p_stream::IncomingStreams;
-use wspub::WebSocketPublisher;
+pub use libp2p::{Multiaddr, StreamProtocol};
+pub use payload::{XLayerFlashblockEnd, XLayerFlashblockMessage, XLayerFlashblockPayload};
+pub use types::Message;
+pub use wspub::WebSocketPublisher;
 
 use crate::metrics::BuilderMetrics;
 use eyre::Context;
@@ -16,6 +19,7 @@ use libp2p::{
     swarm::SwarmEvent,
     tcp, yamux, PeerId, Swarm, Transport as _,
 };
+use libp2p_stream::IncomingStreams;
 use multiaddr::Protocol;
 use std::{
     collections::{HashMap, HashSet},
@@ -25,9 +29,6 @@ use std::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
-
-pub use libp2p::{Multiaddr, StreamProtocol};
-pub(crate) use types::Message;
 
 const DEFAULT_MAX_PEER_COUNT: u32 = 50;
 const DEFAULT_PEER_RETRY_INTERVAL: Duration = Duration::from_secs(1);
@@ -573,7 +574,6 @@ mod test {
     use super::*;
     use crate::broadcast::wspub::WebSocketPublisher;
     use crate::metrics::{tokio::FlashblocksTaskMetrics, BuilderMetrics};
-    use op_alloy_rpc_types_engine::OpFlashblockPayload;
 
     const TEST_AGENT_VERSION: &str = "test/1.0.0";
 
@@ -640,7 +640,9 @@ mod test {
 
         tokio::spawn(async move { node1.run().await });
         tokio::spawn(async move { node2.run().await });
-        let message = Message::from_flashblock_payload(OpFlashblockPayload::default());
+        let message = Message::from_flashblock_payload(
+            XLayerFlashblockMessage::from_flashblock_payload(XLayerFlashblockPayload::default()),
+        );
         let mut rx = rx1.remove(&types::FLASHBLOCKS_STREAM_PROTOCOL).unwrap();
         let recv_message = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -765,7 +767,9 @@ mod test {
         handler.insert_peer_and_stream(peer_a, types::FLASHBLOCKS_STREAM_PROTOCOL, stream);
         assert!(handler.has_peer(&peer_a));
 
-        let msg = Message::from_flashblock_payload(OpFlashblockPayload::default());
+        let msg = Message::from_flashblock_payload(
+            XLayerFlashblockMessage::from_flashblock_payload(XLayerFlashblockPayload::default()),
+        );
         let failed = handler.broadcast_message(msg).await.expect("serialization must not fail");
 
         assert_eq!(failed, vec![peer_a], "peer_a must be returned as a failed peer");
@@ -801,7 +805,9 @@ mod test {
         let mut handler = outgoing::StreamsHandler::new();
         handler.insert_peer_and_stream(peer_a, types::FLASHBLOCKS_STREAM_PROTOCOL, stream);
 
-        let msg = Message::from_flashblock_payload(OpFlashblockPayload::default());
+        let msg = Message::from_flashblock_payload(
+            XLayerFlashblockMessage::from_flashblock_payload(XLayerFlashblockPayload::default()),
+        );
         let failed = handler.broadcast_message(msg).await.expect("serialization must not fail");
 
         assert!(failed.is_empty(), "no peers should fail on a healthy stream");
