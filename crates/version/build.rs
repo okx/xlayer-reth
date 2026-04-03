@@ -18,7 +18,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     emitter.emit_and_set()?;
 
     let sha = env::var("VERGEN_GIT_SHA")?;
-    let sha_short = &sha[0..7];
+    let sha_short = &sha[0..8];
 
     let is_dirty = env::var("VERGEN_GIT_DIRTY")? == "true";
     let not_on_tag = env::var("VERGEN_GIT_DESCRIBE")?.ends_with(&format!("-g{sha_short}"));
