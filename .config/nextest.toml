@@ -1,11 +1,8 @@
 [profile.default]
-# Warn about slow tests after 30s; terminate after 3 periods (90s total)
-slow-timeout = { period = "30s", terminate-after = 3 }
-# Hard timeout for all unit/integration tests
-timeout = "120s"
+# Warn about slow tests after period; terminate after X periods
+slow-timeout = { period = "30s", terminate-after = 2 }
 
 [[profile.default.overrides]]
 # E2E tests get more time — they spin up nodes
 filter = "package(xlayer-e2e-test)"
-timeout = "300s"
 slow-timeout = { period = "60s", terminate-after = 5 }
