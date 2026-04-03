@@ -718,7 +718,7 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("not next consecutive pending height block"));
+            .contains("state cache behind skip committing pending sequence"));
     }
 
     #[test]
@@ -730,7 +730,7 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("not next consecutive pending height block"));
+            .contains("state cache behind skip committing pending sequence"));
     }
 
     #[test]
@@ -740,9 +740,13 @@ mod tests {
         inner.handle_pending_sequence(make_pending_sequence_end(1, B256::ZERO)).unwrap();
         assert_eq!(inner.confirm_height, 1);
 
-        // Re-sending height 1 is silently skipped (height <= confirm_height)
+        // Re-sending height 1 now errors (state cache ahead of incoming sequence)
         let result = inner.handle_pending_sequence(make_pending_sequence(1, B256::ZERO));
-        assert!(result.is_ok());
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("state cache ahead skip committing pending sequence"));
     }
 
     #[test]

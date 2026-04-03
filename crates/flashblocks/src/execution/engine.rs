@@ -45,6 +45,7 @@ use reth_trie_db::ChangesetCache;
 ///    the engine validator receives the same payload, the unified X Layer engine
 ///    validator will guard against this.
 #[derive(Clone, Debug)]
+#[expect(clippy::type_complexity)]
 pub struct XLayerEngineValidator<Provider, Evm, V, N, ChainSpec>
 where
     Evm: ConfigureEvm,
@@ -145,16 +146,16 @@ where
 
         // Pre-warm optimization - skip if flashblocks is enabled and flashblocks
         // sequence validator already validated the payload.
-        if let Some(fb_state) = guard.fb_state.as_ref() {
-            if let Some(executed_block) = fb_state.get_executed_block_by_hash(&num_hash.hash) {
-                debug!(
-                    target: "flashblocks::engine_validator",
-                    block_number = num_hash.number,
-                    block_hash = %num_hash.hash,
-                    "Flashblocks cache hit, returning pre-validated block",
-                );
-                return Ok(executed_block);
-            }
+        if let Some(fb_state) = guard.fb_state.as_ref()
+            && let Some(executed_block) = fb_state.get_executed_block_by_hash(&num_hash.hash)
+        {
+            debug!(
+                target: "flashblocks::engine_validator",
+                block_number = num_hash.number,
+                block_hash = %num_hash.hash,
+                "Flashblocks cache hit, returning pre-validated block",
+            );
+            return Ok(executed_block);
         }
 
         debug!(
@@ -189,16 +190,16 @@ where
 
         // Pre-warm optimization - skip if flashblocks is enabled and flashblocks
         // sequence validator already validated the payload.
-        if let Some(fb_state) = guard.fb_state.as_ref() {
-            if let Some(executed_block) = fb_state.get_executed_block_by_hash(&num_hash.hash) {
-                debug!(
-                    target: "flashblocks::engine_validator",
-                    block_number = num_hash.number,
-                    block_hash = %num_hash.hash,
-                    "Flashblocks cache hit, returning pre-validated block",
-                );
-                return Ok(executed_block);
-            }
+        if let Some(fb_state) = guard.fb_state.as_ref()
+            && let Some(executed_block) = fb_state.get_executed_block_by_hash(&num_hash.hash)
+        {
+            debug!(
+                target: "flashblocks::engine_validator",
+                block_number = num_hash.number,
+                block_hash = %num_hash.hash,
+                "Flashblocks cache hit, returning pre-validated block",
+            );
+            return Ok(executed_block);
         }
 
         debug!(
@@ -283,6 +284,7 @@ where
 }
 
 /// Builder for [`XLayerEngineValidator`] that implements [`EngineValidatorBuilder`].
+#[expect(clippy::type_complexity)]
 #[derive(Clone, Debug)]
 pub struct XLayerEngineValidatorBuilder<
     Provider,
@@ -297,6 +299,7 @@ pub struct XLayerEngineValidatorBuilder<
     pvb: EV,
 }
 
+#[expect(clippy::type_complexity)]
 impl<Provider, Evm: ConfigureEvm, V, N: NodePrimitives, ChainSpec: OpHardforks, EV: Default>
     XLayerEngineValidatorBuilder<Provider, EV, Evm, V, N, ChainSpec>
 {
