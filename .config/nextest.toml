@@ -2,9 +2,16 @@
 # Warn about slow tests after period; terminate after X periods
 slow-timeout = { period = "30s", terminate-after = 2 }
 
+# Flashblock tests all hardcode flashblocks_port: 1239. Running them in parallel causes
+# WS publishers from sibling tests to cross-contaminate each test's flashblock listener,
+# producing wrong counts. Serialize them to prevent port/state collisions.
+[test-groups]
+flashblock-serial = { max-threads = 1 }
+
 [[profile.default.overrides]]
-# Flashblock timing tests are inherently slow (multiple blocks with 1s sleeps between them)
 filter = "package(xlayer-builder) and test(flashblocks)"
+test-group = "flashblock-serial"
+# These tests are inherently slow (multiple blocks with 1s sleeps between them)
 slow-timeout = { period = "60s", terminate-after = 2 }
 
 [[profile.default.overrides]]
