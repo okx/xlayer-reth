@@ -20,7 +20,7 @@ mod timing;
 pub(crate) mod utils;
 
 pub use context::FlashblocksBuilderCtx;
-pub use service::{FlashblocksServiceBuilder, PayloadEventsSender};
+pub use service::FlashblocksServiceBuilder;
 pub use utils::cache::FlashblockPayloadsCache;
 
 /// Configuration values that are specific to the flashblocks builder.

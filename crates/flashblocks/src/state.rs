@@ -1,9 +1,8 @@
 use crate::{
     cache::{ExecutionTaskQueue, RawFlashblocksCache},
     debug::debug_compare_flashblocks_bundle_states,
-    execution::validator::FlashblockSequenceValidator,
     execution::{FlashblockReceipt, OverlayProviderFactory},
-    FlashblockStateCache,
+    FlashblockStateCache, XLayerEngineValidator,
 };
 use futures_util::{FutureExt, Stream, StreamExt};
 use std::{sync::Arc, time::Duration};
@@ -107,8 +106,8 @@ fn process_flashblock_payload<N: NodePrimitives>(
     Ok(())
 }
 
-pub async fn handle_execution_tasks<N, EvmConfig, Provider, ChainSpec>(
-    mut validator: FlashblockSequenceValidator<N, EvmConfig, Provider, ChainSpec>,
+pub async fn handle_execution_tasks<N, EvmConfig, Provider, ChainSpec, V>(
+    validator: XLayerEngineValidator<Provider, EvmConfig, V, N, ChainSpec>,
     raw_cache: Arc<RawFlashblocksCache<N::SignedTx>>,
     flashblocks_state: FlashblockStateCache<N>,
 ) where
@@ -130,6 +129,7 @@ pub async fn handle_execution_tasks<N, EvmConfig, Provider, ChainSpec>(
         + Send
         + 'static,
     ChainSpec: OpHardforks + Send + Sync + 'static,
+    V: Send + 'static,
 {
     info!(target: "flashblocks", "Flashblocks execution handle started");
     loop {

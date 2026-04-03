@@ -1,15 +1,12 @@
 use crate::{
     cache::{raw::RawFlashblocksCache, FlashblockStateCache},
-    execution::{FlashblockReceipt, FlashblockSequenceValidator, OverlayProviderFactory},
+    execution::{FlashblockReceipt, OverlayProviderFactory},
     persist::{handle_persistence, handle_relay_flashblocks},
     state::{handle_canonical_stream, handle_execution_tasks, handle_incoming_flashblocks},
-    ReceivedFlashblocksRx,
+    ReceivedFlashblocksRx, XLayerEngineValidator,
 };
 use futures_util::Stream;
-use std::{
-    net::SocketAddr,
-    sync::{Arc, OnceLock},
-};
+use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::broadcast::Sender;
 use tracing::*;
 
@@ -17,7 +14,6 @@ use alloy_eips::eip2718::Encodable2718;
 use op_alloy_rpc_types_engine::OpFlashblockPayloadBase;
 
 use reth_chain_state::CanonStateNotificationStream;
-use reth_engine_primitives::TreeConfig;
 use reth_evm::ConfigureEvm;
 use reth_node_core::dirs::{ChainPath, DataDirPath};
 use reth_optimism_forks::OpHardforks;
@@ -30,22 +26,13 @@ use reth_tasks::TaskExecutor;
 use xlayer_builder::{
     args::FlashblocksArgs,
     broadcast::{WebSocketPublisher, XLayerFlashblockMessage},
-    flashblocks::PayloadEventsSender,
     metrics::{tokio::FlashblocksTaskMetrics, BuilderMetrics},
 };
 
 /// Context for flashblocks RPC state handles.
-pub struct FlashblocksRpcCtx<N: NodePrimitives, EvmConfig, Provider, ChainSpec> {
-    /// Canonical chainstate provider.
-    pub provider: Provider,
+pub struct FlashblocksRpcCtx<N: NodePrimitives> {
     /// Canonical state notification stream.
     pub canon_state_rx: CanonStateNotificationStream<N>,
-    /// Evm config for the sequence validator.
-    pub evm_config: EvmConfig,
-    /// Chain specs for the sequence validator.
-    pub chain_spec: Arc<ChainSpec>,
-    /// Node engine tree configuration for the sequence validator.
-    pub tree_config: TreeConfig,
     /// Flashblocks RPC debug mode to enable state comparison.
     pub debug_state_comparison: bool,
 }
@@ -58,18 +45,16 @@ pub struct FlashblocksPersistCtx {
     pub relay_flashblocks: bool,
 }
 
-pub struct FlashblocksRpcService<N, EvmConfig, Provider, ChainSpec>
+pub struct FlashblocksRpcService<N>
 where
     N: NodePrimitives,
-    EvmConfig: ConfigureEvm,
-    ChainSpec: OpHardforks,
 {
     /// Flashblock configurations.
     args: FlashblocksArgs,
     /// Flashblocks state cache (shared with RPC handlers).
     flashblocks_state: FlashblockStateCache<N>,
     /// Flashblocks RPC context.
-    rpc_ctx: FlashblocksRpcCtx<N, EvmConfig, Provider, ChainSpec>,
+    rpc_ctx: FlashblocksRpcCtx<N>,
     /// Flashblocks persist context.
     persist_ctx: FlashblocksPersistCtx,
     /// Task executor.
@@ -78,32 +63,18 @@ where
     received_flashblocks_tx: Sender<Arc<XLayerFlashblockMessage>>,
 }
 
-impl<N, EvmConfig, Provider, ChainSpec> FlashblocksRpcService<N, EvmConfig, Provider, ChainSpec>
+impl<N> FlashblocksRpcService<N>
 where
     N: NodePrimitives,
     N::Receipt: FlashblockReceipt,
     N::SignedTx: Encodable2718,
     N::Block: From<alloy_consensus::Block<N::SignedTx>>,
-    EvmConfig: ConfigureEvm<Primitives = N, NextBlockEnvCtx: From<OpFlashblockPayloadBase> + Unpin + Send>
-        + Send
-        + 'static,
-    Provider: StateProviderFactory
-        + HeaderProvider<Header = <N as NodePrimitives>::BlockHeader>
-        + OverlayProviderFactory
-        + BlockReader
-        + StateReader
-        + HashedPostStateProvider
-        + Unpin
-        + Clone
-        + Send
-        + 'static,
-    ChainSpec: OpHardforks + Send + Sync + 'static,
 {
     pub fn new(
         args: FlashblocksArgs,
         flashblocks_state: FlashblockStateCache<N>,
         task_executor: TaskExecutor,
-        rpc_ctx: FlashblocksRpcCtx<N, EvmConfig, Provider, ChainSpec>,
+        rpc_ctx: FlashblocksRpcCtx<N>,
         persist_ctx: FlashblocksPersistCtx,
     ) -> eyre::Result<Self> {
         let (received_flashblocks_tx, _) = tokio::sync::broadcast::channel(128);
@@ -161,20 +132,32 @@ where
         Ok(())
     }
 
-    pub fn spawn_rpc<S>(self, incoming_rx: S)
-    where
+    pub fn spawn_rpc<S, EvmConfig, Provider, ChainSpec, V>(
+        self,
+        engine_validator: XLayerEngineValidator<Provider, EvmConfig, V, N, ChainSpec>,
+        incoming_rx: S,
+    ) where
         S: Stream<Item = eyre::Result<XLayerFlashblockMessage>> + Unpin + Send + 'static,
+        EvmConfig: ConfigureEvm<
+                Primitives = N,
+                NextBlockEnvCtx: From<OpFlashblockPayloadBase> + Unpin + Send,
+            > + Send
+            + 'static,
+        Provider: StateProviderFactory
+            + HeaderProvider<Header = <N as NodePrimitives>::BlockHeader>
+            + OverlayProviderFactory
+            + BlockReader
+            + StateReader
+            + HashedPostStateProvider
+            + Unpin
+            + Clone
+            + Send
+            + 'static,
+        ChainSpec: OpHardforks + Send + Sync + 'static,
+        V: Send + Sync + 'static,
     {
         debug!(target: "flashblocks", "Initializing flashblocks rpc");
         let raw_cache = Arc::new(RawFlashblocksCache::new());
-        let validator = FlashblockSequenceValidator::new(
-            self.rpc_ctx.evm_config,
-            self.rpc_ctx.provider,
-            self.rpc_ctx.chain_spec,
-            self.flashblocks_state.clone(),
-            self.task_executor.clone(),
-            self.rpc_ctx.tree_config,
-        );
 
         // Spawn incoming raw flashblocks handle.
         let received_tx = self.received_flashblocks_tx.clone();
@@ -191,8 +174,8 @@ where
         let cache = raw_cache.clone();
         self.task_executor.spawn_critical_blocking_task(
             "xlayer-flashblocks-execution",
-            Box::pin(handle_execution_tasks::<N, EvmConfig, Provider, ChainSpec>(
-                validator,
+            Box::pin(handle_execution_tasks(
+                engine_validator,
                 cache,
                 self.flashblocks_state.clone(),
             )),
@@ -208,52 +191,5 @@ where
                 self.rpc_ctx.debug_state_comparison,
             )),
         );
-    }
-
-    pub fn spawn_prewarm(&self, events_sender: Arc<OnceLock<PayloadEventsSender>>)
-    where
-        N: NodePrimitives<
-            Block = <reth_optimism_primitives::OpPrimitives as NodePrimitives>::Block,
-            Receipt = <reth_optimism_primitives::OpPrimitives as NodePrimitives>::Receipt,
-        >,
-    {
-        let mut pending_rx = self.flashblocks_state.subscribe_pending_sequence();
-        if let Some(payload_events_sender) = events_sender.get().cloned() {
-            self.task_executor.spawn_critical_task(
-                "xlayer-flashblocks-prewarm",
-                Box::pin(async move {
-                    use either::Either;
-                    use reth_optimism_payload_builder::OpBuiltPayload;
-                    use reth_optimism_primitives::OpPrimitives;
-                    use reth_payload_builder_primitives::Events;
-
-                    while pending_rx.changed().await.is_ok() {
-                        let Some(pending_sequence) =
-                            pending_rx.borrow_and_update().clone().filter(|s| s.is_sequence_end())
-                        else {
-                            continue;
-                        };
-                        let executed = &pending_sequence.executed_block;
-                        let block = executed.recovered_block.clone_sealed_block();
-                        let trie_data = executed.trie_data();
-                        let built =
-                            reth_payload_primitives::BuiltPayloadExecutedBlock::<OpPrimitives> {
-                                recovered_block: executed.recovered_block.clone(),
-                                execution_output: executed.execution_output.clone(),
-                                hashed_state: Either::Right(trie_data.hashed_state),
-                                trie_updates: Either::Right(trie_data.trie_updates),
-                            };
-                        // Use default zero id — to avoid accumulating stale entries in the engine state tree.
-                        let payload = OpBuiltPayload::<OpPrimitives>::new(
-                            reth_payload_builder::PayloadId::default(),
-                            Arc::new(block),
-                            alloy_primitives::U256::ZERO,
-                            Some(built),
-                        );
-                        let _ = payload_events_sender.send(Events::BuiltPayload(payload));
-                    }
-                }),
-            );
-        }
     }
 }

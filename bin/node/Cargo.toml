@@ -26,6 +26,7 @@ xlayer-trace-monitor.workspace = true
 # reth
 reth.workspace = true
 reth-chain-state.workspace = true
+reth-engine-tree.workspace = true
 reth-optimism-node.workspace = true
 reth-optimism-primitives.workspace = true
 reth-optimism-cli.workspace = true

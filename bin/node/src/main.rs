@@ -17,17 +17,17 @@ use reth::{
     providers::providers::BlockchainProvider,
 };
 use reth_chainspec::ChainSpecProvider;
+use reth_node_builder::rpc::BasicEngineValidatorBuilder;
 use reth_optimism_cli::Cli;
 use reth_optimism_evm::OpEvmConfig;
-use reth_optimism_node::{args::RollupArgs, OpNode};
+use reth_optimism_node::{args::RollupArgs, OpEngineValidatorBuilder, OpNode};
 use reth_provider::CanonStateSubscriptions;
 use reth_rpc_server_types::RethRpcModule;
-use reth_trie_db::ChangesetCache;
 
 use xlayer_chainspec::XLayerChainSpecParser;
 use xlayer_flashblocks::{
-    FlashblockStateCache, FlashblocksPersistCtx, FlashblocksPubSub, FlashblocksRpcCtx,
-    FlashblocksRpcService, WsFlashBlockStream,
+    FlashblockSequenceValidator, FlashblockStateCache, FlashblocksPersistCtx, FlashblocksPubSub,
+    FlashblocksRpcCtx, FlashblocksRpcService, WsFlashBlockStream, XLayerEngineValidatorBuilder,
 };
 use xlayer_legacy_rpc::{layer::LegacyRpcRouterLayer, LegacyRpcRouterConfig};
 use xlayer_monitor::{start_monitor_handle, RpcMonitorLayer, XLayerMonitor};
@@ -127,26 +127,37 @@ fn main() {
                 );
             }
 
-            // Get the payload events tx for pre-warming the engine tree with locally built
-            // pending flashblocks sequence.
-            let events_sender = Arc::new(OnceLock::new());
-            let tree_config = builder.config().engine.tree_config();
-
-            // Create a shared changeset cache for flashblocks RPC validator and the
-            // engine tree validator to operate on the same trie changeset data.
-            let changeset_cache = ChangesetCache::new();
-
             // Create the X Layer payload service builder
             // It handles both flashblocks and default modes internally
             let payload_builder = XLayerPayloadServiceBuilder::new(
                 args.xlayer_args.builder.clone(),
                 args.xlayer_args.flashblocks_rpc.flashblock_url.is_some(),
                 args.rollup_args.compute_pending_block,
-                events_sender.clone(),
             )?
             .with_bridge_config(bridge_config);
 
-            let changeset_cache_rpc = changeset_cache.clone();
+            // Get the engine validator for flashblocks RPC.
+            let engine_validator = Arc::new(OnceLock::new());
+
+            // Replace the default engine validator with `XLayerEngineValidator`, sharing
+            // the engine's PayloadProcessor while unifying both the engine validator and
+            // flashblocks sequence validator.
+            //
+            // When flashblocks RPC is enabled, this provides:
+            // 1. Flashblocks pre-warming (skip re-execution for already validated blocks)
+            // 2. Shared PayloadProcessor (same sparse trie + execution cache)
+            // 3. Safeguard against races between engine and flashblocks sequence validator,
+            //    no double re-validation of the same block/payload.
+            //
+            // When flashblocks RPC is disabled, it is a transparent pass-through to the
+            // underlying engine validator.
+            let tree_config = builder.config().engine.tree_config();
+            let engine_builder = XLayerEngineValidatorBuilder::new(
+                BasicEngineValidatorBuilder::<OpEngineValidatorBuilder>::default(),
+                engine_validator.clone(),
+            );
+            let add_ons = add_ons.with_engine_validator(engine_builder);
+
             let NodeHandle { node, node_exit_future } = builder
                 .with_types_and_provider::<OpNode, BlockchainProvider<_>>()
                 .with_components(op_node.components().payload(payload_builder))
@@ -157,44 +168,69 @@ fn main() {
                     let flashblocks_state = if let Some(flashblock_url) =
                         args.xlayer_args.flashblocks_rpc.flashblock_url
                     {
-                        // Initialize flashblocks RPC with the shared changeset cache
+                        let engine_validator = engine_validator
+                            .get()
+                            .expect("XLayerEngineValidator must be set")
+                            .clone();
+
+                        // Initialize flashblocks RPC with the engine's changeset cache
                         let flashblocks_state = FlashblockStateCache::new(
                             ctx.provider().canonical_in_memory_state(),
-                            changeset_cache_rpc,
+                            engine_validator.get_changeset_cache(),
                         );
+
+                        // Initialize the flashblocks validator
+                        engine_validator.set_flashblocks(
+                            FlashblockSequenceValidator::new(
+                                OpEvmConfig::optimism(ctx.provider().chain_spec()),
+                                ctx.provider().clone(),
+                                ctx.provider().chain_spec(),
+                                flashblocks_state.clone(),
+                                engine_validator.get_payload_processor(),
+                                ctx.node().task_executor.clone(),
+                                tree_config,
+                            ),
+                            flashblocks_state.clone(),
+                        );
+
                         let canon_state_rx = ctx.provider().canonical_state_stream();
                         let service = FlashblocksRpcService::new(
                             args.xlayer_args.builder.flashblocks,
                             flashblocks_state.clone(),
                             ctx.node().task_executor.clone(),
                             FlashblocksRpcCtx {
-                                provider: ctx.provider().clone(),
                                 canon_state_rx,
-                                evm_config: OpEvmConfig::optimism(ctx.provider().chain_spec()),
-                                chain_spec: ctx.provider().chain_spec(),
-                                tree_config,
-                                debug_state_comparison: args.xlayer_args.flashblocks_rpc.flashblocks_debug_state_comparison,
+                                debug_state_comparison: args
+                                    .xlayer_args
+                                    .flashblocks_rpc
+                                    .flashblocks_debug_state_comparison,
                             },
                             FlashblocksPersistCtx {
                                 datadir,
                                 relay_flashblocks: args.rollup_args.flashblocks_url.is_some(),
                             },
                         )?;
-                        if !args.xlayer_args.flashblocks_rpc.flashblocks_debug_state_comparison {
-                            service.spawn_prewarm(events_sender);
-                        }
                         service.spawn_persistence()?;
-                        service.spawn_rpc(WsFlashBlockStream::new(flashblock_url));
+                        service.spawn_rpc(
+                            engine_validator,
+                            WsFlashBlockStream::new(flashblock_url),
+                        );
                         info!(target: "reth::cli", "xlayer flashblocks service initialized");
 
                         // Initialize custom flashblocks subscription
-                        if args.xlayer_args.flashblocks_rpc.enable_flashblocks_subscription {
+                        if args
+                            .xlayer_args
+                            .flashblocks_rpc
+                            .enable_flashblocks_subscription
+                        {
                             let flashblocks_pubsub = FlashblocksPubSub::new(
                                 ctx.registry.eth_handlers().pubsub.clone(),
                                 flashblocks_state.subscribe_pending_sequence(),
                                 Box::new(ctx.node().task_executor.clone()),
                                 new_op_eth_api.converter().clone(),
-                                args.xlayer_args.flashblocks_rpc.flashblocks_subscription_max_addresses,
+                                args.xlayer_args
+                                    .flashblocks_rpc
+                                    .flashblocks_subscription_max_addresses,
                             );
                             ctx.modules.add_or_replace_if_module_configured(
                                 RethRpcModule::Eth,
@@ -220,9 +256,8 @@ fn main() {
 
                     // Register X Layer RPC
                     let xlayer_rpc = DefaultRpcExt::new(flashblocks_state);
-                    ctx.modules.merge_configured(DefaultRpcExtApiServer::into_rpc(
-                        xlayer_rpc,
-                    ))?;
+                    ctx.modules
+                        .merge_configured(DefaultRpcExtApiServer::into_rpc(xlayer_rpc))?;
                     info!(target: "reth::cli", "xlayer eth rpc extension enabled");
                     info!(message = "X Layer RPC modules initialized");
                     Ok(())
@@ -239,7 +274,6 @@ fn main() {
                                 builder.config().datadir(),
                                 engine_tree_config,
                             )
-                            .with_changeset_cache(changeset_cache),
                         );
 
                         Either::Left(builder.launch_with(launcher))
@@ -248,8 +282,7 @@ fn main() {
                             builder.task_executor().clone(),
                             builder.config().datadir(),
                             engine_tree_config,
-                        )
-                        .with_changeset_cache(changeset_cache);
+                        );
 
                         Either::Right(builder.launch_with(launcher))
                     }

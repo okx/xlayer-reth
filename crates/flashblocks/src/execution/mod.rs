@@ -1,7 +1,9 @@
 pub(crate) mod assemble;
-pub(crate) mod validator;
+pub mod engine;
+pub mod validator;
 
-pub(crate) use validator::FlashblockSequenceValidator;
+pub use engine::{XLayerEngineValidator, XLayerEngineValidatorBuilder};
+pub use validator::FlashblockSequenceValidator;
 
 use alloy_eips::eip4895::Withdrawal;
 use alloy_rpc_types_engine::PayloadId;
@@ -14,14 +16,14 @@ use reth_provider::{
 };
 use reth_revm::cached::CachedReads;
 
-pub(crate) struct BuildArgs<I> {
-    pub(crate) base: OpFlashblockPayloadBase,
-    pub(crate) payload_id: PayloadId,
-    pub(crate) transactions: I,
-    pub(crate) withdrawals: Vec<Withdrawal>,
-    pub(crate) last_flashblock_index: u64,
-    pub(crate) target_index: u64,
-    pub(crate) sequence_end: bool,
+pub struct BuildArgs<I> {
+    pub base: OpFlashblockPayloadBase,
+    pub payload_id: PayloadId,
+    pub transactions: I,
+    pub withdrawals: Vec<Withdrawal>,
+    pub last_flashblock_index: u64,
+    pub target_index: u64,
+    pub sequence_end: bool,
 }
 
 /// Cached prefix execution data used to resume canonical builds.

@@ -183,6 +183,11 @@ impl<N: NodePrimitives> ConfirmCache<N> {
             .collect())
     }
 
+    /// Returns the `ExecutedBlock` for the given block hash, if present.
+    pub(crate) fn get_executed_block_by_hash(&self, block_hash: &B256) -> Option<ExecutedBlock<N>> {
+        self.get_executed_block_by_number(self.number_for_hash(block_hash)?)
+    }
+
     /// Returns the `ExecutedBlock` for the given block number, if present.
     pub(crate) fn get_executed_block_by_number(
         &self,

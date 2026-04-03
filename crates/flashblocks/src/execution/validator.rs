@@ -76,7 +76,8 @@ use reth_trie_parallel::root::{ParallelStateRoot, ParallelStateRootError};
 /// - **Incremental (same height)**: Full re-execution via `execute_fresh()`. The warm
 ///   execution cache and `PreservedSparseTrie` from the previous sequence build offset
 ///   the cost of re-executing prefix transactions.
-pub(crate) struct FlashblockSequenceValidator<N: NodePrimitives, EvmConfig, Provider, ChainSpec>
+#[derive(Debug)]
+pub struct FlashblockSequenceValidator<N: NodePrimitives, EvmConfig, Provider, ChainSpec>
 where
     EvmConfig: ConfigureEvm,
     ChainSpec: OpHardforks,
@@ -91,7 +92,7 @@ where
     chain_spec: Arc<ChainSpec>,
     /// Configuration for the engine tree.
     tree_config: TreeConfig,
-    /// Payload processor for state root computation.
+    /// Shared `PayloadProcessor` with the engine validator.
     payload_processor: PayloadProcessor<EvmConfig>,
     /// Task runtime for spawning parallel work.
     runtime: Runtime,
@@ -114,20 +115,15 @@ where
         + Clone,
     ChainSpec: OpHardforks,
 {
-    pub(crate) fn new(
+    pub fn new(
         evm_config: EvmConfig,
         provider: Provider,
         chain_spec: Arc<ChainSpec>,
         flashblocks_state: FlashblockStateCache<N>,
+        payload_processor: PayloadProcessor<EvmConfig>,
         runtime: Runtime,
         tree_config: TreeConfig,
     ) -> Self {
-        let payload_processor = PayloadProcessor::new(
-            runtime.clone(),
-            evm_config.clone(),
-            &tree_config,
-            Default::default(),
-        );
         Self {
             flashblocks_state,
             provider,
@@ -141,9 +137,7 @@ where
 
     /// Executes the incoming flashblocks sequence transactions delta and commits the
     /// result to the flashblocks state cache.
-    pub(crate) async fn execute_sequence<
-        I: IntoIterator<Item = WithEncoded<Recovered<N::SignedTx>>>,
-    >(
+    pub async fn execute_sequence<I: IntoIterator<Item = WithEncoded<Recovered<N::SignedTx>>>>(
         &mut self,
         args: BuildArgs<I>,
     ) -> eyre::Result<()>

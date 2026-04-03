@@ -273,6 +273,14 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
         Ok(Some((overlay, header.expect("valid cached header"), anchor_hash)))
     }
 
+    /// Returns the `ExecutedBlock` for the given block hash from confirm cache.
+    pub fn get_executed_block_by_hash(
+        &self,
+        block_hash: &B256,
+    ) -> Option<reth_chain_state::ExecutedBlock<N>> {
+        self.inner.read().confirm_cache.get_executed_block_by_hash(block_hash)
+    }
+
     /// Returns the `ExecutedBlock` for the given block number from confirm cache.
     /// Used for diagnostic comparison with the engine's execution.
     pub fn debug_get_executed_block_by_number(
@@ -300,6 +308,14 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
         pending_sequence: PendingSequence<N>,
     ) -> eyre::Result<()> {
         self.inner.write().handle_pending_sequence(pending_sequence)
+    }
+
+    /// Handles a new incoming executed block validated by the engine validator and
+    /// tries to advance the flashblocks state cache. However if the block height
+    /// mismatches the current flashblocks state cache, we silently ignore since
+    /// the source of truth is still on the engine canonical stream.
+    pub fn try_handle_engine_block(&self, executed_block: ExecutedBlock<N>) -> eyre::Result<()> {
+        self.inner.write().try_handle_engine_block(executed_block)
     }
 
     /// Handles a canonical block committed to the canonical chainstate.
@@ -416,12 +432,34 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
             }
             let _ = self.pending_sequence_tx.send(Some(broadcast));
         } else if pending_height <= self.confirm_height {
-            // State cache may have advanced from canonical block stream. Skip
-        } else {
+            // State cache have advanced from canonical block stream. Skipping
+            // and prioritize using canonical state instead.
             return Err(eyre::eyre!(
-                "polluted state cache - not next consecutive pending height block"
+                "state cache ahead skip committing pending sequence, height={pending_height}, expected={expected_height}"
+            ));
+        } else {
+            // Possible polluted state cache, or the processing of incoming
+            // flashblocks was stalled which caused the raw cache to drop
+            // sequences. Wait for canonical state to catch up to tip.
+            return Err(eyre::eyre!(
+                "state cache behind skip committing pending sequence, height={pending_height}, expected={expected_height}"
             ));
         }
+        Ok(())
+    }
+
+    fn try_handle_engine_block(&mut self, executed_block: ExecutedBlock<N>) -> eyre::Result<()> {
+        let expected_height = self.confirm_height + 1;
+        let block_number = executed_block.recovered_block.number();
+        if block_number != expected_height {
+            return Err(eyre::eyre!(
+                "skipping engine block - not next target confirm height, height={block_number}, expected={expected_height}"
+            ));
+        }
+        // Clear pending sequence and commit new incoming block to confirm cache.
+        self.pending_cache = None;
+        let receipts = Arc::new(executed_block.execution_output.receipts.clone());
+        self.handle_confirmed_block(expected_height, executed_block, receipts)?;
         Ok(())
     }
 
