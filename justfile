@@ -76,12 +76,12 @@ fix: fix-format fix-clippy
 # Run `just test true` to run e2e tests.
 test include_e2e="false" include_flashblocks="false":
     @echo "Running tests (include_e2e={{include_e2e}})"
-    cargo test --workspace --exclude xlayer-e2e-test --all-features
+    cargo nextest run --workspace --exclude xlayer-e2e-test --all-features
     @if [ "{{include_e2e}}" = "true" ]; then \
-        cargo test -p xlayer-e2e-test --test e2e_tests -- --nocapture --test-threads=1; \
+        cargo nextest run -p xlayer-e2e-test --test e2e_tests --test-threads 1 --no-capture; \
     fi
     @if [ "{{include_flashblocks}}" = "true" ]; then \
-        cargo test -p xlayer-e2e-test --test flashblocks_tests -- --nocapture --test-threads=1; \
+        cargo nextest run -p xlayer-e2e-test --test flashblocks_tests --test-threads 1 --no-capture; \
     fi
 
 check-format:
