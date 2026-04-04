@@ -404,7 +404,7 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
             target: "flashblocks",
             confirm_height = self.confirm_height,
             canonical_height = self.canon_info.0,
-            "Committed pending block to confirm flashblocks state cache",
+            "Flashblocks state cache committed pending block to confirm cache",
         );
         Ok(())
     }

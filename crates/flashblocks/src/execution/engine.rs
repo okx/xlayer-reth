@@ -74,23 +74,31 @@ where
         }
     }
 
-    /// Sets the flashblocks validator and state cache if flashblocks is enabled.
+    /// Flashblocks init, sets the flashblocks validator and state cache.
     pub fn set_flashblocks(
         &self,
         fb_validator: FlashblockSequenceValidator<N, Evm, Provider, ChainSpec>,
         fb_state: FlashblockStateCache<N>,
     ) {
-        let mut guard = self.inner.blocking_lock();
-        guard.fb_state = Some(fb_state);
-        guard.fb_validator = Some(fb_validator);
+        tokio::task::block_in_place(|| {
+            let mut guard = self.inner.blocking_lock();
+            guard.fb_state = Some(fb_state);
+            guard.fb_validator = Some(fb_validator);
+        });
     }
 
+    /// Flashblocks init, gets the engine validator's changeset cache.
     pub fn get_changeset_cache(&self) -> ChangesetCache {
-        self.inner.blocking_lock().engine_validator.changeset_cache()
+        tokio::task::block_in_place(|| {
+            self.inner.blocking_lock().engine_validator.changeset_cache()
+        })
     }
 
+    /// Flashblocks init, gets the engine validator's shared payload processor.
     pub fn get_payload_processor(&self) -> PayloadProcessor<Evm> {
-        self.inner.blocking_lock().engine_validator.payload_processor()
+        tokio::task::block_in_place(|| {
+            self.inner.blocking_lock().engine_validator.payload_processor()
+        })
     }
 }
 
