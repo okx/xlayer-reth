@@ -210,6 +210,14 @@ where
             return Ok(executed_block);
         }
 
+        // If flashblocks is enabled and engine validator is validating this new block,
+        // it could mean that the default CL/EL sync received the block before the full
+        // flashblocks sequence has received the last target flashblock.
+        //
+        // Since the shared payload validator's execution cache could be polluted from
+        // the incremental builds of the flashblocks sequence. Note that in this scenario,
+        // we will cache miss here and the rebuild of the full payload will not use the
+        // pre-warm cache from the parent block.
         debug!(
             target: "flashblocks::engine_validator",
             block_number = num_hash.number,

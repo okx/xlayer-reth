@@ -283,9 +283,8 @@ where
         // trie task without cloning the expensive BundleState.
         let output = Arc::new(output);
 
-        // Terminate caching without saving the execution cache. The cache stays keyed to
-        // `parent_hash` so subsequent intermediate flashblocks can reuse it. Only the SR
-        // path advances the cache hash via `on_inserted_executed_block` below.
+        // Terminate caching without saving the execution cache here. The execution cache will be
+        // advanced via `on_inserted_executed_block` below.
         handle.terminate_caching(None);
 
         // Extract signed transactions for the block body before moving
@@ -464,16 +463,11 @@ where
             )
         };
 
-        // Advance the execution cache only on the SR path (sequence end). This re-keys
-        // the cache from `parent_hash` → `block_hash` and inserts the bundle state, so
-        // the next block's validation starts with a warm cache. Intermediate flashblocks
-        // skip this to keep the cache keyed to `parent_hash` for reuse.
-        if calculate_state_root {
-            self.payload_processor.on_inserted_executed_block(
-                executed_block.recovered_block.block_with_parent(),
-                &executed_block.execution_output.state,
-            );
-        }
+        // Update `PayloadProcessor`'s execution cache for next block's prewarming
+        self.payload_processor.on_inserted_executed_block(
+            executed_block.recovered_block.block_with_parent(),
+            &executed_block.execution_output.state,
+        );
 
         let execution_height = args.base.block_number;
         let last_index = args.last_flashblock_index;
