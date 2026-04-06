@@ -283,9 +283,10 @@ where
         // trie task without cloning the expensive BundleState.
         let output = Arc::new(output);
 
-        // Terminate caching task early since execution is complete and caching is no longer
-        // needed. This frees up resources while state root computation continues.
-        let valid_block_tx = handle.terminate_caching(Some(output.clone()));
+        // Terminate caching without saving the execution cache. The cache stays keyed to
+        // `parent_hash` so subsequent intermediate flashblocks can reuse it. Only the SR
+        // path advances the cache hash via `on_inserted_executed_block` below.
+        handle.terminate_caching(None);
 
         // Extract signed transactions for the block body before moving
         // `block_transactions` into the tx root closure.
@@ -442,9 +443,6 @@ where
         let block: N::Block = block.into();
         let block = RecoveredBlock::new_unhashed(block, senders);
 
-        if let Some(valid_block_tx) = valid_block_tx {
-            let _ = valid_block_tx.send(());
-        }
         let executed_block = if calculate_state_root {
             self.spawn_deferred_trie_task(
                 block,
@@ -466,11 +464,16 @@ where
             )
         };
 
-        // Update `PayloadProcessor`'s execution cache for next block's prewarming
-        self.payload_processor.on_inserted_executed_block(
-            executed_block.recovered_block.block_with_parent(),
-            &executed_block.execution_output.state,
-        );
+        // Advance the execution cache only on the SR path (sequence end). This re-keys
+        // the cache from `parent_hash` → `block_hash` and inserts the bundle state, so
+        // the next block's validation starts with a warm cache. Intermediate flashblocks
+        // skip this to keep the cache keyed to `parent_hash` for reuse.
+        if calculate_state_root {
+            self.payload_processor.on_inserted_executed_block(
+                executed_block.recovered_block.block_with_parent(),
+                &executed_block.execution_output.state,
+            );
+        }
 
         let execution_height = args.base.block_number;
         let last_index = args.last_flashblock_index;
