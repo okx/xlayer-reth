@@ -41,19 +41,15 @@ type PendingStreamFuture =
 #[derive(Default)]
 struct PendingStreams {
     futures: FuturesUnordered<PendingStreamFuture>,
-    inflight_peers: HashSet<PeerId>,
+    inflight_peers: HashSet<(PeerId, StreamProtocol)>,
 }
 
 impl PendingStreams {
-    fn new() -> Self {
-        Self::default()
-    }
-
     fn push(&mut self, peer_id: PeerId, proto: StreamProtocol, mut control: Control) {
-        if self.inflight_peers.contains(&peer_id) {
+        if self.inflight_peers.contains(&(peer_id, proto.clone())) {
             return;
         }
-        self.inflight_peers.insert(peer_id);
+        self.inflight_peers.insert((peer_id, proto.clone()));
         self.futures.push(Box::pin(async move {
             let result = control.open_stream(peer_id, proto.clone()).await.map_err(Into::into);
             (peer_id, proto, result)
@@ -63,7 +59,7 @@ impl PendingStreams {
     async fn next(&mut self) -> Option<(PeerId, StreamProtocol, eyre::Result<Stream>)> {
         use futures::StreamExt as _;
         let result = self.futures.next().await?;
-        self.inflight_peers.remove(&result.0);
+        self.inflight_peers.remove(&(result.0, result.1.clone()));
         Some(result)
     }
 }
@@ -177,7 +173,7 @@ impl Node {
             .into_iter()
             .map(|handler| tokio::spawn(handler.run()))
             .collect::<Vec<_>>();
-        let mut pending_streams = PendingStreams::new();
+        let mut pending_streams = PendingStreams::default();
 
         loop {
             tokio::select! {
@@ -851,26 +847,30 @@ mod test {
         let (peer_a, mut control_a, control_b) = connected_stream_swarms().await;
         let mut incoming_a = control_a.accept(types::FLASHBLOCKS_STREAM_PROTOCOL).unwrap();
 
-        let mut pending = PendingStreams::new();
+        let mut pending = PendingStreams::default();
 
         // Push an open_stream future — simulates the retry tick detecting a
         // connected peer with no application stream.
+        let inflight_key = (peer_a, types::FLASHBLOCKS_STREAM_PROTOCOL);
+
         pending.push(peer_a, types::FLASHBLOCKS_STREAM_PROTOCOL, control_b);
         assert!(
-            pending.inflight_peers.contains(&peer_a),
+            pending.inflight_peers.contains(&inflight_key),
             "peer must be tracked as inflight after push"
         );
 
-        // Dedup: pushing again for the same peer should be a no-op.
-        let futures_count_before = pending.futures.len();
-        // Need a fresh control for the second push — but it should be rejected anyway.
-        // We can't easily get another control without another swarm, so just verify
-        // the inflight set blocks it by checking the futures count doesn't grow.
-        // (The push method checks inflight_peers before creating the future.)
+        // Dedup: second push for same (peer, protocol) must be rejected by the inflight guard.
+        // The guard fires before `control` is touched, so any cloned control works.
+        let futures_len_before = pending.futures.len();
+        pending.push(peer_a, types::FLASHBLOCKS_STREAM_PROTOCOL, control_a.clone());
         assert_eq!(
             pending.futures.len(),
-            futures_count_before,
-            "duplicate push must not create additional futures"
+            futures_len_before,
+            "duplicate push must not grow futures"
+        );
+        assert!(
+            pending.inflight_peers.contains(&inflight_key),
+            "peer must still be inflight after rejected push"
         );
 
         // Accept the incoming stream on node A's side so the negotiation completes.
@@ -891,7 +891,7 @@ mod test {
 
         // Verify inflight set is cleared after completion.
         assert!(
-            !pending.inflight_peers.contains(&peer_a),
+            !pending.inflight_peers.contains(&inflight_key),
             "peer must be removed from inflight after completion"
         );
 
