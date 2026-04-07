@@ -49,10 +49,11 @@ impl PendingStreams {
     /// No-op if an identical `(peer_id, protocol)` is already in-flight.
     /// When the guard fires, `control` is dropped without I/O.
     fn push(&mut self, peer_id: PeerId, proto: StreamProtocol, mut control: Control) {
-        if self.inflight_peers.contains(&(peer_id, proto.clone())) {
+        let key = (peer_id, proto.clone());
+        if self.inflight_peers.contains(&key) {
             return;
         }
-        self.inflight_peers.insert((peer_id, proto.clone()));
+        self.inflight_peers.insert(key);
         self.futures.push(Box::pin(async move {
             let result = control.open_stream(peer_id, proto.clone()).await.map_err(Into::into);
             (peer_id, proto, result)
@@ -239,10 +240,9 @@ impl Node {
                     // in the gossiping of new flashblock payloads to websocket subscribers.
                     match outgoing_streams_handler.broadcast_message(message.clone()).await {
                         Ok(failed_peers) => {
-                            // For each peer whose stream send failed, immediately attempt to
-                            // re-open a new yamux stream on the existing TCP connection.
-                            // This recovers from application-level stream closes without
-                            // requiring a full TCP reconnect.
+                            // `broadcast_message` already removed failed peers from
+                            // `peers_to_stream`, so no `has_peer` guard is needed here.
+                            // Push open_stream futures to recover the yamux streams.
                             for &peer_id in &failed_peers {
                                 for proto in &protocols {
                                     pending_streams.push(peer_id, proto.clone(), swarm.behaviour_mut().new_control());
