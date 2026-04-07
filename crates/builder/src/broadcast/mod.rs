@@ -45,6 +45,9 @@ struct PendingStreams {
 }
 
 impl PendingStreams {
+    /// Push an `open_stream` future for the given peer and protocol.
+    /// No-op if an identical `(peer_id, protocol)` is already in-flight.
+    /// When the guard fires, `control` is dropped without I/O.
     fn push(&mut self, peer_id: PeerId, proto: StreamProtocol, mut control: Control) {
         if self.inflight_peers.contains(&(peer_id, proto.clone())) {
             return;
@@ -904,7 +907,9 @@ mod test {
             compat::FuturesAsyncReadCompatExt as _,
         };
 
-        let test_payload = r#"{"OpFlashblockPayload":{"payload_id":"0x0000000000000000","index":0,"base":null,"diff":{"state_root":"0x0000000000000000000000000000000000000000000000000000000000000000","receipts_root":"0x0000000000000000000000000000000000000000000000000000000000000000","logs_bloom":"0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000","gas_used":0,"block_hash":"0x0000000000000000000000000000000000000000000000000000000000000000","transactions":[],"withdrawals":null,"withdrawals_root":null,"blob_gas_used":null},"metadata":{"receipts":{},"new_account_balances":{},"block_number":0}}}"#;
+        let test_message = Message::from_flashblock_payload(OpFlashblockPayload::default());
+        let test_payload =
+            serde_json::to_string(&test_message).expect("can serialize test message");
 
         let mut writer = FramedWrite::new(stream.compat(), LinesCodec::new());
         writer.send(test_payload.to_string()).await.expect("write must succeed");
