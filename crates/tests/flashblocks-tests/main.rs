@@ -340,6 +340,498 @@ async fn fb_negative_test() {
     assert!(result.is_null(), "Out-of-range tx index should return null, got: {result}");
 }
 
+/// Verifies that deploying a contract via CREATE2 through the flashblocks node
+/// results in non-empty bytecode at the deployed address when queried with the pending tag.
+#[tokio::test]
+async fn fb_pending_create2_deploy_test() {
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+    let contracts = operations::try_deploy_contracts().await.expect("Failed to deploy contracts");
+
+    // Use current nonce as salt to avoid collision across repeated test runs
+    let nonce = operations::eth_get_transaction_count(
+        &fb_client,
+        operations::DEFAULT_RICH_ADDRESS,
+        Some(operations::BlockId::Pending),
+    )
+    .await
+    .expect("Failed to get nonce");
+    let salt = U256::from(nonce);
+
+    // Deploy a child contract via CREATE2
+    let tx_hash = operations::deploy_via_create2(
+        operations::DEFAULT_L2_NETWORK_URL_FB,
+        contracts.create2_factory,
+        salt,
+    )
+    .await
+    .expect("CREATE2 deploy failed");
+
+    operations::wait_for_tx_mined(operations::DEFAULT_L2_NETWORK_URL_FB, &tx_hash)
+        .await
+        .expect("CREATE2 deploy tx not mined");
+
+    // Compute the expected address
+    let expected_addr = operations::compute_create2_address(
+        operations::DEFAULT_L2_NETWORK_URL_FB,
+        contracts.create2_factory,
+        salt,
+    )
+    .await
+    .expect("computeAddress failed");
+
+    // Verify code exists at the deployed address via pending tag
+    let code = operations::eth_get_code(
+        &fb_client,
+        &format!("{expected_addr:#x}"),
+        Some(operations::BlockId::Pending),
+    )
+    .await
+    .expect("eth_getCode(pending) failed");
+    assert!(code.len() > 2, "Deployed contract should have non-empty bytecode, got: {code}");
+}
+
+/// Verifies that the CREATE2 `computeAddress` result matches the actual deployed address.
+#[tokio::test]
+async fn fb_pending_create2_address_determinism_test() {
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+    let contracts = operations::try_deploy_contracts().await.expect("Failed to deploy contracts");
+
+    // Use current nonce as salt to avoid collision across repeated test runs
+    let nonce = operations::eth_get_transaction_count(
+        &fb_client,
+        operations::DEFAULT_RICH_ADDRESS,
+        Some(operations::BlockId::Pending),
+    )
+    .await
+    .expect("Failed to get nonce");
+    let salt = U256::from(nonce);
+
+    // Compute expected address BEFORE deployment
+    let predicted_addr = operations::compute_create2_address(
+        operations::DEFAULT_L2_NETWORK_URL_FB,
+        contracts.create2_factory,
+        salt,
+    )
+    .await
+    .expect("computeAddress failed");
+
+    // Deploy
+    let tx_hash = operations::deploy_via_create2(
+        operations::DEFAULT_L2_NETWORK_URL_FB,
+        contracts.create2_factory,
+        salt,
+    )
+    .await
+    .expect("CREATE2 deploy failed");
+
+    let receipt = operations::wait_for_tx_mined(operations::DEFAULT_L2_NETWORK_URL_FB, &tx_hash)
+        .await
+        .expect("CREATE2 deploy tx not mined");
+
+    // Extract the deployed address from the Deployed(address,uint256) event log
+    let logs = receipt["logs"].as_array().expect("Receipt should have logs");
+    assert!(!logs.is_empty(), "Deploy tx should emit at least one log");
+
+    // Verify the event signature: keccak256("Deployed(address,uint256)")
+    let deployed_topic = "0xb03c53b28e78a88e31607a27e1fa48234dce28d5d9d9ec7b295aeb02e674a1e1";
+    let deployed_log = logs
+        .iter()
+        .find(|log| {
+            log["topics"]
+                .as_array()
+                .and_then(|t| t.first())
+                .and_then(|t| t.as_str())
+                .map(|t| t == deployed_topic)
+                .unwrap_or(false)
+        })
+        .expect("Should find a Deployed event log");
+
+    // The Deployed event data contains the address in the first 32-byte word
+    let event_data = deployed_log["data"].as_str().expect("Log should have data");
+    let data_bytes =
+        hex::decode(event_data.trim_start_matches("0x")).expect("Invalid hex in log data");
+    assert!(data_bytes.len() >= 32, "Event data should be at least 32 bytes");
+    let actual_addr = Address::from_slice(&data_bytes[12..32]);
+
+    assert_eq!(
+        predicted_addr, actual_addr,
+        "CREATE2 predicted address should match actual deployed address"
+    );
+}
+
+/// Post-Cancun: verifies that contract code persists after SELFDESTRUCT in a
+/// separate transaction (EIP-6780 behavior).
+#[tokio::test]
+async fn fb_pending_selfdestruct_code_persists_test() {
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+    let contracts = operations::try_deploy_contracts().await.expect("Failed to deploy contracts");
+
+    // Use current nonce as salt to avoid collision across repeated test runs
+    let nonce = operations::eth_get_transaction_count(
+        &fb_client,
+        operations::DEFAULT_RICH_ADDRESS,
+        Some(operations::BlockId::Pending),
+    )
+    .await
+    .expect("Failed to get nonce");
+    let salt = U256::from(nonce);
+    let recipient = Address::from_str(operations::DEFAULT_L2_NEW_ACC1_ADDRESS).unwrap();
+
+    // Deploy a child contract via CREATE2
+    let deploy_tx = operations::deploy_via_create2(
+        operations::DEFAULT_L2_NETWORK_URL_FB,
+        contracts.create2_factory,
+        salt,
+    )
+    .await
+    .expect("CREATE2 deploy failed");
+    operations::wait_for_tx_mined(operations::DEFAULT_L2_NETWORK_URL_FB, &deploy_tx)
+        .await
+        .expect("Deploy tx not mined");
+
+    let child_addr = operations::compute_create2_address(
+        operations::DEFAULT_L2_NETWORK_URL_FB,
+        contracts.create2_factory,
+        salt,
+    )
+    .await
+    .expect("computeAddress failed");
+
+    // Verify code exists before destroy
+    let code_before = operations::eth_get_code(
+        &fb_client,
+        &format!("{child_addr:#x}"),
+        Some(operations::BlockId::Pending),
+    )
+    .await
+    .expect("eth_getCode(pending) before destroy failed");
+    assert!(code_before.len() > 2, "Contract should have bytecode before destroy");
+
+    // Destroy the child contract (SELFDESTRUCT in separate tx)
+    let destroy_tx = operations::destroy_via_factory(
+        operations::DEFAULT_L2_NETWORK_URL_FB,
+        contracts.create2_factory,
+        child_addr,
+        recipient,
+    )
+    .await
+    .expect("Destroy failed");
+    operations::wait_for_tx_mined(operations::DEFAULT_L2_NETWORK_URL_FB, &destroy_tx)
+        .await
+        .expect("Destroy tx not mined");
+
+    // Post-Cancun: code should PERSIST after SELFDESTRUCT in a separate tx
+    let code_after = operations::eth_get_code(
+        &fb_client,
+        &format!("{child_addr:#x}"),
+        Some(operations::BlockId::Pending),
+    )
+    .await
+    .expect("eth_getCode(pending) after destroy failed");
+    assert_eq!(
+        code_before, code_after,
+        "Post-Cancun: code should persist unchanged after SELFDESTRUCT in separate tx"
+    );
+}
+
+/// Verifies that calling a precompile (SHA256 at 0x02) through a contract works
+/// on the flashblocks node.
+#[tokio::test]
+async fn fb_pending_precompile_call_test() {
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+    let contracts = operations::try_deploy_contracts().await.expect("Failed to deploy contracts");
+
+    // Call SHA256 precompile through the contract via eth_call (read-only, deterministic)
+    sol! {
+        function callSha256(bytes memory input) external view returns (bytes32 result);
+    }
+    let input_data = b"hello world";
+    let call = callSha256Call { input: input_data.to_vec().into() };
+    let calldata = call.abi_encode();
+
+    let call_args = json!({
+        "to": contracts.precompile_caller,
+        "data": format!("0x{}", hex::encode(&calldata)),
+    });
+    let result =
+        operations::eth_call(&fb_client, Some(call_args), Some(operations::BlockId::Pending))
+            .await
+            .expect("eth_call to PrecompileCaller failed");
+
+    // SHA256("hello world") is a known constant
+    let expected_sha256 = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+    let result_hex = result.trim_start_matches("0x");
+    assert_eq!(result_hex, expected_sha256, "SHA256 precompile result should match expected hash");
+}
+
+/// Verifies that sending native ETH to a precompile address (0x02) updates the
+/// balance correctly through the flashblocks pending state.
+#[tokio::test]
+async fn fb_pending_transfer_to_precompile_test() {
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+    let precompile_addr = "0x0000000000000000000000000000000000000002";
+
+    // Record balance before
+    let balance_before =
+        operations::get_balance(&fb_client, precompile_addr, Some(operations::BlockId::Pending))
+            .await
+            .expect("get precompile balance before failed");
+
+    // Send 1 GWEI to the precompile address
+    let tx_hash = operations::native_balance_transfer(
+        operations::DEFAULT_L2_NETWORK_URL_FB,
+        U256::from(operations::GWEI),
+        precompile_addr,
+        true,
+    )
+    .await
+    .expect("Transfer to precompile failed");
+
+    // Verify tx was successful
+    let receipt = operations::eth_get_transaction_receipt(&fb_client, &tx_hash)
+        .await
+        .expect("Receipt not found");
+    assert_eq!(receipt["status"].as_str().unwrap(), "0x1", "Transfer to precompile should succeed");
+
+    // Check balance increased
+    let balance_after =
+        operations::get_balance(&fb_client, precompile_addr, Some(operations::BlockId::Pending))
+            .await
+            .expect("get precompile balance after failed");
+
+    assert!(
+        balance_after >= balance_before + U256::from(operations::GWEI),
+        "Precompile balance should increase by at least 1 GWEI, before={balance_before} after={balance_after}"
+    );
+}
+
+/// Verifies that `eth_getLogs` returns Transfer event logs from an ERC20 token
+/// transfer when queried with the transaction's block range.
+#[tokio::test]
+async fn fb_pending_get_logs_test() {
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+    let contracts = operations::try_deploy_contracts().await.expect("Failed to deploy contracts");
+    let test_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
+
+    // Send an ERC20 transfer
+    let tx_hash = operations::erc20_balance_transfer(
+        operations::DEFAULT_L2_NETWORK_URL_FB,
+        U256::from(operations::GWEI),
+        None,
+        test_address,
+        contracts.erc20,
+        None,
+    )
+    .await
+    .expect("ERC20 transfer failed");
+
+    let receipt = operations::wait_for_tx_mined(operations::DEFAULT_L2_NETWORK_URL_FB, &tx_hash)
+        .await
+        .expect("ERC20 transfer tx not mined");
+
+    // Use the exact block from the receipt for a tight query range
+    let tx_block = receipt["blockNumber"]
+        .as_str()
+        .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        .expect("Failed to parse block number from receipt");
+
+    // Query logs from the ERC20 contract address
+    // Transfer event topic: keccak256("Transfer(address,address,uint256)")
+    let transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+    let logs = operations::eth_get_logs(
+        &fb_client,
+        Some(operations::BlockId::Number(tx_block)),
+        Some(operations::BlockId::Number(tx_block)),
+        Some(&format!("{:#x}", contracts.erc20)),
+        Some(vec![transfer_topic.to_string()]),
+    )
+    .await
+    .expect("eth_getLogs failed");
+
+    let logs_arr = logs.as_array().expect("Logs should be an array");
+    assert!(!logs_arr.is_empty(), "Should have at least one Transfer log");
+
+    // Find the log from our specific transaction
+    let our_log = logs_arr
+        .iter()
+        .find(|log| log["transactionHash"].as_str() == Some(tx_hash.as_str()))
+        .expect("Should find a Transfer log from our transaction");
+
+    assert_eq!(
+        our_log["address"].as_str().unwrap().to_lowercase(),
+        format!("{:#x}", contracts.erc20).to_lowercase(),
+        "Log address should match ERC20 contract"
+    );
+}
+
+/// Verifies that a contract-to-contract call (ContractA calling ContractB via
+/// `triggerCall`) works correctly through the flashblocks node.
+#[tokio::test]
+async fn fb_pending_contract_to_contract_call_test() {
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+    let contracts = operations::try_deploy_contracts().await.expect("Failed to deploy contracts");
+
+    // Read call count before
+    sol! {
+        function getCallCount() external view returns (uint256);
+        function triggerCall() external;
+    }
+    let count_call = getCallCountCall {};
+    let count_calldata = count_call.abi_encode();
+    let call_args = json!({
+        "from": operations::DEFAULT_RICH_ADDRESS,
+        "to": contracts.contract_a,
+        "data": format!("0x{}", hex::encode(&count_calldata)),
+    });
+    let count_before_hex =
+        operations::eth_call(&fb_client, Some(call_args), Some(operations::BlockId::Pending))
+            .await
+            .expect("eth_call getCallCount before failed");
+
+    // Send a triggerCall() tx — this calls ContractB internally
+    let trigger = triggerCallCall {};
+    let trigger_calldata = trigger.abi_encode();
+    let tx_request = alloy_rpc_types_eth::TransactionRequest::default().gas_limit(200_000);
+    let result = operations::make_contract_call(
+        operations::DEFAULT_L2_NETWORK_URL_FB,
+        operations::DEFAULT_RICH_PRIVATE_KEY,
+        contracts.contract_a,
+        alloy_primitives::Bytes::from(trigger_calldata),
+        U256::ZERO,
+        tx_request,
+    )
+    .await
+    .expect("triggerCall tx failed");
+
+    let receipt = &result["receipt"];
+    assert_eq!(receipt["status"].as_str().unwrap(), "0x1", "triggerCall should succeed");
+
+    // Read call count after — should have incremented
+    let call_args_after = json!({
+        "from": operations::DEFAULT_RICH_ADDRESS,
+        "to": contracts.contract_a,
+        "data": format!("0x{}", hex::encode(count_call.abi_encode())),
+    });
+    let count_after_hex =
+        operations::eth_call(&fb_client, Some(call_args_after), Some(operations::BlockId::Pending))
+            .await
+            .expect("eth_call getCallCount after failed");
+
+    assert_ne!(count_before_hex, count_after_hex, "Call count should change after triggerCall()");
+}
+
+/// Verifies that state transitions are visible across sequential blocks through
+/// the flashblocks node: balance at block N differs from balance at block N+1
+/// after a transfer.
+#[tokio::test]
+async fn fb_pending_state_transition_across_blocks_test() {
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+    let test_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
+
+    // Get balance at the current latest block
+    let block_n =
+        operations::eth_block_number(&fb_client).await.expect("Failed to get block number");
+    let balance_at_n = operations::get_balance(
+        &fb_client,
+        test_address,
+        Some(operations::BlockId::Number(block_n)),
+    )
+    .await
+    .expect("Failed to get balance at block N");
+
+    // Send a transfer
+    let tx_hash = operations::native_balance_transfer(
+        operations::DEFAULT_L2_NETWORK_URL_FB,
+        U256::from(operations::GWEI),
+        test_address,
+        true,
+    )
+    .await
+    .expect("Transfer failed");
+
+    // Get the block the tx was mined in
+    let receipt = operations::eth_get_transaction_receipt(&fb_client, &tx_hash)
+        .await
+        .expect("Receipt not found");
+    let block_n_plus = receipt["blockNumber"]
+        .as_str()
+        .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        .expect("Failed to parse block number from receipt");
+
+    // Balance at the new block should differ from block N
+    let balance_at_new = operations::get_balance(
+        &fb_client,
+        test_address,
+        Some(operations::BlockId::Number(block_n_plus)),
+    )
+    .await
+    .expect("Failed to get balance at new block");
+
+    assert!(
+        balance_at_new > balance_at_n,
+        "Balance at block {block_n_plus} ({balance_at_new}) should be greater than at block {block_n} ({balance_at_n})"
+    );
+
+    // Verify the old block still returns the old balance (immutable history)
+    let balance_at_n_again = operations::get_balance(
+        &fb_client,
+        test_address,
+        Some(operations::BlockId::Number(block_n)),
+    )
+    .await
+    .expect("Failed to re-read balance at block N");
+
+    assert_eq!(
+        balance_at_n, balance_at_n_again,
+        "Historical balance at block {block_n} should be immutable"
+    );
+}
+
+/// Verifies that `debug_traceTransaction` returns valid trace data for a
+/// contract call on the flashblocks node.
+#[tokio::test]
+async fn fb_pending_debug_trace_transaction_test() {
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+    let contracts = operations::try_deploy_contracts().await.expect("Failed to deploy contracts");
+    let test_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
+
+    // Send an ERC20 transfer — this involves contract execution with EVM opcodes,
+    // unlike a native transfer to an EOA which has no structLogs.
+    let tx_hash = operations::erc20_balance_transfer(
+        operations::DEFAULT_L2_NETWORK_URL_FB,
+        U256::from(operations::GWEI),
+        None,
+        test_address,
+        contracts.erc20,
+        None,
+    )
+    .await
+    .expect("ERC20 transfer failed");
+
+    operations::wait_for_tx_mined(operations::DEFAULT_L2_NETWORK_URL_FB, &tx_hash)
+        .await
+        .expect("ERC20 transfer tx not mined");
+
+    // Trace the transaction
+    let trace = operations::debug_trace_transaction(&fb_client, &tx_hash)
+        .await
+        .expect("debug_traceTransaction failed");
+
+    // Verify trace has structLogs with EVM opcodes
+    let struct_logs =
+        trace["structLogs"].as_array().expect("Trace should contain structLogs array");
+    assert!(
+        !struct_logs.is_empty(),
+        "structLogs should not be empty for a contract call transaction"
+    );
+
+    // Verify log entries have the expected fields
+    let first_log = &struct_logs[0];
+    assert!(first_log.get("pc").is_some(), "Log entry should have 'pc' field");
+    assert!(first_log.get("op").is_some(), "Log entry should have 'op' field");
+    assert!(first_log.get("gas").is_some(), "Log entry should have 'gas' field");
+}
+
 /// Cache correctness test: snapshots all confirmed flashblock cache entries currently ahead
 /// of the canonical chain, writes them to a file, waits for canonical to catch up, then
 /// compares against the non-flashblock canonical node to verify the cache was correct.
@@ -1240,7 +1732,7 @@ async fn fb_subscription_test() -> Result<()> {
     // Read flashblocks until all txs are found or timeout
     let _ = tokio::time::timeout(WEB_SOCKET_TIMEOUT, async {
         loop {
-            // Check if all transactions have been seen exactly twice
+            // Each tx must be seen in all 3 streams: SEQ, SEQ2, and RPC
             let all_found = count.values().all(|&c| c >= 3);
             if all_found {
                 break;
@@ -1273,7 +1765,7 @@ async fn fb_subscription_test() -> Result<()> {
     for (tx_hash, &count_val) in &count {
         assert_eq!(
             count_val, 3,
-            "Transaction {tx_hash} appeared {count_val} times, expected exactly 3"
+            "Transaction {tx_hash} appeared {count_val} times, expected exactly 3 (one per stream: SEQ, SEQ2, RPC)"
         );
     }
 
