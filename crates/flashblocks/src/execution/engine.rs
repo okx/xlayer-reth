@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use alloy_consensus::Block;
-use alloy_eips::eip2718::Encodable2718;
+use alloy_eips::{eip2718::Encodable2718, BlockNumHash};
 use op_alloy_rpc_types_engine::OpFlashblockPayloadBase;
 
 use reth_chain_state::ExecutedBlock;
@@ -152,17 +152,7 @@ where
         let num_hash = payload.num_hash();
         let mut guard = self.inner.blocking_lock();
 
-        // Pre-warm optimization - skip if flashblocks is enabled and flashblocks
-        // sequence validator already validated the payload.
-        if let Some(fb_state) = guard.fb_state.as_ref()
-            && let Some(executed_block) = fb_state.get_executed_block_by_hash(&num_hash.hash)
-        {
-            debug!(
-                target: "flashblocks::engine_validator",
-                block_number = num_hash.number,
-                block_hash = %num_hash.hash,
-                "Flashblocks cache hit, returning pre-validated block",
-            );
+        if let Some(executed_block) = guard.try_flashblocks_cache_hit(&num_hash) {
             return Ok(executed_block);
         }
 
@@ -173,18 +163,7 @@ where
             "Flashblocks cache miss, engine validating payload",
         );
         let executed_block = guard.engine_validator.validate_payload(payload, ctx)?;
-
-        // Optimistically try to advance flashblocks state cache. Note that we dont flush
-        // here on failures since the source of truth is the engine canonical stream.
-        if let Some(fb_state) = guard.fb_state.as_ref()
-            && let Err(e) = fb_state.try_handle_engine_block(executed_block.clone())
-        {
-            warn!(
-                target: "flashblocks::engine_validator",
-                %e,
-                "Failed handle engine block on flashblocks state cache",
-            );
-        }
+        guard.try_advance_flashblocks_state(&executed_block);
         Ok(executed_block)
     }
 
@@ -196,17 +175,7 @@ where
         let num_hash = block.num_hash();
         let mut guard = self.inner.blocking_lock();
 
-        // Pre-warm optimization - skip if flashblocks is enabled and flashblocks
-        // sequence validator already validated the payload.
-        if let Some(fb_state) = guard.fb_state.as_ref()
-            && let Some(executed_block) = fb_state.get_executed_block_by_hash(&num_hash.hash)
-        {
-            debug!(
-                target: "flashblocks::engine_validator",
-                block_number = num_hash.number,
-                block_hash = %num_hash.hash,
-                "Flashblocks cache hit, returning pre-validated block",
-            );
+        if let Some(executed_block) = guard.try_flashblocks_cache_hit(&num_hash) {
             return Ok(executed_block);
         }
 
@@ -214,10 +183,10 @@ where
         // it could mean that the default CL/EL sync received the block before the full
         // flashblocks sequence has received the last target flashblock.
         //
-        // Since the shared payload validator's execution cache could be polluted from
-        // the incremental builds of the flashblocks sequence. Note that in this scenario,
-        // we will cache miss here and the rebuild of the full payload will not use the
-        // pre-warm cache from the parent block.
+        // Note: the execution cache may be keyed to a flashblocks-built hash (not the
+        // canonical hash), so the pre-warm from parent state may be a cache miss. This
+        // is self-healing: `on_inserted_executed_block` below will re-key the cache
+        // to the canonical hash for the next block's prewarming.
         debug!(
             target: "flashblocks::engine_validator",
             block_number = num_hash.number,
@@ -225,18 +194,7 @@ where
             "Flashblocks cache miss, engine validating block",
         );
         let executed_block = guard.engine_validator.validate_block(block, ctx)?;
-
-        // Optimistically try to advance flashblocks state cache. Note that we dont flush
-        // here on failures since the source of truth based on engine canonical stream.
-        if let Some(fb_state) = guard.fb_state.as_ref()
-            && let Err(e) = fb_state.try_handle_engine_block(executed_block.clone())
-        {
-            warn!(
-                target: "flashblocks::engine_validator",
-                %e,
-                "Failed handle engine block on flashblocks state cache",
-            );
-        }
+        guard.try_advance_flashblocks_state(&executed_block);
         Ok(executed_block)
     }
 
@@ -297,6 +255,41 @@ where
     fb_validator: Option<FlashblockSequenceValidator<N, Evm, Provider, ChainSpec>>,
     /// Flashblocks state cache, if flashblocks is enabled.
     fb_state: Option<FlashblockStateCache<N>>,
+}
+
+impl<Provider, Evm, V, N, ChainSpec> XLayerEngineValidatorInner<Provider, Evm, V, N, ChainSpec>
+where
+    Evm: ConfigureEvm,
+    N: NodePrimitives,
+    ChainSpec: OpHardforks,
+{
+    /// Checks the flashblocks confirm cache for a pre-validated block. Returns
+    /// the cached `ExecutedBlock` on hit, skipping re-execution entirely.
+    fn try_flashblocks_cache_hit(&self, num_hash: &BlockNumHash) -> Option<ExecutedBlock<N>> {
+        let executed_block = self.fb_state.as_ref()?.get_executed_block_by_hash(&num_hash.hash)?;
+        debug!(
+            target: "flashblocks::engine_validator",
+            block_number = num_hash.number,
+            block_hash = %num_hash.hash,
+            "Flashblocks cache hit, returning pre-validated block",
+        );
+        Some(executed_block)
+    }
+
+    /// Optimistically advances the flashblocks state cache after engine validation.
+    /// Failures are logged but not propagated — the engine canonical stream is the
+    /// source of truth.
+    fn try_advance_flashblocks_state(&self, executed_block: &ExecutedBlock<N>) {
+        if let Some(fb_state) = self.fb_state.as_ref()
+            && let Err(e) = fb_state.try_handle_engine_block(executed_block.clone())
+        {
+            warn!(
+                target: "flashblocks::engine_validator",
+                %e,
+                "Failed handle engine block on flashblocks state cache",
+            );
+        }
+    }
 }
 
 /// Builder for [`XLayerEngineValidator`] that implements [`EngineValidatorBuilder`].
