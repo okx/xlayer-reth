@@ -207,7 +207,6 @@ fn main() {
                             },
                             FlashblocksPersistCtx {
                                 datadir,
-                                relay_flashblocks: args.rollup_args.flashblocks_url.is_some(),
                             },
                         )?;
                         service.spawn_persistence()?;

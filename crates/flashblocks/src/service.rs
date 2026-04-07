@@ -41,8 +41,6 @@ pub struct FlashblocksRpcCtx<N: NodePrimitives> {
 pub struct FlashblocksPersistCtx {
     /// Data directory for flashblocks persistence.
     pub datadir: ChainPath<DataDirPath>,
-    /// Whether to relay flashblocks to the subscribers.
-    pub relay_flashblocks: bool,
 }
 
 pub struct FlashblocksRpcService<N>
@@ -105,30 +103,28 @@ where
             }),
         );
         // Spawn relayer handle
-        if self.persist_ctx.relay_flashblocks {
-            let ws_addr =
-                SocketAddr::new(self.args.flashblocks_addr.parse()?, self.args.flashblocks_port);
-            let metrics = Arc::new(BuilderMetrics::default());
-            let task_metrics = Arc::new(FlashblocksTaskMetrics::new());
-            let ws_pub = Arc::new(
-                WebSocketPublisher::new(
-                    ws_addr,
-                    metrics,
-                    &task_metrics.websocket_publisher,
-                    self.args.ws_subscriber_limit,
-                )
-                .map_err(|e| eyre::eyre!("Failed to create WebSocket publisher: {e}"))?,
-            );
-            info!(target: "flashblocks", "WebSocket publisher initialized at {ws_addr}");
+        let ws_addr =
+            SocketAddr::new(self.args.flashblocks_addr.parse()?, self.args.flashblocks_port);
+        let metrics = Arc::new(BuilderMetrics::default());
+        let task_metrics = Arc::new(FlashblocksTaskMetrics::new());
+        let ws_pub = Arc::new(
+            WebSocketPublisher::new(
+                ws_addr,
+                metrics,
+                &task_metrics.websocket_publisher,
+                self.args.ws_subscriber_limit,
+            )
+            .map_err(|e| eyre::eyre!("Failed to create WebSocket publisher: {e}"))?,
+        );
+        info!(target: "flashblocks", "WebSocket publisher initialized at {ws_addr}");
 
-            let rx = self.subscribe_received_flashblocks();
-            self.task_executor.spawn_critical_task(
-                "xlayer-flashblocks-publish",
-                Box::pin(async move {
-                    handle_relay_flashblocks(rx, ws_pub).await;
-                }),
-            );
-        }
+        let rx = self.subscribe_received_flashblocks();
+        self.task_executor.spawn_critical_task(
+            "xlayer-flashblocks-publish",
+            Box::pin(async move {
+                handle_relay_flashblocks(rx, ws_pub).await;
+            }),
+        );
         Ok(())
     }
 
