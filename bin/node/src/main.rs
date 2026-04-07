@@ -131,7 +131,6 @@ fn main() {
             // It handles both flashblocks and default modes internally
             let payload_builder = XLayerPayloadServiceBuilder::new(
                 args.xlayer_args.builder.clone(),
-                args.xlayer_args.flashblocks_rpc.flashblock_url.is_some(),
                 args.rollup_args.compute_pending_block,
             )?
             .with_bridge_config(bridge_config);
