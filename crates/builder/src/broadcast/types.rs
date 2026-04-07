@@ -6,9 +6,9 @@ use reth::{core::primitives::SealedBlock, payload::PayloadId};
 use reth_optimism_payload_builder::OpBuiltPayload as RethOpBuiltPayload;
 use reth_optimism_primitives::OpBlock;
 
-pub(crate) const AGENT_VERSION: &str = "flashblock-builder/1.0.0";
+pub(crate) const AGENT_VERSION: &str = "flashblock-builder/2.0.0";
 pub(crate) const FLASHBLOCKS_STREAM_PROTOCOL: crate::broadcast::StreamProtocol =
-    crate::broadcast::StreamProtocol::new("/flashblocks/1.0.0");
+    crate::broadcast::StreamProtocol::new("/flashblocks/2.0.0");
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub enum Message {
