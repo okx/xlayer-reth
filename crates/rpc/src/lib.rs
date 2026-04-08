@@ -2,11 +2,13 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod default;
-pub mod flashblocks;
+pub mod eth;
+pub mod filter;
 pub mod helper;
 
 pub use default::{DefaultRpcExt, DefaultRpcExtApiServer, SequencerClientProvider};
-pub use flashblocks::{FlashblocksEthApiExt, FlashblocksEthApiOverrideServer};
+pub use eth::{FlashblocksEthApiExt, FlashblocksEthApiOverrideServer};
+pub use filter::{FlashblocksEthFilterExt, FlashblocksFilterOverrideServer};
 
 use reth_optimism_rpc::{OpEthApi, SequencerClient};
 use reth_rpc_eth_api::{RpcConvert, RpcNodeCore};

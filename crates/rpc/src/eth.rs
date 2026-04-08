@@ -43,11 +43,6 @@ pub trait FlashblocksEthApiOverride {
     // ----------------- Block apis -----------------
     /// Returns the current block number as the maximum of the flashblocks confirm
     /// height and the canonical chain height.
-    ///
-    /// Note: This may return a height ahead of the canonical chain when flashblocks
-    /// are actively being processed. Block data at this height is available through
-    /// the overridden `eth_getBlockByNumber` and `eth_getTransactionByHash` methods,
-    /// but non-overridden methods (e.g., `eth_getLogs`) only see canonical state.
     #[method(name = "blockNumber")]
     async fn block_number(&self) -> RpcResult<U256>;
 

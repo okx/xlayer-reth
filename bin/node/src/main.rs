@@ -22,6 +22,7 @@ use reth_optimism_cli::Cli;
 use reth_optimism_evm::OpEvmConfig;
 use reth_optimism_node::{args::RollupArgs, OpEngineValidatorBuilder, OpNode};
 use reth_provider::CanonStateSubscriptions;
+use reth_rpc_builder::config::RethRpcServerConfig;
 use reth_rpc_server_types::RethRpcModule;
 
 use xlayer_chainspec::XLayerChainSpecParser;
@@ -33,6 +34,7 @@ use xlayer_legacy_rpc::{layer::LegacyRpcRouterLayer, LegacyRpcRouterConfig};
 use xlayer_monitor::{start_monitor_handle, RpcMonitorLayer, XLayerMonitor};
 use xlayer_rpc::{
     DefaultRpcExt, DefaultRpcExtApiServer, FlashblocksEthApiExt, FlashblocksEthApiOverrideServer,
+    FlashblocksEthFilterExt, FlashblocksFilterOverrideServer,
 };
 
 #[global_allocator]
@@ -247,6 +249,19 @@ fn main() {
                             FlashblocksEthApiOverrideServer::into_rpc(flashblocks_eth),
                         )?;
                         info!(target: "reth::cli", "xlayer flashblocks eth api overrides initialized");
+
+                        // Register flashblocks filter override (eth_getLogs)
+                        let flashblocks_filter = FlashblocksEthFilterExt::new(
+                            ctx.registry.eth_api().clone(),
+                            ctx.registry.eth_handlers().filter.clone(),
+                            flashblocks_state.clone(),
+                            ctx.config().rpc.eth_config().filter_config(),
+                        );
+                        ctx.modules.add_or_replace_if_module_configured(
+                            RethRpcModule::Eth,
+                            FlashblocksFilterOverrideServer::into_rpc(flashblocks_filter),
+                        )?;
+                        info!(target: "reth::cli", "xlayer flashblocks filter overrides initialized");
                         Some(flashblocks_state)
                     } else {
                         None

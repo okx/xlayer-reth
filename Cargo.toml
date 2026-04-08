@@ -121,6 +121,7 @@ reth-rpc-engine-api = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7
 reth-rpc-eth-api = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
 reth-rpc-eth-types = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422", default-features = false }
 reth-rpc-layer = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
+reth-rpc-builder = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
 reth-rpc-server-types = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
 reth-static-file-types = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422", default-features = false }
 reth-storage-api = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422", default-features = false }

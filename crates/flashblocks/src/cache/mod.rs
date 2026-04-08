@@ -92,6 +92,12 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
         self.inner.read().confirm_height
     }
 
+    /// Returns the current pending height.
+    pub fn get_pending_height(&self) -> u64 {
+        let guard = self.inner.read();
+        guard.pending_cache.as_ref().map_or(guard.confirm_height, |p| p.get_height())
+    }
+
     /// Return the current canonical height, if any.
     pub fn get_canon_height(&self) -> u64 {
         self.inner.read().canon_info.0
@@ -166,35 +172,6 @@ impl<N: NodePrimitives> FlashblockStateCache<N> {
             BlockId::Hash(hash) => guard.get_block_by_hash(&hash.block_hash),
         }?
         .block;
-        let block_num = block.number();
-        let in_memory = guard.get_executed_blocks_up_to_height(block_num);
-        drop(guard);
-
-        let in_memory = match in_memory {
-            Ok(blocks) => blocks,
-            Err(e) => {
-                // Flush as the overlay is non-contiguous, indicating potential poluuted state.
-                warn!(target: "flashblocks", "Failed to get flashblocks state provider: {e}. Flushing cache");
-                self.inner.write().flush();
-                self.task_queue.flush();
-                None
-            }
-        }?;
-        Some((
-            Box::new(MemoryOverlayStateProvider::new(canonical_state, in_memory)),
-            block.clone_sealed_header(),
-        ))
-    }
-
-    /// Instantiates a `MemoryOverlayStateProvider` with all block overlays in
-    /// the flashblocks state cache, including the current pending executed
-    /// block state.
-    pub fn get_pending_state_provider(
-        &self,
-        canonical_state: StateProviderBox,
-    ) -> Option<(StateProviderBox, SealedHeaderFor<N>)> {
-        let guard = self.inner.read();
-        let block = guard.get_pending_block()?.block;
         let block_num = block.number();
         let in_memory = guard.get_executed_blocks_up_to_height(block_num);
         drop(guard);
@@ -508,7 +485,10 @@ impl<N: NodePrimitives> FlashblockStateCacheInner<N> {
     }
 
     pub fn get_pending_block(&self) -> Option<BlockAndReceipts<N>> {
-        self.pending_cache.as_ref().map(|p| p.get_block_and_receipts())
+        self.pending_cache
+            .as_ref()
+            .map(|p| p.get_block_and_receipts())
+            .or_else(|| self.get_confirmed_block())
     }
 
     pub fn get_canon_info(&self) -> (u64, B256) {
