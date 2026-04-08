@@ -22,6 +22,9 @@ const ITERATIONS: usize = 11;
 const TX_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(10);
 const WEB_SOCKET_TIMEOUT: Duration = Duration::from_secs(30);
 
+// ========================================================================
+// get_tx_info — pending, confirm, missing (split into 3 tests)
+// ========================================================================
 /// Verifies that the flashblocks node serves pending block data AHEAD of the canonical chain.
 /// This is the core low-latency property: sub-block-time visibility.
 #[tokio::test]
@@ -1131,771 +1134,754 @@ async fn fb_benchmark_erc20_tx_confirmation_test() {
     println!("Avg non-flashblocks erc20 tx transfer confirmation took: {avg_non_fb_duration}ms");
 }
 
-/// Flashblock RPC comparison test compares the supported flashblocks RPC APIs with
-/// a flashblock node and a non-flashblock node to ensure output is identical.
-#[rstest::rstest]
-#[case::stateless_api("StatelessApi")]
-#[case::state_api("StateApi")]
-#[ignore = "Requires a second non-flashblock RPC node to be running"]
-#[tokio::test]
-async fn fb_rpc_comparison_test(#[case] test_name: &str) {
+/// Shared setup for comparison tests that need transactions confirmed on both nodes.
+/// Sends a batch of ERC20 transfers and waits for the block to be available on both nodes.
+/// Returns (fb_client, non_fb_client, tx_hashes, block_num, fb_block_hash, non_fb_block_hash, contracts).
+async fn comparison_test_setup() -> (
+    jsonrpsee::http_client::HttpClient,
+    jsonrpsee::http_client::HttpClient,
+    Vec<String>,
+    u64,
+    String,
+    String,
+    &'static operations::DeployedContracts,
+) {
     let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
     let non_fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_NO_FB);
-    let sender_address = operations::DEFAULT_RICH_ADDRESS;
     let test_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
 
-    let latest_block_number = operations::eth_block_number(&non_fb_client)
+    let contracts = operations::try_deploy_contracts().await.expect("Failed to deploy contracts");
+
+    let (tx_hashes, block_num, _) = operations::transfer_erc20_token_batch(
+        operations::DEFAULT_L2_NETWORK_URL_FB,
+        contracts.erc20,
+        U256::from(operations::GWEI),
+        test_address,
+        5,
+    )
+    .await
+    .expect("Failed to transfer batch ERC20 tokens");
+
+    operations::wait_for_block_on_both_nodes(
+        &fb_client,
+        &non_fb_client,
+        block_num,
+        Duration::from_secs(10),
+    )
+    .await
+    .expect("Failed to wait for block on both nodes");
+
+    let fb_block = operations::eth_get_block_by_number_or_hash(
+        &fb_client,
+        operations::BlockId::Number(block_num),
+        false,
+    )
+    .await
+    .expect("Failed to get block from fb client");
+    let fb_block_hash =
+        fb_block["hash"].as_str().expect("Block hash should not be empty").to_string();
+
+    let non_fb_block = operations::eth_get_block_by_number_or_hash(
+        &non_fb_client,
+        operations::BlockId::Number(block_num),
+        false,
+    )
+    .await
+    .expect("Failed to get block from non-fb client");
+    let non_fb_block_hash =
+        non_fb_block["hash"].as_str().expect("Block hash should not be empty").to_string();
+
+    (fb_client, non_fb_client, tx_hashes, block_num, fb_block_hash, non_fb_block_hash, contracts)
+}
+
+// ---------------------------------------------------------------------------
+// Flashblock RPC comparison tests — each API gets its own test for independent
+// pass/fail reporting. All are #[ignore] since they require two nodes running.
+// ---------------------------------------------------------------------------
+
+#[ignore = "Requires a second non-flashblock RPC node to be running"]
+#[tokio::test]
+async fn fb_compare_block_number() {
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+    let non_fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_NO_FB);
+
+    let fb_block_number = operations::eth_block_number(&fb_client)
+        .await
+        .expect("Failed to get block number from fb client");
+    let non_fb_block_number = operations::eth_block_number(&non_fb_client)
+        .await
+        .expect("Failed to get block number from non-fb client");
+    assert!(
+        fb_block_number >= non_fb_block_number,
+        "FB block number ({fb_block_number}) should be >= non-FB block number ({non_fb_block_number})"
+    );
+}
+
+#[ignore = "Requires a second non-flashblock RPC node to be running"]
+#[tokio::test]
+async fn fb_compare_get_block_by_number() {
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+    let non_fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_NO_FB);
+
+    let latest = operations::eth_block_number(&non_fb_client)
         .await
         .expect("Failed to get latest block number");
-    let mut test_blocks = Vec::new();
+
     for i in 0..10 {
-        test_blocks.push(operations::BlockId::Number(latest_block_number - i));
+        let block_id = operations::BlockId::Number(latest - i);
+        let fb_block =
+            operations::eth_get_block_by_number_or_hash(&fb_client, block_id.clone(), false)
+                .await
+                .expect("Failed to get block from fb client");
+        let non_fb_block =
+            operations::eth_get_block_by_number_or_hash(&non_fb_client, block_id, false)
+                .await
+                .expect("Failed to get block from non-fb client");
+        assert_eq!(fb_block, non_fb_block, "eth_getBlockByNumber not identical");
     }
+}
 
-    // Deploy contracts and get ERC20 address
-    let contracts = operations::try_deploy_contracts().await.expect("Failed to deploy contracts");
-    println!("ERC20 contract at: {:#x}", contracts.erc20);
+#[ignore = "Requires a second non-flashblock RPC node to be running"]
+#[tokio::test]
+async fn fb_compare_get_block_by_hash() {
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+    let non_fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_NO_FB);
 
-    match test_name {
-        "StatelessApi" => {
-            // eth_getBlockByNumber
-            for block_id in test_blocks.clone() {
-                let fb_block = operations::eth_get_block_by_number_or_hash(
-                    &fb_client,
-                    block_id.clone(),
-                    false,
-                )
-                .await
-                .expect("Failed to get block from fb client");
-                let non_fb_block = operations::eth_get_block_by_number_or_hash(
-                    &non_fb_client,
-                    block_id.clone(),
-                    false,
-                )
-                .await
-                .expect("Failed to get block from non-fb client");
-                assert_eq!(fb_block, non_fb_block, "eth_getBlockByNumber not identical");
-            }
+    let latest = operations::eth_block_number(&non_fb_client)
+        .await
+        .expect("Failed to get latest block number");
 
-            // eth_getBlockByHash
-            for block_id in test_blocks.clone() {
-                let block =
-                    operations::eth_get_block_by_number_or_hash(&fb_client, block_id, false)
-                        .await
-                        .expect("Failed to get block from fb client");
-                let block_hash = operations::BlockId::Hash(
-                    block["hash"].as_str().expect("Block hash should not be empty").to_string(),
-                );
-                let fb_block = operations::eth_get_block_by_number_or_hash(
-                    &fb_client,
-                    block_hash.clone(),
-                    false,
-                )
-                .await
-                .expect("Failed to get block from fb client");
-                let non_fb_block = operations::eth_get_block_by_number_or_hash(
-                    &non_fb_client,
-                    block_hash.clone(),
-                    false,
-                )
-                .await
-                .expect("Failed to get block from non-fb client");
-                assert_eq!(fb_block, non_fb_block, "eth_getBlockByHash not identical");
-            }
-
-            // Setup batch ERC20 token transfers
-            let num_transactions = 5;
-            let (tx_hashes, block_num, _) = operations::transfer_erc20_token_batch(
-                operations::DEFAULT_L2_NETWORK_URL_FB,
-                contracts.erc20,
-                U256::from(operations::GWEI),
-                test_address,
-                num_transactions as usize,
-            )
-            .await
-            .expect("Failed to transfer batch ERC20 tokens");
-
-            // Wait for block to be available on both nodes
-            operations::wait_for_block_on_both_nodes(
-                &fb_client,
-                &non_fb_client,
-                block_num,
-                Duration::from_secs(10),
-            )
-            .await
-            .expect("Failed to wait for block on both nodes");
-
-            // Get block hashes from each node (they may differ)
-            let fb_block = operations::eth_get_block_by_number_or_hash(
-                &fb_client,
-                operations::BlockId::Number(block_num),
-                false,
-            )
+    for i in 0..10 {
+        let block_id = operations::BlockId::Number(latest - i);
+        let block = operations::eth_get_block_by_number_or_hash(&fb_client, block_id, false)
             .await
             .expect("Failed to get block from fb client");
-            let fb_block_hash =
-                fb_block["hash"].as_str().expect("Block hash should not be empty").to_string();
+        let block_hash = operations::BlockId::Hash(
+            block["hash"].as_str().expect("Block hash should not be empty").to_string(),
+        );
+        let fb_block =
+            operations::eth_get_block_by_number_or_hash(&fb_client, block_hash.clone(), false)
+                .await
+                .expect("Failed to get block from fb client");
+        let non_fb_block =
+            operations::eth_get_block_by_number_or_hash(&non_fb_client, block_hash, false)
+                .await
+                .expect("Failed to get block from non-fb client");
+        assert_eq!(fb_block, non_fb_block, "eth_getBlockByHash not identical");
+    }
+}
 
-            let non_fb_block = operations::eth_get_block_by_number_or_hash(
-                &non_fb_client,
-                operations::BlockId::Number(block_num),
-                false,
-            )
+#[ignore = "Requires a second non-flashblock RPC node to be running"]
+#[tokio::test]
+async fn fb_compare_get_block_transaction_count() {
+    let (fb_client, non_fb_client, _, block_num, fb_block_hash, non_fb_block_hash, _) =
+        comparison_test_setup().await;
+
+    // By number
+    let fb_count = operations::eth_get_block_transaction_count_by_number_or_hash(
+        &fb_client,
+        operations::BlockId::Number(block_num),
+    )
+    .await
+    .expect("Failed to get block transaction count from fb client");
+    let non_fb_count = operations::eth_get_block_transaction_count_by_number_or_hash(
+        &non_fb_client,
+        operations::BlockId::Number(block_num),
+    )
+    .await
+    .expect("Failed to get block transaction count from non-fb client");
+    assert_eq!(fb_count, non_fb_count, "eth_getBlockTransactionCountByNumber not identical");
+
+    // By hash
+    let fb_count_by_hash = operations::eth_get_block_transaction_count_by_number_or_hash(
+        &fb_client,
+        operations::BlockId::Hash(fb_block_hash),
+    )
+    .await
+    .expect("Failed to get block transaction count by hash from fb client");
+    let non_fb_count_by_hash = operations::eth_get_block_transaction_count_by_number_or_hash(
+        &non_fb_client,
+        operations::BlockId::Hash(non_fb_block_hash),
+    )
+    .await
+    .expect("Failed to get block transaction count by hash from non-fb client");
+    assert_eq!(fb_count, fb_count_by_hash, "FB node: count by hash should match by number");
+    assert_eq!(
+        non_fb_count, non_fb_count_by_hash,
+        "Non-FB node: count by hash should match by number"
+    );
+    assert_eq!(
+        fb_count_by_hash, non_fb_count_by_hash,
+        "eth_getBlockTransactionCountByHash not identical"
+    );
+}
+
+#[ignore = "Requires a second non-flashblock RPC node to be running"]
+#[tokio::test]
+async fn fb_compare_get_transaction_by_hash() {
+    let (fb_client, non_fb_client, tx_hashes, _, _, _, _) = comparison_test_setup().await;
+
+    for tx_hash in &tx_hashes {
+        let fb_tx = operations::eth_get_transaction_by_hash(&fb_client, tx_hash)
             .await
-            .expect("Failed to get block from non-fb client");
-            let non_fb_block_hash =
-                non_fb_block["hash"].as_str().expect("Block hash should not be empty").to_string();
+            .expect("Failed to get transaction from fb client");
+        let non_fb_tx = operations::eth_get_transaction_by_hash(&non_fb_client, tx_hash)
+            .await
+            .expect("Failed to get transaction from non-fb client");
+        assert_eq!(fb_tx, non_fb_tx, "eth_getTransactionByHash not identical");
+    }
+}
 
-            // eth_getBlockTransactionCountByNumber - compare between nodes
-            let fb_block_transaction_count =
-                operations::eth_get_block_transaction_count_by_number_or_hash(
-                    &fb_client,
-                    operations::BlockId::Number(block_num),
-                )
-                .await
-                .expect("Failed to get block transaction count from fb client");
-            let non_fb_block_transaction_count =
-                operations::eth_get_block_transaction_count_by_number_or_hash(
-                    &non_fb_client,
-                    operations::BlockId::Number(block_num),
-                )
-                .await
-                .expect("Failed to get block transaction count from non-fb client");
-            assert_eq!(
-                fb_block_transaction_count, non_fb_block_transaction_count,
-                "eth_getBlockTransactionCountByNumber not identical between nodes"
-            );
+#[ignore = "Requires a second non-flashblock RPC node to be running"]
+#[tokio::test]
+async fn fb_compare_get_raw_transaction_by_hash() {
+    let (fb_client, non_fb_client, tx_hashes, _, _, _, _) = comparison_test_setup().await;
 
-            // eth_getBlockTransactionCountByHash
-            let fb_block_transaction_count_by_hash =
-                operations::eth_get_block_transaction_count_by_number_or_hash(
-                    &fb_client,
-                    operations::BlockId::Hash(fb_block_hash.clone()),
-                )
-                .await
-                .expect("Failed to get block transaction count by hash from fb client");
-            let non_fb_block_transaction_count_by_hash =
-                operations::eth_get_block_transaction_count_by_number_or_hash(
-                    &non_fb_client,
-                    operations::BlockId::Hash(non_fb_block_hash.clone()),
-                )
-                .await
-                .expect("Failed to get block transaction count by hash from non-fb client");
-            assert_eq!(
-                fb_block_transaction_count, fb_block_transaction_count_by_hash,
-                "FB node: transaction count by hash should match by number"
-            );
-            assert_eq!(
-                non_fb_block_transaction_count, non_fb_block_transaction_count_by_hash,
-                "Non-FB node: transaction count by hash should match by number"
-            );
-            assert_eq!(
-                fb_block_transaction_count_by_hash, non_fb_block_transaction_count_by_hash,
-                "eth_getBlockTransactionCountByHash not identical"
-            );
+    for tx_hash in &tx_hashes {
+        let fb_raw = operations::eth_get_raw_transaction_by_hash(&fb_client, tx_hash)
+            .await
+            .expect("Failed to get raw transaction from fb client");
+        let non_fb_raw = operations::eth_get_raw_transaction_by_hash(&non_fb_client, tx_hash)
+            .await
+            .expect("Failed to get raw transaction from non-fb client");
+        assert_eq!(fb_raw, non_fb_raw, "eth_getRawTransactionByHash not identical");
+    }
+}
 
-            // eth_getTransactionByHash
-            for tx_hash in tx_hashes.clone() {
-                let fb_transaction = operations::eth_get_transaction_by_hash(&fb_client, &tx_hash)
-                    .await
-                    .expect("Failed to get transaction from fb client");
-                let non_fb_transaction =
-                    operations::eth_get_transaction_by_hash(&non_fb_client, &tx_hash)
-                        .await
-                        .expect("Failed to get transaction from non-fb client");
-                assert_eq!(
-                    fb_transaction, non_fb_transaction,
-                    "eth_getTransactionByHash not identical"
-                );
-            }
+#[ignore = "Requires a second non-flashblock RPC node to be running"]
+#[tokio::test]
+async fn fb_compare_get_transaction_receipt() {
+    let (fb_client, non_fb_client, tx_hashes, _, _, _, _) = comparison_test_setup().await;
 
-            // eth_getRawTransactionByHash
-            for tx_hash in tx_hashes.clone() {
-                let fb_raw_transaction =
-                    operations::eth_get_raw_transaction_by_hash(&fb_client, &tx_hash)
-                        .await
-                        .expect("Failed to get raw transaction from fb client");
-                let non_fb_raw_transaction =
-                    operations::eth_get_raw_transaction_by_hash(&non_fb_client, &tx_hash)
-                        .await
-                        .expect("Failed to get raw transaction from non-fb client");
-                assert_eq!(
-                    fb_raw_transaction, non_fb_raw_transaction,
-                    "eth_getRawTransactionByHash not identical"
-                );
-            }
+    for tx_hash in &tx_hashes {
+        let fb_receipt = operations::eth_get_transaction_receipt(&fb_client, tx_hash)
+            .await
+            .expect("Failed to get transaction receipt from fb client");
+        let non_fb_receipt = operations::eth_get_transaction_receipt(&non_fb_client, tx_hash)
+            .await
+            .expect("Failed to get transaction receipt from non-fb client");
+        assert_eq!(fb_receipt, non_fb_receipt, "eth_getTransactionReceipt not identical");
+    }
+}
 
-            // eth_getTransactionReceipt
-            for tx_hash in tx_hashes.clone() {
-                let fb_transaction_receipt =
-                    operations::eth_get_transaction_receipt(&fb_client, &tx_hash)
-                        .await
-                        .expect("Failed to get transaction receipt from fb client");
-                let non_fb_transaction_receipt =
-                    operations::eth_get_transaction_receipt(&non_fb_client, &tx_hash)
-                        .await
-                        .expect("Failed to get transaction receipt from non-fb client");
-                assert_eq!(
-                    fb_transaction_receipt, non_fb_transaction_receipt,
-                    "eth_getTransactionReceipt not identical"
-                );
-            }
+#[ignore = "Requires a second non-flashblock RPC node to be running"]
+#[tokio::test]
+async fn fb_compare_get_transaction_by_block_number_and_index() {
+    let (fb_client, non_fb_client, tx_hashes, block_num, _, _, _) = comparison_test_setup().await;
 
-            // eth_getTransactionByBlockNumberAndIndex
-            for tx_hash in tx_hashes.clone() {
-                let receipt = operations::eth_get_transaction_receipt(&fb_client, &tx_hash)
-                    .await
-                    .expect("Failed to get transaction receipt from fb client");
+    for tx_hash in &tx_hashes {
+        let receipt = operations::eth_get_transaction_receipt(&fb_client, tx_hash)
+            .await
+            .expect("Failed to get transaction receipt from fb client");
+        let tx_index_str =
+            receipt["transactionIndex"].as_str().expect("Transaction index should not be empty");
 
-                let tx_index_str = receipt["transactionIndex"]
-                    .as_str()
-                    .expect("Transaction index should not be empty");
-                let fb_transaction =
-                    operations::eth_get_transaction_by_block_number_or_hash_and_index(
-                        &fb_client,
-                        operations::BlockId::Number(block_num),
-                        tx_index_str,
-                    )
-                    .await
-                    .expect("Failed to get transaction from fb client");
-                let non_fb_transaction =
-                    operations::eth_get_transaction_by_block_number_or_hash_and_index(
-                        &non_fb_client,
-                        operations::BlockId::Number(block_num),
-                        tx_index_str,
-                    )
-                    .await
-                    .expect("Failed to get transaction from non-fb client");
-                assert_eq!(
-                    fb_transaction, non_fb_transaction,
-                    "eth_getTransactionByBlockNumberAndIndex not identical"
-                );
-            }
+        let fb_tx = operations::eth_get_transaction_by_block_number_or_hash_and_index(
+            &fb_client,
+            operations::BlockId::Number(block_num),
+            tx_index_str,
+        )
+        .await
+        .expect("Failed to get transaction from fb client");
+        let non_fb_tx = operations::eth_get_transaction_by_block_number_or_hash_and_index(
+            &non_fb_client,
+            operations::BlockId::Number(block_num),
+            tx_index_str,
+        )
+        .await
+        .expect("Failed to get transaction from non-fb client");
+        assert_eq!(fb_tx, non_fb_tx, "eth_getTransactionByBlockNumberAndIndex not identical");
+    }
+}
 
-            // eth_getBlockReceipts
-            let fb_block_receipts = operations::eth_get_block_receipts(
-                &fb_client,
-                operations::BlockId::Number(block_num),
-            )
+#[ignore = "Requires a second non-flashblock RPC node to be running"]
+#[tokio::test]
+async fn fb_compare_get_transaction_by_block_hash_and_index() {
+    let (fb_client, non_fb_client, tx_hashes, _, fb_block_hash, non_fb_block_hash, _) =
+        comparison_test_setup().await;
+
+    for tx_hash in &tx_hashes {
+        let receipt = operations::eth_get_transaction_receipt(&fb_client, tx_hash)
+            .await
+            .expect("Failed to get transaction receipt from fb client");
+        let tx_index_str =
+            receipt["transactionIndex"].as_str().expect("Transaction index should not be empty");
+
+        let fb_tx = operations::eth_get_transaction_by_block_number_or_hash_and_index(
+            &fb_client,
+            operations::BlockId::Hash(fb_block_hash.clone()),
+            tx_index_str,
+        )
+        .await
+        .expect("Failed to get transaction by block hash and index from fb client");
+        let non_fb_tx = operations::eth_get_transaction_by_block_number_or_hash_and_index(
+            &non_fb_client,
+            operations::BlockId::Hash(non_fb_block_hash.clone()),
+            tx_index_str,
+        )
+        .await
+        .expect("Failed to get transaction by block hash and index from non-fb client");
+        assert_eq!(fb_tx, non_fb_tx, "eth_getTransactionByBlockHashAndIndex not identical");
+    }
+}
+
+#[ignore = "Requires a second non-flashblock RPC node to be running"]
+#[tokio::test]
+async fn fb_compare_get_raw_transaction_by_block_number_and_index() {
+    let (fb_client, non_fb_client, tx_hashes, block_num, _, _, _) = comparison_test_setup().await;
+
+    let block_num_hex = format!("0x{block_num:x}");
+    for tx_hash in &tx_hashes {
+        let receipt = operations::eth_get_transaction_receipt(&fb_client, tx_hash)
+            .await
+            .expect("Failed to get transaction receipt from fb client");
+        let tx_index_str =
+            receipt["transactionIndex"].as_str().expect("Transaction index should not be empty");
+
+        let fb_raw = operations::eth_get_raw_transaction_by_block_number_and_index(
+            &fb_client,
+            &block_num_hex,
+            tx_index_str,
+        )
+        .await
+        .expect("Failed to get raw tx by block number and index from fb client");
+        let non_fb_raw = operations::eth_get_raw_transaction_by_block_number_and_index(
+            &non_fb_client,
+            &block_num_hex,
+            tx_index_str,
+        )
+        .await
+        .expect("Failed to get raw tx by block number and index from non-fb client");
+        assert_eq!(fb_raw, non_fb_raw, "eth_getRawTransactionByBlockNumberAndIndex not identical");
+    }
+}
+
+#[ignore = "Requires a second non-flashblock RPC node to be running"]
+#[tokio::test]
+async fn fb_compare_get_raw_transaction_by_block_hash_and_index() {
+    let (fb_client, non_fb_client, tx_hashes, _, fb_block_hash, non_fb_block_hash, _) =
+        comparison_test_setup().await;
+
+    for tx_hash in &tx_hashes {
+        let receipt = operations::eth_get_transaction_receipt(&fb_client, tx_hash)
+            .await
+            .expect("Failed to get transaction receipt from fb client");
+        let tx_index_str =
+            receipt["transactionIndex"].as_str().expect("Transaction index should not be empty");
+
+        let fb_raw = operations::eth_get_raw_transaction_by_block_hash_and_index(
+            &fb_client,
+            &fb_block_hash,
+            tx_index_str,
+        )
+        .await
+        .expect("Failed to get raw tx by block hash and index from fb client");
+        let non_fb_raw = operations::eth_get_raw_transaction_by_block_hash_and_index(
+            &non_fb_client,
+            &non_fb_block_hash,
+            tx_index_str,
+        )
+        .await
+        .expect("Failed to get raw tx by block hash and index from non-fb client");
+        assert_eq!(fb_raw, non_fb_raw, "eth_getRawTransactionByBlockHashAndIndex not identical");
+    }
+}
+
+#[ignore = "Requires a second non-flashblock RPC node to be running"]
+#[tokio::test]
+async fn fb_compare_get_block_receipts() {
+    let (fb_client, non_fb_client, _, block_num, _, _, _) = comparison_test_setup().await;
+
+    let fb_receipts =
+        operations::eth_get_block_receipts(&fb_client, operations::BlockId::Number(block_num))
             .await
             .expect("Failed to get block receipts from fb client");
-            let non_fb_block_receipts = operations::eth_get_block_receipts(
-                &non_fb_client,
-                operations::BlockId::Number(block_num),
-            )
+    let non_fb_receipts =
+        operations::eth_get_block_receipts(&non_fb_client, operations::BlockId::Number(block_num))
             .await
             .expect("Failed to get block receipts from non-fb client");
-            assert_eq!(
-                fb_block_receipts, non_fb_block_receipts,
-                "eth_getBlockReceipts not identical"
-            );
+    assert_eq!(fb_receipts, non_fb_receipts, "eth_getBlockReceipts not identical");
+}
 
-            // eth_getTransactionByBlockHashAndIndex
-            for tx_hash in tx_hashes.clone() {
-                let receipt = operations::eth_get_transaction_receipt(&fb_client, &tx_hash)
-                    .await
-                    .expect("Failed to get transaction receipt from fb client");
+#[ignore = "Requires a second non-flashblock RPC node to be running"]
+#[tokio::test]
+async fn fb_compare_get_logs() {
+    let (fb_client, non_fb_client, _, block_num, fb_block_hash, non_fb_block_hash, _) =
+        comparison_test_setup().await;
 
-                let tx_index_str = receipt["transactionIndex"]
-                    .as_str()
-                    .expect("Transaction index should not be empty");
-                let fb_transaction =
-                    operations::eth_get_transaction_by_block_number_or_hash_and_index(
-                        &fb_client,
-                        operations::BlockId::Hash(fb_block_hash.clone()),
-                        tx_index_str,
-                    )
-                    .await
-                    .expect("Failed to get transaction by block hash and index from fb client");
-                let non_fb_transaction =
-                    operations::eth_get_transaction_by_block_number_or_hash_and_index(
-                        &non_fb_client,
-                        operations::BlockId::Hash(non_fb_block_hash.clone()),
-                        tx_index_str,
-                    )
-                    .await
-                    .expect("Failed to get transaction by block hash and index from non-fb client");
-                assert_eq!(
-                    fb_transaction, non_fb_transaction,
-                    "eth_getTransactionByBlockHashAndIndex not identical"
-                );
-            }
+    // By block number range
+    let fb_logs = operations::eth_get_logs(
+        &fb_client,
+        Some(operations::BlockId::Number(block_num)),
+        Some(operations::BlockId::Number(block_num)),
+        None,
+        None,
+    )
+    .await
+    .expect("Failed to get logs from fb client");
+    let non_fb_logs = operations::eth_get_logs(
+        &non_fb_client,
+        Some(operations::BlockId::Number(block_num)),
+        Some(operations::BlockId::Number(block_num)),
+        None,
+        None,
+    )
+    .await
+    .expect("Failed to get logs from non-fb client");
+    assert_eq!(fb_logs, non_fb_logs, "eth_getLogs by block range not identical");
 
-            // eth_getRawTransactionByBlockNumberAndIndex
-            let block_num_hex = format!("0x{block_num:x}");
-            for tx_hash in tx_hashes.clone() {
-                let receipt = operations::eth_get_transaction_receipt(&fb_client, &tx_hash)
-                    .await
-                    .expect("Failed to get transaction receipt from fb client");
-
-                let tx_index_str = receipt["transactionIndex"]
-                    .as_str()
-                    .expect("Transaction index should not be empty");
-                let fb_raw_tx = operations::eth_get_raw_transaction_by_block_number_and_index(
-                    &fb_client,
-                    &block_num_hex,
-                    tx_index_str,
-                )
-                .await
-                .expect("Failed to get raw tx by block number and index from fb client");
-                let non_fb_raw_tx = operations::eth_get_raw_transaction_by_block_number_and_index(
-                    &non_fb_client,
-                    &block_num_hex,
-                    tx_index_str,
-                )
-                .await
-                .expect("Failed to get raw tx by block number and index from non-fb client");
-                assert_eq!(
-                    fb_raw_tx, non_fb_raw_tx,
-                    "eth_getRawTransactionByBlockNumberAndIndex not identical"
-                );
-            }
-
-            // eth_getRawTransactionByBlockHashAndIndex
-            for tx_hash in tx_hashes.clone() {
-                let receipt = operations::eth_get_transaction_receipt(&fb_client, &tx_hash)
-                    .await
-                    .expect("Failed to get transaction receipt from fb client");
-
-                let tx_index_str = receipt["transactionIndex"]
-                    .as_str()
-                    .expect("Transaction index should not be empty");
-                let fb_raw_tx = operations::eth_get_raw_transaction_by_block_hash_and_index(
-                    &fb_client,
-                    &fb_block_hash,
-                    tx_index_str,
-                )
-                .await
-                .expect("Failed to get raw tx by block hash and index from fb client");
-                let non_fb_raw_tx = operations::eth_get_raw_transaction_by_block_hash_and_index(
-                    &non_fb_client,
-                    &non_fb_block_hash,
-                    tx_index_str,
-                )
-                .await
-                .expect("Failed to get raw tx by block hash and index from non-fb client");
-                assert_eq!(
-                    fb_raw_tx, non_fb_raw_tx,
-                    "eth_getRawTransactionByBlockHashAndIndex not identical"
-                );
-            }
-
-            // eth_getLogs - by block number range
-            let fb_logs = operations::eth_get_logs(
-                &fb_client,
-                Some(operations::BlockId::Number(block_num)),
-                Some(operations::BlockId::Number(block_num)),
-                None,
-                None,
-            )
+    // By block hash
+    let fb_logs_by_hash =
+        operations::eth_get_logs_by_block_hash(&fb_client, &fb_block_hash, None, None)
             .await
-            .expect("Failed to get logs from fb client");
-            let non_fb_logs = operations::eth_get_logs(
-                &non_fb_client,
-                Some(operations::BlockId::Number(block_num)),
-                Some(operations::BlockId::Number(block_num)),
-                None,
-                None,
-            )
-            .await
-            .expect("Failed to get logs from non-fb client");
-            assert_eq!(fb_logs, non_fb_logs, "eth_getLogs by block range not identical");
-
-            // eth_getLogs - by block hash
-            let fb_logs_by_hash =
-                operations::eth_get_logs_by_block_hash(&fb_client, &fb_block_hash, None, None)
-                    .await
-                    .expect("Failed to get logs by block hash from fb client");
-            let non_fb_logs_by_hash = operations::eth_get_logs_by_block_hash(
-                &non_fb_client,
-                &non_fb_block_hash,
-                None,
-                None,
-            )
+            .expect("Failed to get logs by block hash from fb client");
+    let non_fb_logs_by_hash =
+        operations::eth_get_logs_by_block_hash(&non_fb_client, &non_fb_block_hash, None, None)
             .await
             .expect("Failed to get logs by block hash from non-fb client");
-            assert_eq!(
-                fb_logs, fb_logs_by_hash,
-                "FB node: eth_getLogs by hash should match by block range"
-            );
-            assert_eq!(
-                non_fb_logs, non_fb_logs_by_hash,
-                "Non-FB node: eth_getLogs by hash should match by block range"
-            );
-            assert_eq!(
-                fb_logs_by_hash, non_fb_logs_by_hash,
-                "eth_getLogs by block hash not identical"
-            );
-        }
-        "StateApi" => {
-            // Setup batch ERC20 token transfers
-            let num_transactions = 5;
-            let (_, block_num, _) = operations::transfer_erc20_token_batch(
-                operations::DEFAULT_L2_NETWORK_URL_FB,
-                contracts.erc20,
-                U256::from(operations::GWEI),
-                test_address,
-                num_transactions as usize,
-            )
-            .await
-            .expect("Failed to transfer batch ERC20 tokens");
+    assert_eq!(
+        fb_logs, fb_logs_by_hash,
+        "FB node: eth_getLogs by hash should match by block range"
+    );
+    assert_eq!(
+        non_fb_logs, non_fb_logs_by_hash,
+        "Non-FB node: eth_getLogs by hash should match by block range"
+    );
+    assert_eq!(fb_logs_by_hash, non_fb_logs_by_hash, "eth_getLogs by block hash not identical");
+}
 
-            // Wait for block to be available on both nodes
-            operations::wait_for_block_on_both_nodes(
-                &fb_client,
-                &non_fb_client,
-                block_num,
-                Duration::from_secs(10),
-            )
-            .await
-            .expect("Failed to wait for block on both nodes");
+#[ignore = "Requires a second non-flashblock RPC node to be running"]
+#[tokio::test]
+async fn fb_compare_call() {
+    let (fb_client, non_fb_client, _, block_num, fb_block_hash, non_fb_block_hash, contracts) =
+        comparison_test_setup().await;
+    let test_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
 
-            // Get block hashes from each node (they may differ)
-            let fb_block = operations::eth_get_block_by_number_or_hash(
-                &fb_client,
-                operations::BlockId::Number(block_num),
-                false,
-            )
-            .await
-            .expect("Failed to get block from fb client");
-            let fb_block_hash =
-                fb_block["hash"].as_str().expect("Block hash should not be empty").to_string();
-
-            let non_fb_block = operations::eth_get_block_by_number_or_hash(
-                &non_fb_client,
-                operations::BlockId::Number(block_num),
-                false,
-            )
-            .await
-            .expect("Failed to get block from non-fb client");
-            let non_fb_block_hash =
-                non_fb_block["hash"].as_str().expect("Block hash should not be empty").to_string();
-
-            // eth_call
-            sol! {
-                function balanceOf(address account) external view returns (uint256);
-            }
-            let call = balanceOfCall {
-                account: Address::from_str(test_address).expect("Invalid address"),
-            };
-            let calldata = call.abi_encode();
-
-            let call_args = serde_json::json!({
-                "from": test_address,
-                "to": contracts.erc20,
-                "gas": "0x100000",
-                "data": format!("0x{}", hex::encode(&calldata)),
-            });
-
-            // Test block number
-            let fb_call = operations::eth_call(
-                &fb_client,
-                Some(call_args.clone()),
-                Some(operations::BlockId::Number(block_num)),
-            )
-            .await
-            .expect("Failed to call from fb client");
-            let non_fb_call = operations::eth_call(
-                &non_fb_client,
-                Some(call_args.clone()),
-                Some(operations::BlockId::Number(block_num)),
-            )
-            .await
-            .expect("Failed to call from non-fb client");
-            assert_eq!(fb_call, non_fb_call, "eth_call with block number not identical");
-
-            // Test block hash
-            let fb_call_by_hash = operations::eth_call(
-                &fb_client,
-                Some(call_args.clone()),
-                Some(operations::BlockId::Hash(fb_block_hash.clone())),
-            )
-            .await
-            .expect("Failed to call from fb client by hash");
-            let non_fb_call_by_hash = operations::eth_call(
-                &non_fb_client,
-                Some(call_args.clone()),
-                Some(operations::BlockId::Hash(non_fb_block_hash.clone())),
-            )
-            .await
-            .expect("Failed to call from non-fb client by hash");
-            assert_eq!(
-                fb_call, fb_call_by_hash,
-                "FB node: eth_call by hash should match by number"
-            );
-            assert_eq!(
-                non_fb_call, non_fb_call_by_hash,
-                "Non-FB node: eth_call by hash should match by number"
-            );
-            assert_eq!(
-                fb_call_by_hash, non_fb_call_by_hash,
-                "eth_call with block hash not identical"
-            );
-
-            // eth_getBalance
-            // Test block number
-            let fb_balance = operations::get_balance(
-                &fb_client,
-                sender_address,
-                Some(operations::BlockId::Number(block_num)),
-            )
-            .await
-            .expect("Failed to get balance from fb client");
-            let non_fb_balance = operations::get_balance(
-                &non_fb_client,
-                sender_address,
-                Some(operations::BlockId::Number(block_num)),
-            )
-            .await
-            .expect("Failed to get balance from non-fb client");
-            assert_eq!(fb_balance, non_fb_balance, "eth_getBalance not identical");
-
-            // Test block hash
-            let fb_balance_by_hash = operations::get_balance(
-                &fb_client,
-                sender_address,
-                Some(operations::BlockId::Hash(fb_block_hash.clone())),
-            )
-            .await
-            .expect("Failed to get balance from fb client by hash");
-            let non_fb_balance_by_hash = operations::get_balance(
-                &non_fb_client,
-                sender_address,
-                Some(operations::BlockId::Hash(non_fb_block_hash.clone())),
-            )
-            .await
-            .expect("Failed to get balance from non-fb client by hash");
-            assert_eq!(
-                fb_balance, fb_balance_by_hash,
-                "FB node: eth_getBalance by hash should match by number"
-            );
-            assert_eq!(
-                non_fb_balance, non_fb_balance_by_hash,
-                "Non-FB node: eth_getBalance by hash should match by number"
-            );
-            assert_eq!(
-                fb_balance_by_hash, non_fb_balance_by_hash,
-                "eth_getBalance with block hash not identical"
-            );
-
-            // eth_getTransactionCount
-            // Test block number
-            let fb_transaction_count = operations::eth_get_transaction_count(
-                &fb_client,
-                sender_address,
-                Some(operations::BlockId::Number(block_num)),
-            )
-            .await
-            .expect("Failed to get transaction count from fb client");
-            let non_fb_transaction_count = operations::eth_get_transaction_count(
-                &non_fb_client,
-                sender_address,
-                Some(operations::BlockId::Number(block_num)),
-            )
-            .await
-            .expect("Failed to get transaction count from non-fb client");
-            assert_eq!(
-                fb_transaction_count, non_fb_transaction_count,
-                "eth_getTransactionCount not identical"
-            );
-
-            // Test block hash
-            let fb_transaction_count_by_hash = operations::eth_get_transaction_count(
-                &fb_client,
-                sender_address,
-                Some(operations::BlockId::Hash(fb_block_hash.clone())),
-            )
-            .await
-            .expect("Failed to get transaction count from fb client by hash");
-            let non_fb_transaction_count_by_hash = operations::eth_get_transaction_count(
-                &non_fb_client,
-                sender_address,
-                Some(operations::BlockId::Hash(non_fb_block_hash.clone())),
-            )
-            .await
-            .expect("Failed to get transaction count from non-fb client by hash");
-            assert_eq!(
-                fb_transaction_count, fb_transaction_count_by_hash,
-                "FB node: eth_getTransactionCount by hash should match by number"
-            );
-            assert_eq!(
-                non_fb_transaction_count, non_fb_transaction_count_by_hash,
-                "Non-FB node: eth_getTransactionCount by hash should match by number"
-            );
-            assert_eq!(
-                fb_transaction_count_by_hash, non_fb_transaction_count_by_hash,
-                "eth_getTransactionCount with block hash not identical"
-            );
-
-            // eth_getCode
-            // Test block number
-            let fb_code = operations::eth_get_code(
-                &fb_client,
-                contracts.erc20.to_string().as_str(),
-                Some(operations::BlockId::Number(block_num)),
-            )
-            .await
-            .expect("Failed to get code from fb client");
-            let non_fb_code = operations::eth_get_code(
-                &non_fb_client,
-                contracts.erc20.to_string().as_str(),
-                Some(operations::BlockId::Number(block_num)),
-            )
-            .await
-            .expect("Failed to get code from non-fb client");
-            assert_eq!(fb_code, non_fb_code, "eth_getCode with block number not identical");
-
-            // Test block hash
-            let fb_code_by_hash = operations::eth_get_code(
-                &fb_client,
-                contracts.erc20.to_string().as_str(),
-                Some(operations::BlockId::Hash(fb_block_hash.clone())),
-            )
-            .await
-            .expect("Failed to get code from fb client by hash");
-            let non_fb_code_by_hash = operations::eth_get_code(
-                &non_fb_client,
-                contracts.erc20.to_string().as_str(),
-                Some(operations::BlockId::Hash(non_fb_block_hash.clone())),
-            )
-            .await
-            .expect("Failed to get code from non-fb client by hash");
-            assert_eq!(
-                fb_code, fb_code_by_hash,
-                "FB node: eth_getCode by hash should match by number"
-            );
-            assert_eq!(
-                non_fb_code, non_fb_code_by_hash,
-                "Non-FB node: eth_getCode by hash should match by number"
-            );
-            assert_eq!(
-                fb_code_by_hash, non_fb_code_by_hash,
-                "eth_getCode with block hash not identical"
-            );
-
-            // eth_getStorageAt
-            // Test block number
-            let fb_storage = operations::eth_get_storage_at(
-                &fb_client,
-                contracts.erc20.to_string().as_str(),
-                "0x2",
-                Some(operations::BlockId::Number(block_num)),
-            )
-            .await
-            .expect("Failed to get storage from fb client");
-            let non_fb_storage = operations::eth_get_storage_at(
-                &non_fb_client,
-                contracts.erc20.to_string().as_str(),
-                "0x2",
-                Some(operations::BlockId::Number(block_num)),
-            )
-            .await
-            .expect("Failed to get storage from non-fb client");
-            assert_eq!(
-                fb_storage, non_fb_storage,
-                "eth_getStorageAt with block number not identical"
-            );
-
-            // Test block hash
-            let fb_storage_by_hash = operations::eth_get_storage_at(
-                &fb_client,
-                contracts.erc20.to_string().as_str(),
-                "0x2",
-                Some(operations::BlockId::Hash(fb_block_hash.clone())),
-            )
-            .await
-            .expect("Failed to get storage from fb client by hash");
-            let non_fb_storage_by_hash = operations::eth_get_storage_at(
-                &non_fb_client,
-                contracts.erc20.to_string().as_str(),
-                "0x2",
-                Some(operations::BlockId::Hash(non_fb_block_hash.clone())),
-            )
-            .await
-            .expect("Failed to get storage from non-fb client by hash");
-            assert_eq!(
-                fb_storage, fb_storage_by_hash,
-                "FB node: eth_getStorageAt by hash should match by number"
-            );
-            assert_eq!(
-                non_fb_storage, non_fb_storage_by_hash,
-                "Non-FB node: eth_getStorageAt by hash should match by number"
-            );
-            assert_eq!(
-                fb_storage_by_hash, non_fb_storage_by_hash,
-                "eth_getStorageAt with block hash not identical"
-            );
-
-            // eth_blockNumber
-            let fb_block_number = operations::eth_block_number(&fb_client)
-                .await
-                .expect("Failed to get block number from fb client");
-            let non_fb_block_number = operations::eth_block_number(&non_fb_client)
-                .await
-                .expect("Failed to get block number from non-fb client");
-            assert!(
-                fb_block_number >= non_fb_block_number,
-                "FB block number ({fb_block_number}) should be >= non-FB block number ({non_fb_block_number})"
-            );
-
-            // eth_estimateGas
-            let estimate_args = serde_json::json!({
-                "from": test_address,
-                "to": contracts.erc20,
-                "gas": "0x100000",
-                "data": format!("0x{}", hex::encode(&calldata)),
-            });
-
-            // Test block number
-            let fb_estimate = operations::estimate_gas(
-                &fb_client,
-                Some(estimate_args.clone()),
-                Some(operations::BlockId::Number(block_num)),
-            )
-            .await
-            .expect("Failed to estimate gas from fb client");
-            let non_fb_estimate = operations::estimate_gas(
-                &non_fb_client,
-                Some(estimate_args.clone()),
-                Some(operations::BlockId::Number(block_num)),
-            )
-            .await
-            .expect("Failed to estimate gas from non-fb client");
-            assert_eq!(
-                fb_estimate, non_fb_estimate,
-                "eth_estimateGas with block number not identical"
-            );
-
-            // Test block hash
-            let fb_estimate_by_hash = operations::estimate_gas(
-                &fb_client,
-                Some(estimate_args.clone()),
-                Some(operations::BlockId::Hash(fb_block_hash.clone())),
-            )
-            .await
-            .expect("Failed to estimate gas from fb client by hash");
-            let non_fb_estimate_by_hash = operations::estimate_gas(
-                &non_fb_client,
-                Some(estimate_args),
-                Some(operations::BlockId::Hash(non_fb_block_hash.clone())),
-            )
-            .await
-            .expect("Failed to estimate gas from non-fb client by hash");
-            assert_eq!(
-                fb_estimate, fb_estimate_by_hash,
-                "FB node: eth_estimateGas by hash should match by number"
-            );
-            assert_eq!(
-                non_fb_estimate, non_fb_estimate_by_hash,
-                "Non-FB node: eth_estimateGas by hash should match by number"
-            );
-            assert_eq!(
-                fb_estimate_by_hash, non_fb_estimate_by_hash,
-                "eth_estimateGas with block hash not identical"
-            );
-        }
-        _ => panic!("Unknown test case: {test_name}"),
+    sol! {
+        function balanceOf(address account) external view returns (uint256);
     }
+    let call = balanceOfCall { account: Address::from_str(test_address).expect("Invalid address") };
+    let calldata = call.abi_encode();
+    let call_args = serde_json::json!({
+        "from": test_address,
+        "to": contracts.erc20,
+        "gas": "0x100000",
+        "data": format!("0x{}", hex::encode(&calldata)),
+    });
+
+    // By block number
+    let fb_call = operations::eth_call(
+        &fb_client,
+        Some(call_args.clone()),
+        Some(operations::BlockId::Number(block_num)),
+    )
+    .await
+    .expect("Failed to call from fb client");
+    let non_fb_call = operations::eth_call(
+        &non_fb_client,
+        Some(call_args.clone()),
+        Some(operations::BlockId::Number(block_num)),
+    )
+    .await
+    .expect("Failed to call from non-fb client");
+    assert_eq!(fb_call, non_fb_call, "eth_call with block number not identical");
+
+    // By block hash
+    let fb_call_by_hash = operations::eth_call(
+        &fb_client,
+        Some(call_args.clone()),
+        Some(operations::BlockId::Hash(fb_block_hash)),
+    )
+    .await
+    .expect("Failed to call from fb client by hash");
+    let non_fb_call_by_hash = operations::eth_call(
+        &non_fb_client,
+        Some(call_args),
+        Some(operations::BlockId::Hash(non_fb_block_hash)),
+    )
+    .await
+    .expect("Failed to call from non-fb client by hash");
+    assert_eq!(fb_call, fb_call_by_hash, "FB node: eth_call by hash should match by number");
+    assert_eq!(
+        non_fb_call, non_fb_call_by_hash,
+        "Non-FB node: eth_call by hash should match by number"
+    );
+    assert_eq!(fb_call_by_hash, non_fb_call_by_hash, "eth_call with block hash not identical");
+}
+
+#[ignore = "Requires a second non-flashblock RPC node to be running"]
+#[tokio::test]
+async fn fb_compare_estimate_gas() {
+    let (fb_client, non_fb_client, _, block_num, fb_block_hash, non_fb_block_hash, contracts) =
+        comparison_test_setup().await;
+    let test_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
+
+    sol! {
+        function balanceOf(address account) external view returns (uint256);
+    }
+    let call = balanceOfCall { account: Address::from_str(test_address).expect("Invalid address") };
+    let calldata = call.abi_encode();
+    let estimate_args = serde_json::json!({
+        "from": test_address,
+        "to": contracts.erc20,
+        "gas": "0x100000",
+        "data": format!("0x{}", hex::encode(&calldata)),
+    });
+
+    // By block number
+    let fb_estimate = operations::estimate_gas(
+        &fb_client,
+        Some(estimate_args.clone()),
+        Some(operations::BlockId::Number(block_num)),
+    )
+    .await
+    .expect("Failed to estimate gas from fb client");
+    let non_fb_estimate = operations::estimate_gas(
+        &non_fb_client,
+        Some(estimate_args.clone()),
+        Some(operations::BlockId::Number(block_num)),
+    )
+    .await
+    .expect("Failed to estimate gas from non-fb client");
+    assert_eq!(fb_estimate, non_fb_estimate, "eth_estimateGas with block number not identical");
+
+    // By block hash
+    let fb_estimate_by_hash = operations::estimate_gas(
+        &fb_client,
+        Some(estimate_args.clone()),
+        Some(operations::BlockId::Hash(fb_block_hash)),
+    )
+    .await
+    .expect("Failed to estimate gas from fb client by hash");
+    let non_fb_estimate_by_hash = operations::estimate_gas(
+        &non_fb_client,
+        Some(estimate_args),
+        Some(operations::BlockId::Hash(non_fb_block_hash)),
+    )
+    .await
+    .expect("Failed to estimate gas from non-fb client by hash");
+    assert_eq!(
+        fb_estimate, fb_estimate_by_hash,
+        "FB node: eth_estimateGas by hash should match by number"
+    );
+    assert_eq!(
+        non_fb_estimate, non_fb_estimate_by_hash,
+        "Non-FB node: eth_estimateGas by hash should match by number"
+    );
+    assert_eq!(
+        fb_estimate_by_hash, non_fb_estimate_by_hash,
+        "eth_estimateGas with block hash not identical"
+    );
+}
+
+#[ignore = "Requires a second non-flashblock RPC node to be running"]
+#[tokio::test]
+async fn fb_compare_get_balance() {
+    let (fb_client, non_fb_client, _, block_num, fb_block_hash, non_fb_block_hash, _) =
+        comparison_test_setup().await;
+    let sender_address = operations::DEFAULT_RICH_ADDRESS;
+
+    // By block number
+    let fb_balance = operations::get_balance(
+        &fb_client,
+        sender_address,
+        Some(operations::BlockId::Number(block_num)),
+    )
+    .await
+    .expect("Failed to get balance from fb client");
+    let non_fb_balance = operations::get_balance(
+        &non_fb_client,
+        sender_address,
+        Some(operations::BlockId::Number(block_num)),
+    )
+    .await
+    .expect("Failed to get balance from non-fb client");
+    assert_eq!(fb_balance, non_fb_balance, "eth_getBalance not identical");
+
+    // By block hash
+    let fb_balance_by_hash = operations::get_balance(
+        &fb_client,
+        sender_address,
+        Some(operations::BlockId::Hash(fb_block_hash)),
+    )
+    .await
+    .expect("Failed to get balance from fb client by hash");
+    let non_fb_balance_by_hash = operations::get_balance(
+        &non_fb_client,
+        sender_address,
+        Some(operations::BlockId::Hash(non_fb_block_hash)),
+    )
+    .await
+    .expect("Failed to get balance from non-fb client by hash");
+    assert_eq!(
+        fb_balance, fb_balance_by_hash,
+        "FB node: eth_getBalance by hash should match by number"
+    );
+    assert_eq!(
+        non_fb_balance, non_fb_balance_by_hash,
+        "Non-FB node: eth_getBalance by hash should match by number"
+    );
+    assert_eq!(
+        fb_balance_by_hash, non_fb_balance_by_hash,
+        "eth_getBalance with block hash not identical"
+    );
+}
+
+#[ignore = "Requires a second non-flashblock RPC node to be running"]
+#[tokio::test]
+async fn fb_compare_get_transaction_count() {
+    let (fb_client, non_fb_client, _, block_num, fb_block_hash, non_fb_block_hash, _) =
+        comparison_test_setup().await;
+    let sender_address = operations::DEFAULT_RICH_ADDRESS;
+
+    // By block number
+    let fb_count = operations::eth_get_transaction_count(
+        &fb_client,
+        sender_address,
+        Some(operations::BlockId::Number(block_num)),
+    )
+    .await
+    .expect("Failed to get transaction count from fb client");
+    let non_fb_count = operations::eth_get_transaction_count(
+        &non_fb_client,
+        sender_address,
+        Some(operations::BlockId::Number(block_num)),
+    )
+    .await
+    .expect("Failed to get transaction count from non-fb client");
+    assert_eq!(fb_count, non_fb_count, "eth_getTransactionCount not identical");
+
+    // By block hash
+    let fb_count_by_hash = operations::eth_get_transaction_count(
+        &fb_client,
+        sender_address,
+        Some(operations::BlockId::Hash(fb_block_hash)),
+    )
+    .await
+    .expect("Failed to get transaction count from fb client by hash");
+    let non_fb_count_by_hash = operations::eth_get_transaction_count(
+        &non_fb_client,
+        sender_address,
+        Some(operations::BlockId::Hash(non_fb_block_hash)),
+    )
+    .await
+    .expect("Failed to get transaction count from non-fb client by hash");
+    assert_eq!(
+        fb_count, fb_count_by_hash,
+        "FB node: eth_getTransactionCount by hash should match by number"
+    );
+    assert_eq!(
+        non_fb_count, non_fb_count_by_hash,
+        "Non-FB node: eth_getTransactionCount by hash should match by number"
+    );
+    assert_eq!(
+        fb_count_by_hash, non_fb_count_by_hash,
+        "eth_getTransactionCount with block hash not identical"
+    );
+}
+
+#[ignore = "Requires a second non-flashblock RPC node to be running"]
+#[tokio::test]
+async fn fb_compare_get_code() {
+    let (fb_client, non_fb_client, _, block_num, fb_block_hash, non_fb_block_hash, contracts) =
+        comparison_test_setup().await;
+    let erc20_addr = contracts.erc20.to_string();
+
+    // By block number
+    let fb_code = operations::eth_get_code(
+        &fb_client,
+        &erc20_addr,
+        Some(operations::BlockId::Number(block_num)),
+    )
+    .await
+    .expect("Failed to get code from fb client");
+    let non_fb_code = operations::eth_get_code(
+        &non_fb_client,
+        &erc20_addr,
+        Some(operations::BlockId::Number(block_num)),
+    )
+    .await
+    .expect("Failed to get code from non-fb client");
+    assert_eq!(fb_code, non_fb_code, "eth_getCode with block number not identical");
+
+    // By block hash
+    let fb_code_by_hash = operations::eth_get_code(
+        &fb_client,
+        &erc20_addr,
+        Some(operations::BlockId::Hash(fb_block_hash)),
+    )
+    .await
+    .expect("Failed to get code from fb client by hash");
+    let non_fb_code_by_hash = operations::eth_get_code(
+        &non_fb_client,
+        &erc20_addr,
+        Some(operations::BlockId::Hash(non_fb_block_hash)),
+    )
+    .await
+    .expect("Failed to get code from non-fb client by hash");
+    assert_eq!(fb_code, fb_code_by_hash, "FB node: eth_getCode by hash should match by number");
+    assert_eq!(
+        non_fb_code, non_fb_code_by_hash,
+        "Non-FB node: eth_getCode by hash should match by number"
+    );
+    assert_eq!(fb_code_by_hash, non_fb_code_by_hash, "eth_getCode with block hash not identical");
+}
+
+#[ignore = "Requires a second non-flashblock RPC node to be running"]
+#[tokio::test]
+async fn fb_compare_get_storage_at() {
+    let (fb_client, non_fb_client, _, block_num, fb_block_hash, non_fb_block_hash, contracts) =
+        comparison_test_setup().await;
+    let erc20_addr = contracts.erc20.to_string();
+
+    // By block number
+    let fb_storage = operations::eth_get_storage_at(
+        &fb_client,
+        &erc20_addr,
+        "0x2",
+        Some(operations::BlockId::Number(block_num)),
+    )
+    .await
+    .expect("Failed to get storage from fb client");
+    let non_fb_storage = operations::eth_get_storage_at(
+        &non_fb_client,
+        &erc20_addr,
+        "0x2",
+        Some(operations::BlockId::Number(block_num)),
+    )
+    .await
+    .expect("Failed to get storage from non-fb client");
+    assert_eq!(fb_storage, non_fb_storage, "eth_getStorageAt with block number not identical");
+
+    // By block hash
+    let fb_storage_by_hash = operations::eth_get_storage_at(
+        &fb_client,
+        &erc20_addr,
+        "0x2",
+        Some(operations::BlockId::Hash(fb_block_hash)),
+    )
+    .await
+    .expect("Failed to get storage from fb client by hash");
+    let non_fb_storage_by_hash = operations::eth_get_storage_at(
+        &non_fb_client,
+        &erc20_addr,
+        "0x2",
+        Some(operations::BlockId::Hash(non_fb_block_hash)),
+    )
+    .await
+    .expect("Failed to get storage from non-fb client by hash");
+    assert_eq!(
+        fb_storage, fb_storage_by_hash,
+        "FB node: eth_getStorageAt by hash should match by number"
+    );
+    assert_eq!(
+        non_fb_storage, non_fb_storage_by_hash,
+        "Non-FB node: eth_getStorageAt by hash should match by number"
+    );
+    assert_eq!(
+        fb_storage_by_hash, non_fb_storage_by_hash,
+        "eth_getStorageAt with block hash not identical"
+    );
 }
 
 #[ignore = "Requires sequencer 2 and RPC node with flashblocks enabled to be running"]
