@@ -1,20 +1,22 @@
 //! Utility functions for e2e functional tests
 
 use crate::operations::{
-    contracts::*, eth_block_number, eth_gas_price, eth_get_block_by_number_or_hash,
+    contracts::*, eth_block_number, eth_call, eth_gas_price, eth_get_block_by_number_or_hash,
     eth_get_transaction_count, eth_get_transaction_receipt, get_balance, manager::*, BlockId,
-    HttpClient,
+    HttpClient, GWEI,
 };
+use eyre::{eyre, Result};
+use serde_json;
+use std::{collections::HashMap, str::FromStr, sync::OnceLock};
+use tokio::time::{sleep, Duration};
+
+use alloy_eips::eip2718::Encodable2718;
 use alloy_network::{EthereumWallet, TransactionBuilder};
 use alloy_primitives::{hex, Address, Bytes, U256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{sol, SolCall, SolValue};
-use eyre::{eyre, Result};
-use serde_json;
-use std::{collections::HashMap, str::FromStr, sync::OnceLock};
-use tokio::time::{sleep, Duration};
 
 static DEPLOYED_CONTRACTS: OnceLock<DeployedContracts> = OnceLock::new();
 
@@ -27,10 +29,14 @@ pub struct DeployedContracts {
     pub contract_b: Address,
     /// Address of Contract C
     pub contract_c: Address,
-    /// Address of the contract factory
+    /// Address of the contract factory (CREATE opcode)
     pub factory: Address,
     /// Address of the ERC20 token contract
     pub erc20: Address,
+    /// Address of the CREATE2 factory contract
+    pub create2_factory: Address,
+    /// Address of the precompile caller contract
+    pub precompile_caller: Address,
 }
 
 /// Create a new HTTP client for the given endpoint URL
@@ -38,11 +44,14 @@ pub fn create_test_client(endpoint_url: &str) -> HttpClient {
     HttpClient::builder().build(endpoint_url).unwrap()
 }
 
-/// Transfer native balance from the rich address to a target address
+/// Transfer native balance from the rich address to a target address.
+/// Gas limit defaults to 21_000 if `None`. Use a higher value for transfers to
+/// precompile addresses that trigger execution beyond the intrinsic cost.
 pub async fn native_balance_transfer(
     endpoint_url: &str,
     amount: U256,
     to_address: &str,
+    gas_limit: Option<u64>,
     wait_for_confirmation: bool,
 ) -> Result<String> {
     let signer = PrivateKeySigner::from_str(DEFAULT_RICH_PRIVATE_KEY.trim_start_matches("0x"))?;
@@ -59,7 +68,7 @@ pub async fn native_balance_transfer(
         .with_value(amount)
         .with_nonce(nonce)
         .with_chain_id(DEFAULT_L2_CHAIN_ID)
-        .with_gas_limit(21_000)
+        .with_gas_limit(gas_limit.unwrap_or(21_000))
         .with_gas_price(gas_price);
     let pending_tx = provider.send_transaction(tx).await?;
 
@@ -76,6 +85,35 @@ pub async fn native_balance_transfer(
     Ok(format!("{tx_hash:#x}"))
 }
 
+/// Sign a native transfer transaction and return its raw encoded bytes as a hex string,
+/// without broadcasting it to the network.
+pub async fn sign_raw_transaction(
+    endpoint_url: &str,
+    amount: U256,
+    to_address: &str,
+) -> Result<String> {
+    let signer = PrivateKeySigner::from_str(DEFAULT_RICH_PRIVATE_KEY.trim_start_matches("0x"))?;
+    let wallet = EthereumWallet::from(signer.clone());
+    let provider =
+        ProviderBuilder::new().wallet(wallet.clone()).connect_http(endpoint_url.parse()?);
+
+    let from = signer.address();
+    let to = Address::from_str(to_address)?;
+    let nonce = provider.get_transaction_count(from).pending().await?;
+    let gas_price = provider.get_gas_price().await?;
+    let tx = TransactionRequest::default()
+        .with_from(from)
+        .with_to(to)
+        .with_value(amount)
+        .with_nonce(nonce)
+        .with_chain_id(DEFAULT_L2_CHAIN_ID)
+        .with_gas_limit(21_000)
+        .with_gas_price(gas_price);
+
+    let envelope = tx.build(&wallet).await?;
+    Ok(format!("0x{}", hex::encode(envelope.encoded_2718())))
+}
+
 /// Funds an address with native tokens and waits for the balance to be available
 pub async fn fund_address_and_wait_for_balance(
     client: &HttpClient,
@@ -84,7 +122,7 @@ pub async fn fund_address_and_wait_for_balance(
     funding_amount: U256,
 ) -> Result<()> {
     let funding_tx_hash =
-        native_balance_transfer(endpoint_url, funding_amount, to_address, true).await?;
+        native_balance_transfer(endpoint_url, funding_amount, to_address, None, true).await?;
 
     let receipt = eth_get_transaction_receipt(client, &funding_tx_hash).await?;
     let funding_block_num = receipt["blockNumber"]
@@ -185,8 +223,28 @@ pub async fn try_deploy_contracts() -> Result<&'static DeployedContracts> {
     let erc20 = deploy_contract(DEFAULT_L2_NETWORK_URL, ERC20_BYTECODE_STR, None).await?;
     println!("ERC20 deployed at: {erc20:#x}");
 
+    // Deploy Create2Factory (no constructor args)
+    println!("Deploying Create2Factory...");
+    let create2_factory =
+        deploy_contract(DEFAULT_L2_NETWORK_URL, CREATE2_FACTORY_BYTECODE_STR, None).await?;
+    println!("Create2Factory deployed at: {create2_factory:#x}");
+
+    // Deploy PrecompileCaller (no constructor args)
+    println!("Deploying PrecompileCaller...");
+    let precompile_caller =
+        deploy_contract(DEFAULT_L2_NETWORK_URL, PRECOMPILE_CALLER_BYTECODE_STR, None).await?;
+    println!("PrecompileCaller deployed at: {precompile_caller:#x}");
+
     // Store deployed contract addresses in global state
-    let contracts = DeployedContracts { contract_a, contract_b, contract_c, factory, erc20 };
+    let contracts = DeployedContracts {
+        contract_a,
+        contract_b,
+        contract_c,
+        factory,
+        erc20,
+        create2_factory,
+        precompile_caller,
+    };
 
     // Cache the deployed contracts (marks ContractsDeployed = true)
     DEPLOYED_CONTRACTS.set(contracts).map_err(|_| eyre!("Failed to cache deployed contracts"))?;
@@ -197,6 +255,8 @@ pub async fn try_deploy_contracts() -> Result<&'static DeployedContracts> {
     println!("ContractC: {contract_c:#x}");
     println!("Factory: {factory:#x}");
     println!("ERC20: {erc20:#x}");
+    println!("Create2Factory: {create2_factory:#x}");
+    println!("PrecompileCaller: {precompile_caller:#x}");
     println!("ContractsDeployed: true");
     Ok(DEPLOYED_CONTRACTS.get().unwrap())
 }
@@ -371,6 +431,94 @@ pub async fn transfer_erc20_token_batch(
         .to_string();
 
     Ok((tx_hashes, block_number, block_hash))
+}
+
+/// Shared setup for comparison tests that need transactions confirmed on both nodes.
+/// Sends a batch of ERC20 transfers and waits for the block to be available on both nodes.
+/// Returns (fb_client, non_fb_client, tx_hashes, block_num, fb_block_hash, non_fb_block_hash, contracts).
+pub async fn comparison_test_setup() -> (
+    jsonrpsee::http_client::HttpClient,
+    jsonrpsee::http_client::HttpClient,
+    Vec<String>,
+    u64,
+    String,
+    String,
+    &'static DeployedContracts,
+) {
+    let fb_client = create_test_client(DEFAULT_L2_NETWORK_URL_FB);
+    let non_fb_client = create_test_client(DEFAULT_L2_NETWORK_URL_NO_FB);
+    let test_address = DEFAULT_L2_NEW_ACC1_ADDRESS;
+
+    let contracts = try_deploy_contracts().await.expect("Failed to deploy contracts");
+
+    let (tx_hashes, block_num, _) = transfer_erc20_token_batch(
+        DEFAULT_L2_NETWORK_URL_FB,
+        contracts.erc20,
+        U256::from(GWEI),
+        test_address,
+        5,
+    )
+    .await
+    .expect("Failed to transfer batch ERC20 tokens");
+
+    wait_for_block_on_both_nodes(&fb_client, &non_fb_client, block_num, Duration::from_secs(10))
+        .await
+        .expect("Failed to wait for block on both nodes");
+
+    let fb_block = eth_get_block_by_number_or_hash(&fb_client, BlockId::Number(block_num), false)
+        .await
+        .expect("Failed to get block from fb client");
+    let fb_block_hash =
+        fb_block["hash"].as_str().expect("Block hash should not be empty").to_string();
+
+    let non_fb_block =
+        eth_get_block_by_number_or_hash(&non_fb_client, BlockId::Number(block_num), false)
+            .await
+            .expect("Failed to get block from non-fb client");
+    let non_fb_block_hash =
+        non_fb_block["hash"].as_str().expect("Block hash should not be empty").to_string();
+
+    (fb_client, non_fb_client, tx_hashes, block_num, fb_block_hash, non_fb_block_hash, contracts)
+}
+
+/// Waits until all pending transactions for the rich address are confirmed.
+/// This ensures a clean nonce state between tests so they don't interfere with each other.
+pub async fn settle_pending_transactions(endpoint_url: &str) -> Result<()> {
+    let client = create_test_client(endpoint_url);
+    tokio::time::timeout(DEFAULT_TIMEOUT_TX_TO_BE_MINED, async {
+        loop {
+            let pending_nonce =
+                eth_get_transaction_count(&client, DEFAULT_RICH_ADDRESS, Some(BlockId::Pending))
+                    .await?;
+            let latest_nonce =
+                eth_get_transaction_count(&client, DEFAULT_RICH_ADDRESS, Some(BlockId::Latest))
+                    .await?;
+            if pending_nonce == latest_nonce {
+                return <Result<()>>::Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .map_err(|_| eyre!("timeout waiting for pending transactions to settle"))?
+}
+
+/// Waits for the canonical chain to reach the given block number.
+/// This is needed when a receipt is obtained from the flashblock cache (ahead of canonical)
+/// but subsequent operations (e.g., `debug_traceTransaction`, `eth_getLogs`) require canonical data.
+pub async fn wait_for_canonical_block(endpoint_url: &str, target_block: u64) -> Result<()> {
+    let client = create_test_client(endpoint_url);
+    tokio::time::timeout(DEFAULT_TIMEOUT_TX_TO_BE_MINED, async {
+        loop {
+            let current = eth_block_number(&client).await?;
+            if current >= target_block {
+                return <Result<()>>::Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .map_err(|_| eyre!("timeout waiting for canonical block {target_block}"))?
 }
 
 /// Waits for a transaction receipt with timeout
@@ -549,6 +697,100 @@ pub async fn make_contract_call(
         "transactionHash": format!("{:#x}", tx_hash),
         "receipt": receipt
     }))
+}
+
+/// Deploy a child contract via the `Create2Factory` using the given salt.
+/// Returns the tx hash of the deploy transaction.
+pub async fn deploy_via_create2(
+    endpoint_url: &str,
+    factory_address: Address,
+    salt: U256,
+) -> Result<String> {
+    sol! {
+        function deploy(uint256 salt) external payable returns (address addr);
+    }
+    let call = deployCall { salt };
+    let calldata = Bytes::from(call.abi_encode());
+
+    let signer = PrivateKeySigner::from_str(DEFAULT_RICH_PRIVATE_KEY.trim_start_matches("0x"))?;
+    let wallet = EthereumWallet::from(signer.clone());
+    let provider = ProviderBuilder::new().wallet(wallet).connect_http(endpoint_url.parse()?);
+
+    let from = signer.address();
+    let nonce = provider.get_transaction_count(from).pending().await?;
+    let gas_price = provider.get_gas_price().await?;
+    let tx = TransactionRequest::default()
+        .with_from(from)
+        .with_to(factory_address)
+        .with_input(calldata)
+        .with_nonce(nonce)
+        .with_chain_id(DEFAULT_L2_CHAIN_ID)
+        .with_gas_limit(500_000)
+        .with_gas_price(gas_price);
+    let pending_tx = provider.send_transaction(tx).await?;
+    let tx_hash = *pending_tx.tx_hash();
+    Ok(format!("{tx_hash:#x}"))
+}
+
+/// Compute the deterministic CREATE2 address for a given salt via the factory.
+pub async fn compute_create2_address(
+    endpoint_url: &str,
+    factory_address: Address,
+    salt: U256,
+) -> Result<Address> {
+    sol! {
+        function computeAddress(uint256 salt) external view returns (address);
+    }
+    let call = computeAddressCall { salt };
+    let calldata = call.abi_encode();
+
+    let client = create_test_client(endpoint_url);
+    let call_args = serde_json::json!({
+        "to": factory_address,
+        "data": format!("0x{}", hex::encode(&calldata)),
+    });
+    let result = eth_call(&client, Some(call_args), Some(BlockId::Latest)).await?;
+
+    let bytes = hex::decode(result.trim_start_matches("0x"))?;
+    if bytes.len() < 32 {
+        return Err(eyre!("computeAddress returned unexpected length: {}", bytes.len()));
+    }
+    // Address is in the last 20 bytes of the 32-byte ABI-encoded word
+    Ok(Address::from_slice(&bytes[12..32]))
+}
+
+/// Destroy a child contract via the `Create2Factory`.
+/// Returns the tx hash.
+pub async fn destroy_via_factory(
+    endpoint_url: &str,
+    factory_address: Address,
+    child_address: Address,
+    recipient: Address,
+) -> Result<String> {
+    sol! {
+        function destroyChild(address child, address recipient) external;
+    }
+    let call = destroyChildCall { child: child_address, recipient };
+    let calldata = Bytes::from(call.abi_encode());
+
+    let signer = PrivateKeySigner::from_str(DEFAULT_RICH_PRIVATE_KEY.trim_start_matches("0x"))?;
+    let wallet = EthereumWallet::from(signer.clone());
+    let provider = ProviderBuilder::new().wallet(wallet).connect_http(endpoint_url.parse()?);
+
+    let from = signer.address();
+    let nonce = provider.get_transaction_count(from).pending().await?;
+    let gas_price = provider.get_gas_price().await?;
+    let tx = TransactionRequest::default()
+        .with_from(from)
+        .with_to(factory_address)
+        .with_input(calldata)
+        .with_nonce(nonce)
+        .with_chain_id(DEFAULT_L2_CHAIN_ID)
+        .with_gas_limit(100_000)
+        .with_gas_price(gas_price);
+    let pending_tx = provider.send_transaction(tx).await?;
+    let tx_hash = *pending_tx.tx_hash();
+    Ok(format!("{tx_hash:#x}"))
 }
 
 /// Check if a flashblocks notification contains a specific transaction hash

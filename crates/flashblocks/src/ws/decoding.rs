@@ -1,26 +1,25 @@
-use crate::FlashBlock;
 use alloy_primitives::bytes::Bytes;
 use std::io;
 
+use xlayer_builder::broadcast::XLayerFlashblockMessage;
+
 /// A trait for decoding flashblocks from bytes.
 pub trait FlashBlockDecoder: Send + 'static {
-    /// Decodes `bytes` into a [`FlashBlock`].
-    fn decode(&self, bytes: Bytes) -> eyre::Result<FlashBlock>;
+    /// Decodes `bytes` into an [`XLayerFlashblockMessage`].
+    fn decode(&self, bytes: Bytes) -> eyre::Result<XLayerFlashblockMessage>;
 }
 
 /// Default implementation of the decoder.
 impl FlashBlockDecoder for () {
-    fn decode(&self, bytes: Bytes) -> eyre::Result<FlashBlock> {
+    fn decode(&self, bytes: Bytes) -> eyre::Result<XLayerFlashblockMessage> {
         decode_flashblock(bytes)
     }
 }
 
-pub(crate) fn decode_flashblock(bytes: Bytes) -> eyre::Result<FlashBlock> {
+pub(crate) fn decode_flashblock(bytes: Bytes) -> eyre::Result<XLayerFlashblockMessage> {
     let bytes = crate::ws::decoding::try_parse_message(bytes)?;
-
-    let payload: FlashBlock =
+    let payload: XLayerFlashblockMessage =
         serde_json::from_slice(&bytes).map_err(|e| eyre::eyre!("failed to parse message: {e}"))?;
-
     Ok(payload)
 }
 

@@ -1,3 +1,6 @@
+use crate::{
+    broadcast::XLayerFlashblockMessage, metrics::tokio::MonitoredTask, metrics::BuilderMetrics,
+};
 use core::{
     fmt::{Debug, Formatter},
     net::SocketAddr,
@@ -5,7 +8,6 @@ use core::{
 };
 use futures::SinkExt;
 use futures_util::StreamExt;
-use op_alloy_rpc_types_engine::OpFlashblockPayload;
 use std::{io, net::TcpListener, sync::Arc};
 use tokio::{
     net::TcpStream,
@@ -23,8 +25,6 @@ use tokio_tungstenite::{
     WebSocketStream,
 };
 use tracing::{debug, info, trace, warn};
-
-use crate::{metrics::tokio::MonitoredTask, metrics::BuilderMetrics};
 
 /// A WebSockets publisher that accepts connections from client websockets and broadcasts to them
 /// updates about new flashblocks. It maintains a count of sent messages and active subscriptions.
@@ -65,18 +65,31 @@ impl WebSocketPublisher {
         Ok(Self { sent, subs, term, pipe, subscriber_limit })
     }
 
-    pub fn publish(&self, payload: &OpFlashblockPayload) -> io::Result<usize> {
+    pub fn publish(&self, payload: &XLayerFlashblockMessage) -> io::Result<usize> {
         // Serialize the payload to a UTF-8 string
         // serialize only once, then just copy around only a pointer
         // to the serialized data for each subscription.
-        info!(
-            target: "payload_builder::broadcast",
-            event = "flashblock_sent",
-            message = "Sending flashblock to subscribers",
-            id = %payload.payload_id,
-            index = payload.index,
-            base = payload.base.is_some(),
-        );
+        match payload {
+            XLayerFlashblockMessage::Payload(payload) => {
+                info!(
+                    target: "payload_builder::broadcast",
+                    event = "flashblock_sent",
+                    message = "Sending flashblock to subscribers",
+                    id = %payload.inner.payload_id,
+                    index = payload.inner.index,
+                    base = payload.inner.base.is_some(),
+                    target_index = payload.target_index,
+                );
+            }
+            XLayerFlashblockMessage::PayloadEnd(payload) => {
+                info!(
+                    target: "payload_builder::broadcast",
+                    event = "flashblock_end_sent",
+                    message = "Sending flashblock to subscribers",
+                    id = %payload.payload_id,
+                );
+            }
+        }
 
         let serialized = serde_json::to_string(payload)?;
         let utf8_bytes = Utf8Bytes::from(serialized);

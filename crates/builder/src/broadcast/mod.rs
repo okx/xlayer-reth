@@ -1,10 +1,12 @@
 mod behaviour;
 mod outgoing;
+pub(crate) mod payload;
 pub(crate) mod types;
 pub(crate) mod wspub;
 
 use behaviour::Behaviour;
 pub use libp2p::{Multiaddr, StreamProtocol};
+pub use payload::{XLayerFlashblockEnd, XLayerFlashblockMessage, XLayerFlashblockPayload};
 pub use types::Message;
 pub use wspub::WebSocketPublisher;
 
@@ -602,7 +604,6 @@ mod test {
     use super::*;
     use crate::broadcast::wspub::WebSocketPublisher;
     use crate::metrics::{tokio::FlashblocksTaskMetrics, BuilderMetrics};
-    use op_alloy_rpc_types_engine::OpFlashblockPayload;
 
     const TEST_AGENT_VERSION: &str = "test/1.0.0";
 
@@ -669,7 +670,9 @@ mod test {
 
         tokio::spawn(async move { node1.run().await });
         tokio::spawn(async move { node2.run().await });
-        let message = Message::from_flashblock_payload(OpFlashblockPayload::default());
+        let message = Message::from_flashblock_payload(
+            XLayerFlashblockMessage::from_flashblock_payload(XLayerFlashblockPayload::default()),
+        );
         let mut rx = rx1.remove(&types::FLASHBLOCKS_STREAM_PROTOCOL).unwrap();
         let recv_message = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -794,7 +797,9 @@ mod test {
         handler.insert_peer_and_stream(peer_a, types::FLASHBLOCKS_STREAM_PROTOCOL, stream);
         assert!(handler.has_peer(&peer_a));
 
-        let msg = Message::from_flashblock_payload(OpFlashblockPayload::default());
+        let msg = Message::from_flashblock_payload(
+            XLayerFlashblockMessage::from_flashblock_payload(XLayerFlashblockPayload::default()),
+        );
         let failed = handler.broadcast_message(msg).await.expect("serialization must not fail");
 
         assert_eq!(failed, vec![peer_a], "peer_a must be returned as a failed peer");
@@ -830,7 +835,9 @@ mod test {
         let mut handler = outgoing::StreamsHandler::new();
         handler.insert_peer_and_stream(peer_a, types::FLASHBLOCKS_STREAM_PROTOCOL, stream);
 
-        let msg = Message::from_flashblock_payload(OpFlashblockPayload::default());
+        let msg = Message::from_flashblock_payload(
+            XLayerFlashblockMessage::from_flashblock_payload(XLayerFlashblockPayload::default()),
+        );
         let failed = handler.broadcast_message(msg).await.expect("serialization must not fail");
 
         assert!(failed.is_empty(), "no peers should fail on a healthy stream");
@@ -907,7 +914,9 @@ mod test {
             compat::FuturesAsyncReadCompatExt as _,
         };
 
-        let test_message = Message::from_flashblock_payload(OpFlashblockPayload::default());
+        let test_message = Message::from_flashblock_payload(
+            XLayerFlashblockMessage::from_flashblock_payload(XLayerFlashblockPayload::default()),
+        );
         let test_payload =
             serde_json::to_string(&test_message).expect("can serialize test message");
 

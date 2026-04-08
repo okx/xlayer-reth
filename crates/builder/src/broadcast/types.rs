@@ -1,19 +1,19 @@
+use crate::broadcast::XLayerFlashblockMessage;
 use alloy_primitives::U256;
-use op_alloy_rpc_types_engine::OpFlashblockPayload;
 use serde::{Deserialize, Serialize};
 
 use reth::{core::primitives::SealedBlock, payload::PayloadId};
 use reth_optimism_payload_builder::OpBuiltPayload as RethOpBuiltPayload;
 use reth_optimism_primitives::OpBlock;
 
-pub(crate) const AGENT_VERSION: &str = "flashblock-builder/1.0.0";
+pub(crate) const AGENT_VERSION: &str = "flashblock-builder/2.0.0";
 pub(crate) const FLASHBLOCKS_STREAM_PROTOCOL: crate::broadcast::StreamProtocol =
-    crate::broadcast::StreamProtocol::new("/flashblocks/1.0.0");
+    crate::broadcast::StreamProtocol::new("/flashblocks/2.0.0");
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub enum Message {
-    OpBuiltPayload(OpBuiltPayload),
-    OpFlashblockPayload(OpFlashblockPayload),
+    OpBuiltPayload(Box<OpBuiltPayload>),
+    OpFlashblockPayload(XLayerFlashblockMessage),
 }
 
 impl Message {
@@ -36,10 +36,10 @@ pub struct OpBuiltPayload {
 
 impl Message {
     pub fn from_built_payload(value: RethOpBuiltPayload) -> Self {
-        Message::OpBuiltPayload(value.into())
+        Message::OpBuiltPayload(Box::new(value.into()))
     }
 
-    pub fn from_flashblock_payload(value: OpFlashblockPayload) -> Self {
+    pub fn from_flashblock_payload(value: XLayerFlashblockMessage) -> Self {
         Message::OpFlashblockPayload(value)
     }
 }

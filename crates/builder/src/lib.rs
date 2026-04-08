@@ -1,5 +1,5 @@
 pub mod args;
-pub(crate) mod broadcast;
+pub mod broadcast;
 pub mod flashblocks;
 pub mod metrics;
 pub(crate) mod signer;

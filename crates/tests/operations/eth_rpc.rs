@@ -329,6 +329,29 @@ pub async fn eth_get_logs(
     Ok(result)
 }
 
+/// For eth_getLogs with blockHash filter
+pub async fn eth_get_logs_by_block_hash(
+    client_rpc: &HttpClient,
+    block_hash: &str,
+    address: Option<&str>,
+    topics: Option<Vec<String>>,
+) -> Result<Value> {
+    let mut filter = serde_json::Map::new();
+    filter.insert("blockHash".to_string(), json!(block_hash));
+    if let Some(addr) = address {
+        filter.insert("address".to_string(), json!(addr));
+    }
+    if let Some(t) = topics {
+        filter.insert("topics".to_string(), json!(t));
+    }
+    let result: Value = tokio::time::timeout(
+        RPC_TIMEOUT,
+        client_rpc.request("eth_getLogs", jsonrpsee::rpc_params![Value::Object(filter)]),
+    )
+    .await??;
+    Ok(result)
+}
+
 /// For txpool_content
 pub async fn txpool_content(client_rpc: &HttpClient) -> Result<Value> {
     let result: Value = tokio::time::timeout(
@@ -354,6 +377,50 @@ pub async fn eth_flashblocks_enabled(client_rpc: &HttpClient) -> Result<bool> {
     let result: bool = tokio::time::timeout(
         RPC_TIMEOUT,
         client_rpc.request("eth_flashblocksEnabled", jsonrpsee::rpc_params![]),
+    )
+    .await??;
+    Ok(result)
+}
+
+/// For eth_getRawTransactionByBlockNumberAndIndex
+pub async fn eth_get_raw_transaction_by_block_number_and_index(
+    client_rpc: &HttpClient,
+    block_number: &str,
+    index: &str,
+) -> Result<Value> {
+    let result: Value = tokio::time::timeout(
+        RPC_TIMEOUT,
+        client_rpc.request(
+            "eth_getRawTransactionByBlockNumberAndIndex",
+            jsonrpsee::rpc_params![block_number, index],
+        ),
+    )
+    .await??;
+    Ok(result)
+}
+
+/// For `eth_getRawTransactionByBlockHashAndIndex`
+pub async fn eth_get_raw_transaction_by_block_hash_and_index(
+    client_rpc: &HttpClient,
+    block_hash: &str,
+    index: &str,
+) -> Result<Value> {
+    let result: Value = tokio::time::timeout(
+        RPC_TIMEOUT,
+        client_rpc.request(
+            "eth_getRawTransactionByBlockHashAndIndex",
+            jsonrpsee::rpc_params![block_hash, index],
+        ),
+    )
+    .await??;
+    Ok(result)
+}
+
+/// For eth_sendRawTransactionSync
+pub async fn eth_send_raw_transaction_sync(client_rpc: &HttpClient, raw_tx: &str) -> Result<Value> {
+    let result: Value = tokio::time::timeout(
+        RPC_TIMEOUT,
+        client_rpc.request("eth_sendRawTransactionSync", jsonrpsee::rpc_params![raw_tx]),
     )
     .await??;
     Ok(result)
