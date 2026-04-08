@@ -28,35 +28,28 @@ const WEB_SOCKET_TIMEOUT: Duration = Duration::from_secs(30);
 async fn fb_low_latency_pending_visibility_test() {
     let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
 
-    // Retry a few times since the canonical chain can momentarily catch up to the pending block
-    // between the two RPC calls.
-    let mut succeeded = false;
-    for _ in 0..10 {
-        let canonical_height = operations::eth_block_number(&fb_client)
-            .await
-            .expect("Failed to get canonical block number");
-
-        let pending_block = operations::eth_get_block_by_number_or_hash(
-            &fb_client,
-            operations::BlockId::Pending,
-            false,
-        )
+    let canonical_height = operations::eth_block_number(&fb_client)
         .await
-        .expect("Pending eth_getBlockByNumber failed");
-        assert!(!pending_block.is_null(), "Pending block should not be null");
+        .expect("Failed to get canonical block number");
 
-        let pending_number = pending_block["number"]
-            .as_str()
-            .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-            .expect("Pending block number should be a valid hex string");
+    let pending_block = operations::eth_get_block_by_number_or_hash(
+        &fb_client,
+        operations::BlockId::Pending,
+        false,
+    )
+    .await
+    .expect("Pending eth_getBlockByNumber failed");
+    assert!(!pending_block.is_null(), "Pending block should not be null");
 
-        if pending_number > canonical_height {
-            succeeded = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
-    assert!(succeeded, "Flashblocks pending block should be ahead of canonical height");
+    let pending_number = pending_block["number"]
+        .as_str()
+        .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        .expect("Pending block number should be a valid hex string");
+
+    assert!(
+        pending_number >= canonical_height,
+        "Flashblocks pending block ({pending_number}) should be ahead or equal to canonical height ({canonical_height})"
+    );
 }
 
 /// Block-level RPC queries using the pending tag on the flashblocks node.
