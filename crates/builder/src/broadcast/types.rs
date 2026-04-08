@@ -1,23 +1,23 @@
+use crate::broadcast::XLayerFlashblockMessage;
 use alloy_primitives::U256;
-use op_alloy_rpc_types_engine::OpFlashblockPayload;
 use serde::{Deserialize, Serialize};
 
 use reth::{core::primitives::SealedBlock, payload::PayloadId};
 use reth_optimism_payload_builder::OpBuiltPayload as RethOpBuiltPayload;
 use reth_optimism_primitives::OpBlock;
 
-pub(crate) const AGENT_VERSION: &str = "flashblock-builder/1.0.0";
+pub(crate) const AGENT_VERSION: &str = "flashblock-builder/2.0.0";
 pub(crate) const FLASHBLOCKS_STREAM_PROTOCOL: crate::broadcast::StreamProtocol =
-    crate::broadcast::StreamProtocol::new("/flashblocks/1.0.0");
+    crate::broadcast::StreamProtocol::new("/flashblocks/2.0.0");
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
-pub(crate) enum Message {
-    OpBuiltPayload(OpBuiltPayload),
-    OpFlashblockPayload(OpFlashblockPayload),
+pub enum Message {
+    OpBuiltPayload(Box<OpBuiltPayload>),
+    OpFlashblockPayload(XLayerFlashblockMessage),
 }
 
 impl Message {
-    pub(crate) fn protocol(&self) -> crate::broadcast::StreamProtocol {
+    pub fn protocol(&self) -> crate::broadcast::StreamProtocol {
         FLASHBLOCKS_STREAM_PROTOCOL
     }
 }
@@ -25,21 +25,21 @@ impl Message {
 /// Internal type analogous to [`reth_optimism_payload_builder::OpBuiltPayload`]
 /// which additionally implements `Serialize` and `Deserialize` for p2p transmission.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
-pub(crate) struct OpBuiltPayload {
+pub struct OpBuiltPayload {
     /// Identifier of the payload
-    pub(crate) id: PayloadId,
+    pub id: PayloadId,
     /// Sealed block
-    pub(crate) block: SealedBlock<OpBlock>,
+    pub block: SealedBlock<OpBlock>,
     /// The fees of the block
-    pub(crate) fees: U256,
+    pub fees: U256,
 }
 
 impl Message {
-    pub(crate) fn from_built_payload(value: RethOpBuiltPayload) -> Self {
-        Message::OpBuiltPayload(value.into())
+    pub fn from_built_payload(value: RethOpBuiltPayload) -> Self {
+        Message::OpBuiltPayload(Box::new(value.into()))
     }
 
-    pub(crate) fn from_flashblock_payload(value: OpFlashblockPayload) -> Self {
+    pub fn from_flashblock_payload(value: XLayerFlashblockMessage) -> Self {
         Message::OpFlashblockPayload(value)
     }
 }

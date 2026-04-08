@@ -25,7 +25,10 @@ xlayer-trace-monitor.workspace = true
 
 # reth
 reth.workspace = true
+reth-chain-state.workspace = true
+reth-engine-tree.workspace = true
 reth-optimism-node.workspace = true
+reth-optimism-primitives.workspace = true
 reth-optimism-cli.workspace = true
 reth-node-api.workspace = true
 reth-node-builder.workspace = true
@@ -46,7 +49,11 @@ reth-optimism-forks.workspace = true
 reth-optimism-txpool.workspace = true
 reth-transaction-pool.workspace = true
 reth-cli-util.workspace = true
+reth-provider.workspace = true
+reth-rpc-builder.workspace = true
 reth-rpc-server-types.workspace = true
+reth-tasks = { workspace = true, features = ["rayon"] }
+reth-trie-db.workspace = true
 
 # alloy
 alloy-primitives.workspace = true
@@ -56,6 +63,9 @@ op-alloy-network.workspace = true
 
 # revm
 revm.workspace = true
+
+# async
+tokio.workspace = true
 
 # misc
 clap.workspace = true

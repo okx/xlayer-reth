@@ -1,7 +1,7 @@
 //! Functional tests for e2e tests
 //!
 //! Run all tests with: `cargo test -p xlayer-e2e-test --test e2e_tests -- --nocapture --test-threads=1`
-//! or run a specific test with: `cargo test -p xlayer-e2e-test --test e2e_tests -- <test_case_name> -- --nocapture --test-threads=1`
+//! or run a specific test with: `cargo test -p xlayer-e2e-test --test e2e_tests -- <test_case_name> --nocapture --test-threads=1`
 
 use alloy_network::TransactionBuilder;
 use alloy_primitives::{hex, Address, Bytes, B256, U256};
@@ -24,6 +24,7 @@ async fn test_send_transaction() {
         operations::manager::DEFAULT_L2_NETWORK_URL,
         amount,
         to_address,
+        None,
         true,
     )
     .await
@@ -396,6 +397,7 @@ async fn test_eth_transaction_rpc(#[case] test_name: &str) {
         operations::manager::DEFAULT_L2_NETWORK_URL,
         U256::from(1_000_000_000u64), // 1 Gwei
         operations::manager::DEFAULT_L2_NEW_ACC1_ADDRESS,
+        None,
         true,
     )
     .await

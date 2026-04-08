@@ -120,6 +120,10 @@ pub struct XLayerArgs {
     #[command(flatten)]
     pub builder: BuilderArgs,
 
+    /// Flashblocks RPC configuration
+    #[command(flatten)]
+    pub flashblocks_rpc: FlashblocksRpcArgs,
+
     /// Enable legacy rpc routing
     #[command(flatten)]
     pub legacy: LegacyRpcArgs,
@@ -131,22 +135,6 @@ pub struct XLayerArgs {
     /// Bridge intercept configuration
     #[command(flatten)]
     pub intercept: XLayerInterceptArgs,
-
-    /// Enable custom flashblocks subscription
-    #[arg(
-        long = "xlayer.flashblocks-subscription",
-        help = "Enable custom flashblocks subscription (disabled by default)",
-        default_value = "false"
-    )]
-    pub enable_flashblocks_subscription: bool,
-
-    /// Set the number of subscribed addresses in flashblocks subscription
-    #[arg(
-        long = "xlayer.flashblocks-subscription-max-addresses",
-        help = "Set the number of subscribed addresses in flashblocks subscription",
-        default_value = "1000"
-    )]
-    pub flashblocks_subscription_max_addresses: usize,
 
     #[arg(
         long = "xlayer.sequencer-mode",
@@ -245,6 +233,40 @@ impl LegacyRpcArgs {
 
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Args, PartialEq, Eq, Default)]
+pub struct FlashblocksRpcArgs {
+    /// Enable flashblocks RPC
+    #[arg(
+        long = "xlayer.flashblocks-url",
+        help = "URL of the flashblocks RPC endpoint (disabled by default)"
+    )]
+    pub flashblock_url: Option<Url>,
+
+    /// Enable custom flashblocks subscription
+    #[arg(
+        long = "xlayer.flashblocks-subscription",
+        help = "Enable custom flashblocks subscription (disabled by default)",
+        default_value = "false"
+    )]
+    pub enable_flashblocks_subscription: bool,
+
+    /// Set the number of subscribed addresses in flashblocks subscription
+    #[arg(
+        long = "xlayer.flashblocks-subscription-max-addresses",
+        help = "Set the number of subscribed addresses in flashblocks subscription",
+        default_value = "1000"
+    )]
+    pub flashblocks_subscription_max_addresses: usize,
+
+    /// Enable flashblocks RPC state comparison debug mode
+    #[arg(
+        long = "xlayer.flashblocks-debug-state-comparison",
+        help = "Enable flashblocks RPC state comparison debug mode",
+        default_value = "false"
+    )]
+    pub flashblocks_debug_state_comparison: bool,
 }
 
 #[cfg(test)]
@@ -391,13 +413,19 @@ mod tests {
             "--xlayer.flashblocks-subscription",
             "--xlayer.flashblocks-subscription-max-addresses",
             "2000",
+            "--xlayer.flashblocks-url",
+            "ws://localhost:1111",
         ])
         .args;
 
-        assert!(args.enable_flashblocks_subscription);
         assert!(args.legacy.legacy_rpc_url.is_some());
         assert_eq!(args.legacy.legacy_rpc_timeout, Duration::from_secs(45));
-        assert_eq!(args.flashblocks_subscription_max_addresses, 2000);
+        assert!(args.flashblocks_rpc.enable_flashblocks_subscription);
+        assert_eq!(args.flashblocks_rpc.flashblocks_subscription_max_addresses, 2000);
+        assert_eq!(
+            args.flashblocks_rpc.flashblock_url,
+            Some(Url::parse("ws://localhost:1111").unwrap())
+        );
         assert!(args.validate().is_ok());
     }
 
