@@ -24,6 +24,7 @@ async fn test_send_transaction() {
         operations::manager::DEFAULT_L2_NETWORK_URL,
         amount,
         to_address,
+        None,
         true,
     )
     .await
@@ -396,6 +397,7 @@ async fn test_eth_transaction_rpc(#[case] test_name: &str) {
         operations::manager::DEFAULT_L2_NETWORK_URL,
         U256::from(1_000_000_000u64), // 1 Gwei
         operations::manager::DEFAULT_L2_NEW_ACC1_ADDRESS,
+        None,
         true,
     )
     .await

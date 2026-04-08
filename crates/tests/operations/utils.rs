@@ -43,11 +43,14 @@ pub fn create_test_client(endpoint_url: &str) -> HttpClient {
     HttpClient::builder().build(endpoint_url).unwrap()
 }
 
-/// Transfer native balance from the rich address to a target address
+/// Transfer native balance from the rich address to a target address.
+/// Gas limit defaults to 21_000 if `None`. Use a higher value for transfers to
+/// precompile addresses that trigger execution beyond the intrinsic cost.
 pub async fn native_balance_transfer(
     endpoint_url: &str,
     amount: U256,
     to_address: &str,
+    gas_limit: Option<u64>,
     wait_for_confirmation: bool,
 ) -> Result<String> {
     let signer = PrivateKeySigner::from_str(DEFAULT_RICH_PRIVATE_KEY.trim_start_matches("0x"))?;
@@ -64,7 +67,7 @@ pub async fn native_balance_transfer(
         .with_value(amount)
         .with_nonce(nonce)
         .with_chain_id(DEFAULT_L2_CHAIN_ID)
-        .with_gas_limit(21_000)
+        .with_gas_limit(gas_limit.unwrap_or(21_000))
         .with_gas_price(gas_price);
     let pending_tx = provider.send_transaction(tx).await?;
 
@@ -118,7 +121,7 @@ pub async fn fund_address_and_wait_for_balance(
     funding_amount: U256,
 ) -> Result<()> {
     let funding_tx_hash =
-        native_balance_transfer(endpoint_url, funding_amount, to_address, true).await?;
+        native_balance_transfer(endpoint_url, funding_amount, to_address, None, true).await?;
 
     let receipt = eth_get_transaction_receipt(client, &funding_tx_hash).await?;
     let funding_block_num = receipt["blockNumber"]
@@ -427,6 +430,46 @@ pub async fn transfer_erc20_token_batch(
         .to_string();
 
     Ok((tx_hashes, block_number, block_hash))
+}
+
+/// Waits until all pending transactions for the rich address are confirmed.
+/// This ensures a clean nonce state between tests so they don't interfere with each other.
+pub async fn settle_pending_transactions(endpoint_url: &str) -> Result<()> {
+    let client = create_test_client(endpoint_url);
+    tokio::time::timeout(DEFAULT_TIMEOUT_TX_TO_BE_MINED, async {
+        loop {
+            let pending_nonce =
+                eth_get_transaction_count(&client, DEFAULT_RICH_ADDRESS, Some(BlockId::Pending))
+                    .await?;
+            let latest_nonce =
+                eth_get_transaction_count(&client, DEFAULT_RICH_ADDRESS, Some(BlockId::Latest))
+                    .await?;
+            if pending_nonce == latest_nonce {
+                return <Result<()>>::Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .map_err(|_| eyre!("timeout waiting for pending transactions to settle"))?
+}
+
+/// Waits for the canonical chain to reach the given block number.
+/// This is needed when a receipt is obtained from the flashblock cache (ahead of canonical)
+/// but subsequent operations (e.g., `debug_traceTransaction`, `eth_getLogs`) require canonical data.
+pub async fn wait_for_canonical_block(endpoint_url: &str, target_block: u64) -> Result<()> {
+    let client = create_test_client(endpoint_url);
+    tokio::time::timeout(DEFAULT_TIMEOUT_TX_TO_BE_MINED, async {
+        loop {
+            let current = eth_block_number(&client).await?;
+            if current >= target_block {
+                return <Result<()>>::Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .map_err(|_| eyre!("timeout waiting for canonical block {target_block}"))?
 }
 
 /// Waits for a transaction receipt with timeout
