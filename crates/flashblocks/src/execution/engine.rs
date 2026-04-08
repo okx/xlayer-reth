@@ -150,6 +150,13 @@ where
         ctx: TreeCtx<'_, N>,
     ) -> ValidationOutcome<N> {
         let num_hash = payload.num_hash();
+        // SAFETY: `blocking_lock()` is safe here because the engine tree runs on a dedicated
+        // OS thread (`spawn_os_thread("engine", ...)` in `reth-engine-tree`), not a tokio
+        // worker. These `EngineValidator` trait methods are only called from
+        // `insert_block_or_payload` within that thread's synchronous `run()` loop.
+        // The init helpers (`set_flashblocks`, `get_changeset_cache`, `get_payload_processor`)
+        // use `block_in_place` instead because they are called from async context during
+        // node startup.
         let mut guard = self.inner.blocking_lock();
 
         if let Some(executed_block) = guard.try_flashblocks_cache_hit(&num_hash) {
@@ -173,6 +180,8 @@ where
         ctx: TreeCtx<'_, N>,
     ) -> ValidationOutcome<N> {
         let num_hash = block.num_hash();
+        // SAFETY: Called from the engine tree's dedicated OS thread. See comment in
+        // `validate_payload` above for details.
         let mut guard = self.inner.blocking_lock();
 
         if let Some(executed_block) = guard.try_flashblocks_cache_hit(&num_hash) {
@@ -199,6 +208,8 @@ where
     }
 
     fn on_inserted_executed_block(&self, block: ExecutedBlock<N>) {
+        // SAFETY: Called from the engine tree's dedicated OS thread. See comment in
+        // `validate_payload` above for details.
         self.inner.blocking_lock().engine_validator.on_inserted_executed_block(block);
     }
 }
