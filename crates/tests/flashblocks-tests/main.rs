@@ -43,6 +43,7 @@ async fn fb_flashblocks_enabled_returns_true_test() {
 
 /// Verifies that `eth_flashblocksEnabled` returns `false` on a node without flashblocks.
 #[tokio::test]
+#[ignore = "requires non-flashblocks node"]
 async fn fb_flashblocks_enabled_returns_false_on_non_fb_node_test() {
     let non_fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_NO_FB);
 
