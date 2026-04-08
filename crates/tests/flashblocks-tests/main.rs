@@ -2075,3 +2075,180 @@ async fn fb_benchmark_new_transactions_subscription_test() -> Result<()> {
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// eth_getLogs — flashblock cache overlay tests
+// ---------------------------------------------------------------------------
+
+/// Verifies that `eth_getLogs` returns logs from a flashblock when queried
+/// with the exact block number the transaction landed in.
+#[tokio::test]
+async fn fb_get_logs_by_block_number_test() {
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+    let contracts = operations::try_deploy_contracts().await.expect("Failed to deploy contracts");
+    let test_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
+
+    let tx_hash = operations::erc20_balance_transfer(
+        operations::DEFAULT_L2_NETWORK_URL_FB,
+        U256::from(operations::GWEI),
+        None,
+        test_address,
+        contracts.erc20,
+        None,
+    )
+    .await
+    .expect("ERC20 transfer failed");
+
+    let receipt = operations::eth_get_transaction_receipt(&fb_client, &tx_hash)
+        .await
+        .expect("eth_getTransactionReceipt failed");
+    assert!(!receipt.is_null(), "Receipt should not be null");
+
+    let tx_block_number = receipt["blockNumber"]
+        .as_str()
+        .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        .expect("Failed to parse block number from receipt");
+
+    let transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+    let logs = operations::eth_get_logs(
+        &fb_client,
+        Some(operations::BlockId::Number(tx_block_number)),
+        Some(operations::BlockId::Number(tx_block_number)),
+        Some(&format!("{:#x}", contracts.erc20)),
+        Some(vec![transfer_topic.to_string()]),
+    )
+    .await
+    .expect("eth_getLogs with block number failed");
+
+    let logs_arr = logs.as_array().expect("Logs should be an array");
+    assert!(!logs_arr.is_empty(), "Should have at least one Transfer log");
+
+    let our_log = logs_arr
+        .iter()
+        .find(|log| log["transactionHash"].as_str() == Some(tx_hash.as_str()))
+        .expect("Should find our Transfer log by block number");
+
+    assert_eq!(
+        our_log["address"].as_str().unwrap().to_lowercase(),
+        format!("{:#x}", contracts.erc20).to_lowercase(),
+        "Log address should match ERC20 contract"
+    );
+}
+
+/// Verifies that `eth_getLogs` with `blockHash` filter returns logs from a
+/// flashblock-cached block.
+#[tokio::test]
+async fn fb_get_logs_by_block_hash_test() {
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+    let contracts = operations::try_deploy_contracts().await.expect("Failed to deploy contracts");
+    let test_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
+
+    // Send a transfer
+    let tx_hash = operations::erc20_balance_transfer(
+        operations::DEFAULT_L2_NETWORK_URL_FB,
+        U256::from(operations::GWEI),
+        None,
+        test_address,
+        contracts.erc20,
+        None,
+    )
+    .await
+    .expect("ERC20 transfer failed");
+
+    let receipt = operations::eth_get_transaction_receipt(&fb_client, &tx_hash)
+        .await
+        .expect("eth_getTransactionReceipt failed");
+    assert!(!receipt.is_null(), "Receipt should not be null");
+
+    let block_hash = receipt["blockHash"].as_str().expect("Receipt should contain blockHash");
+
+    // Query logs by blockHash
+    let transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+    let logs = operations::eth_get_logs_by_block_hash(
+        &fb_client,
+        block_hash,
+        Some(&format!("{:#x}", contracts.erc20)),
+        Some(vec![transfer_topic.to_string()]),
+    )
+    .await
+    .expect("eth_getLogs with blockHash failed");
+
+    let logs_arr = logs.as_array().expect("Logs should be an array");
+    assert!(!logs_arr.is_empty(), "Should have at least one Transfer log from block hash query");
+
+    let our_log = logs_arr
+        .iter()
+        .find(|log| log["transactionHash"].as_str() == Some(tx_hash.as_str()))
+        .expect("Should find our Transfer log by block hash");
+
+    assert_eq!(
+        our_log["address"].as_str().unwrap().to_lowercase(),
+        format!("{:#x}", contracts.erc20).to_lowercase(),
+        "Log address should match ERC20 contract"
+    );
+}
+
+/// Verifies that `eth_getLogs` with a range spanning both canonical and
+/// flashblock-cached blocks returns logs in ascending order.
+#[tokio::test]
+async fn fb_get_logs_cross_boundary_range_test() {
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+    let contracts = operations::try_deploy_contracts().await.expect("Failed to deploy contracts");
+    let test_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
+
+    // Get the current canonical height
+    let canonical_height =
+        operations::eth_block_number(&fb_client).await.expect("Failed to get block number");
+
+    // Send a transfer so a flashblock ahead of canonical has a log
+    let tx_hash = operations::erc20_balance_transfer(
+        operations::DEFAULT_L2_NETWORK_URL_FB,
+        U256::from(operations::GWEI),
+        None,
+        test_address,
+        contracts.erc20,
+        None,
+    )
+    .await
+    .expect("ERC20 transfer failed");
+
+    let receipt = operations::eth_get_transaction_receipt(&fb_client, &tx_hash)
+        .await
+        .expect("eth_getTransactionReceipt failed");
+    assert!(!receipt.is_null(), "Receipt should not be null");
+
+    // Query a range that starts a few blocks before canonical height and goes
+    // to latest, ensuring we cross the canonical → flashblock boundary.
+    let from_block = canonical_height.saturating_sub(2);
+    let transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+    let logs = operations::eth_get_logs(
+        &fb_client,
+        Some(operations::BlockId::Number(from_block)),
+        Some(operations::BlockId::Pending),
+        Some(&format!("{:#x}", contracts.erc20)),
+        Some(vec![transfer_topic.to_string()]),
+    )
+    .await
+    .expect("eth_getLogs cross-boundary range failed");
+
+    let logs_arr = logs.as_array().expect("Logs should be an array");
+
+    // Verify ascending block number order
+    let mut prev_block: u64 = 0;
+    for log in logs_arr {
+        let block_num = log["blockNumber"]
+            .as_str()
+            .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+            .expect("Log should have a valid blockNumber");
+        assert!(
+            block_num >= prev_block,
+            "Logs must be in ascending block order: got {block_num} after {prev_block}"
+        );
+        prev_block = block_num;
+    }
+
+    // Our transfer should be in the results
+    let our_log =
+        logs_arr.iter().find(|log| log["transactionHash"].as_str() == Some(tx_hash.as_str()));
+    assert!(our_log.is_some(), "Should find our Transfer log in cross-boundary range");
+}
