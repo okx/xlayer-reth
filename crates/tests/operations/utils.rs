@@ -28,10 +28,14 @@ pub struct DeployedContracts {
     pub contract_b: Address,
     /// Address of Contract C
     pub contract_c: Address,
-    /// Address of the contract factory
+    /// Address of the contract factory (CREATE opcode)
     pub factory: Address,
     /// Address of the ERC20 token contract
     pub erc20: Address,
+    /// Address of the CREATE2 factory contract
+    pub create2_factory: Address,
+    /// Address of the precompile caller contract
+    pub precompile_caller: Address,
 }
 
 /// Create a new HTTP client for the given endpoint URL
@@ -215,8 +219,28 @@ pub async fn try_deploy_contracts() -> Result<&'static DeployedContracts> {
     let erc20 = deploy_contract(DEFAULT_L2_NETWORK_URL, ERC20_BYTECODE_STR, None).await?;
     println!("ERC20 deployed at: {erc20:#x}");
 
+    // Deploy Create2Factory (no constructor args)
+    println!("Deploying Create2Factory...");
+    let create2_factory =
+        deploy_contract(DEFAULT_L2_NETWORK_URL, CREATE2_FACTORY_BYTECODE_STR, None).await?;
+    println!("Create2Factory deployed at: {create2_factory:#x}");
+
+    // Deploy PrecompileCaller (no constructor args)
+    println!("Deploying PrecompileCaller...");
+    let precompile_caller =
+        deploy_contract(DEFAULT_L2_NETWORK_URL, PRECOMPILE_CALLER_BYTECODE_STR, None).await?;
+    println!("PrecompileCaller deployed at: {precompile_caller:#x}");
+
     // Store deployed contract addresses in global state
-    let contracts = DeployedContracts { contract_a, contract_b, contract_c, factory, erc20 };
+    let contracts = DeployedContracts {
+        contract_a,
+        contract_b,
+        contract_c,
+        factory,
+        erc20,
+        create2_factory,
+        precompile_caller,
+    };
 
     // Cache the deployed contracts (marks ContractsDeployed = true)
     DEPLOYED_CONTRACTS.set(contracts).map_err(|_| eyre!("Failed to cache deployed contracts"))?;
@@ -227,6 +251,8 @@ pub async fn try_deploy_contracts() -> Result<&'static DeployedContracts> {
     println!("ContractC: {contract_c:#x}");
     println!("Factory: {factory:#x}");
     println!("ERC20: {erc20:#x}");
+    println!("Create2Factory: {create2_factory:#x}");
+    println!("PrecompileCaller: {precompile_caller:#x}");
     println!("ContractsDeployed: true");
     Ok(DEPLOYED_CONTRACTS.get().unwrap())
 }
@@ -579,6 +605,101 @@ pub async fn make_contract_call(
         "transactionHash": format!("{:#x}", tx_hash),
         "receipt": receipt
     }))
+}
+
+/// Deploy a child contract via the `Create2Factory` using the given salt.
+/// Returns the tx hash of the deploy transaction.
+pub async fn deploy_via_create2(
+    endpoint_url: &str,
+    factory_address: Address,
+    salt: U256,
+) -> Result<String> {
+    sol! {
+        function deploy(uint256 salt) external payable returns (address addr);
+    }
+    let call = deployCall { salt };
+    let calldata = Bytes::from(call.abi_encode());
+
+    let signer = PrivateKeySigner::from_str(DEFAULT_RICH_PRIVATE_KEY.trim_start_matches("0x"))?;
+    let wallet = EthereumWallet::from(signer.clone());
+    let provider = ProviderBuilder::new().wallet(wallet).connect_http(endpoint_url.parse()?);
+
+    let from = signer.address();
+    let nonce = provider.get_transaction_count(from).pending().await?;
+    let gas_price = provider.get_gas_price().await?;
+    let tx = TransactionRequest::default()
+        .with_from(from)
+        .with_to(factory_address)
+        .with_input(calldata)
+        .with_nonce(nonce)
+        .with_chain_id(DEFAULT_L2_CHAIN_ID)
+        .with_gas_limit(500_000)
+        .with_gas_price(gas_price);
+    let pending_tx = provider.send_transaction(tx).await?;
+    let tx_hash = *pending_tx.tx_hash();
+    Ok(format!("{tx_hash:#x}"))
+}
+
+/// Compute the deterministic CREATE2 address for a given salt via the factory.
+pub async fn compute_create2_address(
+    endpoint_url: &str,
+    factory_address: Address,
+    salt: U256,
+) -> Result<Address> {
+    sol! {
+        function computeAddress(uint256 salt) external view returns (address);
+    }
+    let call = computeAddressCall { salt };
+    let calldata = call.abi_encode();
+
+    let client = create_test_client(endpoint_url);
+    let call_args = serde_json::json!({
+        "to": factory_address,
+        "data": format!("0x{}", hex::encode(&calldata)),
+    });
+    let result =
+        crate::operations::eth_call(&client, Some(call_args), Some(BlockId::Latest)).await?;
+
+    let bytes = hex::decode(result.trim_start_matches("0x"))?;
+    if bytes.len() < 32 {
+        return Err(eyre!("computeAddress returned unexpected length: {}", bytes.len()));
+    }
+    // Address is in the last 20 bytes of the 32-byte ABI-encoded word
+    Ok(Address::from_slice(&bytes[12..32]))
+}
+
+/// Destroy a child contract via the `Create2Factory`.
+/// Returns the tx hash.
+pub async fn destroy_via_factory(
+    endpoint_url: &str,
+    factory_address: Address,
+    child_address: Address,
+    recipient: Address,
+) -> Result<String> {
+    sol! {
+        function destroyChild(address child, address recipient) external;
+    }
+    let call = destroyChildCall { child: child_address, recipient };
+    let calldata = Bytes::from(call.abi_encode());
+
+    let signer = PrivateKeySigner::from_str(DEFAULT_RICH_PRIVATE_KEY.trim_start_matches("0x"))?;
+    let wallet = EthereumWallet::from(signer.clone());
+    let provider = ProviderBuilder::new().wallet(wallet).connect_http(endpoint_url.parse()?);
+
+    let from = signer.address();
+    let nonce = provider.get_transaction_count(from).pending().await?;
+    let gas_price = provider.get_gas_price().await?;
+    let tx = TransactionRequest::default()
+        .with_from(from)
+        .with_to(factory_address)
+        .with_input(calldata)
+        .with_nonce(nonce)
+        .with_chain_id(DEFAULT_L2_CHAIN_ID)
+        .with_gas_limit(100_000)
+        .with_gas_price(gas_price);
+    let pending_tx = provider.send_transaction(tx).await?;
+    let tx_hash = *pending_tx.tx_hash();
+    Ok(format!("{tx_hash:#x}"))
 }
 
 /// Check if a flashblocks notification contains a specific transaction hash
