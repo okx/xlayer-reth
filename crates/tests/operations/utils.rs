@@ -1,10 +1,15 @@
 //! Utility functions for e2e functional tests
 
 use crate::operations::{
-    contracts::*, eth_block_number, eth_gas_price, eth_get_block_by_number_or_hash,
+    contracts::*, eth_block_number, eth_call, eth_gas_price, eth_get_block_by_number_or_hash,
     eth_get_transaction_count, eth_get_transaction_receipt, get_balance, manager::*, BlockId,
-    HttpClient,
+    HttpClient, GWEI,
 };
+use eyre::{eyre, Result};
+use serde_json;
+use std::{collections::HashMap, str::FromStr, sync::OnceLock};
+use tokio::time::{sleep, Duration};
+
 use alloy_eips::eip2718::Encodable2718;
 use alloy_network::{EthereumWallet, TransactionBuilder};
 use alloy_primitives::{hex, Address, Bytes, U256};
@@ -12,10 +17,6 @@ use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{sol, SolCall, SolValue};
-use eyre::{eyre, Result};
-use serde_json;
-use std::{collections::HashMap, str::FromStr, sync::OnceLock};
-use tokio::time::{sleep, Duration};
 
 static DEPLOYED_CONTRACTS: OnceLock<DeployedContracts> = OnceLock::new();
 
@@ -432,6 +433,54 @@ pub async fn transfer_erc20_token_batch(
     Ok((tx_hashes, block_number, block_hash))
 }
 
+/// Shared setup for comparison tests that need transactions confirmed on both nodes.
+/// Sends a batch of ERC20 transfers and waits for the block to be available on both nodes.
+/// Returns (fb_client, non_fb_client, tx_hashes, block_num, fb_block_hash, non_fb_block_hash, contracts).
+pub async fn comparison_test_setup() -> (
+    jsonrpsee::http_client::HttpClient,
+    jsonrpsee::http_client::HttpClient,
+    Vec<String>,
+    u64,
+    String,
+    String,
+    &'static DeployedContracts,
+) {
+    let fb_client = create_test_client(DEFAULT_L2_NETWORK_URL_FB);
+    let non_fb_client = create_test_client(DEFAULT_L2_NETWORK_URL_NO_FB);
+    let test_address = DEFAULT_L2_NEW_ACC1_ADDRESS;
+
+    let contracts = try_deploy_contracts().await.expect("Failed to deploy contracts");
+
+    let (tx_hashes, block_num, _) = transfer_erc20_token_batch(
+        DEFAULT_L2_NETWORK_URL_FB,
+        contracts.erc20,
+        U256::from(GWEI),
+        test_address,
+        5,
+    )
+    .await
+    .expect("Failed to transfer batch ERC20 tokens");
+
+    wait_for_block_on_both_nodes(&fb_client, &non_fb_client, block_num, Duration::from_secs(10))
+        .await
+        .expect("Failed to wait for block on both nodes");
+
+    let fb_block = eth_get_block_by_number_or_hash(&fb_client, BlockId::Number(block_num), false)
+        .await
+        .expect("Failed to get block from fb client");
+    let fb_block_hash =
+        fb_block["hash"].as_str().expect("Block hash should not be empty").to_string();
+
+    let non_fb_block =
+        eth_get_block_by_number_or_hash(&non_fb_client, BlockId::Number(block_num), false)
+            .await
+            .expect("Failed to get block from non-fb client");
+    let non_fb_block_hash =
+        non_fb_block["hash"].as_str().expect("Block hash should not be empty").to_string();
+
+    (fb_client, non_fb_client, tx_hashes, block_num, fb_block_hash, non_fb_block_hash, contracts)
+}
+
 /// Waits until all pending transactions for the rich address are confirmed.
 /// This ensures a clean nonce state between tests so they don't interfere with each other.
 pub async fn settle_pending_transactions(endpoint_url: &str) -> Result<()> {
@@ -700,8 +749,7 @@ pub async fn compute_create2_address(
         "to": factory_address,
         "data": format!("0x{}", hex::encode(&calldata)),
     });
-    let result =
-        crate::operations::eth_call(&client, Some(call_args), Some(BlockId::Latest)).await?;
+    let result = eth_call(&client, Some(call_args), Some(BlockId::Latest)).await?;
 
     let bytes = hex::decode(result.trim_start_matches("0x"))?;
     if bytes.len() < 32 {

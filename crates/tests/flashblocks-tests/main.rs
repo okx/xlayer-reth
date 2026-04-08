@@ -4,8 +4,6 @@
 //! Run all tests (including ignored): `cargo test -p xlayer-e2e-test --test flashblocks_tests -- --include-ignored --nocapture --test-threads=1`
 //! Run a specific test: `cargo test -p xlayer-e2e-test --test flashblocks_tests -- <test_case_name> --include-ignored --nocapture --test-threads=1`
 
-use alloy_primitives::{hex, Address, U256};
-use alloy_sol_types::{sol, SolCall};
 use eyre::Result;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -16,6 +14,10 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+use alloy_primitives::{hex, Address, U256};
+use alloy_sol_types::{sol, SolCall};
+
 use xlayer_e2e_test::operations;
 
 const ITERATIONS: usize = 11;
@@ -23,8 +25,9 @@ const TX_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(10);
 const WEB_SOCKET_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ========================================================================
-// get_tx_info — pending, confirm, missing (split into 3 tests)
+// Flashblocks pending state tests
 // ========================================================================
+
 /// Verifies that the flashblocks node serves pending block data AHEAD of the canonical chain.
 /// This is the core low-latency property: sub-block-time visibility.
 #[tokio::test]
@@ -258,103 +261,6 @@ async fn fb_pending_state_queries_test() {
     .await
     .expect("Pending eth_estimateGas failed");
     assert_eq!(gas, 21_000, "Estimate gas for native transfer should be 21_000");
-}
-
-/// Verifies `eth_sendRawTransactionSync` returns inclusion data synchronously.
-#[tokio::test]
-async fn fb_send_raw_transaction_sync_test() {
-    operations::settle_pending_transactions(operations::DEFAULT_L2_NETWORK_URL_FB)
-        .await
-        .expect("Failed to settle pending transactions");
-
-    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
-    let test_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
-
-    let raw_tx = operations::sign_raw_transaction(
-        operations::DEFAULT_L2_NETWORK_URL_FB,
-        U256::from(operations::GWEI),
-        test_address,
-    )
-    .await
-    .expect("Failed to sign raw transaction");
-
-    let response = operations::eth_send_raw_transaction_sync(&fb_client, &raw_tx)
-        .await
-        .expect("eth_sendRawTransactionSync failed");
-    assert!(!response.is_null(), "Response should not be null");
-
-    // Verify sync inclusion data in the response
-    let tx_hash =
-        response["transactionHash"].as_str().expect("Response must contain transactionHash");
-    assert!(tx_hash.starts_with("0x"), "Transaction hash should start with 0x");
-
-    let block_number = response["blockNumber"]
-        .as_str()
-        .expect("Response must contain blockNumber for sync inclusion proof");
-    assert!(block_number.starts_with("0x"), "Block number should be hex-encoded");
-
-    // Verify the tx is immediately visible
-    let tx = operations::eth_get_transaction_by_hash(&fb_client, tx_hash)
-        .await
-        .expect("eth_getTransactionByHash after sync send failed");
-    assert!(!tx.is_null(), "Transaction should be visible after eth_sendRawTransactionSync");
-}
-
-/// Negative tests for flashblock RPCs
-#[tokio::test]
-async fn fb_negative_test() {
-    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
-
-    // Non-existent block returns null
-    let result = operations::eth_get_block_by_number_or_hash(
-        &fb_client,
-        operations::BlockId::Number(0xFFFFFFFF),
-        false,
-    )
-    .await
-    .expect("eth_getBlockByNumber should not return an RPC error for non-existent block");
-    assert!(result.is_null(), "Non-existent block should return null, got: {result}");
-
-    // Non-existent tx returns null
-    let fake_hash = "0x0000000000000000000000000000000000000000000000000000000000000001";
-
-    let tx = operations::eth_get_transaction_by_hash(&fb_client, fake_hash)
-        .await
-        .expect("eth_getTransactionByHash should not return an RPC error for non-existent tx");
-    assert!(tx.is_null(), "Non-existent tx should return null, got: {tx}");
-
-    let receipt = operations::eth_get_transaction_receipt(&fb_client, fake_hash)
-        .await
-        .expect("eth_getTransactionReceipt should not return an RPC error for non-existent tx");
-    assert!(receipt.is_null(), "Non-existent tx receipt should return null, got: {receipt}");
-
-    // Invalid raw tx is rejected
-    let result = operations::eth_send_raw_transaction_sync(&fb_client, "0xdeadbeef").await;
-    assert!(
-        result.is_err(),
-        "eth_sendRawTransactionSync with invalid tx should return an error, got: {result:?}"
-    );
-
-    // eth_call with invalid selector reverts
-    let contracts = operations::try_deploy_contracts().await.expect("Failed to deploy contracts");
-
-    let call_args = json!({
-        "from": operations::DEFAULT_RICH_ADDRESS,
-        "to": contracts.erc20,
-        "gas": "0x100000",
-        "data": "0xdeadbeef",
-    });
-
-    let result =
-        operations::eth_call(&fb_client, Some(call_args), Some(operations::BlockId::Pending)).await;
-    assert!(result.is_err(), "eth_call with invalid selector should revert, got: {result:?}");
-
-    // eth_getRawTransactionByBlockNumberAndIndex with out-of-range index returns null
-    let result =
-        operations::eth_get_raw_transaction_by_block_number_and_index(&fb_client, "0x1", "0xFFFF")
-            .await
-            .expect("eth_getRawTransactionByBlockNumberAndIndex should not error for bad index");
-    assert!(result.is_null(), "Out-of-range tx index should return null, got: {result}");
 }
 
 /// Verifies that deploying a contract via CREATE2 through the flashblocks node
@@ -841,6 +747,10 @@ async fn fb_pending_state_transition_across_blocks_test() {
     );
 }
 
+// ========================================================================
+// Flashblocks cache correctioness tests
+// ========================================================================
+
 /// Cache correctness test: snapshots all confirmed flashblock cache entries currently ahead
 /// of the canonical chain, writes them to a file, waits for canonical to catch up, then
 /// compares against the non-flashblock canonical node to verify the cache was correct.
@@ -989,6 +899,10 @@ async fn fb_cache_correctness_test() {
     assert_eq!(mismatches, 0, "{mismatches} cache mismatch(es) — flashblock cache was incorrect");
 }
 
+// ========================================================================
+// Flashblocks benchmark tests
+// ========================================================================
+
 /// Flashblock native balance transfer tx confirmation benchmark between a flashblock
 /// node and a non-flashblock node.
 #[ignore = "Requires a second non-flashblock RPC node to be running"]
@@ -1134,70 +1048,106 @@ async fn fb_benchmark_erc20_tx_confirmation_test() {
     println!("Avg non-flashblocks erc20 tx transfer confirmation took: {avg_non_fb_duration}ms");
 }
 
-/// Shared setup for comparison tests that need transactions confirmed on both nodes.
-/// Sends a batch of ERC20 transfers and waits for the block to be available on both nodes.
-/// Returns (fb_client, non_fb_client, tx_hashes, block_num, fb_block_hash, non_fb_block_hash, contracts).
-async fn comparison_test_setup() -> (
-    jsonrpsee::http_client::HttpClient,
-    jsonrpsee::http_client::HttpClient,
-    Vec<String>,
-    u64,
-    String,
-    String,
-    &'static operations::DeployedContracts,
-) {
+// ========================================================================
+// Flashblocks Eth RPC API tests
+// ========================================================================
+
+/// Verifies `eth_sendRawTransactionSync` returns inclusion data synchronously.
+#[tokio::test]
+async fn fb_send_raw_transaction_sync_test() {
+    operations::settle_pending_transactions(operations::DEFAULT_L2_NETWORK_URL_FB)
+        .await
+        .expect("Failed to settle pending transactions");
+
     let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
-    let non_fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_NO_FB);
     let test_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
 
-    let contracts = operations::try_deploy_contracts().await.expect("Failed to deploy contracts");
-
-    let (tx_hashes, block_num, _) = operations::transfer_erc20_token_batch(
+    let raw_tx = operations::sign_raw_transaction(
         operations::DEFAULT_L2_NETWORK_URL_FB,
-        contracts.erc20,
         U256::from(operations::GWEI),
         test_address,
-        5,
     )
     .await
-    .expect("Failed to transfer batch ERC20 tokens");
+    .expect("Failed to sign raw transaction");
 
-    operations::wait_for_block_on_both_nodes(
-        &fb_client,
-        &non_fb_client,
-        block_num,
-        Duration::from_secs(10),
-    )
-    .await
-    .expect("Failed to wait for block on both nodes");
+    let response = operations::eth_send_raw_transaction_sync(&fb_client, &raw_tx)
+        .await
+        .expect("eth_sendRawTransactionSync failed");
+    assert!(!response.is_null(), "Response should not be null");
 
-    let fb_block = operations::eth_get_block_by_number_or_hash(
-        &fb_client,
-        operations::BlockId::Number(block_num),
-        false,
-    )
-    .await
-    .expect("Failed to get block from fb client");
-    let fb_block_hash =
-        fb_block["hash"].as_str().expect("Block hash should not be empty").to_string();
+    // Verify sync inclusion data in the response
+    let tx_hash =
+        response["transactionHash"].as_str().expect("Response must contain transactionHash");
+    assert!(tx_hash.starts_with("0x"), "Transaction hash should start with 0x");
 
-    let non_fb_block = operations::eth_get_block_by_number_or_hash(
-        &non_fb_client,
-        operations::BlockId::Number(block_num),
-        false,
-    )
-    .await
-    .expect("Failed to get block from non-fb client");
-    let non_fb_block_hash =
-        non_fb_block["hash"].as_str().expect("Block hash should not be empty").to_string();
+    let block_number = response["blockNumber"]
+        .as_str()
+        .expect("Response must contain blockNumber for sync inclusion proof");
+    assert!(block_number.starts_with("0x"), "Block number should be hex-encoded");
 
-    (fb_client, non_fb_client, tx_hashes, block_num, fb_block_hash, non_fb_block_hash, contracts)
+    // Verify the tx is immediately visible
+    let tx = operations::eth_get_transaction_by_hash(&fb_client, tx_hash)
+        .await
+        .expect("eth_getTransactionByHash after sync send failed");
+    assert!(!tx.is_null(), "Transaction should be visible after eth_sendRawTransactionSync");
 }
 
-// ---------------------------------------------------------------------------
-// Flashblock RPC comparison tests — each API gets its own test for independent
-// pass/fail reporting. All are #[ignore] since they require two nodes running.
-// ---------------------------------------------------------------------------
+/// Negative tests for flashblock RPCs
+#[tokio::test]
+async fn fb_negative_test() {
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+
+    // Non-existent block returns null
+    let result = operations::eth_get_block_by_number_or_hash(
+        &fb_client,
+        operations::BlockId::Number(0xFFFFFFFF),
+        false,
+    )
+    .await
+    .expect("eth_getBlockByNumber should not return an RPC error for non-existent block");
+    assert!(result.is_null(), "Non-existent block should return null, got: {result}");
+
+    // Non-existent tx returns null
+    let fake_hash = "0x0000000000000000000000000000000000000000000000000000000000000001";
+
+    let tx = operations::eth_get_transaction_by_hash(&fb_client, fake_hash)
+        .await
+        .expect("eth_getTransactionByHash should not return an RPC error for non-existent tx");
+    assert!(tx.is_null(), "Non-existent tx should return null, got: {tx}");
+
+    let receipt = operations::eth_get_transaction_receipt(&fb_client, fake_hash)
+        .await
+        .expect("eth_getTransactionReceipt should not return an RPC error for non-existent tx");
+    assert!(receipt.is_null(), "Non-existent tx receipt should return null, got: {receipt}");
+
+    // Invalid raw tx is rejected
+    let result = operations::eth_send_raw_transaction_sync(&fb_client, "0xdeadbeef").await;
+    assert!(
+        result.is_err(),
+        "eth_sendRawTransactionSync with invalid tx should return an error, got: {result:?}"
+    );
+
+    // eth_call with invalid selector reverts
+    let contracts = operations::try_deploy_contracts().await.expect("Failed to deploy contracts");
+
+    let call_args = json!({
+        "from": operations::DEFAULT_RICH_ADDRESS,
+        "to": contracts.erc20,
+        "gas": "0x100000",
+        "data": "0xdeadbeef",
+    });
+
+    let result =
+        operations::eth_call(&fb_client, Some(call_args), Some(operations::BlockId::Pending)).await;
+    assert!(result.is_err(), "eth_call with invalid selector should revert, got: {result:?}");
+
+    // eth_getRawTransactionByBlockNumberAndIndex with out-of-range index returns null
+    let result =
+        operations::eth_get_raw_transaction_by_block_number_and_index(&fb_client, "0x1", "0xFFFF")
+            .await
+            .expect("eth_getRawTransactionByBlockNumberAndIndex should not error for bad index");
+    assert!(result.is_null(), "Out-of-range tx index should return null, got: {result}");
+}
 
 #[ignore = "Requires a second non-flashblock RPC node to be running"]
 #[tokio::test]
@@ -1275,7 +1225,7 @@ async fn fb_compare_get_block_by_hash() {
 #[tokio::test]
 async fn fb_compare_get_block_transaction_count() {
     let (fb_client, non_fb_client, _, block_num, fb_block_hash, non_fb_block_hash, _) =
-        comparison_test_setup().await;
+        operations::comparison_test_setup().await;
 
     // By number
     let fb_count = operations::eth_get_block_transaction_count_by_number_or_hash(
@@ -1319,7 +1269,8 @@ async fn fb_compare_get_block_transaction_count() {
 #[ignore = "Requires a second non-flashblock RPC node to be running"]
 #[tokio::test]
 async fn fb_compare_get_transaction_by_hash() {
-    let (fb_client, non_fb_client, tx_hashes, _, _, _, _) = comparison_test_setup().await;
+    let (fb_client, non_fb_client, tx_hashes, _, _, _, _) =
+        operations::comparison_test_setup().await;
 
     for tx_hash in &tx_hashes {
         let fb_tx = operations::eth_get_transaction_by_hash(&fb_client, tx_hash)
@@ -1335,7 +1286,8 @@ async fn fb_compare_get_transaction_by_hash() {
 #[ignore = "Requires a second non-flashblock RPC node to be running"]
 #[tokio::test]
 async fn fb_compare_get_raw_transaction_by_hash() {
-    let (fb_client, non_fb_client, tx_hashes, _, _, _, _) = comparison_test_setup().await;
+    let (fb_client, non_fb_client, tx_hashes, _, _, _, _) =
+        operations::comparison_test_setup().await;
 
     for tx_hash in &tx_hashes {
         let fb_raw = operations::eth_get_raw_transaction_by_hash(&fb_client, tx_hash)
@@ -1351,7 +1303,8 @@ async fn fb_compare_get_raw_transaction_by_hash() {
 #[ignore = "Requires a second non-flashblock RPC node to be running"]
 #[tokio::test]
 async fn fb_compare_get_transaction_receipt() {
-    let (fb_client, non_fb_client, tx_hashes, _, _, _, _) = comparison_test_setup().await;
+    let (fb_client, non_fb_client, tx_hashes, _, _, _, _) =
+        operations::comparison_test_setup().await;
 
     for tx_hash in &tx_hashes {
         let fb_receipt = operations::eth_get_transaction_receipt(&fb_client, tx_hash)
@@ -1367,7 +1320,8 @@ async fn fb_compare_get_transaction_receipt() {
 #[ignore = "Requires a second non-flashblock RPC node to be running"]
 #[tokio::test]
 async fn fb_compare_get_transaction_by_block_number_and_index() {
-    let (fb_client, non_fb_client, tx_hashes, block_num, _, _, _) = comparison_test_setup().await;
+    let (fb_client, non_fb_client, tx_hashes, block_num, _, _, _) =
+        operations::comparison_test_setup().await;
 
     for tx_hash in &tx_hashes {
         let receipt = operations::eth_get_transaction_receipt(&fb_client, tx_hash)
@@ -1398,7 +1352,7 @@ async fn fb_compare_get_transaction_by_block_number_and_index() {
 #[tokio::test]
 async fn fb_compare_get_transaction_by_block_hash_and_index() {
     let (fb_client, non_fb_client, tx_hashes, _, fb_block_hash, non_fb_block_hash, _) =
-        comparison_test_setup().await;
+        operations::comparison_test_setup().await;
 
     for tx_hash in &tx_hashes {
         let receipt = operations::eth_get_transaction_receipt(&fb_client, tx_hash)
@@ -1428,7 +1382,8 @@ async fn fb_compare_get_transaction_by_block_hash_and_index() {
 #[ignore = "Requires a second non-flashblock RPC node to be running"]
 #[tokio::test]
 async fn fb_compare_get_raw_transaction_by_block_number_and_index() {
-    let (fb_client, non_fb_client, tx_hashes, block_num, _, _, _) = comparison_test_setup().await;
+    let (fb_client, non_fb_client, tx_hashes, block_num, _, _, _) =
+        operations::comparison_test_setup().await;
 
     let block_num_hex = format!("0x{block_num:x}");
     for tx_hash in &tx_hashes {
@@ -1460,7 +1415,7 @@ async fn fb_compare_get_raw_transaction_by_block_number_and_index() {
 #[tokio::test]
 async fn fb_compare_get_raw_transaction_by_block_hash_and_index() {
     let (fb_client, non_fb_client, tx_hashes, _, fb_block_hash, non_fb_block_hash, _) =
-        comparison_test_setup().await;
+        operations::comparison_test_setup().await;
 
     for tx_hash in &tx_hashes {
         let receipt = operations::eth_get_transaction_receipt(&fb_client, tx_hash)
@@ -1490,7 +1445,8 @@ async fn fb_compare_get_raw_transaction_by_block_hash_and_index() {
 #[ignore = "Requires a second non-flashblock RPC node to be running"]
 #[tokio::test]
 async fn fb_compare_get_block_receipts() {
-    let (fb_client, non_fb_client, _, block_num, _, _, _) = comparison_test_setup().await;
+    let (fb_client, non_fb_client, _, block_num, _, _, _) =
+        operations::comparison_test_setup().await;
 
     let fb_receipts =
         operations::eth_get_block_receipts(&fb_client, operations::BlockId::Number(block_num))
@@ -1507,7 +1463,7 @@ async fn fb_compare_get_block_receipts() {
 #[tokio::test]
 async fn fb_compare_get_logs() {
     let (fb_client, non_fb_client, _, block_num, fb_block_hash, non_fb_block_hash, _) =
-        comparison_test_setup().await;
+        operations::comparison_test_setup().await;
 
     // By block number range
     let fb_logs = operations::eth_get_logs(
@@ -1554,7 +1510,7 @@ async fn fb_compare_get_logs() {
 #[tokio::test]
 async fn fb_compare_call() {
     let (fb_client, non_fb_client, _, block_num, fb_block_hash, non_fb_block_hash, contracts) =
-        comparison_test_setup().await;
+        operations::comparison_test_setup().await;
     let test_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
 
     sol! {
@@ -1613,7 +1569,7 @@ async fn fb_compare_call() {
 #[tokio::test]
 async fn fb_compare_estimate_gas() {
     let (fb_client, non_fb_client, _, block_num, fb_block_hash, non_fb_block_hash, contracts) =
-        comparison_test_setup().await;
+        operations::comparison_test_setup().await;
     let test_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
 
     sol! {
@@ -1678,7 +1634,7 @@ async fn fb_compare_estimate_gas() {
 #[tokio::test]
 async fn fb_compare_get_balance() {
     let (fb_client, non_fb_client, _, block_num, fb_block_hash, non_fb_block_hash, _) =
-        comparison_test_setup().await;
+        operations::comparison_test_setup().await;
     let sender_address = operations::DEFAULT_RICH_ADDRESS;
 
     // By block number
@@ -1731,7 +1687,7 @@ async fn fb_compare_get_balance() {
 #[tokio::test]
 async fn fb_compare_get_transaction_count() {
     let (fb_client, non_fb_client, _, block_num, fb_block_hash, non_fb_block_hash, _) =
-        comparison_test_setup().await;
+        operations::comparison_test_setup().await;
     let sender_address = operations::DEFAULT_RICH_ADDRESS;
 
     // By block number
@@ -1784,7 +1740,7 @@ async fn fb_compare_get_transaction_count() {
 #[tokio::test]
 async fn fb_compare_get_code() {
     let (fb_client, non_fb_client, _, block_num, fb_block_hash, non_fb_block_hash, contracts) =
-        comparison_test_setup().await;
+        operations::comparison_test_setup().await;
     let erc20_addr = contracts.erc20.to_string();
 
     // By block number
@@ -1831,7 +1787,7 @@ async fn fb_compare_get_code() {
 #[tokio::test]
 async fn fb_compare_get_storage_at() {
     let (fb_client, non_fb_client, _, block_num, fb_block_hash, non_fb_block_hash, contracts) =
-        comparison_test_setup().await;
+        operations::comparison_test_setup().await;
     let erc20_addr = contracts.erc20.to_string();
 
     // By block number
