@@ -11,13 +11,13 @@ pub(crate) const FLASHBLOCKS_STREAM_PROTOCOL: crate::broadcast::StreamProtocol =
     crate::broadcast::StreamProtocol::new("/flashblocks/1.0.0");
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
-pub(crate) enum Message {
+pub enum Message {
     OpBuiltPayload(OpBuiltPayload),
     OpFlashblockPayload(OpFlashblockPayload),
 }
 
 impl Message {
-    pub(crate) fn protocol(&self) -> crate::broadcast::StreamProtocol {
+    pub fn protocol(&self) -> crate::broadcast::StreamProtocol {
         FLASHBLOCKS_STREAM_PROTOCOL
     }
 }
@@ -25,21 +25,21 @@ impl Message {
 /// Internal type analogous to [`reth_optimism_payload_builder::OpBuiltPayload`]
 /// which additionally implements `Serialize` and `Deserialize` for p2p transmission.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
-pub(crate) struct OpBuiltPayload {
+pub struct OpBuiltPayload {
     /// Identifier of the payload
-    pub(crate) id: PayloadId,
+    pub id: PayloadId,
     /// Sealed block
-    pub(crate) block: SealedBlock<OpBlock>,
+    pub block: SealedBlock<OpBlock>,
     /// The fees of the block
-    pub(crate) fees: U256,
+    pub fees: U256,
 }
 
 impl Message {
-    pub(crate) fn from_built_payload(value: RethOpBuiltPayload) -> Self {
+    pub fn from_built_payload(value: RethOpBuiltPayload) -> Self {
         Message::OpBuiltPayload(value.into())
     }
 
-    pub(crate) fn from_flashblock_payload(value: OpFlashblockPayload) -> Self {
+    pub fn from_flashblock_payload(value: OpFlashblockPayload) -> Self {
         Message::OpFlashblockPayload(value)
     }
 }
