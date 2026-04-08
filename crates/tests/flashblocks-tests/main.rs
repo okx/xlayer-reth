@@ -25,6 +25,35 @@ const TX_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(10);
 const WEB_SOCKET_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ========================================================================
+// Flashblocks enabled/disabled tests
+// ========================================================================
+
+/// Verifies that `eth_flashblocksEnabled` returns `true` on a flashblocks-enabled node
+/// whose state cache has been initialized (confirm height > 0).
+#[tokio::test]
+async fn fb_flashblocks_enabled_returns_true_test() {
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+
+    let enabled = operations::eth_flashblocks_enabled(&fb_client)
+        .await
+        .expect("eth_flashblocksEnabled RPC call failed");
+
+    assert!(enabled, "eth_flashblocksEnabled should return true on a flashblocks-enabled node");
+}
+
+/// Verifies that `eth_flashblocksEnabled` returns `false` on a node without flashblocks.
+#[tokio::test]
+async fn fb_flashblocks_enabled_returns_false_on_non_fb_node_test() {
+    let non_fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_NO_FB);
+
+    let enabled = operations::eth_flashblocks_enabled(&non_fb_client)
+        .await
+        .expect("eth_flashblocksEnabled RPC call failed");
+
+    assert!(!enabled, "eth_flashblocksEnabled should return false on a non-flashblocks node");
+}
+
+// ========================================================================
 // Flashblocks pending state tests
 // ========================================================================
 
