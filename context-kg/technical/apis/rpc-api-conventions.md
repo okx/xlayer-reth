@@ -1,16 +1,36 @@
+---
+name: "rpc-api-conventions"
+description: "JSON-RPC conventions, response format, flashblock-aware query patterns, error handling"
+---
 # RPC API Conventions
 
 ## Standard Endpoints
 
 X Layer Reth serves all standard Ethereum JSON-RPC and OP-Reth endpoints without modification. These include `eth_*`, `debug_*`, `net_*`, `web3_*`, `txpool_*`, and `engine_*` namespaces.
 
+## Flashblock-Aware Query Overrides
+
+The following standard eth methods are overridden with cache-aware versions via `FlashblocksEthApiOverride` and `FlashblocksFilterOverride`:
+
+| Method | Override Behavior |
+|--------|-------------------|
+| `eth_blockNumber` | Returns max of canonical and flashblock pending height |
+| `eth_getBlockByNumber` | Checks flashblock cache first for pending/latest/numbered blocks |
+| `eth_getBlockByHash` | Checks flashblock cache first by hash |
+| `eth_getTransactionByHash` | Looks up CachedTxInfo from flashblock state cache |
+| `eth_getBlockReceipts` | Returns receipts from flashblock cache for pending/confirmed blocks |
+| `eth_getTransactionReceipt` | Returns receipt from CachedTxInfo |
+| `eth_getLogs` | Splits query into canonical and flashblock ranges, merges results |
+
+**Cache-first pattern**: Query FlashblockStateCache (pending → confirmed) first, fall back to standard Eth API provider.
+
 ## X Layer Custom Endpoints
 
-### `xlayer_flashblocksEnabled`
-- **Namespace**: `xlayer`
-- **Returns**: `bool` — `true` if a valid, non-expired pending flashblock is present
+### `eth_flashblocksEnabled`
+- **Namespace**: `eth`
+- **Returns**: `bool` — `true` if flashblocks cache is initialized AND confirm_height > 0
 - **Registration**: Added via `extend_rpc_modules` in `bin/node/src/main.rs`
-- **Implementation**: `crates/rpc/src/xlayer_ext.rs`
+- **Implementation**: `crates/rpc/src/default.rs`
 
 ## Flashblocks Subscription
 
@@ -22,8 +42,9 @@ X Layer Reth serves all standard Ethereum JSON-RPC and OP-Reth endpoints without
   - `sub_tx_filter.tx_info: bool` — Include full transaction data
   - `sub_tx_filter.tx_receipt: bool` — Include transaction receipt
 - **Max addresses**: Configurable via `--xlayer.flashblocks-subscription-max-addresses` (default: 1000)
-- **Event types**: `FlashblockStreamEvent::Header` or `FlashblockStreamEvent::Transaction`
-- **Implementation**: `crates/flashblocks/src/subscription.rs`
+- **Event types**: `FlashblockStreamEvent::Header`, `FlashblockStreamEvent::Transaction`, or `FlashblockStreamEvent::Receipt`
+- **Deduplication**: LRU tx hash cache (MAX_TXHASH_CACHE_SIZE=10000) prevents duplicate events
+- **Implementation**: `crates/flashblocks/src/subscription/rpc.rs`
 
 ## RPC Middleware Stack
 
@@ -52,6 +73,12 @@ debug_traceBlockByNumber      debug_traceBlockByHash
 debug_traceTransaction
 ```
 
+## Response Format
+
+- **Success**: `RpcResult<T>` — Direct T serialization with HTTP 200
+- **Error**: `ErrorObject` with `code` and `message` fields (standard JSON-RPC)
+- **Convention**: Use `RpcResult` wrapper type from jsonrpsee throughout
+
 ## Error Handling Pattern
 
 - Standard JSON-RPC error codes are used throughout
@@ -62,3 +89,9 @@ debug_traceTransaction
 ## Batch Request Support
 
 Both the monitoring and legacy routing middleware support batch JSON-RPC requests. Each request in a batch is processed individually through the same routing logic.
+
+## Pagination
+
+- **Log queries**: Block range-based pagination (fromBlock/toBlock)
+- **Flashblock-aware getLogs**: Splits query into canonical range and flashblock range, merges results sorted by block number
+- **Legacy routing for getLogs**: If fromBlock < cutoff_block, routes to legacy RPC endpoint

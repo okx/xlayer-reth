@@ -1,3 +1,7 @@
+---
+name: "service-patterns"
+description: "Service patterns: lock-protected state, async handlers, persistence, event loops"
+---
 # Conventions: Service Patterns
 
 ## 1. PayloadServiceBuilder Pattern
@@ -44,26 +48,39 @@ impl<S: RpcServiceT> RpcServiceT for MyService<S> {
 
 **Middleware stacking**: `(OuterLayer, InnerLayer)` — outer executes first for requests, last for responses.
 
-## 3. Event Loop Service Pattern
+## 3. Async Handler Pattern (NEW — replaces Event Loop Service)
 
-Long-running services with a `tokio::select!` event loop:
+Independent async handler functions spawned as separate tasks:
 
 ```rust
-impl MyService {
-    pub async fn run(mut self) {
-        loop {
-            tokio::select! {
-                Some(event) = self.receiver.recv() => { ... }
-                _ = self.shutdown.recv() => break,
-            }
-        }
-    }
+// Three independent handlers for flashblocks RPC
+handle_incoming_flashblocks(ws_stream, raw_cache, task_queue, broadcast_tx)
+handle_execution_tasks(task_queue, raw_cache, engine_validator, state_cache)
+handle_canonical_stream(canon_notifications, state_cache, raw_cache, task_queue)
+```
+
+**Benefit**: Each handler is independently testable and has clear input/output boundaries. Replaces the monolithic event loop pattern.
+
+**Instances**: `FlashblocksRpcService` spawns 5 handlers: incoming, execution, canonical, persistence, relay.
+
+## 4. Three-Layer Cache Pattern
+
+For flashblock state management:
+
+```rust
+FlashblockStateCache<N> {
+    pending_cache: Option<PendingSequence<N>>,     // Single in-progress
+    confirm_cache: ConfirmCache<N>,                // BTreeMap(height → block)
+    canonical: CanonicalInMemoryState<N>,          // Reth engine state
+    confirm_height: u64,                           // Highest confirmed
 }
 ```
 
-**Instances**: `FlashBlockService::run()`, `FlashBlockConsensusClient::run()`, `WebSocketPublisher`
+**Query pattern**: Check pending → confirmed → canonical (via standard provider).
+**Promotion**: sequence_end=true → pending promotes to confirm, pending cleared.
+**Flush**: On reorg → clear pending, clear confirm, reset confirm_height.
 
-## 4. Task Spawning Pattern
+## 5. Task Spawning Pattern
 
 ```rust
 // Critical task — node shuts down on panic
@@ -75,7 +92,7 @@ ctx.task_executor.spawn("task-name", Box::pin(async move { ... }));
 
 **Rule**: Payload building, consensus, and monitoring are critical. Metrics and WebSocket publishing are background.
 
-## 5. Builder Context Pattern
+## 6. Builder Context Pattern
 
 Encapsulate EVM execution state in a context struct:
 
@@ -91,35 +108,46 @@ pub struct FlashblocksBuilderCtx<EvmConfig> {
 
 The context provides methods for transaction execution, receipt building, and hardfork checks.
 
-## 6. Watch/Broadcast Channel Pattern
+## 7. Watch/Broadcast Channel Pattern
 
 For state distribution between producer and consumers:
 
 ```rust
-// Latest-value (watch) — pending block state
+// Latest-value (watch) — pending sequence state
 let (tx, rx) = tokio::sync::watch::channel(None);
 
-// Fan-out (broadcast) — flashblock sequences
+// Fan-out (broadcast) — flashblock messages
 let (tx, _) = tokio::sync::broadcast::channel(capacity);
 
 // Bounded MPSC — canonical block notifications
 let (tx, rx) = tokio::sync::mpsc::channel(capacity);
+
+// Blocking sync channel — scheduler signals
+let (tx, rx) = std::sync::mpsc::sync_channel(capacity);
 ```
 
-**Convention**: Watch for "current state" (overwrite is fine), broadcast for "events" (all consumers see all events), MPSC for "commands" (single consumer).
+**Convention**: Watch for "current state" (overwrite is fine), broadcast for "events" (all consumers see all events), MPSC for "commands" (single consumer), sync_channel for blocking scheduling triggers.
 
-## 7. Configuration Validation Pattern
+## 8. Atomic Persistence Pattern
+
+For durable state storage:
+
+```rust
+// Write to temp file, then atomic rename
+let tmp_path = dir.join(".flashblocks.tmp");
+std::fs::write(&tmp_path, serialized)?;
+std::fs::rename(&tmp_path, &final_path)?;
+```
+
+**Instance**: `FlashblockPayloadsCache` persistence — flushes every 5 seconds on dirty flag.
+
+## 9. Configuration Validation Pattern
 
 ```rust
 impl MyArgs {
     pub fn validate(&self) -> Result<(), String> {
-        // Check preconditions
         if self.enabled && self.required_field.is_none() {
             return Err("field is required when enabled".to_string());
-        }
-        // Validate formats
-        if let Some(addr) = &self.address {
-            addr.parse::<Address>().map_err(|_| format!("Invalid address: {addr}"))?;
         }
         Ok(())
     }
@@ -128,16 +156,16 @@ impl MyArgs {
 
 **Called in**: `XLayerArgs::validate()` chains all sub-arg validations. Called in `main.rs` before any configuration is used.
 
-## 8. Ring Buffer / LRU Cache Pattern
+## 10. Mutex-Guarded Unified Validator Pattern
 
-For bounded-memory caching:
+For preventing concurrent validation races:
 
 ```rust
-// Ring buffer (fixed size, oldest evicted)
-SequenceManager<T> — capacity 3 for completed sequences
-
-// LRU cache (configurable max, least-recently-used evicted)
-PendingStateRegistry<N> — max 64 entries for pending block states
+pub struct XLayerEngineValidator {
+    inner: Mutex<XLayerEngineValidatorInner>,
+}
+// Engine validation and flashblocks validation share the mutex
+// blocking_lock() used from dedicated OS thread
 ```
 
-**Rule**: Always handle the "entry was evicted" case gracefully (return `None`, log, continue).
+**Rule**: Both engine validation and flashblocks sequence execution lock the same mutex. Ensures state-root computation is never concurrent.

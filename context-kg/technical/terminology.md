@@ -1,13 +1,17 @@
+---
+name: "terminology"
+description: "Domain term glossary for unified terminology across backend skills"
+---
 # Terminology
 
 ## Core Concepts
 
 | Term | Definition |
 |------|-----------|
-| **Flashblock** | A sub-block payload (`OpFlashblockPayload`) produced incrementally during a block's build interval. Multiple flashblocks form a sequence that represents a single canonical block. |
-| **Flashblock Sequence** | An ordered collection of flashblocks (index 0..N) sharing the same block number and payload ID. Managed as `FlashBlockPendingSequence` (mutable) or `FlashBlockCompleteSequence` (finalized, immutable). |
+| **Flashblock** | A partial/incremental block (`OpFlashblockPayload`) produced during a single slot before the full block is finalized; contains a subset of transactions. |
+| **Flashblock Sequence** | An ordered collection of flashblocks (index 0..N) sharing the same block number and payload ID. Managed as `PendingSequence` (in-progress) or stored in `ConfirmCache` (completed). |
 | **Canonical Block** | A block that has been finalized by the consensus engine and is part of the canonical chain. Distinct from pending/speculative blocks. |
-| **Pending Block** | A block being built from accumulated flashblocks. Represented as `PendingFlashBlock<N>` wrapping a `PendingBlock` with flashblock metadata. |
+| **Pending Block** | A block being built from accumulated flashblocks. Represented as `PendingSequence<N>` wrapping Reth's `PendingBlock` with flashblock metadata. |
 | **Payload Builder** | Component responsible for constructing execution payloads (blocks). X Layer uses either `FlashblocksServiceBuilder` (sequencer) or `BasicPayloadServiceBuilder` (follower). |
 | **Cutoff Block** | The genesis block number of the current X Layer chain. Requests for blocks below this are routed to the legacy RPC endpoint. |
 | **Bridge Intercept** | Mechanism to filter out specific bridge transactions during payload building by inspecting `BridgeEvent` logs post-execution. |
@@ -20,14 +24,22 @@
 
 | Term | Definition |
 |------|-----------|
-| **Sequence Manager** | Ring buffer (capacity 3) that tracks recently completed flashblock sequences for build scheduling. Lives in `crates/flashblocks/src/cache.rs`. |
-| **Build Ticket** | Opaque identifier for a snapshot of a sequence targeted by a build job. Used to match build results to the correct sequence state. |
-| **State Epoch** | Monotonically increasing counter that invalidates stale build results when canonical chain state changes (e.g., reorg). |
-| **Canonical Anchor Hash** | The hash of the canonical block that a pending/speculative block's state is rooted in. Used for state lookups instead of the pending block hash. |
-| **Speculative Build** | Building a new block on top of a pending (not-yet-canonical) parent to avoid waiting for P2P finalization. |
-| **Transaction Cache** | Per-block cache (`TransactionCache`) storing cumulative execution state. Enables prefix-based cache reuse when new flashblocks extend the transaction list. |
-| **Pending State Registry** | LRU cache (`PendingStateRegistry`, max 64 entries) of recently built pending block states for speculative chaining. |
+| **FlashblockStateCache** | Top-level controller state cache managing pending and confirmed flashblock sequences with Arc<RwLock> thread safety. Pure data store, not a provider. Lives in `crates/flashblocks/src/cache/mod.rs`. |
+| **PendingSequence** | In-progress flashblock sequence being built from incoming OpFlashblockPayload deltas. Wraps `PendingBlock` with HashMap tx_index for O(1) lookups. At most one active at a time. |
+| **ConfirmCache** | Completed flashblock sequences committed but still ahead of canonical chain. Stored in BTreeMap keyed by block number. Enables O(log n) range splits for efficient flush. |
+| **RawFlashblocksCache** | Ring buffer cache (capacity 50) accumulating raw incoming flashblocks before execution. Tracks next buildable sequence and detects reorgs. |
+| **ExecutionTaskQueue** | BTreeSet-backed async task queue with Arc<Notify> signaling. Enqueues heights for execution; evicts lowest height on capacity overflow. |
+| **FlashblockSequenceValidator** | Builds PendingSequences from accumulated flashblock transactions. Supports 3 state root computation strategies (StateRootTask, Parallel, Synchronous). Uses Reth's PayloadProcessor for optimal execution. |
+| **XLayerEngineValidator** | Unified controller holding both engine validator and flashblocks validator. Guards against payload validation races from CL/EL sync and flashblocks stream. Uses `blocking_lock()` Mutex for engine thread safety. |
+| **PrefixExecutionMeta** | Cached prefix execution data for resuming builds. Stores payload_id, cached_reads, tx_count, gas_used. Keyed by payload_id — new payload_id invalidates cache. |
+| **StateRootStrategy** | Enum describing state root computation method: StateRootTask (concurrent), Parallel, Synchronous (fallback). |
+| **XLayerFlashblockPayload** | OpFlashblockPayload wrapped with target_index indicating builder target. Default target_index=0 for base payload. Enables incremental flashblock building. |
+| **XLayerFlashblockMessage** | Untagged enum representing either Flashblock Payload or PayloadEnd signal. Used in P2P broadcast. Handles end-of-sequence signaling. |
+| **XLayerFlashblockEnd** | Payload ID marking end-of-sequence. No more flashblocks for current block after this signal. |
+| **CachedTxInfo** | Per-transaction cache entry containing block context (number, hash, tx_index), receipt, and transaction data for O(1) lookups by hash. |
+| **FlashblockScheduler** | Schedules and triggers flashblock builds at predetermined times during a block slot. Calculates target flashblocks and send times. |
 | **Builder Transaction** | Special transaction injected by the builder (e.g., flashblock number increment via contract call). Types: `Base` and `NumberContract`. |
+| **MemoryOverlayStateProvider** | State provider that overlays in-memory changes on disk state for flashblock execution without disk writes. |
 
 ## Infrastructure Terms
 
@@ -35,12 +47,14 @@
 |------|-----------|
 | **FCU** | Fork Choice Updated — engine API call (`engine_forkChoiceUpdated`) that drives chain head progression. |
 | **newPayload** | Engine API call (`engine_newPayload`) that submits a new execution payload for validation. |
-| **P2P Broadcast** | libp2p-based network for distributing flashblock payloads between sequencer and followers using the `FLASHBLOCKS_STREAM_PROTOCOL`. |
+| **P2P Broadcast** | libp2p-based network for distributing flashblock payloads between sequencer and followers using stream protocol "/flashblocks/2.0.0". |
 | **WebSocket Publisher** | TCP-based WebSocket server that broadcasts flashblock payloads to subscribers (e.g., RPC nodes). |
 | **Tower Layer** | Middleware pattern from the Tower crate used for RPC request interception (legacy routing, monitoring). |
 | **Static Files** | Reth's immutable segment storage for historical data (transactions, receipts, change sets). |
 | **MDBX** | The default key-value database engine used by Reth (Lightning Memory-Mapped Database). |
-| **RocksDB** | Alternative storage backend; X Layer migrates specific tables from MDBX to RocksDB for performance. |
+| **BridgeEvent** | Log event emitted by bridge contract with signature 0x50178120... containing leafType, originNetwork, originAddress, amount. |
+| **OpDAConfig** | Data Availability configuration for payload building; defines max DA tx/block sizes. |
+| **OpGasLimitConfig** | Gas limit configuration for payload building. |
 
 ## Hardfork Names
 
@@ -48,5 +62,5 @@
 |----------|--------|-----------------|
 | **Bedrock** | OP Stack | First OP hardfork; activated at genesis for X Layer |
 | **Regolith** through **Isthmus** | OP Stack | All activated at genesis (timestamp 0) |
-| **Jovian** | OP Stack | First hardfork with non-zero activation timestamp on X Layer networks |
+| **Jovian** | OP Stack | First hardfork with non-zero activation timestamp on X Layer networks. Mainnet: 1764691201, Testnet: 1764327600. Activates DA footprint scalar computation. |
 | **Prague** | Ethereum L1 | EVM changes inherited via OP Stack; activated at genesis for X Layer |

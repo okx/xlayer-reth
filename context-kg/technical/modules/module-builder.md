@@ -13,9 +13,10 @@
 ### `broadcast/` — P2P Network
 - `Node` / `NodeBuilder`: libp2p swarm for flashblock distribution
 - `Behaviour`: Composite of mdns, identify, ping, autonat, and stream behaviors
-- `StreamsHandler`: Manages outgoing streams to peers for message broadcast
+- `StreamsHandler`: Manages outgoing streams to peers for message broadcast; open_stream is non-blocking with retry on failure
 - `WebSocketPublisher`: TCP-based WebSocket server for flashblock streaming to subscribers
-- **Protocol**: `FLASHBLOCKS_STREAM_PROTOCOL` constant defines the stream protocol ID
+- `payload.rs`: `XLayerFlashblockPayload` (wraps OpFlashblockPayload + target_index), `XLayerFlashblockEnd` (end-of-sequence signal), `XLayerFlashblockMessage` (enum of Payload | PayloadEnd)
+- **Protocol**: Stream protocol "/flashblocks/2.0.0", agent version "flashblock-builder/2.0.0"
 
 ### `flashblocks/` — Flashblock Building Core
 - `BuilderConfig` / `FlashblocksConfig`: Runtime configuration converted from CLI args
@@ -54,3 +55,7 @@
 3. **Builder transactions are post-user-txs**: Builder-injected transactions (tip, number contract) execute after all user transactions in a flashblock, ensuring they don't consume user gas budget.
 
 4. **Cache-resume execution**: The payload handler supports resuming execution from a cached prefix — if the new flashblock extends the previous one, only the delta transactions are executed against cached state.
+
+5. **End-of-sequence signaling**: `XLayerFlashblockEnd` sent after last flashblock in a block, preventing processing of additional flashblocks after sequence completion.
+
+6. **Non-blocking stream connections**: P2P `open_stream` operations are non-blocking with configurable retry intervals (DEFAULT_PEER_RETRY_INTERVAL=1s). Failed peers are evicted and reconnected on next retry tick.

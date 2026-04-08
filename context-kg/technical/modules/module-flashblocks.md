@@ -1,70 +1,81 @@
+---
+name: "module-flashblocks"
+description: "Module design for xlayer_flashblocks: cache, execution, state, subscription, persistence"
+---
 # Module: xlayer_flashblocks
 
 **Path**: `crates/flashblocks/`
-**Purpose**: Flashblock orchestration, consensus integration, caching, and subscription services
+**Purpose**: Flashblock RPC-side orchestration — cache management, sequence execution, subscription, persistence, and engine validation
 
 ## Sub-modules
 
-### Core Types
-- **`payload.rs`**: `FlashBlock` (alias for `OpFlashblockPayload`), `PendingFlashBlock<N>` (pending block with flashblock metadata including `canonical_anchor_hash`, `last_flashblock_index`, `computed_state_root`)
-- **`sequence.rs`**: `FlashBlockPendingSequence` (mutable BTree collection), `FlashBlockCompleteSequence` (immutable validated sequence), `SequenceExecutionOutcome` (block_hash + state_root)
+### Cache Layer (`cache/`)
+- **`mod.rs`**: `FlashblockStateCache<N>` — Top-level controller managing three data layers:
+  - Pending layer (single in-progress sequence)
+  - Confirmed layer (committed sequences ahead of canonical)
+  - Canonical layer (Reth's `CanonicalInMemoryState`)
+  - `CachedTxInfo`: Per-transaction cache entry (block context, receipt, tx data) for O(1) hash lookups
+- **`pending.rs`**: `PendingSequence<N>` — Wraps `PendingBlock` with flashblock metadata and HashMap tx_index for O(1) lookups; at most one active at a time
+- **`confirm.rs`**: `ConfirmCache<N>` — BTreeMap (block_number → block) + HashMap (hash → number); supports O(log n) range splits for efficient flush on canonical advancement
+- **`raw.rs`**: `RawFlashblocksCache` — Ring buffer (MAX_RAW_CACHE_SIZE=50) accumulating raw incoming flashblocks; tracks next buildable sequence and detects reorgs
+- **`task.rs`**: `ExecutionTaskQueue` — BTreeSet-backed async task queue with `Arc<Notify>` signaling; evicts lowest height on capacity overflow
+- **`utils.rs`**: Helper utilities for cache operations
 
-### Service Layer
-- **`service.rs`**: `FlashBlockService<N, S, EvmConfig, Provider>` — Main event loop orchestrator
-  - Handles: job completion, flashblock reception, canonical block reconciliation
-  - Features: speculative building via `PendingStateRegistry`, transaction caching, state epoch invalidation
-  - `FlashBlockBuildInfo`: Tracks current build progress
-  - `FlashBlockServiceMetrics`: Histograms, gauges, counters for service-level observability
+### Execution Pipeline (`execution/`)
+- **`mod.rs`**: `BuildArgs`, `PrefixExecutionMeta`, `FlashblockReceipt` trait, `StateRootStrategy` enum (StateRootTask/Parallel/Synchronous), `OverlayProviderFactory` trait alias
+- **`engine.rs`**: `XLayerEngineValidator` / `XLayerEngineValidatorBuilder` — Unified validator guarding against races between CL/EL sync and flashblocks stream; uses `blocking_lock()` Mutex for engine thread safety; shares PayloadProcessor and changeset cache between engine and flashblocks validators
+- **`validator.rs`**: `FlashblockSequenceValidator<N, Provider>` — Builds PendingSequence from accumulated flashblock transactions; supports incremental execution with cached prefix (CachedReads + PrefixExecutionMeta); handles state root computation with 3 strategies and timeout fallback
+- **`assemble.rs`**: Block assembly helpers for flashblock execution
 
-### Worker
-- **`worker.rs`**: `FlashBlockBuilder<EvmConfig, Provider>` — Executes flashblock sequences to build pending blocks
-  - `BuildArgs<I, N>`: Input (base payload, transactions, optional cached state)
-  - `BuildResult<N>`: Output (pending_flashblock, cached_reads, pending_state)
-  - Supports both canonical and speculative execution modes
-  - Cache-resume: skips already-cached prefix transactions using `CachedPrefixExecutionResult`
+### State Management (`state.rs`)
+Three async handler functions replacing the old worker module:
+1. `handle_incoming_flashblocks()` — Receives XLayerFlashblockMessage stream, routes to RawFlashblocksCache, enqueues to ExecutionTaskQueue, batches consecutive flashblocks
+2. `handle_execution_tasks()` — Polls ExecutionTaskQueue, fetches buildable args from RawFlashblocksCache, calls XLayerEngineValidator::execute_sequence()
+3. `handle_canonical_stream()` — Monitors canonical block notifications, detects reorgs and flushes cache, optional debug state comparison
 
-### State Management
-- **`pending_state.rs`**: `PendingStateRegistry<N>` — LRU cache (max 64) of recently built pending block states for speculative chaining
-- **`cache.rs`**: `SequenceManager<T>` — Ring buffer (size 3) tracking completed sequences
-  - `SequenceId`: Stable identity (block_number, payload_id, parent_hash)
-  - `BuildTicket`: Opaque build target identifier
-  - `next_buildable_args()`: Selects which sequence to build based on canonical tip
-  - `process_canonical_block()`: Reconciliation with reorg detection
-- **`tx_cache.rs`**: `TransactionCache<N>` — Per-block execution state cache
-  - Prefix matching for cache reuse across flashblock increments
-  - Parent-hash-scoped for speculative builds
+### Service Layer (`service.rs`)
+- `FlashblocksRpcService<N, Provider>` — Coordinates all flashblocks RPC components
+  - Spawns: incoming flashblocks handler, execution tasks, canonical stream watcher, persistence, WebSocket relay
+  - `FlashblocksRpcCtx`: canonical state stream + debug flag
+  - `FlashblocksPersistCtx`: data directory path for on-disk flashblock persistence
 
-### Consensus
-- **`consensus.rs`**: `FlashBlockConsensusClient<P>` — Submits completed sequences to engine API
-  - `submit_new_payload()`: Sends `engine_newPayload` if state_root available
-  - `submit_forkchoice_update()`: Always sends `engine_forkChoiceUpdated`
-  - Falls back to parent_hash when state_root is zero
+### Persistence (`persist.rs`)
+- `handle_persistence()` — Watches broadcast channel, flushes `FlashblockPayloadsCache` to disk every 5 seconds on dirty flag
+- `handle_relay_flashblocks()` — Relays incoming flashblocks to downstream WebSocket subscribers
 
-### Validation
-- **`validation.rs`**: Stateless validation utilities
-  - `FlashblockSequenceValidator`: Validates flashblock ordering (NextInSequence, FirstOfNextBlock, Duplicate, etc.)
-  - `ReorgDetector`: Compares block fingerprints to detect chain reorgs
-  - `CanonicalBlockReconciler`: Determines reconciliation strategy (CatchUp, HandleReorg, Continue, etc.)
+### Debug (`debug.rs`)
+- `debug_compare_flashblocks_bundle_states()` — Spawns on blocking thread to compare flashblock-built vs engine-built state; deep field-level mismatch detection for accounts and reverts
 
-### WebSocket / Streaming
-- **`ws/stream.rs`**: `WsFlashBlockStream<Stream, Sink, Connector>` — Async stream with auto-reconnection
-- **`ws/decoding.rs`**: `FlashBlockDecoder` — Supports JSON and brotli-compressed flashblock decoding
+### WebSocket / Streaming (`ws/`)
+- **`stream.rs`**: `WsFlashBlockStream` — Async stream with auto-reconnection consuming `XLayerFlashblockMessage`
+- **`decoding.rs`**: `FlashBlockDecoder` — Supports JSON (text) and brotli-compressed (binary) flashblock decoding
 
-### Subscriptions
-- **`subscription.rs`**: `FlashblocksPubSub<Eth, N>` — Extends standard ETH pubsub
-  - Custom `flashblocks` subscription kind
-  - Address-based filtering with configurable max addresses
-  - Optional transaction data and receipt enrichment
-  - LRU tx hash cache to avoid duplicate events
-- **`handler.rs`**: `FlashblocksService<Node>` — Publishes received flashblocks to WebSocket subscribers with optional disk persistence
+### Subscriptions (`subscription/`)
+- **`rpc.rs`**: `FlashblocksPubSub<Eth, N>` — Extends standard ETH pubsub with `flashblocks` subscription kind; address filtering; LRU tx hash cache (MAX_TXHASH_CACHE_SIZE=10000) to avoid duplicates
+- **`pubsub.rs`**: `FlashblocksPubSubInner` — Watches `pending_sequence_rx` for new PendingSequence changes; converts to FlashblockStreamEvent vector (Header + Transactions + Receipts)
+
+### Memory Overlay (`state.rs` — `MemoryOverlayStateProvider`)
+- Overlays in-memory changes on disk state for flashblock execution without disk writes
 
 ### Testing
-- **`test_utils.rs`**: `TestFlashBlockFactory` / `TestFlashBlockBuilder` — Fluent API for creating test flashblocks
+- **`test_utils.rs`**: `TestFlashBlockFactory` — Fluent builder for test flashblock creation with chainable methods
 
 ## Key Invariants
 
-1. **Sequence ordering**: Index 0 is base; subsequent indices are sequential. New blocks start at index 0 with a new payload ID.
-2. **Ring buffer capacity**: Max 3 sequences in `SequenceManager` — oldest evicted on overflow.
-3. **Epoch invalidation**: Build results from a stale epoch are discarded (reorg detected).
-4. **Prefix matching**: Transaction cache reuse requires the incoming tx list to be a strict extension of the cached prefix.
-5. **Canonical anchor**: Speculative builds use `canonical_anchor_hash` for state DB lookups, not the pending parent hash.
+1. **Three-layer cache**: Pending (single in-progress) → Confirmed (BTreeMap ahead of canonical) → Canonical (Reth engine state)
+2. **Height continuity**: Pending height must equal confirm_height + 1; gaps cause rejection
+3. **Sequence promotion**: When sequence_end=true, pending promotes to confirm cache and pending is cleared
+4. **Reorg handling**: Hash mismatch or explicit reorg → full flush (pending=None, confirm cleared, confirm_height=canon_height, task_queue flushed)
+5. **Engine validation guard**: XLayerEngineValidator holds Mutex preventing concurrent state-root computation between engine and flashblocks validators
+6. **Prefix execution caching**: PrefixExecutionMeta enables warm execution cache reuse; keyed by payload_id — new payload_id invalidates cache
+7. **State root fallback**: If configured timeout elapses during concurrent state root computation, sequential fallback spawned; first result used
+
+## Dependencies
+- Requires `xlayer_builder` for `XLayerFlashblockMessage`, `WebSocketPublisher`, `FlashblockPayloadsCache`
+- Reference `arch/dependency.md` for full dependency details
+
+## NOT Responsible For
+- Building flashblock payloads (that's `xlayer_builder`)
+- P2P broadcast to peers (that's `xlayer_builder::broadcast`)
+- Bridge transaction interception
+- Legacy RPC routing
