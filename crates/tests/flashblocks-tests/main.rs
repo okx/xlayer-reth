@@ -1389,6 +1389,143 @@ async fn fb_rpc_comparison_test(#[case] test_name: &str) {
                 fb_block_receipts, non_fb_block_receipts,
                 "eth_getBlockReceipts not identical"
             );
+
+            // eth_getTransactionByBlockHashAndIndex
+            for tx_hash in tx_hashes.clone() {
+                let receipt = operations::eth_get_transaction_receipt(&fb_client, &tx_hash)
+                    .await
+                    .expect("Failed to get transaction receipt from fb client");
+
+                let tx_index_str = receipt["transactionIndex"]
+                    .as_str()
+                    .expect("Transaction index should not be empty");
+                let fb_transaction =
+                    operations::eth_get_transaction_by_block_number_or_hash_and_index(
+                        &fb_client,
+                        operations::BlockId::Hash(fb_block_hash.clone()),
+                        tx_index_str,
+                    )
+                    .await
+                    .expect("Failed to get transaction by block hash and index from fb client");
+                let non_fb_transaction =
+                    operations::eth_get_transaction_by_block_number_or_hash_and_index(
+                        &non_fb_client,
+                        operations::BlockId::Hash(non_fb_block_hash.clone()),
+                        tx_index_str,
+                    )
+                    .await
+                    .expect("Failed to get transaction by block hash and index from non-fb client");
+                assert_eq!(
+                    fb_transaction, non_fb_transaction,
+                    "eth_getTransactionByBlockHashAndIndex not identical"
+                );
+            }
+
+            // eth_getRawTransactionByBlockNumberAndIndex
+            let block_num_hex = format!("0x{block_num:x}");
+            for tx_hash in tx_hashes.clone() {
+                let receipt = operations::eth_get_transaction_receipt(&fb_client, &tx_hash)
+                    .await
+                    .expect("Failed to get transaction receipt from fb client");
+
+                let tx_index_str = receipt["transactionIndex"]
+                    .as_str()
+                    .expect("Transaction index should not be empty");
+                let fb_raw_tx = operations::eth_get_raw_transaction_by_block_number_and_index(
+                    &fb_client,
+                    &block_num_hex,
+                    tx_index_str,
+                )
+                .await
+                .expect("Failed to get raw tx by block number and index from fb client");
+                let non_fb_raw_tx = operations::eth_get_raw_transaction_by_block_number_and_index(
+                    &non_fb_client,
+                    &block_num_hex,
+                    tx_index_str,
+                )
+                .await
+                .expect("Failed to get raw tx by block number and index from non-fb client");
+                assert_eq!(
+                    fb_raw_tx, non_fb_raw_tx,
+                    "eth_getRawTransactionByBlockNumberAndIndex not identical"
+                );
+            }
+
+            // eth_getRawTransactionByBlockHashAndIndex
+            for tx_hash in tx_hashes.clone() {
+                let receipt = operations::eth_get_transaction_receipt(&fb_client, &tx_hash)
+                    .await
+                    .expect("Failed to get transaction receipt from fb client");
+
+                let tx_index_str = receipt["transactionIndex"]
+                    .as_str()
+                    .expect("Transaction index should not be empty");
+                let fb_raw_tx = operations::eth_get_raw_transaction_by_block_hash_and_index(
+                    &fb_client,
+                    &fb_block_hash,
+                    tx_index_str,
+                )
+                .await
+                .expect("Failed to get raw tx by block hash and index from fb client");
+                let non_fb_raw_tx = operations::eth_get_raw_transaction_by_block_hash_and_index(
+                    &non_fb_client,
+                    &non_fb_block_hash,
+                    tx_index_str,
+                )
+                .await
+                .expect("Failed to get raw tx by block hash and index from non-fb client");
+                assert_eq!(
+                    fb_raw_tx, non_fb_raw_tx,
+                    "eth_getRawTransactionByBlockHashAndIndex not identical"
+                );
+            }
+
+            // eth_getLogs - by block number range
+            let fb_logs = operations::eth_get_logs(
+                &fb_client,
+                Some(operations::BlockId::Number(block_num)),
+                Some(operations::BlockId::Number(block_num)),
+                None,
+                None,
+            )
+            .await
+            .expect("Failed to get logs from fb client");
+            let non_fb_logs = operations::eth_get_logs(
+                &non_fb_client,
+                Some(operations::BlockId::Number(block_num)),
+                Some(operations::BlockId::Number(block_num)),
+                None,
+                None,
+            )
+            .await
+            .expect("Failed to get logs from non-fb client");
+            assert_eq!(fb_logs, non_fb_logs, "eth_getLogs by block range not identical");
+
+            // eth_getLogs - by block hash
+            let fb_logs_by_hash =
+                operations::eth_get_logs_by_block_hash(&fb_client, &fb_block_hash, None, None)
+                    .await
+                    .expect("Failed to get logs by block hash from fb client");
+            let non_fb_logs_by_hash = operations::eth_get_logs_by_block_hash(
+                &non_fb_client,
+                &non_fb_block_hash,
+                None,
+                None,
+            )
+            .await
+            .expect("Failed to get logs by block hash from non-fb client");
+            assert_eq!(
+                fb_logs, fb_logs_by_hash,
+                "FB node: eth_getLogs by hash should match by block range"
+            );
+            assert_eq!(
+                non_fb_logs, non_fb_logs_by_hash,
+                "Non-FB node: eth_getLogs by hash should match by block range"
+            );
+            assert_eq!(
+                fb_logs_by_hash, non_fb_logs_by_hash,
+                "eth_getLogs by block hash not identical"
+            );
         }
         "StateApi" => {
             // Setup batch ERC20 token transfers
@@ -1687,6 +1824,74 @@ async fn fb_rpc_comparison_test(#[case] test_name: &str) {
             assert_eq!(
                 fb_storage_by_hash, non_fb_storage_by_hash,
                 "eth_getStorageAt with block hash not identical"
+            );
+
+            // eth_blockNumber
+            let fb_block_number = operations::eth_block_number(&fb_client)
+                .await
+                .expect("Failed to get block number from fb client");
+            let non_fb_block_number = operations::eth_block_number(&non_fb_client)
+                .await
+                .expect("Failed to get block number from non-fb client");
+            assert!(
+                fb_block_number >= non_fb_block_number,
+                "FB block number ({fb_block_number}) should be >= non-FB block number ({non_fb_block_number})"
+            );
+
+            // eth_estimateGas
+            let estimate_args = serde_json::json!({
+                "from": test_address,
+                "to": contracts.erc20,
+                "gas": "0x100000",
+                "data": format!("0x{}", hex::encode(&calldata)),
+            });
+
+            // Test block number
+            let fb_estimate = operations::estimate_gas(
+                &fb_client,
+                Some(estimate_args.clone()),
+                Some(operations::BlockId::Number(block_num)),
+            )
+            .await
+            .expect("Failed to estimate gas from fb client");
+            let non_fb_estimate = operations::estimate_gas(
+                &non_fb_client,
+                Some(estimate_args.clone()),
+                Some(operations::BlockId::Number(block_num)),
+            )
+            .await
+            .expect("Failed to estimate gas from non-fb client");
+            assert_eq!(
+                fb_estimate, non_fb_estimate,
+                "eth_estimateGas with block number not identical"
+            );
+
+            // Test block hash
+            let fb_estimate_by_hash = operations::estimate_gas(
+                &fb_client,
+                Some(estimate_args.clone()),
+                Some(operations::BlockId::Hash(fb_block_hash.clone())),
+            )
+            .await
+            .expect("Failed to estimate gas from fb client by hash");
+            let non_fb_estimate_by_hash = operations::estimate_gas(
+                &non_fb_client,
+                Some(estimate_args),
+                Some(operations::BlockId::Hash(non_fb_block_hash.clone())),
+            )
+            .await
+            .expect("Failed to estimate gas from non-fb client by hash");
+            assert_eq!(
+                fb_estimate, fb_estimate_by_hash,
+                "FB node: eth_estimateGas by hash should match by number"
+            );
+            assert_eq!(
+                non_fb_estimate, non_fb_estimate_by_hash,
+                "Non-FB node: eth_estimateGas by hash should match by number"
+            );
+            assert_eq!(
+                fb_estimate_by_hash, non_fb_estimate_by_hash,
+                "eth_estimateGas with block hash not identical"
             );
         }
         _ => panic!("Unknown test case: {test_name}"),

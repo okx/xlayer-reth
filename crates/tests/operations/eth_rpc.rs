@@ -399,6 +399,23 @@ pub async fn eth_get_raw_transaction_by_block_number_and_index(
     Ok(result)
 }
 
+/// For `eth_getRawTransactionByBlockHashAndIndex`
+pub async fn eth_get_raw_transaction_by_block_hash_and_index(
+    client_rpc: &HttpClient,
+    block_hash: &str,
+    index: &str,
+) -> Result<Value> {
+    let result: Value = tokio::time::timeout(
+        RPC_TIMEOUT,
+        client_rpc.request(
+            "eth_getRawTransactionByBlockHashAndIndex",
+            jsonrpsee::rpc_params![block_hash, index],
+        ),
+    )
+    .await??;
+    Ok(result)
+}
+
 /// For eth_sendRawTransactionSync
 pub async fn eth_send_raw_transaction_sync(client_rpc: &HttpClient, raw_tx: &str) -> Result<Value> {
     let result: Value = tokio::time::timeout(
