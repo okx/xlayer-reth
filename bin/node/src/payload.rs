@@ -1,12 +1,12 @@
 use reth::builder::components::PayloadServiceBuilder;
 use reth_node_api::NodeTypes;
-use reth_node_builder::{components::BasicPayloadServiceBuilder, BuilderContext};
+use reth_node_builder::BuilderContext;
 use reth_optimism_evm::OpEvmConfig;
-use reth_optimism_node::node::OpPayloadBuilder;
 use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
 use xlayer_bridge_intercept::BridgeInterceptConfig;
 use xlayer_builder::{
     args::BuilderArgs,
+    default::DefaultBuilderServiceBuilder,
     flashblocks::{BuilderConfig, FlashblocksServiceBuilder},
     traits::{NodeBounds, PoolBounds},
 };
@@ -15,12 +15,13 @@ use xlayer_builder::{
 enum XLayerPayloadServiceBuilderInner {
     /// Uses [`FlashblocksServiceBuilder`] for sequencer nodes producing flashblocks.
     Flashblocks(Box<FlashblocksServiceBuilder>),
-    /// Uses [`BasicPayloadServiceBuilder`] with [`OpPayloadBuilder`] for follower/RPC nodes.
-    Default(BasicPayloadServiceBuilder<OpPayloadBuilder>),
+    /// Uses [`DefaultBuilderServiceBuilder`] that wraps the default OP builder with
+    /// builder p2p and flashblocks reorg protection.
+    Default(Box<DefaultBuilderServiceBuilder>),
 }
 
-/// The X Layer payload service builder that delegates to either [`FlashblocksServiceBuilder`]
-/// or the default [`BasicPayloadServiceBuilder`].
+/// The X Layer payload service builder that builds [`FlashblocksServiceBuilder`] if
+/// flashblocks are enabled, otherwise builds [`DefaultBuilderServiceBuilder`].
 pub struct XLayerPayloadServiceBuilder {
     builder: XLayerPayloadServiceBuilderInner,
 }
@@ -44,21 +45,21 @@ impl XLayerPayloadServiceBuilder {
         da_config: OpDAConfig,
         gas_limit_config: OpGasLimitConfig,
     ) -> eyre::Result<Self> {
-        let builder = if xlayer_builder_args.flashblocks.enabled {
-            let builder_config = BuilderConfig::try_from(xlayer_builder_args)?;
+        let flashblocks_enabled = xlayer_builder_args.flashblocks.enabled;
+        let config = BuilderConfig::try_from(xlayer_builder_args)?;
+        let builder = if flashblocks_enabled {
             XLayerPayloadServiceBuilderInner::Flashblocks(Box::new(FlashblocksServiceBuilder {
-                config: builder_config,
+                config,
                 bridge_intercept: Default::default(),
             }))
         } else {
-            let payload_builder = OpPayloadBuilder::new(compute_pending_block)
-                .with_da_config(da_config)
-                .with_gas_limit_config(gas_limit_config);
-            XLayerPayloadServiceBuilderInner::Default(BasicPayloadServiceBuilder::new(
-                payload_builder,
-            ))
+            XLayerPayloadServiceBuilderInner::Default(Box::new(DefaultBuilderServiceBuilder {
+                compute_pending_block,
+                config,
+                da_config,
+                gas_limit_config,
+            }))
         };
-
         Ok(Self { builder })
     }
 
@@ -85,12 +86,10 @@ where
     {
         match self.builder {
             XLayerPayloadServiceBuilderInner::Flashblocks(flashblocks_builder) => {
-                // Use FlashblocksServiceBuilder
                 flashblocks_builder.spawn_payload_builder_service(ctx, pool, evm_config).await
             }
-            XLayerPayloadServiceBuilderInner::Default(basic_builder) => {
-                // Use BasicPayloadServiceBuilder - it handles all the boilerplate!
-                basic_builder.spawn_payload_builder_service(ctx, pool, evm_config).await
+            XLayerPayloadServiceBuilderInner::Default(default_builder) => {
+                default_builder.spawn_payload_builder_service(ctx, pool, evm_config).await
             }
         }
     }
