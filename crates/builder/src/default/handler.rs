@@ -48,9 +48,8 @@ impl DefaultPayloadHandler {
                 Some(message) = self.p2p_rx.recv() => {
                     match message {
                         Message::OpFlashblockPayload(fb_payload) => {
-                            if let XLayerFlashblockMessage::Payload(payload) = &fb_payload &&
-                                let Err(e) = self.p2p_cache.add_flashblock_payload(payload.inner.clone()) {
-                                warn!(target: "payload_builder", e = ?e, "failed to add flashblock txs to cache");
+                            if let XLayerFlashblockMessage::Payload(payload) = &fb_payload {
+                                self.p2p_cache.add_flashblock_payload(payload.inner.clone());
                             }
                             if let Err(e) = self.ws_pub.publish(&fb_payload) {
                                 warn!(target: "payload_builder", e = ?e, "failed to publish flashblock to websocket publisher");

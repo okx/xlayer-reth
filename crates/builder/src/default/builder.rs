@@ -188,7 +188,7 @@ where
         let base_fee = builder.evm_mut().block().basefee();
 
         // The execution result is discarded here since even on replay errors, we
-        // will resolve the payload tillwhichever point the replay failed.
+        // will resolve the payload till whichever point the replay failed.
         let _ = execute_cached_transactions::<N, _>(
             &mut info,
             &mut builder,
@@ -284,6 +284,9 @@ where
         let gas_used = builder
             .execute_transaction(recovered_tx.clone())
             .map_err(|err| PayloadBuilderError::EvmExecutionError(Box::new(err)))?;
+
+        info.cumulative_gas_used += gas_used;
+        info.cumulative_da_bytes_used += tx_da_size;
 
         // Track fees for payload metadata
         let miner_fee = recovered_tx
