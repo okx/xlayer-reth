@@ -61,7 +61,7 @@ fn setup_environment() {
             std::env::set_var("RUST_BACKTRACE", "1");
         }
     }
-    // 校验初始化命令参数
+    // Validate initial command arguments
     XLayerArgs::validate_init_command();
 }
 
@@ -94,8 +94,6 @@ fn parse_bridge_config(args: &Args) -> eyre::Result<BridgeInterceptConfig> {
         .intercept
         .to_bridge_intercept_config()
         .map_err(|e| eyre::eyre!("Bridge intercept config error: {e}"))?;
-
-    println!("bridge_config enabled: {}", bridge_config.enabled);
 
     if bridge_config.enabled {
         tracing::info!(
