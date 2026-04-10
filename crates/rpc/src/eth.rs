@@ -27,7 +27,7 @@ use reth_primitives_traits::SealedHeaderFor;
 use reth_revm::{database::StateProviderDatabase, db::State};
 use reth_rpc_convert::{RpcConvert, RpcTransaction};
 use reth_rpc_eth_api::{
-    helpers::{estimate::EstimateCall, Call, FullEthApi, LoadState},
+    helpers::{estimate::EstimateCall, Call, FullEthApi, LoadState, SpawnBlocking},
     EthApiServer, EthApiTypes, FromEvmError, RpcBlock, RpcNodeCore, RpcReceipt,
 };
 use reth_rpc_eth_types::{
@@ -475,26 +475,24 @@ where
     ) -> RpcResult<Bytes> {
         trace!(target: "rpc::eth", ?transaction, ?block_number, ?state_overrides, ?block_overrides, "Serving eth_call");
         if let Some((state, header)) = self.get_flashblock_state_provider_by_id(block_number)? {
-            let evm_env = self
+            let _permit = self.eth_api.acquire_owned_blocking_io().await;
+            return self
                 .eth_api
-                .evm_env_for_header(&header)
-                .map_err(|e| -> jsonrpsee_types::error::ErrorObject<'static> { e.into() })?;
-            let mut db = State::builder().with_database(StateProviderDatabase::new(state)).build();
-            let (evm_env, tx_env) = self
-                .eth_api
-                .prepare_call_env(
-                    evm_env,
-                    transaction,
-                    &mut db,
-                    EvmOverrides::new(state_overrides, block_overrides),
-                )
-                .map_err(|e| -> jsonrpsee_types::error::ErrorObject<'static> { e.into() })?;
-            let res = self
-                .eth_api
-                .transact(db, evm_env, tx_env)
-                .map_err(|e| -> jsonrpsee_types::error::ErrorObject<'static> { e.into() })?;
-            return <OpEthApiError as FromEvmError<_>>::ensure_success(res.result)
-                .map_err(Into::into);
+                .spawn_blocking_io_fut(move |this| async move {
+                    let evm_env = this.evm_env_for_header(&header)?;
+                    let mut db =
+                        State::builder().with_database(StateProviderDatabase::new(state)).build();
+                    let (evm_env, tx_env) = this.prepare_call_env(
+                        evm_env,
+                        transaction,
+                        &mut db,
+                        EvmOverrides::new(state_overrides, block_overrides),
+                    )?;
+                    let res = this.transact(db, evm_env, tx_env)?;
+                    <OpEthApiError as FromEvmError<_>>::ensure_success(res.result)
+                })
+                .await
+                .map_err(|e| -> jsonrpsee_types::error::ErrorObject<'static> { e.into() });
         }
         EthApiServer::call(
             &self.eth_api,
@@ -515,14 +513,14 @@ where
     ) -> RpcResult<U256> {
         trace!(target: "rpc::eth", ?transaction, ?block_number, "Serving eth_estimateGas");
         if let Some((state, header)) = self.get_flashblock_state_provider_by_id(block_number)? {
-            let evm_env = self
-                .eth_api
-                .evm_env_for_header(&header)
-                .map_err(|e| -> jsonrpsee_types::error::ErrorObject<'static> { e.into() })?;
             return self
                 .eth_api
-                .estimate_gas_with(evm_env, transaction, state, overrides)
-                .map_err(Into::into);
+                .spawn_blocking_io_fut(move |this| async move {
+                    let evm_env = this.evm_env_for_header(&header)?;
+                    this.estimate_gas_with(evm_env, transaction, state, overrides)
+                })
+                .await
+                .map_err(|e| -> jsonrpsee_types::error::ErrorObject<'static> { e.into() });
         }
         EthApiServer::estimate_gas(&self.eth_api, transaction, block_number, overrides).await
     }
@@ -531,7 +529,13 @@ where
     async fn balance(&self, address: Address, block_number: Option<BlockId>) -> RpcResult<U256> {
         trace!(target: "rpc::eth", ?address, ?block_number, "Serving eth_getBalance");
         if let Some((state, _)) = self.get_flashblock_state_provider_by_id(block_number)? {
-            return Ok(state.account_balance(&address).to_rpc_result()?.unwrap_or_default());
+            return self
+                .eth_api
+                .spawn_blocking_io_fut(move |_| async move {
+                    Ok(state.account_balance(&address)?.unwrap_or_default())
+                })
+                .await
+                .map_err(|e| -> jsonrpsee_types::error::ErrorObject<'static> { e.into() });
         }
         EthApiServer::balance(&self.eth_api, address, block_number).await
     }
@@ -544,28 +548,34 @@ where
     ) -> RpcResult<U256> {
         trace!(target: "rpc::eth", ?address, ?block_number, "Serving eth_getTransactionCount");
         if let Some((state, _)) = self.get_flashblock_state_provider_by_id(block_number)? {
-            let nonce = state.account_nonce(&address).to_rpc_result()?.unwrap_or_default();
+            return self
+                .eth_api
+                .spawn_blocking_io_fut(move |this| async move {
+                    let on_chain_account_nonce = state.account_nonce(&address)?.unwrap_or_default();
 
-            // Txpool awareness for pending tag. Mirrors reth's `LoadState::transaction_count`
-            if block_number == Some(BlockId::pending())
-                && let Some(highest_pool_tx) = self
-                    .eth_api
-                    .pool()
-                    .get_highest_consecutive_transaction_by_sender(address, nonce)
-            {
-                // and the corresponding txcount is nonce + 1 of the highest tx in the pool
-                // (on chain nonce is increased after tx)
-                let next_pool_tx_nonce = highest_pool_tx
-                    .nonce()
-                    .checked_add(1)
-                    .ok_or_else(|| {
-                        EthApiError::InvalidTransaction(RpcInvalidTransactionError::NonceMaxValue)
-                    })
-                    .map_err(|e| -> jsonrpsee_types::error::ErrorObject<'static> { e.into() })?;
-                return Ok(U256::from(nonce.max(next_pool_tx_nonce)));
-            }
+                    // Txpool awareness for pending tag. Mirrors reth's `LoadState::transaction_count`
+                    if block_number == Some(BlockId::pending())
+                        && let Some(highest_pool_tx) =
+                            this.pool().get_highest_consecutive_transaction_by_sender(
+                                address,
+                                on_chain_account_nonce,
+                            )
+                    {
+                        // and the corresponding txcount is nonce + 1 of the highest tx in the pool
+                        // (on chain nonce is increased after tx)
+                        let next_pool_tx_nonce =
+                            highest_pool_tx.nonce().checked_add(1).ok_or_else(|| {
+                                EthApiError::InvalidTransaction(
+                                    RpcInvalidTransactionError::NonceMaxValue,
+                                )
+                            })?;
+                        return Ok(U256::from(on_chain_account_nonce.max(next_pool_tx_nonce)));
+                    }
 
-            return Ok(U256::from(nonce));
+                    Ok(U256::from(on_chain_account_nonce))
+                })
+                .await
+                .map_err(|e| -> jsonrpsee_types::error::ErrorObject<'static> { e.into() });
         }
         EthApiServer::transaction_count(&self.eth_api, address, block_number).await
     }
@@ -574,11 +584,16 @@ where
     async fn get_code(&self, address: Address, block_number: Option<BlockId>) -> RpcResult<Bytes> {
         trace!(target: "rpc::eth", ?address, ?block_number, "Serving eth_getCode");
         if let Some((state, _)) = self.get_flashblock_state_provider_by_id(block_number)? {
-            return Ok(state
-                .account_code(&address)
-                .to_rpc_result()?
-                .map(|code| code.original_bytes())
-                .unwrap_or_default());
+            return self
+                .eth_api
+                .spawn_blocking_io_fut(move |_| async move {
+                    Ok(state
+                        .account_code(&address)?
+                        .map(|code| code.original_bytes())
+                        .unwrap_or_default())
+                })
+                .await
+                .map_err(|e| -> jsonrpsee_types::error::ErrorObject<'static> { e.into() });
         }
         EthApiServer::get_code(&self.eth_api, address, block_number).await
     }
@@ -592,13 +607,15 @@ where
     ) -> RpcResult<B256> {
         trace!(target: "rpc::eth", ?address, ?slot, ?block_number, "Serving eth_getStorageAt");
         if let Some((state, _)) = self.get_flashblock_state_provider_by_id(block_number)? {
-            return Ok(B256::new(
-                state
-                    .storage(address, slot.as_b256())
-                    .to_rpc_result()?
-                    .unwrap_or_default()
-                    .to_be_bytes(),
-            ));
+            return self
+                .eth_api
+                .spawn_blocking_io_fut(move |_| async move {
+                    Ok(B256::new(
+                        state.storage(address, slot.as_b256())?.unwrap_or_default().to_be_bytes(),
+                    ))
+                })
+                .await
+                .map_err(|e| -> jsonrpsee_types::error::ErrorObject<'static> { e.into() });
         }
         EthApiServer::storage_at(&self.eth_api, address, slot, block_number).await
     }
