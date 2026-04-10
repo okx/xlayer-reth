@@ -1,7 +1,8 @@
 use reth::builder::components::PayloadServiceBuilder;
 use reth_node_api::NodeTypes;
-use reth_node_builder::BuilderContext;
+use reth_node_builder::{components::BasicPayloadServiceBuilder, BuilderContext};
 use reth_optimism_evm::OpEvmConfig;
+use reth_optimism_node::node::OpPayloadBuilder;
 use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
 use xlayer_bridge_intercept::BridgeInterceptConfig;
 use xlayer_builder::{
@@ -17,7 +18,9 @@ enum XLayerPayloadServiceBuilderInner {
     Flashblocks(Box<FlashblocksServiceBuilder>),
     /// Uses [`DefaultBuilderServiceBuilder`] that wraps the default OP builder with
     /// builder p2p and flashblocks reorg protection.
-    Default(Box<DefaultBuilderServiceBuilder>),
+    DefaultWithP2P(Box<DefaultBuilderServiceBuilder>),
+    /// Uses [`BasicPayloadServiceBuilder`] with [`OpPayloadBuilder`] for RPC nodes.
+    Default(BasicPayloadServiceBuilder<OpPayloadBuilder>),
 }
 
 /// The X Layer payload service builder that builds [`FlashblocksServiceBuilder`] if
@@ -30,10 +33,12 @@ impl XLayerPayloadServiceBuilder {
     pub fn new(
         xlayer_builder_args: BuilderArgs,
         compute_pending_block: bool,
+        sequencer_mode: bool,
     ) -> eyre::Result<Self> {
         Self::with_config(
             xlayer_builder_args,
             compute_pending_block,
+            sequencer_mode,
             OpDAConfig::default(),
             OpGasLimitConfig::default(),
         )
@@ -42,23 +47,35 @@ impl XLayerPayloadServiceBuilder {
     pub fn with_config(
         xlayer_builder_args: BuilderArgs,
         compute_pending_block: bool,
+        sequencer_mode: bool,
         da_config: OpDAConfig,
         gas_limit_config: OpGasLimitConfig,
     ) -> eyre::Result<Self> {
         let flashblocks_enabled = xlayer_builder_args.flashblocks.enabled;
         let config = BuilderConfig::try_from(xlayer_builder_args)?;
-        let builder = if flashblocks_enabled {
-            XLayerPayloadServiceBuilderInner::Flashblocks(Box::new(FlashblocksServiceBuilder {
-                config,
-                bridge_intercept: Default::default(),
-            }))
+        let builder = if sequencer_mode {
+            if flashblocks_enabled {
+                XLayerPayloadServiceBuilderInner::Flashblocks(Box::new(FlashblocksServiceBuilder {
+                    config,
+                    bridge_intercept: Default::default(),
+                }))
+            } else {
+                XLayerPayloadServiceBuilderInner::DefaultWithP2P(Box::new(
+                    DefaultBuilderServiceBuilder {
+                        compute_pending_block,
+                        config,
+                        da_config,
+                        gas_limit_config,
+                    },
+                ))
+            }
         } else {
-            XLayerPayloadServiceBuilderInner::Default(Box::new(DefaultBuilderServiceBuilder {
-                compute_pending_block,
-                config,
-                da_config,
-                gas_limit_config,
-            }))
+            let payload_builder = OpPayloadBuilder::new(compute_pending_block)
+                .with_da_config(da_config)
+                .with_gas_limit_config(gas_limit_config);
+            XLayerPayloadServiceBuilderInner::Default(BasicPayloadServiceBuilder::new(
+                payload_builder,
+            ))
         };
         Ok(Self { builder })
     }
@@ -88,8 +105,11 @@ where
             XLayerPayloadServiceBuilderInner::Flashblocks(flashblocks_builder) => {
                 flashblocks_builder.spawn_payload_builder_service(ctx, pool, evm_config).await
             }
-            XLayerPayloadServiceBuilderInner::Default(default_builder) => {
+            XLayerPayloadServiceBuilderInner::DefaultWithP2P(default_builder) => {
                 default_builder.spawn_payload_builder_service(ctx, pool, evm_config).await
+            }
+            XLayerPayloadServiceBuilderInner::Default(basic_builder) => {
+                basic_builder.spawn_payload_builder_service(ctx, pool, evm_config).await
             }
         }
     }
