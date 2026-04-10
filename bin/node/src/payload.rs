@@ -52,8 +52,8 @@ impl XLayerPayloadServiceBuilder {
         gas_limit_config: OpGasLimitConfig,
     ) -> eyre::Result<Self> {
         let flashblocks_enabled = xlayer_builder_args.flashblocks.enabled;
-        let config = BuilderConfig::try_from(xlayer_builder_args)?;
         let builder = if sequencer_mode {
+            let config = BuilderConfig::try_from(xlayer_builder_args)?;
             if flashblocks_enabled {
                 XLayerPayloadServiceBuilderInner::Flashblocks(Box::new(FlashblocksServiceBuilder {
                     config,
@@ -80,10 +80,18 @@ impl XLayerPayloadServiceBuilder {
         Ok(Self { builder })
     }
 
-    /// Apply bridge intercept config to the flashblocks builder.
+    /// Apply bridge intercept config. Only the flashblocks builder supports bridge
+    /// intercept — the default builder runs unmodified upstream `OpPayloadBuilder` logic
+    /// as a failsafe, so bridge filtering is intentionally not applied.
     pub fn with_bridge_config(mut self, config: BridgeInterceptConfig) -> Self {
-        if let XLayerPayloadServiceBuilderInner::Flashblocks(ref mut fb) = self.builder {
-            fb.with_bridge_intercept(config);
+        match &mut self.builder {
+            XLayerPayloadServiceBuilderInner::Flashblocks(fb) => {
+                fb.with_bridge_intercept(config);
+            }
+            // DefaultWithP2P runs the upstream OpPayloadBuilder as a failsafe during
+            // conductor failover — bridge intercept is not supported on this path.
+            XLayerPayloadServiceBuilderInner::DefaultWithP2P(_) => {}
+            XLayerPayloadServiceBuilderInner::Default(_) => {}
         }
         self
     }
