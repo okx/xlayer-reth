@@ -30,9 +30,12 @@ use reth_rpc_eth_api::{
     helpers::{estimate::EstimateCall, Call, FullEthApi, LoadState},
     EthApiServer, EthApiTypes, FromEvmError, RpcBlock, RpcNodeCore, RpcReceipt,
 };
-use reth_rpc_eth_types::{block::convert_transaction_receipt, EthApiError};
+use reth_rpc_eth_types::{
+    block::convert_transaction_receipt, EthApiError, RpcInvalidTransactionError,
+};
 use reth_rpc_server_types::result::ToRpcResult;
 use reth_storage_api::{StateProvider, StateProviderBox, StateProviderFactory};
+use reth_transaction_pool::TransactionPool;
 
 use xlayer_flashblocks::FlashblockStateCache;
 
@@ -541,9 +544,28 @@ where
     ) -> RpcResult<U256> {
         trace!(target: "rpc::eth", ?address, ?block_number, "Serving eth_getTransactionCount");
         if let Some((state, _)) = self.get_flashblock_state_provider_by_id(block_number)? {
-            return Ok(U256::from(
-                state.account_nonce(&address).to_rpc_result()?.unwrap_or_default(),
-            ));
+            let nonce = state.account_nonce(&address).to_rpc_result()?.unwrap_or_default();
+
+            // Txpool awareness for pending tag. Mirrors reth's `LoadState::transaction_count`
+            if block_number == Some(BlockId::pending())
+                && let Some(highest_pool_tx) = self
+                    .eth_api
+                    .pool()
+                    .get_highest_consecutive_transaction_by_sender(address, nonce)
+            {
+                // and the corresponding txcount is nonce + 1 of the highest tx in the pool
+                // (on chain nonce is increased after tx)
+                let next_pool_tx_nonce = highest_pool_tx
+                    .nonce()
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        EthApiError::InvalidTransaction(RpcInvalidTransactionError::NonceMaxValue)
+                    })
+                    .map_err(|e| -> jsonrpsee_types::error::ErrorObject<'static> { e.into() })?;
+                return Ok(U256::from(nonce.max(next_pool_tx_nonce)));
+            }
+
+            return Ok(U256::from(nonce));
         }
         EthApiServer::transaction_count(&self.eth_api, address, block_number).await
     }
