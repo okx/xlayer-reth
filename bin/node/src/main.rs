@@ -73,7 +73,7 @@ fn maybe_init_tracer(xlayer_args: &XLayerArgs) {
         init_global_tracer(true, Some(output_path));
         info!(
             target: "xlayer::monitor",
-            "Gloabl tracer intialized with output path: {}",
+            "Global tracer initialized with output path: {}",
             xlayer_args.monitor.output_path
         );
     }
