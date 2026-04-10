@@ -7,6 +7,7 @@ use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
 use xlayer_bridge_intercept::BridgeInterceptConfig;
 use xlayer_builder::{
     args::BuilderArgs,
+    default::DefaultBuilderServiceBuilder,
     flashblocks::{BuilderConfig, FlashblocksServiceBuilder},
     traits::{NodeBounds, PoolBounds},
 };
@@ -15,12 +16,15 @@ use xlayer_builder::{
 enum XLayerPayloadServiceBuilderInner {
     /// Uses [`FlashblocksServiceBuilder`] for sequencer nodes producing flashblocks.
     Flashblocks(Box<FlashblocksServiceBuilder>),
-    /// Uses [`BasicPayloadServiceBuilder`] with [`OpPayloadBuilder`] for follower/RPC nodes.
+    /// Uses [`DefaultBuilderServiceBuilder`] that wraps the default OP builder with
+    /// builder p2p and flashblocks reorg protection.
+    DefaultWithP2P(Box<DefaultBuilderServiceBuilder>),
+    /// Uses [`BasicPayloadServiceBuilder`] with [`OpPayloadBuilder`] for RPC nodes.
     Default(BasicPayloadServiceBuilder<OpPayloadBuilder>),
 }
 
-/// The X Layer payload service builder that delegates to either [`FlashblocksServiceBuilder`]
-/// or the default [`BasicPayloadServiceBuilder`].
+/// The X Layer payload service builder that builds [`FlashblocksServiceBuilder`] if
+/// flashblocks are enabled, otherwise builds [`DefaultBuilderServiceBuilder`].
 pub struct XLayerPayloadServiceBuilder {
     builder: XLayerPayloadServiceBuilderInner,
 }
@@ -29,10 +33,12 @@ impl XLayerPayloadServiceBuilder {
     pub fn new(
         xlayer_builder_args: BuilderArgs,
         compute_pending_block: bool,
+        sequencer_mode: bool,
     ) -> eyre::Result<Self> {
         Self::with_config(
             xlayer_builder_args,
             compute_pending_block,
+            sequencer_mode,
             OpDAConfig::default(),
             OpGasLimitConfig::default(),
         )
@@ -41,15 +47,28 @@ impl XLayerPayloadServiceBuilder {
     pub fn with_config(
         xlayer_builder_args: BuilderArgs,
         compute_pending_block: bool,
+        sequencer_mode: bool,
         da_config: OpDAConfig,
         gas_limit_config: OpGasLimitConfig,
     ) -> eyre::Result<Self> {
-        let builder = if xlayer_builder_args.flashblocks.enabled {
-            let builder_config = BuilderConfig::try_from(xlayer_builder_args)?;
-            XLayerPayloadServiceBuilderInner::Flashblocks(Box::new(FlashblocksServiceBuilder {
-                config: builder_config,
-                bridge_intercept: Default::default(),
-            }))
+        let flashblocks_enabled = xlayer_builder_args.flashblocks.enabled;
+        let builder = if sequencer_mode {
+            let config = BuilderConfig::try_from(xlayer_builder_args)?;
+            if flashblocks_enabled {
+                XLayerPayloadServiceBuilderInner::Flashblocks(Box::new(FlashblocksServiceBuilder {
+                    config,
+                    bridge_intercept: Default::default(),
+                }))
+            } else {
+                XLayerPayloadServiceBuilderInner::DefaultWithP2P(Box::new(
+                    DefaultBuilderServiceBuilder {
+                        compute_pending_block,
+                        config,
+                        da_config,
+                        gas_limit_config,
+                    },
+                ))
+            }
         } else {
             let payload_builder = OpPayloadBuilder::new(compute_pending_block)
                 .with_da_config(da_config)
@@ -58,14 +77,21 @@ impl XLayerPayloadServiceBuilder {
                 payload_builder,
             ))
         };
-
         Ok(Self { builder })
     }
 
-    /// Apply bridge intercept config to the flashblocks builder.
+    /// Apply bridge intercept config. Only the flashblocks builder supports bridge
+    /// intercept — the default builder runs unmodified upstream `OpPayloadBuilder` logic
+    /// as a failsafe, so bridge filtering is intentionally not applied.
     pub fn with_bridge_config(mut self, config: BridgeInterceptConfig) -> Self {
-        if let XLayerPayloadServiceBuilderInner::Flashblocks(ref mut fb) = self.builder {
-            fb.with_bridge_intercept(config);
+        match &mut self.builder {
+            XLayerPayloadServiceBuilderInner::Flashblocks(fb) => {
+                fb.with_bridge_intercept(config);
+            }
+            // DefaultWithP2P runs the upstream OpPayloadBuilder as a failsafe during
+            // conductor failover — bridge intercept is not supported on this path.
+            XLayerPayloadServiceBuilderInner::DefaultWithP2P(_) => {}
+            XLayerPayloadServiceBuilderInner::Default(_) => {}
         }
         self
     }
@@ -85,11 +111,12 @@ where
     {
         match self.builder {
             XLayerPayloadServiceBuilderInner::Flashblocks(flashblocks_builder) => {
-                // Use FlashblocksServiceBuilder
                 flashblocks_builder.spawn_payload_builder_service(ctx, pool, evm_config).await
             }
+            XLayerPayloadServiceBuilderInner::DefaultWithP2P(default_builder) => {
+                default_builder.spawn_payload_builder_service(ctx, pool, evm_config).await
+            }
             XLayerPayloadServiceBuilderInner::Default(basic_builder) => {
-                // Use BasicPayloadServiceBuilder - it handles all the boilerplate!
                 basic_builder.spawn_payload_builder_service(ctx, pool, evm_config).await
             }
         }

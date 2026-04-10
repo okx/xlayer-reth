@@ -279,7 +279,7 @@ where
     Client: ClientBounds,
     Tasks: TaskSpawner + Clone + Unpin + 'static,
 {
-    fn get_op_payload_builder_ctx(
+    fn get_flashblocks_payload_builder_ctx(
         &self,
         config: reth_basic_payload_builder::PayloadConfig<
             OpPayloadBuilderAttributes<op_alloy_consensus::OpTxEnvelope>,
@@ -352,7 +352,7 @@ where
 
         let disable_state_root = self.config.flashblocks.disable_state_root;
         let ctx = self
-            .get_op_payload_builder_ctx(config.clone(), block_cancel.clone())
+            .get_flashblocks_payload_builder_ctx(config.clone(), block_cancel.clone())
             .map_err(|e| PayloadBuilderError::Other(e.into()))?;
 
         // Initialize flashblocks state for this block
@@ -523,7 +523,7 @@ where
 
         let fb_cancel = block_cancel.child_token();
         let mut ctx = self
-            .get_op_payload_builder_ctx(config, fb_cancel.clone())
+            .get_flashblocks_payload_builder_ctx(config, fb_cancel.clone())
             .map_err(|e| PayloadBuilderError::Other(e.into()))?;
 
         // Create best_transaction iterator

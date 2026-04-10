@@ -134,6 +134,7 @@ fn main() {
             let payload_builder = XLayerPayloadServiceBuilder::new(
                 args.xlayer_args.builder.clone(),
                 args.rollup_args.compute_pending_block,
+                xlayer_args.sequencer_mode,
             )?
             .with_bridge_config(bridge_config);
 

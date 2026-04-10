@@ -22,12 +22,8 @@ pub async fn handle_persistence(mut rx: ReceivedFlashblocksRx, datadir: ChainPat
             result = rx.recv() => {
                 match result {
                     Ok(fb_payload) => {
-                        if let XLayerFlashblockMessage::Payload(payload) = &*fb_payload
-                            && let Err(e) =
-                                cache.add_flashblock_payload(payload.inner.clone())
-                        {
-                            warn!(target: "flashblocks", "Failed to cache flashblock payload: {e}");
-                            continue;
+                        if let XLayerFlashblockMessage::Payload(payload) = &*fb_payload {
+                            cache.add_flashblock_payload(payload.inner.clone());
                         }
                         dirty = true;
                     }
