@@ -25,6 +25,7 @@ use reth_provider::CanonStateSubscriptions;
 use reth_rpc_builder::config::RethRpcServerConfig;
 use reth_rpc_server_types::RethRpcModule;
 
+use xlayer_bridge_intercept::BridgeInterceptConfig;
 use xlayer_chainspec::XLayerChainSpecParser;
 use xlayer_flashblocks::{
     FlashblockSequenceValidator, FlashblockStateCache, FlashblocksPersistCtx, FlashblocksPubSub,
@@ -51,38 +52,77 @@ struct Args {
     pub xlayer_args: XLayerArgs,
 }
 
-fn main() {
+fn setup_environment() {
     xlayer_version::init_version!();
-
     reth_cli_util::sigsegv_handler::install();
-
     // Enable backtraces unless a RUST_BACKTRACE value has already been explicitly provided.
     if std::env::var_os("RUST_BACKTRACE").is_none() {
         unsafe {
             std::env::set_var("RUST_BACKTRACE", "1");
         }
     }
-
+    // 校验初始化命令参数
     XLayerArgs::validate_init_command();
+}
+
+fn maybe_init_tracer(xlayer_args: &XLayerArgs) {
+    if xlayer_args.monitor.enable {
+        use std::path::PathBuf;
+        use xlayer_trace_monitor::init_global_tracer;
+        let output_path = PathBuf::from(&xlayer_args.monitor.output_path);
+        init_global_tracer(true, Some(output_path));
+        info!(
+            target: "xlayer::monitor",
+            "Gloabl tracer intialized with output path: {}",
+            xlayer_args.monitor.output_path
+        );
+    }
+}
+
+fn build_legacy_rpc_config(xlayer_args: &XLayerArgs, genesis_block: u64) -> LegacyRpcRouterConfig {
+    LegacyRpcRouterConfig {
+        enabled: xlayer_args.legacy.legacy_rpc_url.is_some(),
+        legacy_endpoint: xlayer_args.legacy.legacy_rpc_url.clone().unwrap_or_default(),
+        cutoff_block: genesis_block,
+        timeout: xlayer_args.legacy.legacy_rpc_timeout,
+    }
+}
+
+fn parse_bridge_config(args: &Args) -> eyre::Result<BridgeInterceptConfig> {
+    let bridge_config = args
+        .xlayer_args
+        .intercept
+        .to_bridge_intercept_config()
+        .map_err(|e| eyre::eyre!("Bridge intercept config error: {e}"))?;
+
+    println!("bridge_config enabled: {}", bridge_config.enabled);
+
+    if bridge_config.enabled {
+        tracing::info!(
+            target: "xlayer::intercept",
+            bridge_contract = ?bridge_config.bridge_contract_address,
+            target_token = ?bridge_config.target_token_address,
+            wildcard = bridge_config.wildcard,
+            "Bridge transaction interception enabled"
+        );
+    }
+
+    Ok(bridge_config)
+}
+
+fn main() {
+    setup_environment();
 
     Cli::<XLayerChainSpecParser, Args>::parse()
         .run(|builder, args| async move {
             info!(message = "starting custom X Layer node");
 
-            // Validate X Layer configuration
             if let Err(e) = args.xlayer_args.validate() {
                 eprintln!("X Layer configuration error: {e}");
                 std::process::exit(1);
             }
 
-            // Initialize global tracer if full link monitor is enabled
-            if args.xlayer_args.monitor.enable {
-                use std::path::PathBuf;
-                use xlayer_trace_monitor::init_global_tracer;
-                let output_path = PathBuf::from(&args.xlayer_args.monitor.output_path);
-                init_global_tracer(true, Some(output_path));
-                info!(target: "xlayer::monitor", "Global tracer initialized with output path: {}", args.xlayer_args.monitor.output_path);
-            }
+            maybe_init_tracer(&args.xlayer_args);
 
             let op_node = OpNode::new(args.rollup_args.clone());
 
@@ -93,14 +133,8 @@ fn main() {
             let xlayer_args = args.xlayer_args.clone();
             let datadir = builder.config().datadir().clone();
 
-            let legacy_config = LegacyRpcRouterConfig {
-                enabled: xlayer_args.legacy.legacy_rpc_url.is_some(),
-                legacy_endpoint: xlayer_args.legacy.legacy_rpc_url.unwrap_or_default(),
-                cutoff_block: genesis_block,
-                timeout: xlayer_args.legacy.legacy_rpc_timeout,
-            };
+            let legacy_config = build_legacy_rpc_config(&xlayer_args, genesis_block);
 
-            // For X Layer full link monitor
             let monitor = XLayerMonitor::new(
                 xlayer_args.monitor,
                 xlayer_args.builder.flashblocks.enabled,
@@ -112,33 +146,15 @@ fn main() {
                 LegacyRpcRouterLayer::new(legacy_config), // Execute second
             ));
 
-            // Parse and validate bridge intercept configuration
-            let bridge_config = args
-                .xlayer_args
-                .intercept
-                .to_bridge_intercept_config()
-                .map_err(|e| eyre::eyre!("Bridge intercept config error: {e}"))?;
+            let bridge_config = parse_bridge_config(&args)?;
 
-            if bridge_config.enabled {
-                tracing::info!(
-                    target: "xlayer::intercept",
-                    bridge_contract = ?bridge_config.bridge_contract_address,
-                    target_token = ?bridge_config.target_token_address,
-                    wildcard = bridge_config.wildcard,
-                    "Bridge transaction interception enabled"
-                );
-            }
-
-            // Create the X Layer payload service builder
-            // It handles both flashblocks and default modes internally
+            // Create the X Layer payload service builder.
+            // It handles both flashblocks and default modes internally.
             let payload_builder = XLayerPayloadServiceBuilder::new(
                 args.xlayer_args.builder.clone(),
                 args.rollup_args.compute_pending_block,
             )?
             .with_bridge_config(bridge_config);
-
-            // Get the engine validator for flashblocks RPC.
-            let engine_validator = Arc::new(OnceLock::new());
 
             // Replace the default engine validator with `XLayerEngineValidator`, sharing
             // the engine's PayloadProcessor while unifying both the engine validator and
@@ -152,6 +168,7 @@ fn main() {
             //
             // When flashblocks RPC is disabled, it is a transparent pass-through to the
             // underlying engine validator.
+            let engine_validator = Arc::new(OnceLock::new());
             let tree_config = builder.config().engine.tree_config();
             let engine_builder = XLayerEngineValidatorBuilder::new(
                 BasicEngineValidatorBuilder::<OpEngineValidatorBuilder>::default(),
@@ -174,13 +191,11 @@ fn main() {
                             .expect("XLayerEngineValidator must be set")
                             .clone();
 
-                        // Initialize flashblocks RPC with the engine's changeset cache
                         let flashblocks_state = FlashblockStateCache::new(
                             ctx.provider().canonical_in_memory_state(),
                             engine_validator.get_changeset_cache(),
                         );
 
-                        // Initialize the flashblocks validator
                         engine_validator.set_flashblocks(
                             FlashblockSequenceValidator::new(
                                 OpEvmConfig::optimism(ctx.provider().chain_spec()),
@@ -194,35 +209,24 @@ fn main() {
                             flashblocks_state.clone(),
                         );
 
-                        let canon_state_rx = ctx.provider().canonical_state_stream();
                         let service = FlashblocksRpcService::new(
                             args.xlayer_args.builder.flashblocks,
                             flashblocks_state.clone(),
                             ctx.node().task_executor.clone(),
                             FlashblocksRpcCtx {
-                                canon_state_rx,
+                                canon_state_rx: ctx.provider().canonical_state_stream(),
                                 debug_state_comparison: args
                                     .xlayer_args
                                     .flashblocks_rpc
                                     .flashblocks_debug_state_comparison,
                             },
-                            FlashblocksPersistCtx {
-                                datadir,
-                            },
+                            FlashblocksPersistCtx { datadir },
                         )?;
                         service.spawn_persistence()?;
-                        service.spawn_rpc(
-                            engine_validator,
-                            WsFlashBlockStream::new(flashblock_url),
-                        );
+                        service.spawn_rpc(engine_validator, WsFlashBlockStream::new(flashblock_url));
                         info!(target: "reth::cli", "xlayer flashblocks service initialized");
 
-                        // Initialize custom flashblocks subscription
-                        if args
-                            .xlayer_args
-                            .flashblocks_rpc
-                            .enable_flashblocks_subscription
-                        {
+                        if args.xlayer_args.flashblocks_rpc.enable_flashblocks_subscription {
                             let flashblocks_pubsub = FlashblocksPubSub::new(
                                 ctx.registry.eth_handlers().pubsub.clone(),
                                 flashblocks_state.subscribe_pending_sequence(),
@@ -239,7 +243,6 @@ fn main() {
                             info!(target: "reth::cli", "xlayer flashblocks pubsub initialized");
                         }
 
-                        // Register flashblocks Eth API overrides
                         let flashblocks_eth = FlashblocksEthApiExt::new(
                             ctx.registry.eth_api().clone(),
                             flashblocks_state.clone(),
@@ -250,7 +253,6 @@ fn main() {
                         )?;
                         info!(target: "reth::cli", "xlayer flashblocks eth api overrides initialized");
 
-                        // Register flashblocks filter override (eth_getLogs)
                         let flashblocks_filter = FlashblocksEthFilterExt::new(
                             ctx.registry.eth_api().clone(),
                             ctx.registry.eth_handlers().filter.clone(),
@@ -262,12 +264,13 @@ fn main() {
                             FlashblocksFilterOverrideServer::into_rpc(flashblocks_filter),
                         )?;
                         info!(target: "reth::cli", "xlayer flashblocks filter overrides initialized");
+
                         Some(flashblocks_state)
                     } else {
                         None
                     };
 
-                    // Register X Layer RPC
+                    // Register X Layer RPC extension
                     let xlayer_rpc = DefaultRpcExt::new(flashblocks_state);
                     ctx.modules
                         .merge_configured(DefaultRpcExtApiServer::into_rpc(xlayer_rpc))?;
@@ -277,32 +280,23 @@ fn main() {
                 })
                 .launch_with_fn(|builder| {
                     let engine_tree_config = builder.config().engine.tree_config();
-
-                    let dev_mode = builder.config().dev.dev;
-                    if dev_mode {
+                    let task_executor = builder.task_executor().clone();
+                    let datadir = builder.config().datadir();
+                    if builder.config().dev.dev {
                         tracing::warn!("Running in debug mode");
-                        let launcher = DebugNodeLauncher::new(
-                            EngineNodeLauncher::new(
-                                builder.task_executor().clone(),
-                                builder.config().datadir(),
-                                engine_tree_config,
-                            )
-                        );
-
-                        Either::Left(builder.launch_with(launcher))
+                        Either::Left(builder.launch_with(DebugNodeLauncher::new(
+                            EngineNodeLauncher::new(task_executor, datadir, engine_tree_config),
+                        )))
                     } else {
-                        let launcher = EngineNodeLauncher::new(
-                            builder.task_executor().clone(),
-                            builder.config().datadir(),
+                        Either::Right(builder.launch_with(EngineNodeLauncher::new(
+                            task_executor,
+                            datadir,
                             engine_tree_config,
-                        );
-
-                        Either::Right(builder.launch_with(launcher))
+                        )))
                     }
                 })
                 .await?;
 
-            // Start X Layer full link monitor handle
             start_monitor_handle(
                 node.tasks(),
                 monitor,
