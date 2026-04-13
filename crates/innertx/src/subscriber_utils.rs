@@ -76,16 +76,19 @@ async fn handle_canonical_state_stream<P, E, N>(
 
                 for (block, receipts) in new.blocks_and_receipts() {
                     let block_hash = block.hash();
+                    let block_number = block.header().number();
 
                     // If innertx was already computed by the flashblocks
                     // validator, index from cache (skip EVM replay).
-                    if let Some(traces) =
-                        innertx_cache.as_ref().and_then(|c| c.get_raw_block_traces(&block_hash))
+                    if let Some(traces) = innertx_cache
+                        .as_ref()
+                        .and_then(|c| c.get_raw_traces_by_number(block_number))
                     {
                         debug!(
                             target: "xlayer::subscriber",
+                            block_number,
                             ?block_hash,
-                            "Flashblocks cache hit, indexing block innertxs from cache: {block_hash:?}",
+                            "Indexing innertx from flashblocks cache (skipping replay)",
                         );
                         if let Err(err) = index_block_innertx::<N>(block, receipts, traces) {
                             error!(
@@ -122,6 +125,11 @@ async fn handle_canonical_state_stream<P, E, N>(
                     old.range(),
                     new.range()
                 );
+
+                // Flush innertx cache — reorged data is invalid.
+                if let Some(cache) = &innertx_cache {
+                    cache.clear();
+                }
 
                 // Remove old blocks
                 for block in old.blocks_iter() {

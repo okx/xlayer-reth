@@ -448,15 +448,31 @@ where
         let block: N::Block = block.into();
         let block = RecoveredBlock::new_unhashed(block, senders);
 
-        // Spawn innertx computation on a blocking thread. Runs concurrently
-        // with deferred trie task and execution cache update below.
-        let innertx_handle = self.innertx_cache.as_ref().map(|cache| {
-            xlayer_innertx::cache::spawn_compute_and_cache_innertx(
-                cache.clone(),
-                self.evm_config.clone(),
-                block.clone(),
-                state_provider,
-            )
+        let innertx_handle = self.innertx_cache.as_ref().and_then(|cache| {
+            let prefix_tx_count = pending_sequence
+                .as_ref()
+                .map_or(0, |seq| seq.prefix_execution_meta.cached_tx_count);
+            let hash = pending_sequence.as_ref().map_or(parent_hash, |seq| seq.get_hash());
+            self.state_provider_builder(hash)
+                .and_then(|(builder, _, _)| builder.build().map_err(Into::into))
+                .inspect_err(|err| {
+                    warn!(
+                        target: "xlayer::flashblocks::innertx",
+                        %err,
+                        "Failed to build state provider for innertx"
+                    );
+                })
+                .ok()
+                .map(|provider| {
+                    xlayer_innertx::cache::spawn_compute_and_cache_innertx(
+                        cache.clone(),
+                        self.evm_config.clone(),
+                        block.clone(),
+                        provider,
+                        cached_reads.clone(),
+                        prefix_tx_count,
+                    )
+                })
         });
 
         let executed_block = if calculate_state_root {
