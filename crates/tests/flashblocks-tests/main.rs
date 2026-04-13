@@ -55,6 +55,74 @@ async fn fb_flashblocks_enabled_returns_false_on_non_fb_node_test() {
 }
 
 // ========================================================================
+// Flashblocks P2P peer status tests
+// ========================================================================
+
+/// Verifies that `eth_flashblocksPeerStatus` returns a valid, well-formed
+/// response on the sequencer node (which has the P2P broadcast layer).
+#[tokio::test]
+async fn fb_peer_status_returns_data_on_sequencer_test() {
+    let seq_client = operations::create_test_client(operations::DEFAULT_L2_SEQ_URL);
+
+    let status = operations::eth_flashblocks_peer_status(&seq_client)
+        .await
+        .expect("eth_flashblocksPeerStatus RPC call failed")
+        .expect("sequencer should return peer status, not null");
+
+    // Top-level structure
+    assert!(!status["localPeerId"].as_str().unwrap().is_empty(), "localPeerId must be non-empty");
+
+    // Summary counts must be consistent
+    let summary = &status["summary"];
+    let total = summary["total"].as_u64().unwrap();
+    let connected = summary["connected"].as_u64().unwrap();
+    let disconnected = summary["disconnected"].as_u64().unwrap();
+    let never_connected = summary["neverConnected"].as_u64().unwrap();
+    assert_eq!(total, connected + disconnected + never_connected, "summary counts must add up");
+
+    // Validate each peer entry
+    let peers = status["peers"].as_array().expect("peers must be an array");
+    assert_eq!(peers.len(), total as usize);
+    for peer in peers {
+        assert!(!peer["peerId"].as_str().unwrap().is_empty());
+        assert!(peer["isStatic"].is_boolean());
+        assert!(peer["connectionCount"].is_u64());
+        let state = peer["connectionState"].as_str().unwrap();
+        assert!(
+            ["connected", "disconnected", "never_connected"].contains(&state),
+            "invalid connectionState: {state}"
+        );
+    }
+}
+
+/// Verifies that `eth_flashblocksPeerStatus` returns `null` on an RPC node
+/// that does not have the P2P broadcast layer.
+#[tokio::test]
+async fn fb_peer_status_returns_null_on_rpc_node_test() {
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+
+    let result = operations::eth_flashblocks_peer_status(&fb_client)
+        .await
+        .expect("eth_flashblocksPeerStatus RPC call failed");
+
+    assert!(result.is_none(), "RPC node (non-sequencer) should return null for peer status");
+}
+
+/// Verifies that `eth_flashblocksPeerStatus` returns `null` on a node without
+/// flashblocks.
+#[tokio::test]
+#[ignore = "requires non-flashblocks node"]
+async fn fb_peer_status_returns_null_on_non_fb_node_test() {
+    let non_fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_NO_FB);
+
+    let result = operations::eth_flashblocks_peer_status(&non_fb_client)
+        .await
+        .expect("eth_flashblocksPeerStatus RPC call failed");
+
+    assert!(result.is_none(), "non-flashblocks node should return null for peer status");
+}
+
+// ========================================================================
 // Flashblocks pending state tests
 // ========================================================================
 

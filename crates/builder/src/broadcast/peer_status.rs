@@ -263,28 +263,31 @@ mod tests {
     }
 
     #[test]
-    fn disconnect_then_reconnect() {
+    fn disconnect_clears_stream_and_records_duration() {
         let local = test_peer_id(0);
         let tracker = PeerStatusTracker::new(local);
 
         let peer_a = test_peer_id(1);
-        let addr_a = test_multiaddr(9001);
-        tracker.register_static_peers(&[(peer_a, addr_a.clone())]);
-
-        // Connect
-        tracker.on_connected(peer_a, Some(addr_a.clone()));
+        tracker.on_connected(peer_a, None);
         tracker.on_stream_opened(peer_a);
-        assert!(tracker.snapshot().peers[0].has_stream);
 
-        // Disconnect
         tracker.on_disconnected(peer_a);
         let snap = tracker.snapshot();
         assert_eq!(snap.peers[0].connection_state, "disconnected");
         assert!(!snap.peers[0].has_stream);
         assert!(snap.peers[0].disconnected_duration_secs.is_some());
+    }
 
-        // Reconnect
-        tracker.on_connected(peer_a, Some(addr_a));
+    #[test]
+    fn reconnect_increments_count_and_clears_disconnected_duration() {
+        let local = test_peer_id(0);
+        let tracker = PeerStatusTracker::new(local);
+
+        let peer_a = test_peer_id(1);
+        tracker.on_connected(peer_a, None);
+        tracker.on_disconnected(peer_a);
+        tracker.on_connected(peer_a, None);
+
         let snap = tracker.snapshot();
         assert_eq!(snap.peers[0].connection_state, "connected");
         assert_eq!(snap.peers[0].connection_count, 2);
@@ -328,23 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn broadcast_success_updates_last_broadcast() {
-        let local = test_peer_id(0);
-        let tracker = PeerStatusTracker::new(local);
-
-        let peer_a = test_peer_id(1);
-        tracker.on_connected(peer_a, None);
-        tracker.on_stream_opened(peer_a);
-
-        assert!(tracker.snapshot().peers[0].last_broadcast_secs_ago.is_none());
-
-        tracker.on_broadcast_result(&[]);
-        let snap = tracker.snapshot();
-        assert!(snap.peers[0].last_broadcast_secs_ago.is_some());
-    }
-
-    #[test]
-    fn broadcast_result_only_updates_peers_with_stream() {
+    fn broadcast_success_only_updates_peers_with_stream() {
         let local = test_peer_id(0);
         let tracker = PeerStatusTracker::new(local);
 
@@ -353,7 +340,6 @@ mod tests {
         tracker.on_connected(peer_a, None);
         tracker.on_stream_opened(peer_a);
         tracker.on_connected(peer_b, None);
-        // peer_b has no stream
 
         tracker.on_broadcast_result(&[]);
         let snap = tracker.snapshot();
@@ -377,6 +363,39 @@ mod tests {
         let snap = tracker.snapshot();
         assert!(snap.peers[0].is_static);
         assert!(!snap.peers[1].is_static);
+    }
+
+    #[test]
+    fn unknown_peer_operations_are_noop() {
+        let local = test_peer_id(0);
+        let tracker = PeerStatusTracker::new(local);
+        let unknown = test_peer_id(99);
+
+        tracker.on_disconnected(unknown);
+        tracker.on_stream_opened(unknown);
+        tracker.on_broadcast_result(&[unknown]);
+        assert_eq!(tracker.snapshot().summary.total, 0);
+    }
+
+    #[test]
+    fn existing_peer_state_preserved_on_reregistration() {
+        let local = test_peer_id(0);
+        let tracker = PeerStatusTracker::new(local);
+
+        let peer_a = test_peer_id(1);
+        let addr_a = test_multiaddr(9001);
+
+        // Connect first, then late static registration — should not clobber state.
+        tracker.on_connected(peer_a, Some(addr_a.clone()));
+        tracker.register_static_peers(&[(peer_a, addr_a)]);
+        let snap = tracker.snapshot();
+        assert!(snap.peers[0].is_static);
+        assert_eq!(snap.peers[0].connection_state, "connected");
+        assert_eq!(snap.peers[0].connection_count, 1);
+
+        // Connect with None multiaddr — should keep existing addr.
+        tracker.on_connected(peer_a, None);
+        assert!(tracker.snapshot().peers[0].multiaddr.is_some());
     }
 
     #[test]
