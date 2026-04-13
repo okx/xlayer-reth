@@ -6,6 +6,7 @@ use jsonrpsee::{
 use reth_optimism_primitives::OpPrimitives;
 use reth_optimism_rpc::SequencerClient;
 
+use xlayer_builder::broadcast::peer_status::{PeerStatusSnapshot, PeerStatusTracker};
 use xlayer_flashblocks::FlashblockStateCache;
 
 /// Trait for accessing sequencer client from backend
@@ -25,18 +26,29 @@ pub trait DefaultRpcExtApi {
     /// receiving and caching flashblock data.
     #[method(name = "flashblocksEnabled")]
     async fn flashblocks_enabled(&self) -> RpcResult<bool>;
+
+    /// Returns the status of all flashblocks P2P peers, including connected,
+    /// disconnected, and never-connected static peers.
+    ///
+    /// Returns `None` on non-sequencer nodes that have no P2P layer.
+    #[method(name = "flashblocksPeerStatus")]
+    async fn flashblocks_peer_status(&self) -> RpcResult<Option<PeerStatusSnapshot>>;
 }
 
 /// X Layer default Eth JSON-RPC API extension implementation.
 #[derive(Debug, Clone)]
 pub struct DefaultRpcExt {
     flashblocks_state: Option<FlashblockStateCache<OpPrimitives>>,
+    peer_status: Option<PeerStatusTracker>,
 }
 
 impl DefaultRpcExt {
     /// Creates a new [`DefaultRpcExt`].
-    pub fn new(flashblocks_state: Option<FlashblockStateCache<OpPrimitives>>) -> Self {
-        Self { flashblocks_state }
+    pub fn new(
+        flashblocks_state: Option<FlashblockStateCache<OpPrimitives>>,
+        peer_status: Option<PeerStatusTracker>,
+    ) -> Self {
+        Self { flashblocks_state, peer_status }
     }
 }
 
@@ -45,6 +57,11 @@ impl DefaultRpcExtApiServer for DefaultRpcExt {
     /// Handler for: `eth_flashblocksEnabled`
     async fn flashblocks_enabled(&self) -> RpcResult<bool> {
         Ok(self.flashblocks_state.as_ref().is_some_and(|cache| cache.get_confirm_height() > 0))
+    }
+
+    /// Handler for: `eth_flashblocksPeerStatus`
+    async fn flashblocks_peer_status(&self) -> RpcResult<Option<PeerStatusSnapshot>> {
+        Ok(self.peer_status.as_ref().map(|tracker| tracker.snapshot()))
     }
 }
 
@@ -55,7 +72,7 @@ mod tests {
 
     #[test]
     fn test_flashblocks_disabled_when_no_cache() {
-        let ext = DefaultRpcExt::new(None);
+        let ext = DefaultRpcExt::new(None, None);
         assert!(ext.flashblocks_state.is_none());
     }
 
@@ -71,7 +88,13 @@ mod tests {
             ),
             ChangesetCache::new(),
         );
-        let ext = DefaultRpcExt::new(Some(cache));
+        let ext = DefaultRpcExt::new(Some(cache), None);
         assert!(ext.flashblocks_state.as_ref().unwrap().get_confirm_height() == 0);
+    }
+
+    #[test]
+    fn test_peer_status_returns_none_when_no_tracker() {
+        let ext = DefaultRpcExt::new(None, None);
+        assert!(ext.peer_status.is_none());
     }
 }

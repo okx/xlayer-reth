@@ -17,7 +17,7 @@ use crate::{
     traits::{NodeBounds, PoolBounds},
 };
 use eyre::WrapErr as _;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use reth_basic_payload_builder::{BasicPayloadJobGenerator, BasicPayloadJobGeneratorConfig};
 use reth_node_api::NodeTypes;
@@ -32,6 +32,7 @@ pub struct DefaultBuilderServiceBuilder {
     pub config: BuilderConfig,
     pub da_config: OpDAConfig,
     pub gas_limit_config: OpGasLimitConfig,
+    pub peer_status_sink: Arc<OnceLock<crate::broadcast::PeerStatusTracker>>,
 }
 
 impl<Node, Pool> PayloadServiceBuilder<Node, Pool, OpEvmConfig> for DefaultBuilderServiceBuilder
@@ -88,6 +89,7 @@ where
             node,
             outgoing_message_tx: _,
             mut incoming_message_rxs,
+            peer_status,
         } = broadcast_builder
             .with_agent_version(AGENT_VERSION.to_string())
             .with_protocol(FLASHBLOCKS_STREAM_PROTOCOL)
@@ -97,6 +99,7 @@ where
             .with_max_peer_count(self.config.flashblocks.p2p_max_peer_count)
             .try_build()
             .wrap_err("failed to build flashblocks p2p node")?;
+        let _ = self.peer_status_sink.set(peer_status);
         let multiaddrs = node.multiaddrs();
         ctx.task_executor().spawn_task(async move {
             if let Err(e) = node.run().await {
