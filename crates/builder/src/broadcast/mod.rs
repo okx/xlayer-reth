@@ -300,7 +300,7 @@ impl Node {
                             cause,
                             ..
                         } => {
-                            debug!(target: "payload_builder::broadcast", "connection closed with peer {peer_id}: {cause:?}");
+                            warn!(target: "payload_builder::broadcast", "connection closed with peer {peer_id}: {cause:?}");
                             outgoing_streams_handler.remove_peer(&peer_id);
                         }
                         SwarmEvent::Behaviour(event) => event.handle(&mut swarm),
@@ -538,7 +538,9 @@ impl IncomingStreamsHandler {
                 }
                 Some(res) = handle_stream_futures.next() => {
                     match res {
-                        Ok(Ok(())) => {}
+                        Ok(Ok(())) => {
+                            warn!(target: "payload_builder::broadcast", "incoming stream closed on protocol {protocol}");
+                        }
                         Ok(Err(e)) => {
                             warn!(target: "payload_builder::broadcast", "error handling incoming stream: {e:?}");
                         }
