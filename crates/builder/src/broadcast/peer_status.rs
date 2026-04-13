@@ -37,6 +37,15 @@ enum PeerConnectionState {
     NeverConnected,
 }
 
+/// Serializable connection state for the RPC response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionState {
+    Connected,
+    Disconnected,
+    NeverConnected,
+}
+
 impl PeerStatusTracker {
     /// Creates a new tracker for the given local peer.
     pub fn new(local_peer_id: PeerId) -> Self {
@@ -70,9 +79,16 @@ impl PeerStatusTracker {
     }
 
     /// The TCP connection with `peer_id` was closed.
+    ///
+    /// Non-static peers are removed entirely on disconnect to prevent unbounded
+    /// accumulation from transient mDNS/DHT connections.
     pub fn on_disconnected(&self, peer_id: PeerId) {
         let mut inner = self.inner.write();
         if let Some(entry) = inner.peers.get_mut(&peer_id) {
+            if !entry.is_static {
+                inner.peers.remove(&peer_id);
+                return;
+            }
             entry.state = PeerConnectionState::Disconnected { since: Instant::now() };
             entry.has_stream = false;
         }
@@ -115,13 +131,19 @@ impl PeerStatusTracker {
             .map(|(peer_id, entry)| {
                 let (connection_state, connected_duration_secs, disconnected_duration_secs) =
                     match &entry.state {
-                        PeerConnectionState::Connected { since } => {
-                            ("connected", Some(now.duration_since(*since).as_secs_f64()), None)
+                        PeerConnectionState::Connected { since } => (
+                            ConnectionState::Connected,
+                            Some(now.duration_since(*since).as_secs_f64()),
+                            None,
+                        ),
+                        PeerConnectionState::Disconnected { since } => (
+                            ConnectionState::Disconnected,
+                            None,
+                            Some(now.duration_since(*since).as_secs_f64()),
+                        ),
+                        PeerConnectionState::NeverConnected => {
+                            (ConnectionState::NeverConnected, None, None)
                         }
-                        PeerConnectionState::Disconnected { since } => {
-                            ("disconnected", None, Some(now.duration_since(*since).as_secs_f64()))
-                        }
-                        PeerConnectionState::NeverConnected => ("never_connected", None, None),
                     };
 
                 let last_broadcast_secs_ago =
@@ -131,7 +153,7 @@ impl PeerStatusTracker {
                     peer_id: peer_id.to_string(),
                     multiaddr: entry.multiaddr.as_ref().map(|a| a.to_string()),
                     is_static: entry.is_static,
-                    connection_state: connection_state.to_string(),
+                    connection_state,
                     has_stream: entry.has_stream,
                     connected_duration_secs,
                     disconnected_duration_secs,
@@ -144,10 +166,12 @@ impl PeerStatusTracker {
         // Sort: static first, then by peer_id for deterministic output.
         peers.sort_by(|a, b| b.is_static.cmp(&a.is_static).then_with(|| a.peer_id.cmp(&b.peer_id)));
 
-        let connected = peers.iter().filter(|p| p.connection_state == "connected").count();
-        let disconnected = peers.iter().filter(|p| p.connection_state == "disconnected").count();
+        let connected =
+            peers.iter().filter(|p| p.connection_state == ConnectionState::Connected).count();
+        let disconnected =
+            peers.iter().filter(|p| p.connection_state == ConnectionState::Disconnected).count();
         let never_connected =
-            peers.iter().filter(|p| p.connection_state == "never_connected").count();
+            peers.iter().filter(|p| p.connection_state == ConnectionState::NeverConnected).count();
         let static_peers = peers.iter().filter(|p| p.is_static).count();
 
         PeerStatusSnapshot {
@@ -195,8 +219,7 @@ pub struct PeerInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub multiaddr: Option<String>,
     pub is_static: bool,
-    /// One of `"connected"`, `"disconnected"`, `"never_connected"`.
-    pub connection_state: String,
+    pub connection_state: ConnectionState,
     pub has_stream: bool,
     /// Seconds since connection was established (present only when connected).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -239,7 +262,7 @@ mod tests {
         assert_eq!(snap.summary.total, 1);
         assert_eq!(snap.summary.never_connected, 1);
         assert_eq!(snap.summary.static_peers, 1);
-        assert_eq!(snap.peers[0].connection_state, "never_connected");
+        assert_eq!(snap.peers[0].connection_state, ConnectionState::NeverConnected);
         assert!(snap.peers[0].is_static);
         assert_eq!(snap.peers[0].connection_count, 0);
     }
@@ -257,25 +280,39 @@ mod tests {
         let snap = tracker.snapshot();
         assert_eq!(snap.summary.connected, 1);
         assert_eq!(snap.summary.never_connected, 0);
-        assert_eq!(snap.peers[0].connection_state, "connected");
+        assert_eq!(snap.peers[0].connection_state, ConnectionState::Connected);
         assert_eq!(snap.peers[0].connection_count, 1);
         assert!(snap.peers[0].connected_duration_secs.is_some());
     }
 
     #[test]
-    fn disconnect_clears_stream_and_records_duration() {
+    fn disconnect_static_peer_clears_stream_and_records_duration() {
         let local = test_peer_id(0);
         let tracker = PeerStatusTracker::new(local);
 
         let peer_a = test_peer_id(1);
+        tracker.register_static_peers(&[(peer_a, test_multiaddr(9001))]);
         tracker.on_connected(peer_a, None);
         tracker.on_stream_opened(peer_a);
 
         tracker.on_disconnected(peer_a);
         let snap = tracker.snapshot();
-        assert_eq!(snap.peers[0].connection_state, "disconnected");
+        assert_eq!(snap.peers[0].connection_state, ConnectionState::Disconnected);
         assert!(!snap.peers[0].has_stream);
         assert!(snap.peers[0].disconnected_duration_secs.is_some());
+    }
+
+    #[test]
+    fn disconnect_non_static_peer_removes_entry() {
+        let local = test_peer_id(0);
+        let tracker = PeerStatusTracker::new(local);
+
+        let peer_a = test_peer_id(1);
+        tracker.on_connected(peer_a, None);
+        assert_eq!(tracker.snapshot().summary.total, 1);
+
+        tracker.on_disconnected(peer_a);
+        assert_eq!(tracker.snapshot().summary.total, 0);
     }
 
     #[test]
@@ -284,30 +321,30 @@ mod tests {
         let tracker = PeerStatusTracker::new(local);
 
         let peer_a = test_peer_id(1);
+        tracker.register_static_peers(&[(peer_a, test_multiaddr(9001))]);
         tracker.on_connected(peer_a, None);
         tracker.on_disconnected(peer_a);
         tracker.on_connected(peer_a, None);
 
         let snap = tracker.snapshot();
-        assert_eq!(snap.peers[0].connection_state, "connected");
+        assert_eq!(snap.peers[0].connection_state, ConnectionState::Connected);
         assert_eq!(snap.peers[0].connection_count, 2);
         assert!(snap.peers[0].disconnected_duration_secs.is_none());
     }
 
     #[test]
-    fn non_static_peer_tracked_on_connect() {
+    fn non_static_peer_tracked_while_connected() {
         let local = test_peer_id(0);
         let tracker = PeerStatusTracker::new(local);
 
         let peer_b = test_peer_id(2);
-        let addr_b = test_multiaddr(9002);
-        tracker.on_connected(peer_b, Some(addr_b));
+        tracker.on_connected(peer_b, Some(test_multiaddr(9002)));
 
         let snap = tracker.snapshot();
         assert_eq!(snap.summary.total, 1);
         assert_eq!(snap.summary.static_peers, 0);
         assert!(!snap.peers[0].is_static);
-        assert_eq!(snap.peers[0].connection_state, "connected");
+        assert_eq!(snap.peers[0].connection_state, ConnectionState::Connected);
     }
 
     #[test]
@@ -324,7 +361,7 @@ mod tests {
 
         let snap = tracker.snapshot();
         // Connection is still up, only stream is lost.
-        assert_eq!(snap.peers[0].connection_state, "connected");
+        assert_eq!(snap.peers[0].connection_state, ConnectionState::Connected);
         assert!(!snap.peers[0].has_stream);
         // Failed peer should not get last_broadcast_at updated.
         assert!(snap.peers[0].last_broadcast_secs_ago.is_none());
@@ -390,7 +427,7 @@ mod tests {
         tracker.register_static_peers(&[(peer_a, addr_a)]);
         let snap = tracker.snapshot();
         assert!(snap.peers[0].is_static);
-        assert_eq!(snap.peers[0].connection_state, "connected");
+        assert_eq!(snap.peers[0].connection_state, ConnectionState::Connected);
         assert_eq!(snap.peers[0].connection_count, 1);
 
         // Connect with None multiaddr — should keep existing addr.
