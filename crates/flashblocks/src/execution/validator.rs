@@ -449,9 +449,8 @@ where
         let block = RecoveredBlock::new_unhashed(block, senders);
 
         let innertx_handle = self.innertx_cache.as_ref().and_then(|cache| {
-            let prefix_tx_count = pending_sequence
-                .as_ref()
-                .map_or(0, |seq| seq.prefix_execution_meta.cached_tx_count);
+            let prefix_tx_count =
+                pending_sequence.as_ref().map(|seq| seq.prefix_execution_meta.cached_tx_count);
             let hash = pending_sequence.as_ref().map_or(parent_hash, |seq| seq.get_hash());
             self.state_provider_builder(hash)
                 .and_then(|(builder, _, _)| builder.build().map_err(Into::into))

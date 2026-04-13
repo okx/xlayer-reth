@@ -189,7 +189,7 @@ pub fn spawn_compute_and_cache_innertx<N, E>(
     block: RecoveredBlock<N::Block>,
     state_provider: reth_storage_api::StateProviderBox,
     cached_reads: CachedReads,
-    prefix_tx_count: usize,
+    prefix_tx_count: Option<usize>,
 ) -> tokio::task::JoinHandle<()>
 where
     N: NodePrimitives + 'static,
@@ -199,16 +199,12 @@ where
         let block_hash = block.hash();
         let block_number = block.header().number();
         let total_txs = block.body().transactions().len();
-        let delta_tx_count = total_txs.saturating_sub(prefix_tx_count);
+        let skip = prefix_tx_count.unwrap_or(0);
+        let delta_tx_count = total_txs.saturating_sub(skip);
 
         // Derive delta tx hashes from the block body.
-        let delta_tx_hashes = block
-            .body()
-            .transactions()
-            .iter()
-            .skip(prefix_tx_count)
-            .map(|tx| *tx.tx_hash())
-            .collect();
+        let delta_tx_hashes =
+            block.body().transactions().iter().skip(skip).map(|tx| *tx.tx_hash()).collect();
 
         if delta_tx_count == 0 {
             // No new transactions — just update the block hash.
@@ -262,14 +258,14 @@ fn replay_delta_innertx<E, N>(
     block: &RecoveredBlock<N::Block>,
     state_provider: &dyn StateProvider,
     mut cached_reads: CachedReads,
-    prefix_tx_count: usize,
+    prefix_tx_count: Option<usize>,
 ) -> eyre::Result<InnerTxTraces>
 where
     E: ConfigureEvm<Primitives = N> + Send + Sync + 'static,
     N: NodePrimitives + 'static,
 {
-    // Only the delta transactions (skip prefix).
-    let delta_txs: Vec<_> = block.transactions_recovered().skip(prefix_tx_count).collect();
+    let skip = prefix_tx_count.unwrap_or(0);
+    let delta_txs: Vec<_> = block.transactions_recovered().skip(skip).collect();
 
     if delta_txs.is_empty() {
         return Ok(Vec::new());
@@ -289,9 +285,19 @@ where
     let evm = evm_config.evm_with_env_and_inspector(&mut state, evm_env, &mut inspector);
     let block_ctx = evm_config.context_for_block(block)?;
     let mut executor = evm_config.create_executor(evm, block_ctx);
-
     executor.set_state_hook(None);
-    let _output = executor.execute_block(delta_txs.into_iter())?;
+
+    if prefix_tx_count.is_some() {
+        // Incremental: skip pre-execution (already applied during prefix),
+        // execute only delta txs, then apply post-execution changes.
+        for tx in delta_txs {
+            executor.execute_transaction(tx)?;
+        }
+        executor.apply_post_execution_changes()?;
+    } else {
+        // Fresh build: apply pre-execution changes + all txs + post-execution
+        let _output = executor.execute_block(delta_txs.into_iter())?;
+    }
 
     Ok(inspector.get())
 }
