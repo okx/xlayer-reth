@@ -14404,6 +14404,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "xlayer-builder",
  "xlayer-flashblocks",
 ]
 

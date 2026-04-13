@@ -372,11 +372,23 @@ pub async fn txpool_status(client_rpc: &HttpClient) -> Result<Value> {
     Ok(result)
 }
 
-/// For eth_flashblocksEnabled
+/// For `eth_flashblocksEnabled`
 pub async fn eth_flashblocks_enabled(client_rpc: &HttpClient) -> Result<bool> {
     let result: bool = tokio::time::timeout(
         RPC_TIMEOUT,
         client_rpc.request("eth_flashblocksEnabled", jsonrpsee::rpc_params![]),
+    )
+    .await??;
+    Ok(result)
+}
+
+/// For `eth_flashblocksPeerStatus`
+pub async fn eth_flashblocks_peer_status(
+    client_rpc: &HttpClient,
+) -> Result<Option<serde_json::Value>> {
+    let result: Option<serde_json::Value> = tokio::time::timeout(
+        RPC_TIMEOUT,
+        client_rpc.request("eth_flashblocksPeerStatus", jsonrpsee::rpc_params![]),
     )
     .await??;
     Ok(result)

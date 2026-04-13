@@ -1,12 +1,14 @@
 mod behaviour;
 mod outgoing;
 pub(crate) mod payload;
+pub mod peer_status;
 pub(crate) mod types;
 pub(crate) mod wspub;
 
 use behaviour::Behaviour;
 pub use libp2p::{Multiaddr, StreamProtocol};
 pub use payload::{XLayerFlashblockEnd, XLayerFlashblockMessage, XLayerFlashblockPayload};
+pub use peer_status::PeerStatusTracker;
 pub use types::Message;
 pub use wspub::WebSocketPublisher;
 
@@ -121,6 +123,9 @@ pub struct Node {
 
     /// The metrics for the builder
     metrics: Arc<BuilderMetrics>,
+
+    /// Shared peer status tracker for RPC visibility.
+    peer_status: PeerStatusTracker,
 }
 
 impl Node {
@@ -153,6 +158,7 @@ impl Node {
             protocols,
             ws_pub,
             metrics,
+            peer_status,
         } = self;
 
         for addr in listen_addrs {
@@ -174,6 +180,8 @@ impl Node {
             swarm.dial(address.clone()).wrap_err("swarm failed to dial known peer")?;
             known_peers_info.push((peer_id, address));
         }
+
+        peer_status.register_static_peers(&known_peers_info);
 
         let handles = incoming_streams_handlers
             .into_iter()
@@ -214,6 +222,7 @@ impl Node {
                     match result {
                         Ok(stream) => {
                             outgoing_streams_handler.insert_peer_and_stream(peer_id, protocol.clone(), stream);
+                            peer_status.on_stream_opened(peer_id);
                             debug!(target: "payload_builder::broadcast", "opened outbound stream with peer {peer_id} on protocol {protocol}");
                         }
                         Err(e) => {
@@ -242,9 +251,7 @@ impl Node {
                     // in the gossiping of new flashblock payloads to websocket subscribers.
                     match outgoing_streams_handler.broadcast_message(message.clone()).await {
                         Ok(failed_peers) => {
-                            // `broadcast_message` already removed failed peers from
-                            // `peers_to_stream`, so no `has_peer` guard is needed here.
-                            // Push open_stream futures to recover the yamux streams.
+                            peer_status.on_broadcast_result(&failed_peers);
                             for &peer_id in &failed_peers {
                                 for proto in &protocols {
                                     pending_streams.push(peer_id, proto.clone(), swarm.behaviour_mut().new_control());
@@ -289,6 +296,7 @@ impl Node {
                             // when a new connection is established, open outbound streams for each protocol
                             // and add them to the outgoing streams handler.
                             debug!(target: "payload_builder::broadcast", "fb p2p connection established with peer {peer_id} on connection {connection_id}");
+                            peer_status.on_connected(peer_id, None);
                             if !outgoing_streams_handler.has_peer(&peer_id) {
                                 for protocol in &protocols {
                                     pending_streams.push(peer_id, protocol.clone(), swarm.behaviour_mut().new_control());
@@ -302,6 +310,7 @@ impl Node {
                         } => {
                             warn!(target: "payload_builder::broadcast", "connection closed with peer {peer_id}: {cause:?}");
                             outgoing_streams_handler.remove_peer(&peer_id);
+                            peer_status.on_disconnected(peer_id);
                         }
                         SwarmEvent::Behaviour(event) => event.handle(&mut swarm),
                         _ => continue,
@@ -316,6 +325,9 @@ pub struct NodeBuildResult {
     pub node: Node,
     pub outgoing_message_tx: mpsc::Sender<Message>,
     pub incoming_message_rxs: HashMap<StreamProtocol, mpsc::Receiver<Message>>,
+    /// Shared peer status tracker — clone into the RPC layer for
+    /// `eth_flashblocksPeerStatus`.
+    pub peer_status: PeerStatusTracker,
 }
 
 pub struct NodeBuilder {
@@ -482,6 +494,8 @@ impl NodeBuilder {
 
         let (outgoing_message_tx, outgoing_message_rx) = tokio::sync::mpsc::channel(100);
 
+        let peer_status = PeerStatusTracker::new(peer_id);
+
         Ok(NodeBuildResult {
             node: Node {
                 peer_id,
@@ -495,9 +509,11 @@ impl NodeBuilder {
                 protocols,
                 ws_pub,
                 metrics,
+                peer_status: peer_status.clone(),
             },
             outgoing_message_tx,
             incoming_message_rxs,
+            peer_status,
         })
     }
 }
@@ -654,14 +670,18 @@ mod test {
         drop(_guard1);
         drop(_guard2);
 
-        let NodeBuildResult { node: node1, outgoing_message_tx: _, incoming_message_rxs: mut rx1 } =
-            make_test_node_builder()
-                .with_listen_addr(format!("/ip4/127.0.0.1/tcp/{port1}").parse().unwrap())
-                .with_agent_version(TEST_AGENT_VERSION.to_string())
-                .with_protocol(types::FLASHBLOCKS_STREAM_PROTOCOL)
-                .try_build()
-                .unwrap();
-        let NodeBuildResult { node: node2, outgoing_message_tx: tx2, incoming_message_rxs: _ } =
+        let NodeBuildResult {
+            node: node1,
+            outgoing_message_tx: _,
+            incoming_message_rxs: mut rx1,
+            ..
+        } = make_test_node_builder()
+            .with_listen_addr(format!("/ip4/127.0.0.1/tcp/{port1}").parse().unwrap())
+            .with_agent_version(TEST_AGENT_VERSION.to_string())
+            .with_protocol(types::FLASHBLOCKS_STREAM_PROTOCOL)
+            .try_build()
+            .unwrap();
+        let NodeBuildResult { node: node2, outgoing_message_tx: tx2, .. } =
             make_test_node_builder()
                 .with_known_peers(node1.multiaddrs())
                 .with_protocol(types::FLASHBLOCKS_STREAM_PROTOCOL)
