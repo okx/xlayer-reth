@@ -58,11 +58,34 @@ async fn fb_flashblocks_enabled_returns_false_on_non_fb_node_test() {
 // Flashblocks P2P peer status tests
 // ========================================================================
 
-/// Verifies that `eth_flashblocksPeerStatus` returns valid responses on both
-/// sequencers and that each sees the other as a static peer.
+/// Verifies that `eth_flashblocksPeerStatus` returns a non-null, well-formed
+/// response on the sequencer node.
+#[tokio::test]
+async fn fb_peer_status_returns_data_on_sequencer_test() {
+    let status = operations::eth_flashblocks_peer_status(&operations::create_test_client(
+        operations::DEFAULT_L2_SEQ_URL,
+    ))
+    .await
+    .expect("RPC failed")
+    .expect("sequencer should return peer status, not null");
+
+    assert!(!status["localPeerId"].as_str().unwrap().is_empty());
+    let summary = &status["summary"];
+    assert_eq!(
+        summary["total"].as_u64().unwrap(),
+        summary["connected"].as_u64().unwrap()
+            + summary["disconnected"].as_u64().unwrap()
+            + summary["neverConnected"].as_u64().unwrap(),
+        "summary counts must add up"
+    );
+    assert!(status["peers"].as_array().is_some());
+}
+
+/// Validates both sequencers see each other as static peers with the expected
+/// P2P identities from the devnet fb-p2p-key provisioning.
 #[tokio::test]
 #[ignore = "requires conductor-enabled devnet with P2P keys"]
-async fn fb_peer_status_returns_data_on_sequencer_test() {
+async fn fb_peer_status_validates_static_peer_identities_test() {
     // seq1 → expects localPeerId = SEQ1, static peer = SEQ2
     let seq1_status = operations::eth_flashblocks_peer_status(&operations::create_test_client(
         operations::DEFAULT_L2_SEQ_URL,
@@ -74,15 +97,6 @@ async fn fb_peer_status_returns_data_on_sequencer_test() {
     assert_eq!(
         seq1_status["localPeerId"].as_str().unwrap(),
         operations::DEFAULT_SEQ_FB_P2P_PEER_ID
-    );
-    let summary = &seq1_status["summary"];
-    let total = summary["total"].as_u64().unwrap();
-    assert_eq!(
-        total,
-        summary["connected"].as_u64().unwrap()
-            + summary["disconnected"].as_u64().unwrap()
-            + summary["neverConnected"].as_u64().unwrap(),
-        "summary counts must add up"
     );
     let seq2_on_seq1 = seq1_status["peers"]
         .as_array()
