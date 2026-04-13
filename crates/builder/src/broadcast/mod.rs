@@ -538,8 +538,8 @@ impl IncomingStreamsHandler {
                 }
                 Some(res) = handle_stream_futures.next() => {
                     match res {
-                        Ok(Ok(())) => {
-                            warn!(target: "payload_builder::broadcast", "incoming stream closed on protocol {protocol}");
+                        Ok(Ok(peer_id)) => {
+                            warn!(target: "payload_builder::broadcast", "incoming stream closed with peer {peer_id} on protocol {protocol}");
                         }
                         Ok(Err(e)) => {
                             warn!(target: "payload_builder::broadcast", "error handling incoming stream: {e:?}");
@@ -558,7 +558,7 @@ async fn handle_incoming_stream(
     peer_id: PeerId,
     stream: Stream,
     payload_tx: mpsc::Sender<Message>,
-) -> eyre::Result<()> {
+) -> eyre::Result<PeerId> {
     use futures::StreamExt as _;
     use tokio_util::{
         codec::{FramedRead, LinesCodec},
@@ -582,7 +582,7 @@ async fn handle_incoming_stream(
         }
     }
 
-    Ok(())
+    Ok(peer_id)
 }
 
 fn create_transport(
