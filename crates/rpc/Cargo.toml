@@ -12,6 +12,7 @@ default = []
 
 [dependencies]
 xlayer-flashblocks.workspace = true
+xlayer-innertx.workspace = true
 
 # reth
 reth-chain-state.workspace = true
@@ -24,6 +25,7 @@ reth-rpc-convert.workspace = true
 reth-rpc-eth-api.workspace = true
 reth-rpc-eth-types.workspace = true
 reth-rpc-server-types.workspace = true
+reth-provider.workspace = true
 reth-storage-api.workspace = true
 reth-transaction-pool.workspace = true
 

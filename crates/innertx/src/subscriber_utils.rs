@@ -3,6 +3,7 @@
 //! This module provides functions to subscribe to `canonical_state_stream` and
 //! process canonical state notifications for inner transaction indexing.
 
+use alloy_consensus::BlockHeader;
 use futures::StreamExt;
 
 use reth_chain_state::{CanonStateNotification, CanonStateSubscriptions};
@@ -12,10 +13,16 @@ use reth_primitives_traits::NodePrimitives;
 use reth_provider::StateProviderFactory;
 use reth_tracing::tracing::{debug, error, info};
 
-use crate::replay_utils::{remove_block, replay_and_index_block};
+use crate::{
+    cache::FlashblocksInnerTxCache,
+    replay_utils::{index_block_innertx, remove_block, replay_and_index_block},
+};
 
 /// Initializes the inner transaction replay handler that listens to `canonical_state_stream`
 /// and indexes internal transactions for each new canonical block.
+///
+/// When `innertx_cache` is provided, blocks whose innertx traces were already
+/// computed by the flashblocks validator are skipped (no redundant replay).
 ///
 /// # Note
 ///
@@ -26,7 +33,7 @@ use crate::replay_utils::{remove_block, replay_and_index_block};
 /// - May miss notifications if the handler is slow (broadcast channel)
 ///
 /// For reliable processing of all blocks including synced ones, use ExEx instead.
-pub fn initialize_innertx_replay<Node>(node: &Node)
+pub fn initialize_innertx_replay<Node>(node: &Node, innertx_cache: Option<FlashblocksInnerTxCache>)
 where
     Node: FullNodeComponents + Clone + 'static,
     <Node as FullNodeTypes>::Provider: CanonStateSubscriptions,
@@ -43,7 +50,8 @@ where
     task_executor.spawn_critical_task(
         "xlayer-innertx-replay",
         Box::pin(async move {
-            handle_canonical_state_stream(canonical_stream, provider, evm_config).await;
+            handle_canonical_state_stream(canonical_stream, provider, evm_config, innertx_cache)
+                .await;
         }),
     );
 }
@@ -53,6 +61,7 @@ async fn handle_canonical_state_stream<P, E, N>(
     mut stream: impl StreamExt<Item = CanonStateNotification<N>> + Unpin,
     provider: P,
     evm_config: E,
+    innertx_cache: Option<FlashblocksInnerTxCache>,
 ) where
     P: StateProviderFactory + Clone + Send + Sync + 'static,
     E: ConfigureEvm<Primitives = N> + Clone + Send + Sync + 'static,
@@ -65,9 +74,29 @@ async fn handle_canonical_state_stream<P, E, N>(
             CanonStateNotification::Commit { new } => {
                 debug!(target: "xlayer::subscriber", "Canonical commit: range {:?}", new.range());
 
-                for block in new.blocks_iter() {
-                    debug!(target: "xlayer::subscriber", "Processing committed block: {:?}", block.hash());
+                for (block, receipts) in new.blocks_and_receipts() {
+                    let block_hash = block.hash();
 
+                    // If innertx was already computed by the flashblocks
+                    // validator, index from cache (skip EVM replay).
+                    if let Some(traces) =
+                        innertx_cache.as_ref().and_then(|c| c.get_raw_block_traces(&block_hash))
+                    {
+                        debug!(
+                            target: "xlayer::subscriber",
+                            ?block_hash,
+                            "Flashblocks cache hit, indexing block innertxs from cache: {block_hash:?}",
+                        );
+                        if let Err(err) = index_block_innertx::<N>(block, receipts, traces) {
+                            error!(
+                                target: "xlayer::subscriber",
+                                "Failed to index cached innertx for block {block_hash:?}: {err:?}",
+                            );
+                        }
+                        continue;
+                    }
+
+                    debug!(target: "xlayer::subscriber", "Flashblocks cache miss, processing committed block: {block_hash:?}");
                     let provider_clone = provider.clone();
                     let evm_config_clone = evm_config.clone();
 
@@ -76,11 +105,14 @@ async fn handle_canonical_state_stream<P, E, N>(
                     {
                         error!(
                             target: "xlayer::subscriber",
-                            "Failed to process committed block {:?}: {:?}",
-                            block.hash(),
-                            err
+                            "Failed to process committed block {block_hash:?}: {err:?}",
                         );
                     }
+                }
+
+                // Evict all cached innertx at or below the canonical tip.
+                if let Some(cache) = &innertx_cache {
+                    cache.evict_up_to(new.tip().number());
                 }
             }
             CanonStateNotification::Reorg { old, new } => {

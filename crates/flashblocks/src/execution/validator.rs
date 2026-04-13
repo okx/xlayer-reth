@@ -96,6 +96,8 @@ where
     payload_processor: PayloadProcessor<EvmConfig>,
     /// Task runtime for spawning parallel work.
     runtime: Runtime,
+    /// Optional innertx cache for computing and caching internal transaction traces.
+    innertx_cache: Option<xlayer_innertx::cache::FlashblocksInnerTxCache>,
 }
 
 impl<N, EvmConfig, Provider, ChainSpec>
@@ -104,6 +106,7 @@ where
     N: NodePrimitives,
     N::Receipt: FlashblockReceipt,
     EvmConfig: ConfigureEvm<Primitives = N, NextBlockEnvCtx: From<OpFlashblockPayloadBase> + Unpin + Send>
+        + Clone
         + 'static,
     Provider: StateProviderFactory
         + HeaderProvider<Header = HeaderTy<N>>
@@ -115,6 +118,7 @@ where
         + Clone,
     ChainSpec: OpHardforks,
 {
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         evm_config: EvmConfig,
         provider: Provider,
@@ -123,6 +127,7 @@ where
         payload_processor: PayloadProcessor<EvmConfig>,
         runtime: Runtime,
         tree_config: TreeConfig,
+        innertx_cache: Option<xlayer_innertx::cache::FlashblocksInnerTxCache>,
     ) -> Self {
         Self {
             flashblocks_state,
@@ -132,6 +137,7 @@ where
             tree_config,
             payload_processor,
             runtime,
+            innertx_cache,
         }
     }
 
@@ -442,6 +448,17 @@ where
         let block: N::Block = block.into();
         let block = RecoveredBlock::new_unhashed(block, senders);
 
+        // Spawn innertx computation on a blocking thread. Runs concurrently
+        // with deferred trie task and execution cache update below.
+        let innertx_handle = self.innertx_cache.as_ref().map(|cache| {
+            xlayer_innertx::cache::spawn_compute_and_cache_innertx(
+                cache.clone(),
+                self.evm_config.clone(),
+                block.clone(),
+                state_provider,
+            )
+        });
+
         let executed_block = if calculate_state_root {
             self.spawn_deferred_trie_task(
                 block,
@@ -468,6 +485,12 @@ where
             executed_block.recovered_block.block_with_parent(),
             &executed_block.execution_output.state,
         );
+
+        // Wait for innertx computation to complete before committing so
+        // the cache is populated atomically with the pending sequence.
+        if let Some(handle) = innertx_handle {
+            let _ = handle.await;
+        }
 
         let execution_height = args.base.block_number;
         let last_index = args.last_flashblock_index;

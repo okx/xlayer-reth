@@ -23,6 +23,7 @@ use crate::{
     innertx_inspector::TraceCollector,
 };
 
+/// Replays a block to compute innertx traces and writes them to MDBX.
 pub fn replay_and_index_block<P, E, N>(
     provider: P,
     evm_config: E,
@@ -50,16 +51,32 @@ where
     executor.set_state_hook(None);
     let output = executor.execute_block(block.transactions_recovered())?;
 
-    let mut internal_transactions = inspector.get();
+    let internal_transactions = inspector.get();
+    index_block_innertx::<N>(&block, &output.receipts, internal_transactions)
+}
+
+/// Writes pre-computed innertx traces to the MDBX innertx database.
+///
+/// This can be called with traces from either:
+/// - A fresh EVM replay (via [`replay_and_index_block`])
+/// - The flashblocks innertx cache (skipping replay entirely)
+pub fn index_block_innertx<N>(
+    block: &RecoveredBlock<<N as NodePrimitives>::Block>,
+    receipts: &[N::Receipt],
+    mut internal_transactions: Vec<Vec<crate::innertx_inspector::InternalTransaction>>,
+) -> Result<()>
+where
+    N: NodePrimitives + 'static,
+{
     let mut tx_hashes = Vec::<TxHash>::default();
 
     let (rw_tx, rw_db) = rw_batch_start::<TxTable>()?;
 
     let mut prev_cumulative_gas = 0u64;
     for (index, tx) in block.transactions_recovered().enumerate() {
-        let success = output.receipts[index].status();
+        let success = receipts[index].status();
 
-        let current_cumulative_gas = output.receipts[index].cumulative_gas_used();
+        let current_cumulative_gas = receipts[index].cumulative_gas_used();
         let tx_gas_used = current_cumulative_gas - prev_cumulative_gas;
         prev_cumulative_gas = current_cumulative_gas;
 

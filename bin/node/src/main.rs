@@ -33,12 +33,13 @@ use xlayer_flashblocks::{
     FlashblocksRpcCtx, FlashblocksRpcService, WsFlashBlockStream, XLayerEngineValidatorBuilder,
 };
 use xlayer_innertx::{
-    db_utils::initialize_inner_tx_db,
-    rpc_utils::{XlayerInnerTxExt, XlayerInnerTxExtApiServer},
+    cache::FlashblocksInnerTxCache, db_utils::initialize_inner_tx_db,
     subscriber_utils::initialize_innertx_replay,
 };
 use xlayer_legacy_rpc::{layer::LegacyRpcRouterLayer, LegacyRpcRouterConfig};
 use xlayer_monitor::{start_monitor_handle, RpcMonitorLayer, XLayerMonitor};
+use xlayer_rpc::FlashblocksInnerTxApiServer;
+use xlayer_rpc::FlashblocksInnerTxExt;
 use xlayer_rpc::{
     DefaultRpcExt, DefaultRpcExtApiServer, FlashblocksEthApiExt, FlashblocksEthApiOverrideServer,
     FlashblocksEthFilterExt, FlashblocksFilterOverrideServer,
@@ -192,18 +193,6 @@ fn main() {
                 .extend_rpc_modules(move |ctx| {
                     let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
 
-                    // Initialize innertx if enabled
-                    if args.xlayer_args.enable_inner_tx {
-                        // Initialize inner tx replay handler (uses canonical_state_stream)
-                        // Note: This only processes real-time blocks, NOT synced blocks from Pipeline
-                        initialize_innertx_replay(ctx.node());
-                        info!(target: "reth::cli", "xlayer inner tx replay initialized (canonical_state_stream mode)");
-
-                        // Register inner tx RPC
-                        let custom_rpc = XlayerInnerTxExt { backend: new_op_eth_api.clone() };
-                        ctx.modules.merge_configured(custom_rpc.into_rpc())?;
-                        info!(target: "reth::cli", "xlayer innertx rpc enabled");
-                    }
 
                     let flashblocks_state = if let Some(flashblock_url) =
                         args.xlayer_args.flashblocks_rpc.flashblock_url
@@ -219,6 +208,16 @@ fn main() {
                             engine_validator.get_changeset_cache(),
                         );
 
+                        // Initialize innertx if enabled
+                        let innertx_cache = if args.xlayer_args.enable_inner_tx {
+                            let innertx_cache = FlashblocksInnerTxCache::new();
+                            initialize_innertx_replay(ctx.node(), Some(innertx_cache.clone()));
+                            info!(target: "reth::cli", "xlayer inner tx replay initialized (canonical_state_stream mode)");
+                            Some(innertx_cache)
+                        } else {
+                            None
+                        };
+
                         // Initialize the flashblocks validator
                         engine_validator.set_flashblocks(
                             FlashblockSequenceValidator::new(
@@ -229,6 +228,7 @@ fn main() {
                                 engine_validator.get_payload_processor(),
                                 ctx.node().task_executor.clone(),
                                 tree_config,
+                                innertx_cache.clone(),
                             ),
                             flashblocks_state.clone(),
                         );
@@ -270,6 +270,7 @@ fn main() {
                                 args.xlayer_args
                                     .flashblocks_rpc
                                     .flashblocks_subscription_max_addresses,
+                                innertx_cache.clone(),
                             );
                             ctx.modules.add_or_replace_if_module_configured(
                                 RethRpcModule::Eth,
@@ -301,10 +302,28 @@ fn main() {
                             FlashblocksFilterOverrideServer::into_rpc(flashblocks_filter),
                         )?;
                         info!(target: "reth::cli", "xlayer flashblocks filter overrides initialized");
-                        Some(flashblocks_state)
+                        Some((flashblocks_state, innertx_cache))
                     } else {
                         None
                     };
+
+                    let (flashblocks_state, innertx_cache) = match flashblocks_state {
+                        Some((state, cache)) => (Some(state), cache),
+                        None => (None, None),
+                    };
+
+                    // Register innertx RPC with flashblocks cache overlay
+                    if args.xlayer_args.enable_inner_tx {
+                        let innertx_rpc = FlashblocksInnerTxExt::new(
+                            ctx.registry.eth_api().clone(),
+                            innertx_cache.clone(),
+                            flashblocks_state.clone(),
+                        );
+                        ctx.modules.merge_configured(
+                            FlashblocksInnerTxApiServer::into_rpc(innertx_rpc),
+                        )?;
+                        info!(target: "reth::cli", "xlayer innertx rpc enabled");
+                    }
 
                     // Register X Layer RPC
                     let xlayer_rpc = DefaultRpcExt::new(flashblocks_state);

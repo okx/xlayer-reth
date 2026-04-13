@@ -14226,6 +14226,7 @@ dependencies = [
  "reth-trie-common",
  "reth-trie-db",
  "reth-trie-parallel",
+ "revm-database",
  "ringbuffer",
  "serde",
  "serde_json",
@@ -14238,6 +14239,7 @@ dependencies = [
  "tracing",
  "url",
  "xlayer-builder",
+ "xlayer-innertx",
 ]
 
 [[package]]
@@ -14245,13 +14247,11 @@ name = "xlayer-innertx"
 version = "0.1.0"
 dependencies = [
  "alloy-consensus",
- "alloy-eips",
  "alloy-evm",
  "alloy-primitives",
  "alloy-rlp",
  "eyre",
  "futures",
- "jsonrpsee",
  "once_cell",
  "reth-chain-state",
  "reth-db",
@@ -14262,8 +14262,6 @@ dependencies = [
  "reth-primitives-traits",
  "reth-provider",
  "reth-revm",
- "reth-rpc",
- "reth-rpc-eth-api",
  "reth-storage-api",
  "reth-tracing",
  "revm-context-interface",
@@ -14425,6 +14423,7 @@ dependencies = [
  "reth-optimism-primitives",
  "reth-optimism-rpc",
  "reth-primitives-traits",
+ "reth-provider",
  "reth-revm",
  "reth-rpc",
  "reth-rpc-convert",
@@ -14438,6 +14437,7 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "xlayer-flashblocks",
+ "xlayer-innertx",
 ]
 
 [[package]]

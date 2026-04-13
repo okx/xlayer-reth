@@ -102,6 +102,9 @@ pub struct SubTxFilter {
 
     /// Flag to include transaction receipts.
     pub tx_receipt: bool,
+
+    /// Flag to include internal transaction traces.
+    pub tx_inner_tx: bool,
 }
 
 impl SubTxFilter {
@@ -153,4 +156,8 @@ pub struct EnrichedTransaction<Tx, R> {
     /// Transaction receipt (if `tx_receipt` is true in filter criteria).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub receipt: Option<R>,
+
+    /// Internal transaction traces (if `tx_inner_tx` is true in filter criteria).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub innertx: Option<Vec<xlayer_innertx::innertx_inspector::InternalTransaction>>,
 }
