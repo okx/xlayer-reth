@@ -1,10 +1,19 @@
+use crate::{
+    db_utils::{
+        delete_single, rw_batch_delete, rw_batch_end, rw_batch_start, rw_batch_write, write_single,
+    },
+    db_utils::{BlockTable, TxTable},
+    innertx_inspector::TraceCollector,
+};
+
+use eyre::Result;
+use futures::TryStreamExt;
+use tracing::{error, info};
+
 use alloy_consensus::Transaction;
 use alloy_consensus::{transaction::TxHashRef, TxReceipt};
 use alloy_evm::block::BlockExecutor;
 use alloy_rlp::encode;
-use eyre::Result;
-use futures::TryStreamExt;
-use revm_database::states::State;
 
 use reth_evm::ConfigureEvm;
 use reth_exex::{ExExContext, ExExEvent, ExExNotification};
@@ -13,15 +22,7 @@ use reth_primitives_traits::AlloyBlockHeader;
 use reth_primitives_traits::{NodePrimitives, RecoveredBlock};
 use reth_provider::StateProviderFactory;
 use reth_revm::{database::StateProviderDatabase, primitives::alloy_primitives::TxHash};
-use reth_tracing::tracing::{error, info};
-
-use crate::{
-    db_utils::{
-        delete_single, rw_batch_delete, rw_batch_end, rw_batch_start, rw_batch_write, write_single,
-    },
-    db_utils::{BlockTable, TxTable},
-    innertx_inspector::TraceCollector,
-};
+use revm_database::states::State;
 
 /// Replays a block to compute innertx traces and writes them to MDBX.
 pub fn replay_and_index_block<P, E, N>(

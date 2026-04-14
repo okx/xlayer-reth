@@ -244,6 +244,10 @@ where
             .with_lazy_overlay(lazy_overlay)
         });
 
+        // Build innertx state provider from the same overlay snapshot before
+        // provider_builder is moved into spawn_payload_processor.
+        let innertx_state_provider = self.innertx_cache.is_some().then(|| provider_builder.build());
+
         // Spawn the appropriate processor based on strategy.
         let mut handle = self.spawn_payload_processor(
             execution_env,
@@ -449,11 +453,7 @@ where
         let block = RecoveredBlock::new_unhashed(block, senders);
 
         let innertx_handle = self.innertx_cache.as_ref().and_then(|cache| {
-            let prefix_tx_count =
-                pending_sequence.as_ref().map(|seq| seq.prefix_execution_meta.cached_tx_count);
-            let hash = pending_sequence.as_ref().map_or(parent_hash, |seq| seq.get_hash());
-            self.state_provider_builder(hash)
-                .and_then(|(builder, _, _)| builder.build().map_err(Into::into))
+            innertx_state_provider?
                 .inspect_err(|err| {
                     warn!(
                         target: "xlayer::flashblocks::innertx",
@@ -469,7 +469,6 @@ where
                         block.clone(),
                         provider,
                         cached_reads.clone(),
-                        prefix_tx_count,
                     )
                 })
         });

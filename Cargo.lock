@@ -14263,11 +14263,11 @@ dependencies = [
  "reth-provider",
  "reth-revm",
  "reth-storage-api",
- "reth-tracing",
  "revm-context-interface",
  "revm-database",
  "serde",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

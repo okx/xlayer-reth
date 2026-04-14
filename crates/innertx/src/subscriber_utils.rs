@@ -2,21 +2,19 @@
 //!
 //! This module provides functions to subscribe to `canonical_state_stream` and
 //! process canonical state notifications for inner transaction indexing.
+use crate::{
+    cache::FlashblocksInnerTxCache,
+    replay_utils::{index_block_innertx, remove_block, replay_and_index_block},
+};
+use futures::StreamExt;
+use tracing::{debug, error, info};
 
 use alloy_consensus::BlockHeader;
-use futures::StreamExt;
-
 use reth_chain_state::{CanonStateNotification, CanonStateSubscriptions};
 use reth_evm::ConfigureEvm;
 use reth_node_api::{FullNodeComponents, FullNodeTypes};
 use reth_primitives_traits::NodePrimitives;
 use reth_provider::StateProviderFactory;
-use reth_tracing::tracing::{debug, error, info};
-
-use crate::{
-    cache::FlashblocksInnerTxCache,
-    replay_utils::{index_block_innertx, remove_block, replay_and_index_block},
-};
 
 /// Initializes the inner transaction replay handler that listens to `canonical_state_stream`
 /// and indexes internal transactions for each new canonical block.
@@ -82,7 +80,7 @@ async fn handle_canonical_state_stream<P, E, N>(
                     // validator, index from cache (skip EVM replay).
                     if let Some(traces) = innertx_cache
                         .as_ref()
-                        .and_then(|c| c.get_raw_traces_by_number(block_number))
+                        .and_then(|c| c.get_raw_block_traces_by_hash(&block_hash))
                     {
                         debug!(
                             target: "xlayer::subscriber",
@@ -115,7 +113,7 @@ async fn handle_canonical_state_stream<P, E, N>(
 
                 // Evict all cached innertx at or below the canonical tip.
                 if let Some(cache) = &innertx_cache {
-                    cache.evict_up_to(new.tip().number());
+                    cache.flush_up_to_height(new.tip().number());
                 }
             }
             CanonStateNotification::Reorg { old, new } => {

@@ -236,7 +236,7 @@ where
                     let block_innertx = if filter.sub_tx_filter.tx_inner_tx {
                         innertx_cache
                             .as_ref()
-                            .and_then(|c| c.get_raw_block_traces(&pending_block.block_hash))
+                            .and_then(|c| c.get_raw_block_traces_by_hash(&pending_block.block_hash))
                     } else {
                         None
                     };

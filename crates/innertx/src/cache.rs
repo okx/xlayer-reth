@@ -1,12 +1,23 @@
+use eyre::eyre;
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, RwLock},
 };
+use tracing::*;
 
+use alloy_consensus::BlockHeader as _;
+use alloy_evm::block::BlockExecutor;
 use alloy_primitives::{TxHash, B256};
-use eyre::eyre;
 
-use crate::innertx_inspector::InternalTransaction;
+use crate::innertx_inspector::{InternalTransaction, TraceCollector};
+
+use reth_evm::ConfigureEvm;
+use reth_primitives_traits::{
+    transaction::TxHashRef, BlockBody as _, NodePrimitives, RecoveredBlock,
+};
+use reth_revm::{cached::CachedReads, database::StateProviderDatabase};
+use reth_storage_api::StateProvider;
+use revm_database::states::State;
 
 /// Per-transaction internal transaction traces for a block.
 /// Each entry corresponds positionally to the transaction at the same index.
@@ -14,11 +25,11 @@ pub type InnerTxTraces = Vec<Vec<InternalTransaction>>;
 
 const DEFAULT_CONFIRM_BLOCK_CACHE_SIZE: usize = 50;
 
-/// Shared, thread-safe cache of internal transaction traces for flashblock
-/// pending/confirmed sequences.
-#[derive(Clone, Debug)]
-pub struct FlashblocksInnerTxCache {
-    inner: Arc<RwLock<CacheInner>>,
+#[derive(Debug, Clone, Default)]
+struct BlockEntry {
+    block_hash: B256,
+    traces: InnerTxTraces,
+    tx_index: HashMap<TxHash, usize>,
 }
 
 #[derive(Debug, Default)]
@@ -26,69 +37,44 @@ struct CacheInner {
     blocks: BTreeMap<u64, BlockEntry>,
 }
 
-#[derive(Debug, Clone)]
-struct BlockEntry {
-    block_hash: B256,
-    traces: InnerTxTraces,
-    tx_index: HashMap<TxHash, usize>,
-}
-
-impl CacheInner {
-    fn flush_up_to(&mut self, block_number: u64) {
-        self.blocks = self.blocks.split_off(&(block_number + 1));
-    }
-
-    fn insert(
-        &mut self,
-        height: u64,
-        block_hash: B256,
-        delta_tx_hashes: Vec<TxHash>,
-        delta_traces: InnerTxTraces,
-    ) -> eyre::Result<()> {
-        if self.blocks.len() >= DEFAULT_CONFIRM_BLOCK_CACHE_SIZE
-            && !self.blocks.contains_key(&height)
-        {
-            return Err(eyre!(
-                "innertx cache at max capacity ({DEFAULT_CONFIRM_BLOCK_CACHE_SIZE}), cannot insert block: {height}"
-            ));
-        }
-
-        let entry = self.blocks.entry(height).or_insert_with(|| BlockEntry {
-            block_hash,
-            traces: Vec::new(),
-            tx_index: HashMap::new(),
-        });
-        // Update hash to latest pending hash
-        entry.block_hash = block_hash;
-        // Append delta traces and build tx index
-        let base = entry.traces.len();
-        for (i, tx_hash) in delta_tx_hashes.iter().enumerate() {
-            entry.tx_index.insert(*tx_hash, base + i);
-        }
-        entry.traces.extend(delta_traces);
-        Ok(())
-    }
+/// Shared, thread-safe cache of internal transaction traces for flashblock
+/// pending/confirmed sequences.
+#[derive(Clone, Debug, Default)]
+pub struct FlashblocksInnerTxCache {
+    inner: Arc<RwLock<CacheInner>>,
 }
 
 impl FlashblocksInnerTxCache {
     pub fn new() -> Self {
-        Self { inner: Arc::new(RwLock::new(CacheInner::default())) }
+        Self::default()
     }
 
-    /// Appends delta innertx traces for a block, updating the block hash.
+    /// Replaces the innertx traces for a block.
     pub fn insert(
         &self,
         height: u64,
         block_hash: B256,
-        delta_tx_hashes: Vec<TxHash>,
-        delta_traces: InnerTxTraces,
+        tx_hashes: Vec<TxHash>,
+        traces: InnerTxTraces,
     ) -> eyre::Result<()> {
-        self.inner.write().expect("innertx cache lock poisoned").insert(
+        let mut guard = self.inner.write().expect("innertx cache lock poisoned");
+
+        if guard.blocks.len() >= DEFAULT_CONFIRM_BLOCK_CACHE_SIZE
+            && !guard.blocks.contains_key(&height)
+        {
+            return Err(eyre!(
+                    "innertx cache at max capacity ({DEFAULT_CONFIRM_BLOCK_CACHE_SIZE}), cannot insert block: {height}"
+                ));
+        }
+        guard.blocks.insert(
             height,
-            block_hash,
-            delta_tx_hashes,
-            delta_traces,
-        )
+            BlockEntry {
+                block_hash,
+                traces,
+                tx_index: tx_hashes.iter().enumerate().map(|(i, tx_hash)| (*tx_hash, i)).collect(),
+            },
+        );
+        Ok(())
     }
 
     /// Single-tx lookup by hash.
@@ -124,7 +110,7 @@ impl FlashblocksInnerTxCache {
     }
 
     /// Raw positional traces for subscription enrichment.
-    pub fn get_raw_block_traces(&self, block_hash: &B256) -> Option<InnerTxTraces> {
+    pub fn get_raw_block_traces_by_hash(&self, block_hash: &B256) -> Option<InnerTxTraces> {
         let guard = self.inner.read().expect("innertx cache lock poisoned");
         let entry = guard.blocks.values().find(|e| &e.block_hash == block_hash)?;
         Some(entry.traces.clone())
@@ -136,50 +122,21 @@ impl FlashblocksInnerTxCache {
         guard.blocks.values().any(|e| e.block_hash == *block_hash)
     }
 
-    /// Returns the raw traces for a block number (for canonical indexing).
-    pub fn get_raw_traces_by_number(&self, block_number: u64) -> Option<InnerTxTraces> {
-        let guard = self.inner.read().expect("innertx cache lock poisoned");
-        guard.blocks.get(&block_number).map(|e| e.traces.clone())
-    }
-
     /// Clears all entries.
     pub fn clear(&self) {
         self.inner.write().expect("innertx cache lock poisoned").blocks.clear();
     }
 
-    /// Evicts all cached entries at or below the given block number.
-    pub fn evict_up_to(&self, block_number: u64) {
-        self.inner.write().expect("innertx cache lock poisoned").flush_up_to(block_number);
+    /// Flushes all entries with block number <= `canonical_number`.
+    pub fn flush_up_to_height(&self, canon_height: u64) {
+        let mut guard = self.inner.write().expect("innertx cache lock poisoned");
+        guard.blocks = guard.blocks.split_off(&(canon_height + 1));
     }
 }
 
-impl Default for FlashblocksInnerTxCache {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Async innertx computation for flashblocks validator
-// ---------------------------------------------------------------------------
-
-use alloy_consensus::BlockHeader as _;
-use alloy_evm::block::BlockExecutor;
-use reth_evm::ConfigureEvm;
-use reth_primitives_traits::{
-    transaction::TxHashRef, BlockBody as _, NodePrimitives, RecoveredBlock,
-};
-use reth_revm::{cached::CachedReads, database::StateProviderDatabase};
-use reth_storage_api::StateProvider;
-use reth_tracing::tracing::{debug, warn};
-use revm_database::states::State;
-
-use crate::innertx_inspector::TraceCollector;
-
-/// Spawns incremental innertx computation on a blocking thread.
+/// Spawns innertx computation on a blocking thread.
 ///
-/// Replays the full block but only keeps innertx traces for transactions
-/// after `prefix_tx_count` (the delta since the previous flashblock).
+/// Replays the full block and keeps all innertx traces.
 /// Uses `CachedReads` from the validator's execution as a warm read cache.
 ///
 /// Results are appended to the cache entry for the block number.
@@ -189,7 +146,6 @@ pub fn spawn_compute_and_cache_innertx<N, E>(
     block: RecoveredBlock<N::Block>,
     state_provider: reth_storage_api::StateProviderBox,
     cached_reads: CachedReads,
-    prefix_tx_count: Option<usize>,
 ) -> tokio::task::JoinHandle<()>
 where
     N: NodePrimitives + 'static,
@@ -198,15 +154,12 @@ where
     tokio::task::spawn_blocking(move || {
         let block_hash = block.hash();
         let block_number = block.header().number();
-        let total_txs = block.body().transactions().len();
-        let skip = prefix_tx_count.unwrap_or(0);
-        let delta_tx_count = total_txs.saturating_sub(skip);
+        let tx_count = block.body().transactions().len();
 
         // Derive delta tx hashes from the block body.
-        let delta_tx_hashes =
-            block.body().transactions().iter().skip(skip).map(|tx| *tx.tx_hash()).collect();
+        let tx_hashes = block.body().transactions().iter().map(|tx| *tx.tx_hash()).collect();
 
-        if delta_tx_count == 0 {
+        if tx_count == 0 {
             // No new transactions — just update the block hash.
             if let Err(err) = cache.insert(block_number, block_hash, Vec::new(), Vec::new()) {
                 warn!(target: "xlayer::flashblocks::innertx", %err, "Failed to update innertx cache");
@@ -214,22 +167,16 @@ where
             return;
         }
 
-        match replay_delta_innertx(
-            &evm_config,
-            &block,
-            state_provider.as_ref(),
-            cached_reads,
-            prefix_tx_count,
-        ) {
+        match replay_innertx(&evm_config, &block, state_provider.as_ref(), cached_reads) {
             Ok(traces) => {
-                if let Err(err) = cache.insert(block_number, block_hash, delta_tx_hashes, traces) {
+                if let Err(err) = cache.insert(block_number, block_hash, tx_hashes, traces) {
                     warn!(target: "xlayer::flashblocks::innertx", %err, "Failed to append innertx to cache");
                 } else {
                     debug!(
                         target: "xlayer::flashblocks::innertx",
                         block_number,
                         ?block_hash,
-                        delta_tx_count,
+                        tx_count,
                         "Computed and cached delta innertx"
                     );
                 }
@@ -239,37 +186,30 @@ where
                     target: "xlayer::flashblocks::innertx",
                     %err,
                     block_number,
-                    delta_tx_count,
-                    "Failed to compute delta innertx"
+                    tx_count,
+                    "Failed to compute innertx"
                 );
             }
         }
     })
 }
 
-/// Replays only the **delta transactions** (skipping the prefix) with a
-/// [`TraceCollector`] inspector. The state provider must be at the point
-/// where prefix txs have already been applied (pending sequence hash for
-/// incremental builds, parent hash for fresh builds).
+/// Replays all block transactions with a [`TraceCollector`] inspector.
+/// The state provider must be at `parent_hash` (start of block).
 ///
-/// `CachedReads` from the validator's execution provides a warm read cache.
-fn replay_delta_innertx<E, N>(
+/// `CachedReads` from the validator's execution provides a warm read cache
+/// so prefix transaction re-execution is fast (cache hits).
+fn replay_innertx<E, N>(
     evm_config: &E,
     block: &RecoveredBlock<N::Block>,
     state_provider: &dyn StateProvider,
     mut cached_reads: CachedReads,
-    prefix_tx_count: Option<usize>,
 ) -> eyre::Result<InnerTxTraces>
 where
     E: ConfigureEvm<Primitives = N> + Send + Sync + 'static,
     N: NodePrimitives + 'static,
 {
-    let skip = prefix_tx_count.unwrap_or(0);
-    let delta_txs: Vec<_> = block.transactions_recovered().skip(skip).collect();
-
-    if delta_txs.is_empty() {
-        return Ok(Vec::new());
-    }
+    let txs: Vec<_> = block.transactions_recovered().collect();
 
     // Layer CachedReads on top of the state provider for warm reads
     let db = StateProviderDatabase::new(state_provider);
@@ -287,17 +227,7 @@ where
     let mut executor = evm_config.create_executor(evm, block_ctx);
     executor.set_state_hook(None);
 
-    if prefix_tx_count.is_some() {
-        // Incremental: skip pre-execution (already applied during prefix),
-        // execute only delta txs, then apply post-execution changes.
-        for tx in delta_txs {
-            executor.execute_transaction(tx)?;
-        }
-        executor.apply_post_execution_changes()?;
-    } else {
-        // Fresh build: apply pre-execution changes + all txs + post-execution
-        let _output = executor.execute_block(delta_txs.into_iter())?;
-    }
-
+    // Replay transactions with innertx inspector
+    let _output = executor.execute_block(txs.into_iter())?;
     Ok(inspector.get())
 }
