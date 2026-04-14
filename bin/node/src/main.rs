@@ -101,13 +101,15 @@ fn main() {
             let op_node = OpNode::new(args.rollup_args.clone());
 
             let data_dir = builder.config().datadir();
-            if args.xlayer_args.enable_inner_tx {
+            let mut inner_tx_enabled = args.xlayer_args.enable_inner_tx;
+            if inner_tx_enabled {
                 let db = data_dir.db();
                 let db_path = db.parent().unwrap_or_else(|| Path::new("/")).to_str().unwrap();
                 match initialize_inner_tx_db(db_path) {
                     Ok(_) => info!(target: "reth::cli", "xlayer db initialize_inner_tx_db"),
                     Err(e) => {
-                        tracing::error!(target: "reth::cli", "xlayer db failed to initialize_inner_tx_db {:#?}", e)
+                        tracing::error!(target: "reth::cli", "xlayer db failed to initialize_inner_tx_db, disabling innertx: {e:#}");
+                        inner_tx_enabled = false;
                     }
                 }
             }
@@ -209,7 +211,7 @@ fn main() {
                         );
 
                         // Initialize innertx if enabled
-                        let innertx_cache = if args.xlayer_args.enable_inner_tx {
+                        let innertx_cache = if inner_tx_enabled {
                             let innertx_cache = FlashblocksInnerTxCache::new();
                             initialize_innertx_replay(ctx.node(), Some(innertx_cache.clone()));
                             info!(target: "reth::cli", "xlayer inner tx replay initialized (canonical_state_stream mode)");
@@ -313,7 +315,7 @@ fn main() {
                     };
 
                     // Register innertx RPC with flashblocks cache overlay
-                    if args.xlayer_args.enable_inner_tx {
+                    if inner_tx_enabled {
                         let innertx_rpc = FlashblocksInnerTxExt::new(
                             ctx.registry.eth_api().clone(),
                             innertx_cache.clone(),

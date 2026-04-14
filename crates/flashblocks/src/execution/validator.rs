@@ -503,7 +503,9 @@ where
         // Wait for innertx computation to complete before committing so
         // the cache is populated atomically with the pending sequence.
         if let Some(handle) = innertx_handle {
-            let _ = handle.await;
+            if let Err(err) = handle.await {
+                warn!(target: "xlayer::flashblocks::innertx", %err, "innertx compute task panicked");
+            }
         }
 
         let execution_height = args.base.block_number;
