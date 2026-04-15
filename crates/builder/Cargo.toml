@@ -55,6 +55,7 @@ reth-tasks.workspace = true
 reth-ipc = { workspace = true, optional = true }
 
 # alloy
+alloy-eip7928 = { workspace = true, features = ["serde", "rlp"] }
 alloy-primitives.workspace = true
 alloy-consensus.workspace = true
 alloy-contract.workspace = true

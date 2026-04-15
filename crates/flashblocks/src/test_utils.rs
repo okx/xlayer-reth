@@ -1,6 +1,7 @@
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use alloy_consensus::{Header, Receipt, TxEip7702};
+use alloy_eip7928::BlockAccessList;
 use alloy_primitives::{Address, Bloom, Bytes, Signature, TxHash, B256, U256};
 use alloy_rpc_types_engine::PayloadId;
 use op_alloy_consensus::OpTypedTransaction;
@@ -173,6 +174,7 @@ impl TestFlashBlockFactory {
             withdrawals: vec![],
             withdrawals_root: B256::ZERO,
             blob_gas_used: None,
+            access_list: None,
         }
     }
 }
@@ -194,6 +196,7 @@ pub(crate) struct TestFlashBlockBuilder {
     withdrawals: Vec<alloy_eips::eip4895::Withdrawal>,
     withdrawals_root: B256,
     blob_gas_used: Option<u64>,
+    access_list: Option<BlockAccessList>,
 }
 
 impl TestFlashBlockBuilder {
@@ -293,6 +296,7 @@ impl TestFlashBlockBuilder {
                 block_number: self.block_number,
                 receipts: Default::default(),
                 new_account_balances: Default::default(),
+                access_list: self.access_list,
             },
         }
     }

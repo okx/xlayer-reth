@@ -1204,10 +1204,18 @@ where
         .zip(new_receipts.iter())
         .map(|(tx, receipt)| (tx.tx_hash(), convert_receipt(receipt)))
         .collect::<BTreeMap<B256, op_alloy_consensus::OpReceipt>>();
+    // Build EIP-7928 access list for this flashblock's transaction range.
+    // Takes the accumulated builder (resets it for the next flashblock).
+    let min_tx_index = last_idx as u64;
+    let max_tx_index = min_tx_index + new_transactions.len() as u64;
+    let fal_builder = std::mem::take(&mut info.access_list_builder);
+    let access_list = fal_builder.build(min_tx_index, max_tx_index);
+
     let metadata = OpFlashblockPayloadMetadata {
         receipts: receipts_with_hash,
         new_account_balances,
         block_number: ctx.parent().number + 1,
+        access_list: Some(access_list.account_changes),
     };
 
     let (_, blob_gas_used) = ctx.blob_fields(info);

@@ -227,6 +227,7 @@ mod tests {
                 block_number,
                 new_account_balances: BTreeMap::new(),
                 receipts: BTreeMap::new(),
+                access_list: None,
             },
         }
     }

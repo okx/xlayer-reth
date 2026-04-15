@@ -334,6 +334,10 @@ impl FlashblocksBuilderCtx {
 
             info.receipts.push(self.build_receipt(ctx, depositor_nonce));
 
+            // Build EIP-7928 access list from the transaction state changeset
+            let tx_index = info.executed_transactions.len() as u64;
+            info.access_list_builder.process_transaction_state(tx_index, &state);
+
             // commit changes
             evm.db_mut().commit(state);
 
@@ -443,6 +447,10 @@ impl FlashblocksBuilderCtx {
                 cumulative_gas_used: info.cumulative_gas_used,
             };
             info.receipts.push(self.build_receipt(ctx, None));
+
+            // Build EIP-7928 access list from the transaction state changeset
+            let tx_index = info.executed_transactions.len() as u64;
+            info.access_list_builder.process_transaction_state(tx_index, &state);
 
             // Commit changes
             evm.db_mut().commit(state);
@@ -647,6 +655,10 @@ impl FlashblocksBuilderCtx {
                 cumulative_gas_used: info.cumulative_gas_used,
             };
             info.receipts.push(self.build_receipt(ctx, None));
+
+            // Build EIP-7928 access list from the transaction state changeset
+            let tx_index = info.executed_transactions.len() as u64;
+            info.access_list_builder.process_transaction_state(tx_index, &state);
 
             // commit changes
             evm.db_mut().commit(state);
