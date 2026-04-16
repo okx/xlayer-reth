@@ -437,3 +437,24 @@ pub async fn eth_send_raw_transaction_sync(client_rpc: &HttpClient, raw_tx: &str
     .await??;
     Ok(result)
 }
+
+/// For eth_getHeaderByNumber
+pub async fn eth_get_header_by_number(client_rpc: &HttpClient, block_id: BlockId) -> Result<Value> {
+    let block_id = block_id.to_rpc_param();
+    let result: Value = tokio::time::timeout(
+        RPC_TIMEOUT,
+        client_rpc.request("eth_getHeaderByNumber", jsonrpsee::rpc_params![block_id]),
+    )
+    .await??;
+    Ok(result)
+}
+
+/// For eth_getHeaderByHash
+pub async fn eth_get_header_by_hash(client_rpc: &HttpClient, block_hash: &str) -> Result<Value> {
+    let result: Value = tokio::time::timeout(
+        RPC_TIMEOUT,
+        client_rpc.request("eth_getHeaderByHash", jsonrpsee::rpc_params![block_hash]),
+    )
+    .await??;
+    Ok(result)
+}
