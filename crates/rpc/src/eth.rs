@@ -37,6 +37,7 @@ use reth_rpc_server_types::result::ToRpcResult;
 use reth_storage_api::{StateProvider, StateProviderBox, StateProviderFactory};
 use reth_transaction_pool::TransactionPool;
 
+use xlayer_eip8130_consensus::{nonce_slot, NONCE_MANAGER_ADDRESS};
 use xlayer_flashblocks::FlashblockStateCache;
 
 /// Eth API override for flashblocks RPC integration.
@@ -176,11 +177,16 @@ pub trait FlashblocksEthApiOverride {
 
     /// Returns the number of transactions sent from an address at given block number, with the
     /// flashblock state cache overlay support for pending and confirmed block states.
+    ///
+    /// When the optional `nonce_key` parameter is provided, returns the EIP-8130 2D nonce
+    /// sequence for `(address, nonce_key)` from NonceManager precompile storage.
+    /// This is backward compatible: 2-parameter calls behave identically to before.
     #[method(name = "getTransactionCount")]
     async fn transaction_count(
         &self,
         address: Address,
         block_number: Option<BlockId>,
+        nonce_key: Option<U256>,
     ) -> RpcResult<U256>;
 
     /// Returns code at a given address at given block number, with the flashblock state cache
@@ -541,12 +547,46 @@ where
     }
 
     /// Handler for: `eth_getTransactionCount`
+    ///
+    /// When `nonce_key` is `Some`, returns the EIP-8130 2D nonce sequence from
+    /// NonceManager precompile storage. When `None`, delegates to the standard
+    /// account nonce with flashblock/txpool awareness.
     async fn transaction_count(
         &self,
         address: Address,
         block_number: Option<BlockId>,
+        nonce_key: Option<U256>,
     ) -> RpcResult<U256> {
-        trace!(target: "rpc::eth", ?address, ?block_number, "Serving eth_getTransactionCount");
+        trace!(target: "rpc::eth", ?address, ?block_number, ?nonce_key, "Serving eth_getTransactionCount");
+
+        // EIP-8130 2D nonce query: read from NonceManager precompile storage.
+        if let Some(nonce_key) = nonce_key {
+            let slot = nonce_slot(address, nonce_key);
+
+            // Try flashblock cache first.
+            if let Some((state, _)) = self.get_flashblock_state_provider_by_id(block_number)? {
+                return self
+                    .eth_api
+                    .spawn_blocking_io_fut(move |_| async move {
+                        let value = state.storage(NONCE_MANAGER_ADDRESS, slot)?.unwrap_or_default();
+                        Ok(value)
+                    })
+                    .await
+                    .map_err(|e| -> jsonrpsee_types::error::ErrorObject<'static> { e.into() });
+            }
+
+            // Fall back to canonical state via the standard storage_at RPC.
+            let value = EthApiServer::storage_at(
+                &self.eth_api,
+                NONCE_MANAGER_ADDRESS,
+                slot.into(),
+                block_number,
+            )
+            .await?;
+            return Ok(U256::from_be_bytes(value.0));
+        }
+
+        // Standard nonce query (unchanged behavior).
         if let Some((state, _)) = self.get_flashblock_state_provider_by_id(block_number)? {
             return self
                 .eth_api

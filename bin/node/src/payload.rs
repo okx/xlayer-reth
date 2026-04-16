@@ -14,6 +14,7 @@ use xlayer_builder::{
     flashblocks::{BuilderConfig, FlashblocksServiceBuilder},
     traits::{NodeBounds, PoolBounds},
 };
+use xlayer_eip8130_pool::AaPoolHandle;
 
 /// Payload builder strategy for X Layer.
 enum XLayerPayloadServiceBuilderInner {
@@ -65,6 +66,7 @@ impl XLayerPayloadServiceBuilder {
                     config,
                     bridge_intercept: Default::default(),
                     peer_status_sink: peer_status.clone(),
+                    aa_pool: None,
                 }))
             } else {
                 XLayerPayloadServiceBuilderInner::DefaultWithP2P(Box::new(
@@ -86,6 +88,15 @@ impl XLayerPayloadServiceBuilder {
             ))
         };
         Ok(Self { builder })
+    }
+
+    /// Sets the AA side pool handle for EIP-8130 merged transaction sourcing.
+    /// Only the flashblocks builder supports AA pool integration.
+    pub fn with_aa_pool(mut self, handle: AaPoolHandle) -> Self {
+        if let XLayerPayloadServiceBuilderInner::Flashblocks(fb) = &mut self.builder {
+            fb.aa_pool = Some(handle);
+        }
+        self
     }
 
     /// Apply bridge intercept config. Only the flashblocks builder supports bridge

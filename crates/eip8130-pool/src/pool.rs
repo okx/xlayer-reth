@@ -23,7 +23,7 @@ use parking_lot::RwLock;
 use reth_transaction_pool::{
     error::InvalidPoolTransactionError,
     identifier::{SenderId, TransactionId},
-    EthPoolTransaction, PoolTransaction, TransactionOrigin, ValidPoolTransaction,
+    PoolTransaction, TransactionOrigin, ValidPoolTransaction,
 };
 use tokio::sync::broadcast;
 
@@ -809,7 +809,7 @@ impl<T: PoolTransaction> Eip8130Pool<T> {
     }
 }
 
-impl<T: EthPoolTransaction + Clone> Eip8130Pool<T> {
+impl<T: PoolTransaction + Clone> Eip8130Pool<T> {
     /// Snapshots the ready (executable) transactions across all sequences.
     ///
     /// Returns a priority-ordered iterator that respects intra-lane nonce
@@ -904,7 +904,7 @@ pub struct BestEip8130Transactions<T: PoolTransaction> {
     hash_to_lane: HashMap<B256, Eip8130SequenceId>,
 }
 
-impl<T: EthPoolTransaction> Iterator for BestEip8130Transactions<T> {
+impl<T: PoolTransaction> Iterator for BestEip8130Transactions<T> {
     type Item = Arc<ValidPoolTransaction<T>>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -940,7 +940,7 @@ impl<T: EthPoolTransaction> Iterator for BestEip8130Transactions<T> {
     }
 }
 
-impl<T: EthPoolTransaction> reth_transaction_pool::BestTransactions for BestEip8130Transactions<T> {
+impl<T: PoolTransaction> reth_transaction_pool::BestTransactions for BestEip8130Transactions<T> {
     fn mark_invalid(&mut self, transaction: &Self::Item, _kind: &InvalidPoolTransactionError) {
         let hash = *transaction.hash();
         if let Some(lane) = self.hash_to_lane.get(&hash) {

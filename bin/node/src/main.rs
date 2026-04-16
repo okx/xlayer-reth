@@ -3,11 +3,11 @@
 mod args;
 mod payload;
 
-// EIP-8130 AA crates: force-link to ensure they compile as part of the node binary.
-// Actual usage will be wired in during Phase 3-5.
+// EIP-8130 AA crates.
 use xlayer_eip8130_consensus as _;
-use xlayer_eip8130_pool as _;
 use xlayer_eip8130_revm as _;
+
+use reth_optimism_txpool::OpPooledTransaction;
 
 use payload::XLayerPayloadServiceBuilder;
 
@@ -135,16 +135,34 @@ fn main() {
                 );
             }
 
+            // Create the EIP-8130 AA side pool (sequencer + flashblocks mode only).
+            // The pool is parameterized with the concrete OP pool transaction type
+            // so the type-erased handle can be downcast correctly in the builder.
+            let aa_pool_handle =
+                if xlayer_args.sequencer_mode && xlayer_args.builder.flashblocks.enabled
+            {
+                let aa_pool =
+                    Arc::new(xlayer_eip8130_pool::Eip8130Pool::<OpPooledTransaction>::default());
+                info!(target: "xlayer::aa", "EIP-8130 AA side pool created");
+                Some(xlayer_eip8130_pool::AaPoolHandle::new(aa_pool))
+            } else {
+                None
+            };
+
             // Create the X Layer payload service builder
             // It handles both flashblocks and default modes internally
             let fb_p2p_status = Arc::new(OnceLock::new());
-            let payload_builder = XLayerPayloadServiceBuilder::new(
+            let mut payload_builder = XLayerPayloadServiceBuilder::new(
                 args.xlayer_args.builder.clone(),
                 args.rollup_args.compute_pending_block,
                 xlayer_args.sequencer_mode,
                 fb_p2p_status.clone(),
             )?
             .with_bridge_config(bridge_config);
+
+            if let Some(handle) = aa_pool_handle {
+                payload_builder = payload_builder.with_aa_pool(handle);
+            }
 
             // Get the engine validator for flashblocks RPC.
             let engine_validator = Arc::new(OnceLock::new());

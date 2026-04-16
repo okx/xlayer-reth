@@ -11,6 +11,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+xlayer-eip8130-pool.workspace = true
 xlayer-trace-monitor.workspace = true
 xlayer-bridge-intercept.workspace = true
 

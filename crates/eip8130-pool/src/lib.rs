@@ -21,10 +21,9 @@
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
-// Phase 3+ dependency — suppress unused warning until maintenance task lands.
-use tracing as _;
-
+pub mod handle;
 pub mod invalidation;
+pub mod merged;
 pub mod pool;
 pub mod transaction;
 pub mod validate;
@@ -33,7 +32,9 @@ pub mod validate;
 pub(crate) mod test_utils;
 
 // Re-export primary types for convenience.
+pub use handle::AaPoolHandle;
 pub use invalidation::{compute_invalidation_keys, Eip8130InvalidationIndex, InvalidationKey};
+pub use merged::MergedBestTransactions;
 pub use pool::{
     BestEip8130Transactions, Eip8130Pool, Eip8130PoolConfig, Eip8130PoolError, SharedEip8130Pool,
     ThroughputTier, TierCheckResult,

@@ -47,13 +47,14 @@ use reth_revm::{
     db::{states::bundle_state::BundleRetention, BundleState},
     State,
 };
-use reth_transaction_pool::TransactionPool;
+use reth_transaction_pool::{BestTransactions, TransactionPool, ValidPoolTransaction};
 use reth_trie::{updates::TrieUpdates, HashedPostState, TrieInput};
 use revm::Database;
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
+use xlayer_eip8130_pool::AaPoolHandle;
 
 /// Converts a reth OpReceipt to an op-alloy OpReceipt
 /// TODO: remove this once reth updates to use the op-alloy defined type as well.
@@ -210,6 +211,8 @@ pub(super) struct FlashblocksBuilder<Pool, Client, Tasks> {
     pub task_metrics: Arc<FlashblocksTaskMetrics>,
     /// Configuration for bridge transaction interception.
     pub bridge_intercept_config: xlayer_bridge_intercept::BridgeInterceptConfig,
+    /// Optional AA side pool for EIP-8130 merged transaction sourcing.
+    pub aa_pool: Option<AaPoolHandle>,
 }
 
 impl<Pool, Client, Tasks> FlashblocksBuilder<Pool, Client, Tasks> {
@@ -241,6 +244,7 @@ impl<Pool, Client, Tasks> FlashblocksBuilder<Pool, Client, Tasks> {
             builder_tx,
             task_metrics,
             bridge_intercept_config: Default::default(),
+            aa_pool: None,
         }
     }
 }
@@ -279,6 +283,18 @@ where
     Client: ClientBounds,
     Tasks: TaskSpawner + Clone + Unpin + 'static,
 {
+    /// Returns best transactions from the pool, merged with AA side pool if present.
+    fn best_transactions_merged(
+        &self,
+        attrs: reth_transaction_pool::BestTransactionsAttributes,
+    ) -> Box<dyn BestTransactions<Item = Arc<ValidPoolTransaction<Pool::Transaction>>>> {
+        let std_best = self.pool.best_transactions_with_attributes(attrs);
+        match &self.aa_pool {
+            Some(handle) => handle.merge_with_standard(std_best),
+            None => std_best,
+        }
+    }
+
     fn get_flashblocks_payload_builder_ctx(
         &self,
         config: reth_basic_payload_builder::PayloadConfig<
@@ -526,9 +542,9 @@ where
             .get_flashblocks_payload_builder_ctx(config, fb_cancel.clone())
             .map_err(|e| PayloadBuilderError::Other(e.into()))?;
 
-        // Create best_transaction iterator
+        // Create best_transaction iterator (merged with AA side pool if present).
         let mut best_txs = BestFlashblocksTxs::new(BestPayloadTransactions::new(
-            self.pool.best_transactions_with_attributes(ctx.best_transaction_attributes()),
+            self.best_transactions_merged(ctx.best_transaction_attributes()),
         ));
 
         let (tx, rx) = std::sync::mpsc::sync_channel((expected_flashblocks + 1) as usize);
@@ -703,7 +719,7 @@ where
         let best_txs_start_time = Instant::now();
         best_txs.refresh_iterator(
             BestPayloadTransactions::new(
-                self.pool.best_transactions_with_attributes(ctx.best_transaction_attributes()),
+                self.best_transactions_merged(ctx.best_transaction_attributes()),
             ),
             flashblock_index,
         );

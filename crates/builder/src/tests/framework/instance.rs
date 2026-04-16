@@ -119,6 +119,7 @@ impl LocalInstance {
                     config: builder_config,
                     bridge_intercept: Default::default(),
                     peer_status_sink: std::sync::Arc::new(std::sync::OnceLock::new()),
+                    aa_pool: None,
                 },
             ))
             .with_add_ons(addons)

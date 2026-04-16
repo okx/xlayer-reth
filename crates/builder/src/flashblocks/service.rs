@@ -22,11 +22,14 @@ use reth_node_builder::{components::PayloadServiceBuilder, BuilderContext};
 use reth_optimism_evm::OpEvmConfig;
 use reth_payload_builder::{PayloadBuilderHandle, PayloadBuilderService};
 use reth_provider::CanonStateSubscriptions;
+use xlayer_eip8130_pool::AaPoolHandle;
 
 pub struct FlashblocksServiceBuilder {
     pub config: BuilderConfig,
     pub bridge_intercept: xlayer_bridge_intercept::BridgeInterceptConfig,
     pub peer_status_sink: Arc<OnceLock<crate::broadcast::PeerStatusTracker>>,
+    /// Optional AA side pool handle for EIP-8130 merged transaction sourcing.
+    pub aa_pool: Option<AaPoolHandle>,
 }
 
 impl FlashblocksServiceBuilder {
@@ -142,6 +145,7 @@ impl FlashblocksServiceBuilder {
             task_metrics.clone(),
         );
         payload_builder.bridge_intercept_config = self.bridge_intercept.clone();
+        payload_builder.aa_pool = self.aa_pool.clone();
         let payload_job_config = BasicPayloadJobGeneratorConfig::default();
 
         let payload_generator = BlockPayloadJobGenerator::with_builder(

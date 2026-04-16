@@ -14137,6 +14137,7 @@ dependencies = [
  "tracing-subscriber 0.3.23",
  "url",
  "xlayer-bridge-intercept",
+ "xlayer-eip8130-pool",
  "xlayer-trace-monitor",
 ]
 
@@ -14205,8 +14206,10 @@ name = "xlayer-eip8130-pool"
 version = "0.0.6"
 dependencies = [
  "alloy-consensus",
+ "alloy-eips",
  "alloy-primitives",
  "parking_lot",
+ "reth-primitives-traits",
  "reth-transaction-pool",
  "thiserror 2.0.18",
  "tokio",
@@ -14468,10 +14471,13 @@ dependencies = [
  "reth-storage-api",
  "reth-transaction-pool",
  "reth-trie-db",
+ "serde",
+ "serde_json",
  "tokio",
  "tokio-stream",
  "tracing",
  "xlayer-builder",
+ "xlayer-eip8130-consensus",
  "xlayer-flashblocks",
 ]
 
