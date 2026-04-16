@@ -255,30 +255,18 @@ async fn fb_pending_block_queries_test() {
     assert!(!raw_tx.is_null(), "Raw transaction at index 0 should not be null");
 }
 
-/// Header-level RPC queries using the pending tag and by-hash lookups on the flashblocks node.
-/// Anchors on a concrete block first to avoid race conditions from pending advancing between calls.
+/// Header-level RPC queries on the flashblocks node.
+/// Uses a confirmed block number (from `eth_blockNumber`) whose hash is stable, rather than
+/// the pending tag whose hash can change as the flashblock sequence advances.
 #[tokio::test]
 async fn fb_pending_header_queries_test() {
     let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
 
-    // Anchor on a concrete pending block to avoid race conditions — pending can advance
-    // every ~250ms, so we extract concrete identifiers from one call and use those throughout.
-    let pending_block = operations::eth_get_block_by_number_or_hash(
-        &fb_client,
-        operations::BlockId::Pending,
-        false,
-    )
-    .await
-    .expect("eth_getBlockByNumber(pending) failed");
-    assert!(!pending_block.is_null(), "Pending block should not be null");
+    // Use the confirmed height — its hash is stable unlike pending
+    let block_number =
+        operations::eth_block_number(&fb_client).await.expect("Failed to get block number");
 
-    let block_hash = pending_block["hash"].as_str().expect("Block should have a hash");
-    let block_number = pending_block["number"]
-        .as_str()
-        .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-        .expect("Block should have a valid hex number");
-
-    // eth_getHeaderByNumber with the concrete block number
+    // eth_getHeaderByNumber returns a header with essential fields
     let header_by_number =
         operations::eth_get_header_by_number(&fb_client, operations::BlockId::Number(block_number))
             .await
@@ -289,21 +277,26 @@ async fn fb_pending_header_queries_test() {
     assert!(header_by_number["parentHash"].is_string(), "Header should have a parentHash field");
     assert!(header_by_number["stateRoot"].is_string(), "Header should have a stateRoot field");
 
-    // Header fields should match the anchored block
+    // Header should match the block's header from eth_getBlockByNumber
+    let block = operations::eth_get_block_by_number_or_hash(
+        &fb_client,
+        operations::BlockId::Number(block_number),
+        false,
+    )
+    .await
+    .expect("eth_getBlockByNumber failed");
+    assert_eq!(header_by_number["hash"], block["hash"], "Header hash should match block hash");
     assert_eq!(
-        header_by_number["hash"], pending_block["hash"],
-        "Header hash should match block hash"
-    );
-    assert_eq!(
-        header_by_number["number"], pending_block["number"],
+        header_by_number["number"], block["number"],
         "Header number should match block number"
     );
     assert_eq!(
-        header_by_number["stateRoot"], pending_block["stateRoot"],
+        header_by_number["stateRoot"], block["stateRoot"],
         "Header stateRoot should match block stateRoot"
     );
 
     // eth_getHeaderByHash returns the same header
+    let block_hash = header_by_number["hash"].as_str().expect("Header should have a hash");
     let header_by_hash = operations::eth_get_header_by_hash(&fb_client, block_hash)
         .await
         .expect("eth_getHeaderByHash failed");
