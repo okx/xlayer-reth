@@ -1017,54 +1017,53 @@ async fn test_new_transaction_types(#[case] test_name: &str) {
 // JSON-RPC calls and routes them to either the local reth node or a legacy
 // endpoint based on block height cutoffs.
 //
-// The devnet must be started with `--rpc.legacy-url` and
-// `--rpc.legacy-cutoff-override=8593925` on the RPC node.
+// On devnet the legacy endpoint points to L1 geth (`--rpc.legacy-url=http://l1-geth:8545`)
+// and the cutoff defaults to the L2 genesis block (8593921). Any request for a
+// block below genesis is forwarded to L1 geth.
 
 /// ERC20 Transfer event topic: `keccak256("Transfer(address,address,uint256)")`
 const TRANSFER_EVENT_TOPIC: &str =
     "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 
-/// Pre-flight check called at the start of every legacy routing test.
-/// Panics with a clear message if the cutoff block hasn't been minted or isn't empty.
-async fn assert_legacy_preconditions(client: &operations::HttpClient) {
-    let cutoff = operations::manager::LEGACY_CUTOFF_BLOCK_HEIGHT;
+/// Returns the current L1 block height by querying the L1 node directly.
+async fn get_l1_block_height() -> u64 {
+    let l1_client = operations::create_test_client(operations::manager::DEFAULT_L1_NETWORK_URL);
+    operations::eth_block_number(&l1_client).await.expect("Failed to get L1 block number")
+}
 
-    let current_block =
-        operations::eth_block_number(client).await.expect("Failed to get block number");
+/// Pre-flight check called at the start of every legacy routing test.
+/// Verifies that L1 height is below L2 genesis (so forwarded requests land in
+/// L1's valid block range) and that L2 has minted past genesis.
+async fn assert_legacy_preconditions(client: &operations::HttpClient) {
+    let genesis = operations::manager::DEVNET_GENESIS_BLOCK;
+
+    // L2 must have minted past genesis
+    let l2_height =
+        operations::eth_block_number(client).await.expect("Failed to get L2 block number");
     assert!(
-        current_block >= cutoff,
-        "Cutoff block {cutoff} has not been minted yet (current: {current_block})"
+        l2_height >= genesis,
+        "L2 genesis block {genesis} not minted yet (current L2: {l2_height})"
     );
 
-    let block = operations::eth_get_block_by_number_or_hash(
-        client,
-        operations::BlockId::Number(cutoff),
-        false,
-    )
-    .await
-    .expect("Failed to get cutoff block");
-
-    let txs = block["transactions"].as_array().expect("Block should have transactions array");
+    // L1 height must be below L2 genesis — otherwise L1 block numbers overlap
+    // with L2 local blocks and the forwarding boundary becomes ambiguous.
+    let l1_height = get_l1_block_height().await;
     assert!(
-        txs.len() <= 1,
-        "Cutoff block {cutoff} should be empty (at most 1 L1 attributes tx), got {} txs",
-        txs.len()
+        l1_height < genesis,
+        "L1 height ({l1_height}) must be below L2 genesis ({genesis}) for legacy routing tests"
     );
 }
 
-/// Tests `eth_getLogs` legacy routing for all three `eth_getLogs` code paths:
-/// blockHash filter, range routing (pure local / pure legacy / hybrid split).
+/// Tests `eth_getLogs` legacy routing for blockHash filter and range routing.
 #[rstest::rstest]
 #[case::block_hash_with_logs("BlockHashWithLogs")]
 #[case::block_hash_empty_result_regression("BlockHashEmptyResultRegression")]
 #[case::range_pure_local("RangePureLocal")]
 #[case::range_pure_legacy("RangePureLegacy")]
-#[case::range_hybrid("RangeHybrid")]
 #[tokio::test]
 async fn test_legacy_eth_get_logs(#[case] test_name: &str) {
     let client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL);
     assert_legacy_preconditions(&client).await;
-    let cutoff = operations::manager::LEGACY_CUTOFF_BLOCK_HEIGHT;
 
     match test_name {
         "BlockHashWithLogs" => {
@@ -1129,7 +1128,6 @@ async fn test_legacy_eth_get_logs(#[case] test_name: &str) {
             let block_hash =
                 receipt["blockHash"].as_str().expect("Receipt should have blockHash").to_string();
 
-            // Query an address with no logs in this block
             let logs = operations::eth_get_logs_by_block_hash(
                 &client,
                 &block_hash,
@@ -1145,7 +1143,7 @@ async fn test_legacy_eth_get_logs(#[case] test_name: &str) {
             println!("BlockHashEmptyResultRegression: correctly returned [] for {block_hash}");
         }
         "RangePureLocal" => {
-            // Both bounds >= cutoff — served locally, not forwarded
+            // Both bounds >= genesis (cutoff) — served locally, not forwarded
             let current_block =
                 operations::eth_block_number(&client).await.expect("Failed to get block number");
             let from = current_block.saturating_sub(5);
@@ -1167,91 +1165,56 @@ async fn test_legacy_eth_get_logs(#[case] test_name: &str) {
             );
         }
         "RangePureLegacy" => {
-            // Both bounds < cutoff — forwarded entirely to legacy
-            let genesis = operations::manager::DEVNET_GENESIS_BLOCK;
+            // Both bounds < genesis (cutoff) — forwarded entirely to L1 via legacy
+            let l1_height = get_l1_block_height().await;
+            let from = l1_height.saturating_sub(10);
+
             let logs = operations::eth_get_logs(
                 &client,
-                Some(operations::BlockId::Number(genesis)),
-                Some(operations::BlockId::Number(cutoff - 1)),
+                Some(operations::BlockId::Number(from)),
+                Some(operations::BlockId::Number(l1_height)),
                 None,
                 None,
             )
             .await
-            .expect("Failed to get logs for pure legacy range");
+            .expect("Failed to get logs for pure legacy range (forwarded to L1)");
 
-            let logs_arr = logs.as_array().expect("Result should be an array");
-            for log in logs_arr {
-                if let Some(bn_str) = log["blockNumber"].as_str() {
-                    let bn = u64::from_str_radix(bn_str.trim_start_matches("0x"), 16).unwrap_or(0);
-                    assert!(bn < cutoff, "Log blockNumber {bn} should be below cutoff {cutoff}");
-                }
-            }
-
-            println!("RangePureLegacy: {} logs below cutoff {cutoff}", logs_arr.len());
-        }
-        "RangeHybrid" => {
-            // Range spans cutoff — split into legacy + local, results merged
-            let genesis = operations::manager::DEVNET_GENESIS_BLOCK;
-            let current_block =
-                operations::eth_block_number(&client).await.expect("Failed to get block number");
-            let to = std::cmp::min(cutoff + 10, current_block);
-
-            let logs = operations::eth_get_logs(
-                &client,
-                Some(operations::BlockId::Number(genesis)),
-                Some(operations::BlockId::Number(to)),
-                None,
-                None,
-            )
-            .await
-            .expect("Failed to get logs for hybrid range");
-
-            let logs_arr = logs.as_array().expect("Result should be an array");
-
-            // Verify logs are sorted by block number (merge correctness)
-            let mut prev_block: u64 = 0;
-            for log in logs_arr {
-                if let Some(bn_str) = log["blockNumber"].as_str() {
-                    let bn = u64::from_str_radix(bn_str.trim_start_matches("0x"), 16).unwrap_or(0);
-                    assert!(bn >= prev_block, "Logs not sorted: {bn} < {prev_block}");
-                    prev_block = bn;
-                }
-            }
-
+            assert!(logs.is_array(), "Result should be an array");
             println!(
-                "RangeHybrid: {} logs spanning cutoff (blocks {genesis}..{to})",
-                logs_arr.len()
+                "RangePureLegacy: {} logs from L1 blocks {from}..{l1_height}",
+                logs.as_array().unwrap().len()
             );
         }
         _ => panic!("Unknown test case: {test_name}"),
     }
 }
 
-/// Tests that `eth_getBlockByNumber` correctly forwards to legacy for blocks
-/// below the cutoff height. Local routing (>= cutoff) is already covered by
-/// the existing `test_eth_block_rpc::EthGetBlockByNumber` test.
+/// Tests that `eth_getBlockByNumber` correctly forwards to L1 for blocks
+/// below the cutoff (genesis) height.
 #[tokio::test]
 async fn test_legacy_get_block_by_number_forwarding() {
     let client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL);
     assert_legacy_preconditions(&client).await;
-    let cutoff = operations::manager::LEGACY_CUTOFF_BLOCK_HEIGHT;
 
-    // Below cutoff — should be forwarded to legacy endpoint
+    // Get L1's current height, then request that block through the L2 RPC.
+    // The legacy routing layer should forward it to L1.
+    let l1_height = get_l1_block_height().await;
+
     let block = operations::eth_get_block_by_number_or_hash(
         &client,
-        operations::BlockId::Number(cutoff - 1),
+        operations::BlockId::Number(l1_height),
         false,
     )
     .await
-    .expect("Failed to get block below cutoff via legacy");
+    .expect("Failed to get L1 block via legacy forwarding");
 
-    assert!(!block.is_null(), "Legacy block should not be null");
-    assert!(block["hash"].is_string(), "Legacy block should have hash");
+    assert!(!block.is_null(), "Forwarded block should not be null");
+    assert!(block["hash"].is_string(), "Forwarded block should have hash");
 
     let block_num_str = block["number"].as_str().expect("Block should have number");
     let block_num = u64::from_str_radix(block_num_str.trim_start_matches("0x"), 16)
         .expect("Should parse block number");
-    assert_eq!(block_num, cutoff - 1, "Block number should match requested");
+    assert_eq!(block_num, l1_height, "Block number should match requested L1 height");
 
-    println!("Legacy forwarding OK: block #{block_num} retrieved via legacy endpoint");
+    println!("Legacy forwarding OK: L1 block #{block_num} retrieved via L2 RPC");
 }

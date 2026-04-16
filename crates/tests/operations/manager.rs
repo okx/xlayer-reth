@@ -70,8 +70,6 @@ pub const DEFAULT_OK_PAY_SENDER_PRIVATE_KEY: &str =
     "2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6";
 
 // Legacy RPC Configuration
-/// Devnet genesis block number. No blocks exist below this height.
+/// Devnet L2 genesis block number. The legacy RPC cutoff defaults to this value.
+/// Blocks below genesis are forwarded to the legacy endpoint (L1 geth on devnet).
 pub const DEVNET_GENESIS_BLOCK: u64 = 8593921;
-/// The cutoff block height for legacy routing override on devnet.
-/// All blocks below this number are forwarded to legacy; blocks >= this are local.
-pub const LEGACY_CUTOFF_BLOCK_HEIGHT: u64 = 8593925;
