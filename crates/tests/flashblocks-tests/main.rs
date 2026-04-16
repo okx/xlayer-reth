@@ -1948,11 +1948,16 @@ async fn fb_negative_test() {
         operations::eth_call(&fb_client, Some(call_args), Some(operations::BlockId::Pending)).await;
     assert!(result.is_err(), "eth_call with invalid selector should revert, got: {result:?}");
 
-    // eth_getRawTransactionByBlockNumberAndIndex with out-of-range index returns null
-    let result =
-        operations::eth_get_raw_transaction_by_block_number_and_index(&fb_client, "0x1", "0xFFFF")
-            .await
-            .expect("eth_getRawTransactionByBlockNumberAndIndex should not error for bad index");
+    // eth_getRawTransactionByBlockNumberAndIndex with out-of-range index returns null.
+    // Use an actual block that exists (latest), then query a tx index that doesn't exist.
+    let current_block =
+        operations::eth_block_number(&fb_client).await.expect("Failed to get block number");
+    let block_hex = format!("0x{current_block:x}");
+    let result = operations::eth_get_raw_transaction_by_block_number_and_index(
+        &fb_client, &block_hex, "0xFFFF",
+    )
+    .await
+    .expect("eth_getRawTransactionByBlockNumberAndIndex should not error for bad index");
     assert!(result.is_null(), "Out-of-range tx index should return null, got: {result}");
 }
 
