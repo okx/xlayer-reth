@@ -15,6 +15,9 @@ workspace = true
 # internal
 xlayer-bridge-intercept.workspace = true
 xlayer-builder.workspace = true
+xlayer-eip8130-consensus.workspace = true
+xlayer-eip8130-pool.workspace = true
+xlayer-eip8130-revm.workspace = true
 xlayer-flashblocks.workspace = true
 xlayer-chainspec.workspace = true
 xlayer-legacy-rpc.workspace = true

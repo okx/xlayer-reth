@@ -16,6 +16,9 @@ exclude = ["deps"]
 members = [
     "crates/builder",
     "crates/chainspec",
+    "crates/eip8130-consensus",
+    "crates/eip8130-pool",
+    "crates/eip8130-revm",
     "crates/flashblocks",
     "crates/intercept",
     "crates/legacy-rpc",
@@ -68,6 +71,9 @@ codegen-units = 1
 xlayer-bridge-intercept = { path = "crates/intercept" }
 xlayer-builder = { path = "crates/builder" }
 xlayer-chainspec = { path = "crates/chainspec" }
+xlayer-eip8130-consensus = { path = "crates/eip8130-consensus" }
+xlayer-eip8130-pool = { path = "crates/eip8130-pool" }
+xlayer-eip8130-revm = { path = "crates/eip8130-revm" }
 xlayer-flashblocks = { path = "crates/flashblocks" }
 xlayer-legacy-rpc = { path = "crates/legacy-rpc" }
 xlayer-monitor = { path = "crates/monitor" }

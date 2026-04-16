@@ -1,0 +1,31 @@
+[package]
+name = "xlayer-eip8130-consensus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "XLayer EIP-8130 Native Account Abstraction - consensus types and logic"
+
+[lints]
+workspace = true
+
+[dependencies]
+# alloy
+alloy-primitives = { workspace = true }
+alloy-rlp = { workspace = true }
+alloy-consensus = { workspace = true }
+alloy-eips = { workspace = true }
+
+# misc
+serde = { workspace = true, features = ["derive"], optional = true }
+
+[dev-dependencies]
+alloy-primitives = { workspace = true }
+
+[features]
+default = []
+serde = ["dep:serde", "alloy-primitives/serde"]
+evm = []              # will gate: dep:revm, accessors.rs, execution.rs, validation.rs
+native-verifier = []  # will gate: dep:p256, dep:sha2, dep:k256, native_verifier.rs

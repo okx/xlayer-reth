@@ -18,8 +18,26 @@ pub use reth_optimism_chainspec::OpChainSpec;
 use alloy_primitives::U256;
 use once_cell::sync::Lazy;
 use reth_chainspec::Hardfork;
-use reth_ethereum_forks::{ChainHardforks, EthereumHardfork, ForkCondition};
+use reth_ethereum_forks::{hardfork, ChainHardforks, EthereumHardfork, ForkCondition};
 use reth_optimism_forks::OpHardfork;
+
+// ---------------------------------------------------------------------------
+// XLayer-specific hardforks (not part of the upstream OpHardfork enum)
+// ---------------------------------------------------------------------------
+
+hardfork!(
+    /// XLayer-specific hardforks that extend the OP Stack fork schedule.
+    XLayerHardfork {
+        /// Native Account Abstraction (EIP-8130) activation.
+        NativeAA,
+    }
+);
+
+/// Returns `true` if the Native AA hardfork is active at the given `timestamp`
+/// for the provided chain spec.
+pub fn is_native_aa_active(hardforks: &ChainHardforks, timestamp: u64) -> bool {
+    hardforks.is_fork_active_at_timestamp(XLayerHardfork::NativeAA, timestamp)
+}
 
 /// XLayer mainnet Jovian hardfork activation timestamp
 /// 2025-12-02 16:00:01 UTC
@@ -71,6 +89,8 @@ pub static XLAYER_MAINNET_HARDFORKS: Lazy<ChainHardforks> = Lazy::new(|| {
         (EthereumHardfork::Prague.boxed(), ForkCondition::Timestamp(0)),
         (OpHardfork::Isthmus.boxed(), ForkCondition::Timestamp(0)),
         (OpHardfork::Jovian.boxed(), ForkCondition::Timestamp(XLAYER_MAINNET_JOVIAN_TIMESTAMP)),
+        // NativeAA: not yet scheduled on mainnet
+        (XLayerHardfork::NativeAA.boxed(), ForkCondition::Never),
     ])
 });
 
@@ -112,6 +132,8 @@ pub static XLAYER_TESTNET_HARDFORKS: Lazy<ChainHardforks> = Lazy::new(|| {
         (EthereumHardfork::Prague.boxed(), ForkCondition::Timestamp(0)),
         (OpHardfork::Isthmus.boxed(), ForkCondition::Timestamp(0)),
         (OpHardfork::Jovian.boxed(), ForkCondition::Timestamp(XLAYER_TESTNET_JOVIAN_TIMESTAMP)),
+        // NativeAA: not yet scheduled on testnet
+        (XLayerHardfork::NativeAA.boxed(), ForkCondition::Never),
     ])
 });
 
@@ -153,5 +175,35 @@ pub static XLAYER_DEVNET_HARDFORKS: Lazy<ChainHardforks> = Lazy::new(|| {
         (EthereumHardfork::Prague.boxed(), ForkCondition::Timestamp(0)),
         (OpHardfork::Isthmus.boxed(), ForkCondition::Timestamp(0)),
         (OpHardfork::Jovian.boxed(), ForkCondition::Timestamp(XLAYER_DEVNET_JOVIAN_TIMESTAMP)),
+        // NativeAA: activated at genesis on devnet for testing
+        (XLayerHardfork::NativeAA.boxed(), ForkCondition::Timestamp(0)),
     ])
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_aa_active_on_devnet_at_genesis() {
+        assert!(is_native_aa_active(&XLAYER_DEVNET_HARDFORKS, 0));
+        assert!(is_native_aa_active(&XLAYER_DEVNET_HARDFORKS, u64::MAX));
+    }
+
+    #[test]
+    fn native_aa_never_on_mainnet() {
+        assert!(!is_native_aa_active(&XLAYER_MAINNET_HARDFORKS, 0));
+        assert!(!is_native_aa_active(&XLAYER_MAINNET_HARDFORKS, u64::MAX));
+    }
+
+    #[test]
+    fn native_aa_never_on_testnet() {
+        assert!(!is_native_aa_active(&XLAYER_TESTNET_HARDFORKS, 0));
+        assert!(!is_native_aa_active(&XLAYER_TESTNET_HARDFORKS, u64::MAX));
+    }
+
+    #[test]
+    fn xlayer_hardfork_name() {
+        assert_eq!(XLayerHardfork::NativeAA.to_string(), "NativeAA");
+    }
+}

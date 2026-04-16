@@ -14184,6 +14184,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "xlayer-eip8130-consensus"
+version = "0.0.6"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-primitives",
+ "alloy-rlp",
+ "serde",
+]
+
+[[package]]
+name = "xlayer-eip8130-pool"
+version = "0.0.6"
+dependencies = [
+ "alloy-primitives",
+ "reth-transaction-pool",
+ "tracing",
+ "xlayer-eip8130-consensus",
+ "xlayer-eip8130-revm",
+]
+
+[[package]]
+name = "xlayer-eip8130-revm"
+version = "0.0.6"
+dependencies = [
+ "alloy-primitives",
+ "revm",
+ "xlayer-eip8130-consensus",
+]
+
+[[package]]
 name = "xlayer-flashblocks"
 version = "0.0.6"
 dependencies = [
@@ -14351,6 +14382,9 @@ dependencies = [
  "xlayer-bridge-intercept",
  "xlayer-builder",
  "xlayer-chainspec",
+ "xlayer-eip8130-consensus",
+ "xlayer-eip8130-pool",
+ "xlayer-eip8130-revm",
  "xlayer-flashblocks",
  "xlayer-legacy-rpc",
  "xlayer-monitor",

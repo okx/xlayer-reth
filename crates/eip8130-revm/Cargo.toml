@@ -1,0 +1,25 @@
+[package]
+name = "xlayer-eip8130-revm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "XLayer EIP-8130 Native Account Abstraction - EVM execution engine extensions"
+
+[lints]
+workspace = true
+
+[dependencies]
+# internal
+xlayer-eip8130-consensus.workspace = true
+
+# alloy
+alloy-primitives = { workspace = true }
+
+# revm
+revm = { workspace = true }
+
+[dev-dependencies]
+alloy-primitives = { workspace = true }

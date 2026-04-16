@@ -3,6 +3,12 @@
 mod args;
 mod payload;
 
+// EIP-8130 AA crates: force-link to ensure they compile as part of the node binary.
+// Actual usage will be wired in during Phase 3-5.
+use xlayer_eip8130_consensus as _;
+use xlayer_eip8130_pool as _;
+use xlayer_eip8130_revm as _;
+
 use payload::XLayerPayloadServiceBuilder;
 
 use args::XLayerArgs;

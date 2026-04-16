@@ -1,0 +1,29 @@
+[package]
+name = "xlayer-eip8130-pool"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "XLayer EIP-8130 Native Account Abstraction - transaction pool"
+
+[lints]
+workspace = true
+
+[dependencies]
+# internal
+xlayer-eip8130-consensus = { workspace = true, features = ["evm", "native-verifier"] }
+xlayer-eip8130-revm.workspace = true
+
+# reth
+reth-transaction-pool = { workspace = true }
+
+# alloy
+alloy-primitives = { workspace = true }
+
+# misc
+tracing = { workspace = true }
+
+[dev-dependencies]
+alloy-primitives = { workspace = true }
