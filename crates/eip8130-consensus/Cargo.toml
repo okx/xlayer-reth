@@ -19,6 +19,15 @@ alloy-consensus = { workspace = true }
 alloy-eips = { workspace = true }
 alloy-sol-types = { workspace = true }
 
+# evm (feature-gated)
+revm = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+
+# native-verifier (feature-gated)
+k256 = { workspace = true, optional = true }
+p256 = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+
 # misc
 serde = { workspace = true, features = ["derive"], optional = true }
 
@@ -28,5 +37,5 @@ alloy-primitives = { workspace = true }
 [features]
 default = []
 serde = ["dep:serde", "alloy-primitives/serde"]
-evm = []              # will gate: dep:revm, accessors.rs, execution.rs, validation.rs
-native-verifier = []  # will gate: dep:p256, dep:sha2, dep:k256, native_verifier.rs
+evm = ["dep:revm", "dep:thiserror"]
+native-verifier = ["dep:k256", "dep:p256", "dep:sha2", "dep:thiserror"]

@@ -14192,7 +14192,12 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "alloy-sol-types",
+ "k256",
+ "p256",
+ "revm",
  "serde",
+ "sha2",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

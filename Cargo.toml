@@ -252,6 +252,9 @@ serde = "1"
 serde_json = "1.0"
 serde_with = { version = "3.8.1" }
 thiserror = { version = "2.0.18" }
+k256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+sha2 = { version = "0.10", default-features = false }
 humantime = "2.1"
 tracing = { version = "0.1.41" }
 shellexpand = "3.1"

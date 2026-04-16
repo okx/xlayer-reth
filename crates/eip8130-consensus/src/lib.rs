@@ -5,7 +5,7 @@
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
-// Phase 2+ dependencies — suppress unused warnings until those modules land.
+// Phase 3+ dependencies — suppress unused warnings until those modules land.
 use alloy_consensus as _;
 use alloy_eips as _;
 
@@ -76,6 +76,44 @@ pub use storage::{
 
 mod purity;
 pub use purity::{PurityScanner, PurityVerdict, PurityViolation, ViolationCategory};
+
+#[cfg(feature = "evm")]
+mod accessors;
+#[cfg(feature = "evm")]
+pub use accessors::{
+    increment_nonce_op, is_owner_authorized, read_change_sequence, read_lock_state, read_nonce,
+    read_owner_config, write_owner_config_op, LockState,
+};
+
+#[cfg(feature = "evm")]
+mod execution;
+#[cfg(feature = "evm")]
+pub use execution::{
+    auto_delegation_code, build_execution_calls, config_change_sequence, config_change_writes,
+    gas_refund, max_execution_gas_cost, nonce_increment_write, owner_registration_writes,
+    CodePlacement, ExecutionCall, PhaseResult, SequenceUpdateInfo, StorageWrite, TxContextValues,
+};
+
+#[cfg(feature = "evm")]
+mod precompiles;
+#[cfg(feature = "evm")]
+pub use precompiles::{
+    handle_nonce_manager, handle_tx_context, PrecompileError, NONCE_MANAGER_GAS, TX_CONTEXT_GAS,
+};
+
+#[cfg(feature = "evm")]
+mod validation;
+#[cfg(feature = "evm")]
+pub use validation::{
+    check_lock_state, check_payer_authorization, check_sender_authorization, decode_verify_return,
+    encode_verify_call, implicit_eoa_owner_id, resolve_sender, validate_config_change_sequences,
+    validate_expiry, validate_nonce, validate_structure, ValidationError,
+};
+
+#[cfg(feature = "native-verifier")]
+mod native_verifier;
+#[cfg(feature = "native-verifier")]
+pub use native_verifier::{try_native_verify, NativeVerifyError, NativeVerifyResult};
 
 /// Returns `true` if the given transaction type byte is an AA transaction.
 pub const fn is_aa_tx_type(tx_type: u8) -> bool {
