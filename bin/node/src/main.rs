@@ -93,13 +93,6 @@ fn main() {
             let xlayer_args = args.xlayer_args.clone();
             let datadir = builder.config().datadir().clone();
 
-            let legacy_config = LegacyRpcRouterConfig {
-                enabled: xlayer_args.legacy.legacy_rpc_url.is_some(),
-                legacy_endpoint: xlayer_args.legacy.legacy_rpc_url.unwrap_or_default(),
-                cutoff_block: genesis_block,
-                timeout: xlayer_args.legacy.legacy_rpc_timeout,
-            };
-
             // For X Layer full link monitor
             let monitor = XLayerMonitor::new(
                 xlayer_args.monitor,
@@ -109,7 +102,7 @@ fn main() {
 
             let add_ons = op_node.add_ons().with_rpc_middleware((
                 RpcMonitorLayer::new(monitor.clone()),    // Execute first
-                LegacyRpcRouterLayer::new(legacy_config), // Execute second
+                LegacyRpcRouterLayer::new(xlayer_args.legacy.to_legacy_rpc_config(genesis_block)), // Execute second
             ));
 
             // Parse and validate bridge intercept configuration

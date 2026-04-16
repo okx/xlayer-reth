@@ -4,6 +4,7 @@ use url::Url;
 
 use xlayer_bridge_intercept::BridgeInterceptConfig;
 use xlayer_builder::args::BuilderArgs;
+use xlayer_legacy_rpc::LegacyRpcRouterConfig;
 use xlayer_monitor::FullLinkMonitorArgs;
 
 /// Bridge intercept CLI arguments
@@ -111,7 +112,6 @@ impl XLayerInterceptArgs {
         Ok(())
     }
 }
-
 /// X Layer specific configuration flags
 #[derive(Debug, Clone, Args, PartialEq, Eq, Default)]
 #[command(next_help_heading = "X Layer")]
@@ -207,6 +207,17 @@ pub struct LegacyRpcArgs {
         requires = "legacy_rpc_url"
     )]
     pub legacy_rpc_timeout: Duration,
+
+    /// WARNING: This flag is intended for e2e testing only and should NOT be set
+    /// in production. The optional flag overrides the legacy RPC cutoff block height
+    /// derived from the chain genesis number.
+    #[arg(
+        long = "rpc.legacy-cutoff-override",
+        value_name = "BLOCK_NUMBER",
+        requires = "legacy_rpc_url",
+        help = "[TEST ONLY] Override the legacy RPC cutoff block height (default: derived from genesis)"
+    )]
+    pub legacy_cutoff_override: Option<u64>,
 }
 
 impl LegacyRpcArgs {
@@ -232,6 +243,18 @@ impl LegacyRpcArgs {
         }
 
         Ok(())
+    }
+
+    pub fn to_legacy_rpc_config(&self, mut genesis_block: u64) -> LegacyRpcRouterConfig {
+        if self.legacy_cutoff_override.is_some() {
+            genesis_block = self.legacy_cutoff_override.unwrap();
+        }
+        LegacyRpcRouterConfig {
+            enabled: self.legacy_rpc_url.is_some(),
+            legacy_endpoint: self.legacy_rpc_url.clone().unwrap_or_default(),
+            cutoff_block: genesis_block,
+            timeout: self.legacy_rpc_timeout,
+        }
     }
 }
 
@@ -299,6 +322,7 @@ mod tests {
         let args = LegacyRpcArgs {
             legacy_rpc_url: Some("http://localhost:8545".to_string()),
             legacy_rpc_timeout: Duration::from_secs(30),
+            legacy_cutoff_override: None,
         };
         assert!(args.validate().is_ok());
     }
@@ -308,6 +332,7 @@ mod tests {
         let args = LegacyRpcArgs {
             legacy_rpc_url: Some("https://mainnet.infura.io/v3/YOUR-PROJECT-ID".to_string()),
             legacy_rpc_timeout: Duration::from_secs(30),
+            legacy_cutoff_override: None,
         };
         assert!(args.validate().is_ok());
     }
@@ -317,6 +342,7 @@ mod tests {
         let args = LegacyRpcArgs {
             legacy_rpc_url: Some("http://192.168.1.100:8545".to_string()),
             legacy_rpc_timeout: Duration::from_secs(30),
+            legacy_cutoff_override: None,
         };
         assert!(args.validate().is_ok());
     }
@@ -326,6 +352,7 @@ mod tests {
         let args = LegacyRpcArgs {
             legacy_rpc_url: Some("not-a-valid-url".to_string()),
             legacy_rpc_timeout: Duration::from_secs(30),
+            legacy_cutoff_override: None,
         };
         let result = args.validate();
         assert!(result.is_err());
@@ -337,6 +364,7 @@ mod tests {
         let args = LegacyRpcArgs {
             legacy_rpc_url: Some("".to_string()),
             legacy_rpc_timeout: Duration::from_secs(30),
+            legacy_cutoff_override: None,
         };
         let result = args.validate();
         assert!(result.is_err());
@@ -347,6 +375,7 @@ mod tests {
         let args = LegacyRpcArgs {
             legacy_rpc_url: Some("ftp://example.com".to_string()),
             legacy_rpc_timeout: Duration::from_secs(30),
+            legacy_cutoff_override: None,
         };
         // This should pass validation (URL is valid, even if scheme is unusual)
         assert!(args.validate().is_ok());
@@ -357,6 +386,7 @@ mod tests {
         let args = LegacyRpcArgs {
             legacy_rpc_url: Some("http://localhost:8545".to_string()),
             legacy_rpc_timeout: Duration::from_secs(0),
+            legacy_cutoff_override: None,
         };
         let result = args.validate();
         assert!(result.is_err());
@@ -368,6 +398,7 @@ mod tests {
         let args = LegacyRpcArgs {
             legacy_rpc_url: Some("http://localhost:8545".to_string()),
             legacy_rpc_timeout: Duration::from_secs(60),
+            legacy_cutoff_override: None,
         };
         assert!(args.validate().is_ok());
     }
@@ -435,6 +466,7 @@ mod tests {
             legacy: LegacyRpcArgs {
                 legacy_rpc_url: Some("invalid-url".to_string()),
                 legacy_rpc_timeout: Duration::from_secs(30),
+                legacy_cutoff_override: None,
             },
             ..Default::default()
         };
