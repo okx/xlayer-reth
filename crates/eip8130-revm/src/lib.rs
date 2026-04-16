@@ -5,7 +5,9 @@
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
-// Deps used in upcoming modules (Phase 4+), suppress unused warnings during skeleton phase.
-use alloy_primitives as _;
-use revm as _;
-use xlayer_eip8130_consensus as _;
+mod constants;
+pub mod eip8130_parts;
+pub mod eip8130_policy;
+pub mod handler;
+pub mod precompiles;
+pub mod tx_context;
