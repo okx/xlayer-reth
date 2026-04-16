@@ -300,9 +300,15 @@ where
                     debug!(target:"xlayer_legacy_rpc", "method = eth_getLogs, block exists locally, using local result");
                     inner.call(req).await
                 }
-                Ok(None) | Err(_) => {
+                Ok(None) => {
                     // Block not found locally; forward to legacy
                     debug!(target:"xlayer_legacy_rpc", "method = eth_getLogs, block not found locally, forward to legacy");
+                    service.forward_to_legacy(req).await
+                }
+                Err(e) => {
+                    // Unexpected error — hash was already validated upstream so this
+                    // should be unreachable, but log it to make any surprise visible.
+                    debug!(target:"xlayer_legacy_rpc", "method = eth_getLogs, unexpected error checking block by hash ({e}), forward to legacy");
                     service.forward_to_legacy(req).await
                 }
             }
