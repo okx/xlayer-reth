@@ -1008,3 +1008,249 @@ async fn test_new_transaction_types(#[case] test_name: &str) {
         _ => panic!("Unknown test case: {test_name}"),
     }
 }
+
+// ============================================================================
+// Legacy RPC Routing Tests
+// ============================================================================
+//
+// These tests exercise the `LegacyRpcRouterLayer` middleware that intercepts
+// JSON-RPC calls and routes them to either the local reth node or a legacy
+// endpoint based on block height cutoffs.
+//
+// The devnet must be started with `--rpc.legacy-url` and
+// `--rpc.legacy-cutoff-override=8593925` on the RPC node.
+
+/// ERC20 Transfer event topic: `keccak256("Transfer(address,address,uint256)")`
+const TRANSFER_EVENT_TOPIC: &str =
+    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
+/// Pre-flight check called at the start of every legacy routing test.
+/// Panics with a clear message if the cutoff block hasn't been minted or isn't empty.
+async fn assert_legacy_preconditions(client: &operations::HttpClient) {
+    let cutoff = operations::manager::LEGACY_CUTOFF_BLOCK_HEIGHT;
+
+    let current_block =
+        operations::eth_block_number(client).await.expect("Failed to get block number");
+    assert!(
+        current_block >= cutoff,
+        "Cutoff block {cutoff} has not been minted yet (current: {current_block})"
+    );
+
+    let block = operations::eth_get_block_by_number_or_hash(
+        client,
+        operations::BlockId::Number(cutoff),
+        false,
+    )
+    .await
+    .expect("Failed to get cutoff block");
+
+    let txs = block["transactions"].as_array().expect("Block should have transactions array");
+    assert!(
+        txs.len() <= 1,
+        "Cutoff block {cutoff} should be empty (at most 1 L1 attributes tx), got {} txs",
+        txs.len()
+    );
+}
+
+/// Tests `eth_getLogs` legacy routing for all three `eth_getLogs` code paths:
+/// blockHash filter, range routing (pure local / pure legacy / hybrid split).
+#[rstest::rstest]
+#[case::block_hash_with_logs("BlockHashWithLogs")]
+#[case::block_hash_empty_result_regression("BlockHashEmptyResultRegression")]
+#[case::range_pure_local("RangePureLocal")]
+#[case::range_pure_legacy("RangePureLegacy")]
+#[case::range_hybrid("RangeHybrid")]
+#[tokio::test]
+async fn test_legacy_eth_get_logs(#[case] test_name: &str) {
+    let client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL);
+    assert_legacy_preconditions(&client).await;
+    let cutoff = operations::manager::LEGACY_CUTOFF_BLOCK_HEIGHT;
+
+    match test_name {
+        "BlockHashWithLogs" => {
+            // Baseline: blockHash filter on a block WITH logs returns them locally.
+            let contracts =
+                operations::try_deploy_contracts().await.expect("Failed to deploy contracts");
+            let erc20_address = format!("{:#x}", contracts.erc20);
+
+            let (_tx_hashes, block_number, block_hash) = operations::transfer_erc20_token_batch(
+                operations::manager::DEFAULT_L2_NETWORK_URL,
+                contracts.erc20,
+                U256::from(100 * operations::ETH_WEI),
+                operations::manager::DEFAULT_L2_NEW_ACC1_ADDRESS,
+                1,
+            )
+            .await
+            .expect("Failed to perform ERC20 transfer");
+
+            operations::wait_for_blocks(&client, block_number).await;
+
+            let logs = operations::eth_get_logs_by_block_hash(
+                &client,
+                &block_hash,
+                Some(&erc20_address),
+                Some(vec![TRANSFER_EVENT_TOPIC.to_string()]),
+            )
+            .await
+            .expect("Failed to get logs by block hash");
+
+            let logs_arr = logs.as_array().expect("Logs should be an array");
+            assert!(!logs_arr.is_empty(), "Should have at least one Transfer log");
+
+            for log in logs_arr {
+                assert_eq!(
+                    log["blockHash"].as_str().unwrap().to_lowercase(),
+                    block_hash.to_lowercase(),
+                );
+                assert_eq!(
+                    log["address"].as_str().unwrap().to_lowercase(),
+                    erc20_address.to_lowercase(),
+                );
+            }
+
+            println!("BlockHashWithLogs: {} logs in block {block_hash}", logs_arr.len());
+        }
+        "BlockHashEmptyResultRegression" => {
+            // REGRESSION TEST: blockHash filter on a block with NO matching logs
+            // must return [] locally, NOT forward to legacy and error out.
+            let tx_hash = operations::native_balance_transfer(
+                operations::manager::DEFAULT_L2_NETWORK_URL,
+                U256::from(1_000_000_000u64),
+                operations::manager::DEFAULT_L2_NEW_ACC1_ADDRESS,
+                None,
+                true,
+            )
+            .await
+            .expect("Failed to send ETH transfer");
+
+            let receipt = operations::eth_get_transaction_receipt(&client, &tx_hash)
+                .await
+                .expect("Failed to get receipt");
+            let block_hash =
+                receipt["blockHash"].as_str().expect("Receipt should have blockHash").to_string();
+
+            // Query an address with no logs in this block
+            let logs = operations::eth_get_logs_by_block_hash(
+                &client,
+                &block_hash,
+                Some("0x0000000000000000000000000000000000000001"),
+                None,
+            )
+            .await
+            .expect("eth_getLogs with blockHash should succeed even when no logs match");
+
+            let logs_arr = logs.as_array().expect("Result should be an array");
+            assert!(logs_arr.is_empty(), "Should return [], got {} logs", logs_arr.len());
+
+            println!("BlockHashEmptyResultRegression: correctly returned [] for {block_hash}");
+        }
+        "RangePureLocal" => {
+            // Both bounds >= cutoff — served locally, not forwarded
+            let current_block =
+                operations::eth_block_number(&client).await.expect("Failed to get block number");
+            let from = current_block.saturating_sub(5);
+
+            let logs = operations::eth_get_logs(
+                &client,
+                Some(operations::BlockId::Number(from)),
+                Some(operations::BlockId::Number(current_block)),
+                None,
+                None,
+            )
+            .await
+            .expect("Failed to get logs for pure local range");
+
+            assert!(logs.is_array(), "Result should be an array");
+            println!(
+                "RangePureLocal: {} logs for blocks {from}..{current_block}",
+                logs.as_array().unwrap().len()
+            );
+        }
+        "RangePureLegacy" => {
+            // Both bounds < cutoff — forwarded entirely to legacy
+            let genesis = operations::manager::DEVNET_GENESIS_BLOCK;
+            let logs = operations::eth_get_logs(
+                &client,
+                Some(operations::BlockId::Number(genesis)),
+                Some(operations::BlockId::Number(cutoff - 1)),
+                None,
+                None,
+            )
+            .await
+            .expect("Failed to get logs for pure legacy range");
+
+            let logs_arr = logs.as_array().expect("Result should be an array");
+            for log in logs_arr {
+                if let Some(bn_str) = log["blockNumber"].as_str() {
+                    let bn = u64::from_str_radix(bn_str.trim_start_matches("0x"), 16).unwrap_or(0);
+                    assert!(bn < cutoff, "Log blockNumber {bn} should be below cutoff {cutoff}");
+                }
+            }
+
+            println!("RangePureLegacy: {} logs below cutoff {cutoff}", logs_arr.len());
+        }
+        "RangeHybrid" => {
+            // Range spans cutoff — split into legacy + local, results merged
+            let genesis = operations::manager::DEVNET_GENESIS_BLOCK;
+            let current_block =
+                operations::eth_block_number(&client).await.expect("Failed to get block number");
+            let to = std::cmp::min(cutoff + 10, current_block);
+
+            let logs = operations::eth_get_logs(
+                &client,
+                Some(operations::BlockId::Number(genesis)),
+                Some(operations::BlockId::Number(to)),
+                None,
+                None,
+            )
+            .await
+            .expect("Failed to get logs for hybrid range");
+
+            let logs_arr = logs.as_array().expect("Result should be an array");
+
+            // Verify logs are sorted by block number (merge correctness)
+            let mut prev_block: u64 = 0;
+            for log in logs_arr {
+                if let Some(bn_str) = log["blockNumber"].as_str() {
+                    let bn = u64::from_str_radix(bn_str.trim_start_matches("0x"), 16).unwrap_or(0);
+                    assert!(bn >= prev_block, "Logs not sorted: {bn} < {prev_block}");
+                    prev_block = bn;
+                }
+            }
+
+            println!(
+                "RangeHybrid: {} logs spanning cutoff (blocks {genesis}..{to})",
+                logs_arr.len()
+            );
+        }
+        _ => panic!("Unknown test case: {test_name}"),
+    }
+}
+
+/// Tests that `eth_getBlockByNumber` correctly forwards to legacy for blocks
+/// below the cutoff height, proving the block-param routing path works.
+#[tokio::test]
+async fn test_legacy_get_block_by_number_forwarding() {
+    let client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL);
+    assert_legacy_preconditions(&client).await;
+    let cutoff = operations::manager::LEGACY_CUTOFF_BLOCK_HEIGHT;
+
+    // Below cutoff — should be forwarded to legacy endpoint
+    let block = operations::eth_get_block_by_number_or_hash(
+        &client,
+        operations::BlockId::Number(cutoff - 1),
+        false,
+    )
+    .await
+    .expect("Failed to get block below cutoff via legacy");
+
+    assert!(!block.is_null(), "Legacy block should not be null");
+    assert!(block["hash"].is_string(), "Legacy block should have hash");
+
+    let block_num_str = block["number"].as_str().expect("Block should have number");
+    let block_num = u64::from_str_radix(block_num_str.trim_start_matches("0x"), 16)
+        .expect("Should parse block number");
+    assert_eq!(block_num, cutoff - 1, "Block number should match requested");
+
+    println!("Legacy forwarding OK: block #{block_num} retrieved via legacy endpoint");
+}
