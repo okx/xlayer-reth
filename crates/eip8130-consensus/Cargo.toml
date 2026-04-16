@@ -17,6 +17,7 @@ alloy-primitives = { workspace = true }
 alloy-rlp = { workspace = true }
 alloy-consensus = { workspace = true }
 alloy-eips = { workspace = true }
+alloy-sol-types = { workspace = true }
 
 # misc
 serde = { workspace = true, features = ["derive"], optional = true }
