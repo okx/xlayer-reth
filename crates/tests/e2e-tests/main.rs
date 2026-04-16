@@ -1227,16 +1227,16 @@ async fn test_legacy_eth_get_logs(#[case] test_name: &str) {
     }
 }
 
-/// Tests that `eth_getBlockByNumber` correctly forwards to legacy for blocks
-/// below the cutoff height, proving the block-param routing path works.
+/// Tests `eth_getBlockByNumber` routing at the cutoff boundary:
+/// blocks below cutoff are forwarded to legacy, blocks at cutoff are served locally.
 #[tokio::test]
-async fn test_legacy_get_block_by_number_forwarding() {
+async fn test_legacy_get_block_by_number_routing() {
     let client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL);
     assert_legacy_preconditions(&client).await;
     let cutoff = operations::manager::LEGACY_CUTOFF_BLOCK_HEIGHT;
 
-    // Below cutoff — should be forwarded to legacy endpoint
-    let block = operations::eth_get_block_by_number_or_hash(
+    // Below cutoff — forwarded to legacy endpoint
+    let legacy_block = operations::eth_get_block_by_number_or_hash(
         &client,
         operations::BlockId::Number(cutoff - 1),
         false,
@@ -1244,13 +1244,26 @@ async fn test_legacy_get_block_by_number_forwarding() {
     .await
     .expect("Failed to get block below cutoff via legacy");
 
-    assert!(!block.is_null(), "Legacy block should not be null");
-    assert!(block["hash"].is_string(), "Legacy block should have hash");
-
-    let block_num_str = block["number"].as_str().expect("Block should have number");
-    let block_num = u64::from_str_radix(block_num_str.trim_start_matches("0x"), 16)
+    assert!(!legacy_block.is_null(), "Legacy block should not be null");
+    let legacy_num_str = legacy_block["number"].as_str().expect("Block should have number");
+    let legacy_num = u64::from_str_radix(legacy_num_str.trim_start_matches("0x"), 16)
         .expect("Should parse block number");
-    assert_eq!(block_num, cutoff - 1, "Block number should match requested");
+    assert_eq!(legacy_num, cutoff - 1, "Block number should match requested");
+    println!("Below cutoff: block #{legacy_num} retrieved via legacy");
 
-    println!("Legacy forwarding OK: block #{block_num} retrieved via legacy endpoint");
+    // At cutoff — served locally (>= cutoff is local)
+    let local_block = operations::eth_get_block_by_number_or_hash(
+        &client,
+        operations::BlockId::Number(cutoff),
+        false,
+    )
+    .await
+    .expect("Failed to get block at cutoff from local node");
+
+    assert!(!local_block.is_null(), "Local block should not be null");
+    let local_num_str = local_block["number"].as_str().expect("Block should have number");
+    let local_num = u64::from_str_radix(local_num_str.trim_start_matches("0x"), 16)
+        .expect("Should parse block number");
+    assert_eq!(local_num, cutoff, "Block number should match requested");
+    println!("At cutoff: block #{local_num} served locally");
 }
