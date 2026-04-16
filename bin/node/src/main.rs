@@ -30,7 +30,7 @@ use xlayer_flashblocks::{
     FlashblockSequenceValidator, FlashblockStateCache, FlashblocksPersistCtx, FlashblocksPubSub,
     FlashblocksRpcCtx, FlashblocksRpcService, WsFlashBlockStream, XLayerEngineValidatorBuilder,
 };
-use xlayer_legacy_rpc::{layer::LegacyRpcRouterLayer, LegacyRpcRouterConfig};
+use xlayer_legacy_rpc::layer::LegacyRpcRouterLayer;
 use xlayer_monitor::{start_monitor_handle, RpcMonitorLayer, XLayerMonitor};
 use xlayer_rpc::{
     DefaultRpcExt, DefaultRpcExtApiServer, FlashblocksEthApiExt, FlashblocksEthApiOverrideServer,

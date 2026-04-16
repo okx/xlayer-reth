@@ -246,8 +246,8 @@ impl LegacyRpcArgs {
     }
 
     pub fn to_legacy_rpc_config(&self, mut genesis_block: u64) -> LegacyRpcRouterConfig {
-        if self.legacy_cutoff_override.is_some() {
-            genesis_block = self.legacy_cutoff_override.unwrap();
+        if let Some(cutoff) = self.legacy_cutoff_override {
+            genesis_block = cutoff;
         }
         LegacyRpcRouterConfig {
             enabled: self.legacy_rpc_url.is_some(),
