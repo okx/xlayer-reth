@@ -138,21 +138,21 @@ reth-trie-db = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434
 reth-trie-parallel = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
 
 # ==============================================================================
-# Reth Optimism Dependencies (from local optimism/rust op-reth)
+# Reth Optimism Dependencies (from okx/optimism git)
 # These are OP-chain-specific crates, sourced from the optimism monorepo.
 # ==============================================================================
-reth-optimism-chainspec = { path = "deps/optimism/rust/op-reth/crates/chainspec/", default-features = false }
-reth-optimism-cli = { path = "deps/optimism/rust/op-reth/crates/cli/", default-features = false }
-reth-optimism-consensus = { path = "deps/optimism/rust/op-reth/crates/consensus/", default-features = false }
-reth-optimism-evm = { path = "deps/optimism/rust/op-reth/crates/evm/", default-features = false, features = ["rpc"] }
-reth-optimism-flashblocks = { path = "deps/optimism/rust/op-reth/crates/flashblocks/" }
-reth-optimism-forks = { path = "deps/optimism/rust/op-reth/crates/hardforks/", default-features = false }
-reth-optimism-node = { path = "deps/optimism/rust/op-reth/crates/node/" }
-reth-optimism-payload-builder = { path = "deps/optimism/rust/op-reth/crates/payload/" }
-reth-optimism-primitives = { path = "deps/optimism/rust/op-reth/crates/primitives/", default-features = false }
-reth-optimism-rpc = { path = "deps/optimism/rust/op-reth/crates/rpc/" }
-reth-optimism-storage = { path = "deps/optimism/rust/op-reth/crates/storage/" }
-reth-optimism-txpool = { path = "deps/optimism/rust/op-reth/crates/txpool/" }
+reth-optimism-chainspec = { git = "https://github.com/okx/optimism", rev = "3a4ab7cbdd258ecdad1df58ffcbfdaeed0a3d8df", default-features = false }
+reth-optimism-cli = { git = "https://github.com/okx/optimism", rev = "3a4ab7cbdd258ecdad1df58ffcbfdaeed0a3d8df", default-features = false }
+reth-optimism-consensus = { git = "https://github.com/okx/optimism", rev = "3a4ab7cbdd258ecdad1df58ffcbfdaeed0a3d8df", default-features = false }
+reth-optimism-evm = { git = "https://github.com/okx/optimism", rev = "3a4ab7cbdd258ecdad1df58ffcbfdaeed0a3d8df", default-features = false, features = ["rpc"] }
+reth-optimism-flashblocks = { git = "https://github.com/okx/optimism", rev = "3a4ab7cbdd258ecdad1df58ffcbfdaeed0a3d8df" }
+reth-optimism-forks = { git = "https://github.com/okx/optimism", rev = "3a4ab7cbdd258ecdad1df58ffcbfdaeed0a3d8df", default-features = false }
+reth-optimism-node = { git = "https://github.com/okx/optimism", rev = "3a4ab7cbdd258ecdad1df58ffcbfdaeed0a3d8df" }
+reth-optimism-payload-builder = { git = "https://github.com/okx/optimism", rev = "3a4ab7cbdd258ecdad1df58ffcbfdaeed0a3d8df" }
+reth-optimism-primitives = { git = "https://github.com/okx/optimism", rev = "3a4ab7cbdd258ecdad1df58ffcbfdaeed0a3d8df", default-features = false }
+reth-optimism-rpc = { git = "https://github.com/okx/optimism", rev = "3a4ab7cbdd258ecdad1df58ffcbfdaeed0a3d8df" }
+reth-optimism-storage = { git = "https://github.com/okx/optimism", rev = "3a4ab7cbdd258ecdad1df58ffcbfdaeed0a3d8df" }
+reth-optimism-txpool = { git = "https://github.com/okx/optimism", rev = "3a4ab7cbdd258ecdad1df58ffcbfdaeed0a3d8df" }
 
 # ==============================================================================
 # Revm Dependencies (follows upstream reth)
@@ -198,14 +198,14 @@ alloy-transport-http = { version = "~1.6", features = [
 alloy-transport = { version = "~1.6" }
 alloy-hardforks = { version = "~0.4", default-features = false }
 
-# op-alloy (from local optimism/rust, with version for compat)
-alloy-op-evm = { version = "0.26.3", path = "deps/optimism/rust/alloy-op-evm/", default-features = false }
-alloy-op-hardforks = { version = "0.4.7", path = "deps/optimism/rust/alloy-op-hardforks/", default-features = false }
-op-alloy-consensus = { version = "0.23.1", path = "deps/optimism/rust/op-alloy/crates/consensus", default-features = false }
+# op-alloy (from okx/optimism git, pinned by rev)
+alloy-op-evm = { git = "https://github.com/okx/optimism", rev = "3a4ab7cbdd258ecdad1df58ffcbfdaeed0a3d8df", default-features = false }
+alloy-op-hardforks = { git = "https://github.com/okx/optimism", rev = "3a4ab7cbdd258ecdad1df58ffcbfdaeed0a3d8df", default-features = false }
+op-alloy-consensus = { git = "https://github.com/okx/optimism", rev = "3a4ab7cbdd258ecdad1df58ffcbfdaeed0a3d8df", default-features = false }
 op-alloy-flz = { version = "0.13.1", default-features = false }
-op-alloy-network = { version = "0.23.1", path = "deps/optimism/rust/op-alloy/crates/network", default-features = false }
-op-alloy-rpc-types = { version = "0.23.1", path = "deps/optimism/rust/op-alloy/crates/rpc-types", default-features = false }
-op-alloy-rpc-types-engine = { version = "0.23.1", path = "deps/optimism/rust/op-alloy/crates/rpc-types-engine", default-features = false }
+op-alloy-network = { git = "https://github.com/okx/optimism", rev = "3a4ab7cbdd258ecdad1df58ffcbfdaeed0a3d8df", default-features = false }
+op-alloy-rpc-types = { git = "https://github.com/okx/optimism", rev = "3a4ab7cbdd258ecdad1df58ffcbfdaeed0a3d8df", default-features = false }
+op-alloy-rpc-types-engine = { git = "https://github.com/okx/optimism", rev = "3a4ab7cbdd258ecdad1df58ffcbfdaeed0a3d8df", default-features = false }
 
 # ==============================================================================
 # Support Dependencies
@@ -273,13 +273,13 @@ multiaddr = "0.18"
 #   alloy-op-hardforks:        alloy-evm
 # ==============================================================================
 [patch.crates-io]
-op-alloy-consensus = { path = "deps/optimism/rust/op-alloy/crates/consensus" }
-op-alloy-rpc-types-engine = { path = "deps/optimism/rust/op-alloy/crates/rpc-types-engine" }
-op-alloy-network = { path = "deps/optimism/rust/op-alloy/crates/network" }
-op-alloy-rpc-types = { path = "deps/optimism/rust/op-alloy/crates/rpc-types" }
-alloy-op-hardforks = { path = "deps/optimism/rust/alloy-op-hardforks/" }
-alloy-op-evm = { path = "deps/optimism/rust/alloy-op-evm/" }
-op-alloy = { path = "deps/optimism/rust/op-alloy/crates/op-alloy" }
+op-alloy-consensus = { git = "https://github.com/okx/optimism", rev = "3a4ab7cbdd258ecdad1df58ffcbfdaeed0a3d8df" }
+op-alloy-rpc-types-engine = { git = "https://github.com/okx/optimism", rev = "3a4ab7cbdd258ecdad1df58ffcbfdaeed0a3d8df" }
+op-alloy-network = { git = "https://github.com/okx/optimism", rev = "3a4ab7cbdd258ecdad1df58ffcbfdaeed0a3d8df" }
+op-alloy-rpc-types = { git = "https://github.com/okx/optimism", rev = "3a4ab7cbdd258ecdad1df58ffcbfdaeed0a3d8df" }
+alloy-op-hardforks = { git = "https://github.com/okx/optimism", rev = "3a4ab7cbdd258ecdad1df58ffcbfdaeed0a3d8df" }
+alloy-op-evm = { git = "https://github.com/okx/optimism", rev = "3a4ab7cbdd258ecdad1df58ffcbfdaeed0a3d8df" }
+op-alloy = { git = "https://github.com/okx/optimism", rev = "3a4ab7cbdd258ecdad1df58ffcbfdaeed0a3d8df" }
 # Security patch: upgrade jsonwebtoken to 10.3.0 (CVE-2026-25537)
 # alloy-rpc-types-engine 1.6.3 requires jsonwebtoken ^9.3.0 (^9 semver),
 # which does not include 10.x. This local fork pins jsonwebtoken to 10.3.0.
