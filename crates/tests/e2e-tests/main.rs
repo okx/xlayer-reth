@@ -589,6 +589,91 @@ async fn test_eth_logs_rpc() {
     println!("EthGetLogs result type: {logs}");
 }
 
+/// Regression test for the `eth_getLogs` blockHash routing bug.
+///
+/// Before the fix, querying logs by block hash on a local block that had zero
+/// matching events caused the router to forward to legacy.  Legacy doesn't
+/// have the block and returns "block not found", which is wrong.
+///
+/// After the fix the router checks whether the block exists locally first:
+///   - Block found locally  → return local result (even if the log array is empty)
+///   - Block NOT found locally → forward to legacy
+///
+/// This test verifies both branches against a live node.
+#[tokio::test]
+async fn test_eth_get_logs_by_block_hash() {
+    let client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL);
+
+    // ── Case 1: block exists locally, no matching events ────────────────────
+    // Filter by an address that has never emitted logs so the result is [].
+    // Before the fix this triggered a legacy forward and returned "block not found".
+    let block_number = operations::wait_for_blocks(&client, 1).await;
+    let block = operations::eth_get_block_by_number_or_hash(
+        &client,
+        operations::BlockId::Number(block_number),
+        false,
+    )
+    .await
+    .expect("Failed to get local block");
+
+    let block_hash = block["hash"].as_str().expect("Block should have hash").to_string();
+    println!("Case 1 — block #{block_number}, hash: {block_hash}");
+
+    // 0xdead has no contract code and will never emit logs
+    let nonexistent_address = "0x000000000000000000000000000000000000dead";
+    let empty_logs = operations::eth_get_logs_by_block_hash(
+        &client,
+        &block_hash,
+        Some(nonexistent_address),
+        None,
+    )
+    .await
+    .expect("eth_getLogs by blockHash must succeed even when the block has no matching events");
+
+    assert!(
+        empty_logs.is_array(),
+        "Result must be a JSON array, not an error. Got: {empty_logs}"
+    );
+    assert_eq!(
+        empty_logs.as_array().unwrap().len(),
+        0,
+        "Expected empty array for non-existent address filter, got: {empty_logs}"
+    );
+    println!("Case 1 passed: locally-known block with no matching events → [] (not 'block not found')");
+
+    // ── Case 2: block exists locally with ERC20 Transfer events ─────────────
+    let contracts = operations::try_deploy_contracts().await.expect("Failed to deploy contracts");
+
+    let (_tx_hashes, erc20_block_number, erc20_block_hash) =
+        operations::transfer_erc20_token_batch(
+            operations::manager::DEFAULT_L2_NETWORK_URL,
+            contracts.erc20,
+            U256::from(100u128 * operations::ETH_WEI),
+            operations::manager::DEFAULT_L2_NEW_ACC1_ADDRESS,
+            1,
+        )
+        .await
+        .expect("Failed to transfer ERC20 tokens");
+
+    operations::wait_for_blocks(&client, erc20_block_number).await;
+    println!("Case 2 — ERC20 transfer in block #{erc20_block_number}, hash: {erc20_block_hash}");
+
+    let logs_with_events =
+        operations::eth_get_logs_by_block_hash(&client, &erc20_block_hash, None, None)
+            .await
+            .expect("eth_getLogs by blockHash must succeed for a block with ERC20 events");
+
+    assert!(logs_with_events.is_array(), "Logs result must be a JSON array");
+    assert!(
+        !logs_with_events.as_array().unwrap().is_empty(),
+        "Expected at least one Transfer log in the ERC20 transfer block, got: {logs_with_events}"
+    );
+    println!(
+        "Case 2 passed: ERC20 transfer block returns {} log(s)",
+        logs_with_events.as_array().unwrap().len()
+    );
+}
+
 #[rstest::rstest]
 #[case::txpool_content("TxPoolContent")]
 #[case::txpool_status("TxPoolStatus")]
