@@ -630,16 +630,15 @@ async fn test_eth_get_logs_by_block_hash() {
     .await
     .expect("eth_getLogs by blockHash must succeed even when the block has no matching events");
 
-    assert!(
-        empty_logs.is_array(),
-        "Result must be a JSON array, not an error. Got: {empty_logs}"
-    );
+    assert!(empty_logs.is_array(), "Result must be a JSON array, not an error. Got: {empty_logs}");
     assert_eq!(
         empty_logs.as_array().unwrap().len(),
         0,
         "Expected empty array for non-existent address filter, got: {empty_logs}"
     );
-    println!("Case 1 passed: locally-known block with no matching events → [] (not 'block not found')");
+    println!(
+        "Case 1 passed: locally-known block with no matching events → [] (not 'block not found')"
+    );
 
     // ── Case 2: block exists locally with ERC20 Transfer events ─────────────
     let contracts = operations::try_deploy_contracts().await.expect("Failed to deploy contracts");

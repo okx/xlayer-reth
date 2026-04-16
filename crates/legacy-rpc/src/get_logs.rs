@@ -359,8 +359,7 @@ mod tests {
             };
             Box::pin(async move {
                 let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
-                let result =
-                    json.get("result").cloned().unwrap_or(serde_json::Value::Null);
+                let result = json.get("result").cloned().unwrap_or(serde_json::Value::Null);
                 let payload = jsonrpsee_types::ResponsePayload::success(&result).into();
                 MethodResponse::response(Id::Number(1), payload, usize::MAX)
             })
