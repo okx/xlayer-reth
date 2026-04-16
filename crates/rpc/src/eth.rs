@@ -1,5 +1,6 @@
 use crate::helper::{
-    to_block_receipts, to_rpc_block, to_rpc_transaction, to_rpc_transaction_from_bar_and_index,
+    to_block_receipts, to_rpc_block, to_rpc_header, to_rpc_transaction,
+    to_rpc_transaction_from_bar_and_index,
 };
 use futures::StreamExt;
 use jsonrpsee::{
@@ -28,7 +29,7 @@ use reth_revm::{database::StateProviderDatabase, db::State};
 use reth_rpc_convert::{RpcConvert, RpcTransaction};
 use reth_rpc_eth_api::{
     helpers::{estimate::EstimateCall, Call, FullEthApi, LoadState, SpawnBlocking},
-    EthApiServer, EthApiTypes, FromEvmError, RpcBlock, RpcNodeCore, RpcReceipt,
+    EthApiServer, EthApiTypes, FromEvmError, RpcBlock, RpcHeader, RpcNodeCore, RpcReceipt,
 };
 use reth_rpc_eth_types::{
     block::convert_transaction_receipt, EthApiError, RpcInvalidTransactionError,
@@ -62,6 +63,19 @@ pub trait FlashblocksEthApiOverride {
     /// and confirmed blocks.
     #[method(name = "getBlockByHash")]
     async fn block_by_hash(&self, hash: B256, full: bool) -> RpcResult<Option<RpcBlock<Optimism>>>;
+
+    /// Returns the block's header at given number, with the flashblock state cache overlay support
+    /// for pending and confirmed blocks.
+    #[method(name = "getHeaderByNumber")]
+    async fn header_by_number(
+        &self,
+        number: BlockNumberOrTag,
+    ) -> RpcResult<Option<RpcHeader<Optimism>>>;
+
+    /// Returns the block's header at given hash, with the flashblock state cache overlay support
+    /// for pending and confirmed blocks.
+    #[method(name = "getHeaderByHash")]
+    async fn header_by_hash(&self, hash: B256) -> RpcResult<Option<RpcHeader<Optimism>>>;
 
     /// Returns all the receipts in a block by block number, with the flashblock state cache
     /// overlay support for pending and confirmed blocks.
@@ -303,6 +317,27 @@ where
             return Ok(Some(U256::from(count)));
         }
         EthApiServer::block_transaction_count_by_hash(&self.eth_api, hash).await
+    }
+
+    /// Handler for: `eth_getHeaderByNumber`
+    async fn header_by_number(
+        &self,
+        number: BlockNumberOrTag,
+    ) -> RpcResult<Option<RpcHeader<Optimism>>> {
+        trace!(target: "rpc::eth", ?number, "Serving eth_getHeaderByNumber");
+        if let Some(bar) = self.flashblocks_state.get_rpc_block(number) {
+            return to_rpc_header(&bar, &self.converter).map(Some).map_err(Into::into);
+        }
+        EthApiServer::header_by_number(&self.eth_api, number).await
+    }
+
+    /// Handler for: `eth_getHeaderByHash`
+    async fn header_by_hash(&self, hash: B256) -> RpcResult<Option<RpcHeader<Optimism>>> {
+        trace!(target: "rpc::eth", ?hash, "Serving eth_getHeaderByHash");
+        if let Some(bar) = self.flashblocks_state.get_block_by_hash(&hash) {
+            return to_rpc_header(&bar, &self.converter).map(Some).map_err(Into::into);
+        }
+        EthApiServer::header_by_hash(&self.eth_api, hash).await
     }
 
     // ----------------- Transaction apis -----------------

@@ -6,7 +6,7 @@ use op_alloy_network::Optimism;
 use reth_optimism_primitives::OpPrimitives;
 use reth_primitives_traits::{Recovered, SignedTransaction, TransactionMeta};
 use reth_rpc_convert::{transaction::ConvertReceiptInput, RpcConvert, RpcTransaction};
-use reth_rpc_eth_api::{RpcBlock, RpcReceipt};
+use reth_rpc_eth_api::{RpcBlock, RpcHeader, RpcReceipt};
 use reth_rpc_eth_types::block::BlockAndReceipts;
 
 use xlayer_flashblocks::CachedTxInfo;
@@ -41,6 +41,19 @@ pub(crate) fn build_tx_info(
         block_number: Some(bar.block.number()),
         base_fee: bar.block.base_fee_per_gas(),
     }
+}
+
+/// Converts a `BlockAndReceipts` into an RPC header.
+pub(crate) fn to_rpc_header<Rpc>(
+    bar: &BlockAndReceipts<OpPrimitives>,
+    converter: &Rpc,
+) -> Result<RpcHeader<Optimism>, Rpc::Error>
+where
+    Rpc: RpcConvert<Network = Optimism, Primitives = OpPrimitives>,
+{
+    let sealed_header = bar.block.clone_sealed_header();
+    let block_size = bar.block.size();
+    converter.convert_header(sealed_header, block_size)
 }
 
 /// Converts a `BlockAndReceipts` into an RPC block.
