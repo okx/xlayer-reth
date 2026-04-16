@@ -24,7 +24,7 @@
 //!     These get converted to 0
 //! to_block: latest/pending/finalized/safe
 //!     These get converted to u64::MAX
-use crate::{service::is_result_empty, LegacyRpcRouterService};
+use crate::LegacyRpcRouterService;
 use jsonrpsee::{
     types::{error::INVALID_PARAMS_CODE, ErrorObject},
     MethodResponse,
@@ -292,15 +292,25 @@ where
                 return inner.call(req).await;
             }
         }
-        Some(GetLogsParams::BlockHash(_block_hash)) => {
-            debug!(target:"xlayer_legacy_rpc", "method = eth_getLogs, testing locally first...");
-            let res = inner.call(req.clone()).await;
-            if res.is_success() && !is_result_empty(&res) {
-                debug!(target:"xlayer_legacy_rpc", "method = eth_getLogs, success response = {res:?}");
-                res
-            } else {
-                debug!(target:"xlayer_legacy_rpc", "method = eth_getLogs, forward to legacy (empty or error)");
-                service.forward_to_legacy(req).await
+        Some(GetLogsParams::BlockHash(block_hash)) => {
+            debug!(target:"xlayer_legacy_rpc", "method = eth_getLogs, checking if block exists locally...");
+            match service.call_eth_get_block_by_hash(&block_hash, false).await {
+                Ok(Some(_)) => {
+                    // Block exists locally; return local result even if logs are empty
+                    debug!(target:"xlayer_legacy_rpc", "method = eth_getLogs, block exists locally, using local result");
+                    inner.call(req).await
+                }
+                Ok(None) => {
+                    // Block not found locally; forward to legacy
+                    debug!(target:"xlayer_legacy_rpc", "method = eth_getLogs, block not found locally, forward to legacy");
+                    service.forward_to_legacy(req).await
+                }
+                Err(e) => {
+                    // Unexpected error — hash was already validated upstream so this
+                    // should be unreachable, but log it to make any surprise visible.
+                    debug!(target:"xlayer_legacy_rpc", "method = eth_getLogs, unexpected error checking block by hash ({e}), forward to legacy");
+                    service.forward_to_legacy(req).await
+                }
             }
         }
         _ => {
@@ -313,9 +323,171 @@ where
 #[cfg(test)]
 mod tests {
     use crate::get_logs::GetLogsParams;
+    use crate::LegacyRpcRouterConfig;
+    use jsonrpsee::core::middleware::RpcServiceT;
     use jsonrpsee::MethodResponse;
     use jsonrpsee_types::{Id, Request};
     use serde_json::value::RawValue;
+    use std::future::Future;
+    use std::sync::Arc;
+
+    // ── Shared helpers for BlockHash routing tests ─────────────────────────────
+
+    const TEST_BLOCK_HASH: &str =
+        "0x8c83240f457f709b4574dd57afb656242418ea481325ea3c284c4ba144c1e032";
+
+    /// Mock that returns different responses for `eth_getBlockByHash` vs everything else.
+    #[derive(Clone)]
+    struct MockRpcService {
+        block_response: String,
+        other_response: String,
+    }
+
+    impl RpcServiceT for MockRpcService {
+        type MethodResponse = MethodResponse;
+        type NotificationResponse = MethodResponse;
+        type BatchResponse = Vec<MethodResponse>;
+
+        fn call<'a>(
+            &self,
+            req: Request<'a>,
+        ) -> impl Future<Output = Self::MethodResponse> + Send + 'a {
+            let json_str = if req.method_name() == "eth_getBlockByHash" {
+                self.block_response.clone()
+            } else {
+                self.other_response.clone()
+            };
+            Box::pin(async move {
+                let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+                let result = json.get("result").cloned().unwrap_or(serde_json::Value::Null);
+                let payload = jsonrpsee_types::ResponsePayload::success(&result).into();
+                MethodResponse::response(Id::Number(1), payload, usize::MAX)
+            })
+        }
+
+        fn batch<'a>(
+            &self,
+            _req: jsonrpsee::core::middleware::Batch<'a>,
+        ) -> impl Future<Output = Self::BatchResponse> + Send + 'a {
+            Box::pin(async { vec![] })
+        }
+
+        fn notification<'a>(
+            &self,
+            _n: jsonrpsee::core::middleware::Notification<'a>,
+        ) -> impl Future<Output = Self::NotificationResponse> + Send + 'a {
+            Box::pin(async {
+                MethodResponse::error(
+                    Id::Number(1),
+                    jsonrpsee::types::ErrorObjectOwned::owned(
+                        -32600,
+                        "Not implemented",
+                        None::<()>,
+                    ),
+                )
+            })
+        }
+    }
+
+    fn make_get_logs_by_hash_request(block_hash: &str) -> Request<'static> {
+        let params = format!(r#"[{{"blockHash":"{block_hash}"}}]"#);
+        let params_raw = RawValue::from_string(params).unwrap();
+        Request::owned("eth_getLogs".to_string(), Some(params_raw), Id::Number(1))
+    }
+
+    fn make_test_config() -> Arc<LegacyRpcRouterConfig> {
+        Arc::new(LegacyRpcRouterConfig {
+            enabled: true,
+            // Unreachable endpoint: any forward attempt produces a clear error response.
+            legacy_endpoint: "http://127.0.0.1:1".to_string(),
+            cutoff_block: 1_000_000,
+            timeout: std::time::Duration::from_secs(1),
+        })
+    }
+
+    // ── BlockHash routing tests ────────────────────────────────────────────────
+
+    /// Regression test for the original bug:
+    ///
+    /// Block exists locally but has zero events. The old code checked
+    /// `is_result_empty` and forwarded to legacy, which returned "block not
+    /// found". The fix checks block existence first; an empty log array from a
+    /// known-local block is returned directly.
+    #[tokio::test]
+    async fn test_block_hash_block_exists_with_empty_logs_returns_local_empty() {
+        let mock = MockRpcService {
+            block_response: r#"{"jsonrpc":"2.0","id":1,"result":{"number":"0xf4240","hash":"0x8c83240f457f709b4574dd57afb656242418ea481325ea3c284c4ba144c1e032"}}"#.into(),
+            other_response: r#"{"jsonrpc":"2.0","id":1,"result":[]}"#.into(),
+        };
+
+        let response = super::handle_eth_get_logs(
+            make_get_logs_by_hash_request(TEST_BLOCK_HASH),
+            reqwest::Client::new(),
+            make_test_config(),
+            mock,
+        )
+        .await;
+
+        assert!(response.is_success(), "expected success, got: {}", response.as_json().get());
+        let json: serde_json::Value = serde_json::from_str(response.as_json().get()).unwrap();
+        let result = json.get("result").expect("response must have result field");
+        assert!(result.is_array(), "result must be an array");
+        assert_eq!(
+            result.as_array().unwrap().len(),
+            0,
+            "should return local empty array, not forward to legacy"
+        );
+    }
+
+    /// Block exists locally and has events — local logs are returned directly.
+    #[tokio::test]
+    async fn test_block_hash_block_exists_with_logs_returns_local_logs() {
+        let mock = MockRpcService {
+            block_response: r#"{"jsonrpc":"2.0","id":1,"result":{"number":"0xf4240","hash":"0x8c83240f457f709b4574dd57afb656242418ea481325ea3c284c4ba144c1e032"}}"#.into(),
+            other_response: r#"{"jsonrpc":"2.0","id":1,"result":[{"address":"0x1234567890123456789012345678901234567890","blockNumber":"0xf4240","logIndex":"0x0"}]}"#.into(),
+        };
+
+        let response = super::handle_eth_get_logs(
+            make_get_logs_by_hash_request(TEST_BLOCK_HASH),
+            reqwest::Client::new(),
+            make_test_config(),
+            mock,
+        )
+        .await;
+
+        assert!(response.is_success());
+        let json: serde_json::Value = serde_json::from_str(response.as_json().get()).unwrap();
+        let result = json.get("result").unwrap().as_array().unwrap();
+        assert_eq!(result.len(), 1, "should return the one log from local node");
+    }
+
+    /// Block is not found locally — request is forwarded to legacy.
+    ///
+    /// The legacy endpoint is unreachable in tests, so a forwarded request
+    /// produces an error response. An error here confirms the forward path was
+    /// taken (the local path would have returned a success).
+    #[tokio::test]
+    async fn test_block_hash_block_not_found_locally_forwards_to_legacy() {
+        let mock = MockRpcService {
+            block_response: r#"{"jsonrpc":"2.0","id":1,"result":null}"#.into(),
+            // If routing incorrectly hits local for getLogs, it would return success.
+            other_response: r#"{"jsonrpc":"2.0","id":1,"result":[]}"#.into(),
+        };
+
+        let response = super::handle_eth_get_logs(
+            make_get_logs_by_hash_request(TEST_BLOCK_HASH),
+            reqwest::Client::new(),
+            make_test_config(),
+            mock,
+        )
+        .await;
+
+        assert!(
+            response.is_error(),
+            "expected forward-to-legacy error when block not found locally, got: {}",
+            response.as_json().get()
+        );
+    }
 
     #[test]
     fn test_parse_eth_get_logs_params_both_blocks() {

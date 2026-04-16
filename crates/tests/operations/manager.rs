@@ -62,3 +62,8 @@ pub const DEFAULT_OK_PAY_SENDER_ADDRESS: &str = "0xa0Ee7A142d267C1f36714E4a8F756
 /// Default OkPay sender private key for testing
 pub const DEFAULT_OK_PAY_SENDER_PRIVATE_KEY: &str =
     "2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6";
+
+// Legacy RPC Configuration
+/// Devnet L2 genesis block number. The legacy RPC cutoff defaults to this value.
+/// Blocks below genesis are forwarded to the legacy endpoint (L1 geth on devnet).
+pub const DEVNET_GENESIS_BLOCK: u64 = 8593921;
