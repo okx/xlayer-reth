@@ -14204,11 +14204,14 @@ dependencies = [
 name = "xlayer-eip8130-pool"
 version = "0.0.6"
 dependencies = [
+ "alloy-consensus",
  "alloy-primitives",
+ "parking_lot",
  "reth-transaction-pool",
+ "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "xlayer-eip8130-consensus",
- "xlayer-eip8130-revm",
 ]
 
 [[package]]

@@ -14,7 +14,6 @@ workspace = true
 [dependencies]
 # internal
 xlayer-eip8130-consensus = { workspace = true, features = ["evm", "native-verifier"] }
-xlayer-eip8130-revm.workspace = true
 
 # reth
 reth-transaction-pool = { workspace = true }
@@ -23,7 +22,12 @@ reth-transaction-pool = { workspace = true }
 alloy-primitives = { workspace = true }
 
 # misc
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
+alloy-consensus = { workspace = true }
 alloy-primitives = { workspace = true }
+reth-transaction-pool = { workspace = true, features = ["test-utils"] }
