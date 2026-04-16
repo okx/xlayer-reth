@@ -14137,6 +14137,7 @@ dependencies = [
  "tracing-subscriber 0.3.23",
  "url",
  "xlayer-bridge-intercept",
+ "xlayer-chainspec",
  "xlayer-eip8130-pool",
  "xlayer-trace-monitor",
 ]

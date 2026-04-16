@@ -20,41 +20,47 @@ use xlayer_eip8130_consensus::{NONCE_MANAGER_ADDRESS, TX_CONTEXT_ADDRESS};
 
 use crate::tx_context::get_eip8130_tx_context;
 
-/// Whether EIP-8130 precompiles are enabled for a given spec.
-///
-/// TODO: Gate on a proper hardfork spec once XLayer defines its AA
-/// activation hardfork. For now, returns `true` unconditionally.
-pub fn eip8130_precompiles_enabled(_spec: SpecId) -> bool {
-    true
-}
-
 /// Precompile provider that adds EIP-8130 NonceManager and TxContext
 /// on top of the standard Ethereum precompiles.
+///
+/// The AA precompiles are only active when `aa_enabled` is `true`.
+/// The caller is responsible for setting this flag based on the
+/// NativeAA hardfork activation status at the current block's timestamp.
 #[derive(Debug, Clone)]
 pub struct Eip8130Precompiles {
     /// Delegates to standard Ethereum precompiles.
     pub inner: EthPrecompiles,
     /// Current spec for gating.
     pub spec: SpecId,
+    /// Whether the NativeAA hardfork is active (AA precompiles enabled).
+    pub aa_enabled: bool,
 }
 
 impl Default for Eip8130Precompiles {
     fn default() -> Self {
         let inner = EthPrecompiles::default();
-        Self { spec: inner.spec, inner }
+        Self { spec: inner.spec, inner, aa_enabled: false }
     }
 }
 
 impl Eip8130Precompiles {
     /// Creates a new precompile provider with the given spec.
+    ///
+    /// AA precompiles default to **disabled**; call [`with_aa_enabled`](Self::with_aa_enabled)
+    /// to activate them.
     pub fn new(spec: SpecId) -> Self {
         Self { spec, ..Self::default() }
     }
 
+    /// Returns a copy with AA precompiles enabled or disabled.
+    pub fn with_aa_enabled(mut self, enabled: bool) -> Self {
+        self.aa_enabled = enabled;
+        self
+    }
+
     /// Returns whether the address is an EIP-8130 or standard precompile.
     pub fn contains(&self, address: &Address) -> bool {
-        if eip8130_precompiles_enabled(self.spec)
-            && (*address == NONCE_MANAGER_ADDRESS || *address == TX_CONTEXT_ADDRESS)
+        if self.aa_enabled && (*address == NONCE_MANAGER_ADDRESS || *address == TX_CONTEXT_ADDRESS)
         {
             return true;
         }
@@ -64,7 +70,7 @@ impl Eip8130Precompiles {
     /// Returns all warm addresses (standard + EIP-8130).
     pub fn warm_addresses(&self) -> Box<impl Iterator<Item = Address>> {
         let mut addrs: Vec<Address> = self.inner.warm_addresses().collect();
-        if eip8130_precompiles_enabled(self.spec) {
+        if self.aa_enabled {
             addrs.push(NONCE_MANAGER_ADDRESS);
             addrs.push(TX_CONTEXT_ADDRESS);
         }
@@ -89,7 +95,7 @@ where
         context: &mut CTX,
         inputs: &CallInputs,
     ) -> Result<Option<InterpreterResult>, String> {
-        if eip8130_precompiles_enabled(self.spec) {
+        if self.aa_enabled {
             let input_bytes = extract_input_bytes(context, inputs);
 
             if inputs.bytecode_address == NONCE_MANAGER_ADDRESS {
@@ -106,21 +112,11 @@ where
     }
 
     fn warm_addresses(&self) -> Box<impl Iterator<Item = Address>> {
-        let mut addrs: Vec<Address> = self.inner.warm_addresses().collect();
-        if eip8130_precompiles_enabled(self.spec) {
-            addrs.push(NONCE_MANAGER_ADDRESS);
-            addrs.push(TX_CONTEXT_ADDRESS);
-        }
-        Box::new(addrs.into_iter())
+        Eip8130Precompiles::warm_addresses(self)
     }
 
     fn contains(&self, address: &Address) -> bool {
-        if eip8130_precompiles_enabled(self.spec)
-            && (*address == NONCE_MANAGER_ADDRESS || *address == TX_CONTEXT_ADDRESS)
-        {
-            return true;
-        }
-        self.inner.contains(address)
+        Eip8130Precompiles::contains(self, address)
     }
 }
 
@@ -191,11 +187,23 @@ fn map_precompile_result(
 mod tests {
     use super::*;
 
+    fn aa_enabled_provider() -> Eip8130Precompiles {
+        Eip8130Precompiles::default().with_aa_enabled(true)
+    }
+
     #[test]
-    fn contains_aa_precompiles() {
-        let provider = Eip8130Precompiles::default();
+    fn contains_aa_precompiles_when_enabled() {
+        let provider = aa_enabled_provider();
         assert!(provider.contains(&NONCE_MANAGER_ADDRESS));
         assert!(provider.contains(&TX_CONTEXT_ADDRESS));
+    }
+
+    #[test]
+    fn does_not_contain_aa_precompiles_when_disabled() {
+        let provider = Eip8130Precompiles::default();
+        assert!(!provider.aa_enabled);
+        assert!(!provider.contains(&NONCE_MANAGER_ADDRESS));
+        assert!(!provider.contains(&TX_CONTEXT_ADDRESS));
     }
 
     #[test]
@@ -208,10 +216,18 @@ mod tests {
     }
 
     #[test]
-    fn warm_addresses_include_aa() {
-        let provider = Eip8130Precompiles::default();
+    fn warm_addresses_include_aa_when_enabled() {
+        let provider = aa_enabled_provider();
         let addrs: Vec<Address> = provider.warm_addresses().collect();
         assert!(addrs.contains(&NONCE_MANAGER_ADDRESS));
         assert!(addrs.contains(&TX_CONTEXT_ADDRESS));
+    }
+
+    #[test]
+    fn warm_addresses_exclude_aa_when_disabled() {
+        let provider = Eip8130Precompiles::default();
+        let addrs: Vec<Address> = provider.warm_addresses().collect();
+        assert!(!addrs.contains(&NONCE_MANAGER_ADDRESS));
+        assert!(!addrs.contains(&TX_CONTEXT_ADDRESS));
     }
 }

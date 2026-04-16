@@ -39,6 +39,21 @@ pub fn is_native_aa_active(hardforks: &ChainHardforks, timestamp: u64) -> bool {
     hardforks.is_fork_active_at_timestamp(XLayerHardfork::NativeAA, timestamp)
 }
 
+/// Extension trait for querying XLayer-specific hardfork activation on `OpChainSpec`.
+///
+/// Provides ergonomic methods (e.g. `spec.is_native_aa_active_at_timestamp(ts)`)
+/// that parallel OP-Stack's built-in methods like `is_holocene_active_at_timestamp`.
+pub trait XLayerHardforks {
+    /// Returns `true` if the NativeAA hardfork is active at the given `timestamp`.
+    fn is_native_aa_active_at_timestamp(&self, timestamp: u64) -> bool;
+}
+
+impl XLayerHardforks for OpChainSpec {
+    fn is_native_aa_active_at_timestamp(&self, timestamp: u64) -> bool {
+        is_native_aa_active(&self.inner.hardforks, timestamp)
+    }
+}
+
 /// XLayer mainnet Jovian hardfork activation timestamp
 /// 2025-12-02 16:00:01 UTC
 pub const XLAYER_MAINNET_JOVIAN_TIMESTAMP: u64 = 1764691201;

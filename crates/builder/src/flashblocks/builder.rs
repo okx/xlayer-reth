@@ -284,13 +284,25 @@ where
     Tasks: TaskSpawner + Clone + Unpin + 'static,
 {
     /// Returns best transactions from the pool, merged with AA side pool if present.
+    ///
+    /// AA transactions are only merged when the `NativeAA` hardfork is active at the
+    /// given `timestamp`. Before activation the AA side pool is skipped entirely.
     fn best_transactions_merged(
         &self,
         attrs: reth_transaction_pool::BestTransactionsAttributes,
+        timestamp: u64,
     ) -> Box<dyn BestTransactions<Item = Arc<ValidPoolTransaction<Pool::Transaction>>>> {
         let std_best = self.pool.best_transactions_with_attributes(attrs);
         match &self.aa_pool {
-            Some(handle) => handle.merge_with_standard(std_best),
+            Some(handle) => {
+                use xlayer_chainspec::XLayerHardforks;
+                let chain_spec = self.client.chain_spec();
+                if chain_spec.is_native_aa_active_at_timestamp(timestamp) {
+                    handle.merge_with_standard(std_best)
+                } else {
+                    std_best
+                }
+            }
             None => std_best,
         }
     }
@@ -544,7 +556,7 @@ where
 
         // Create best_transaction iterator (merged with AA side pool if present).
         let mut best_txs = BestFlashblocksTxs::new(BestPayloadTransactions::new(
-            self.best_transactions_merged(ctx.best_transaction_attributes()),
+            self.best_transactions_merged(ctx.best_transaction_attributes(), ctx.timestamp()),
         ));
 
         let (tx, rx) = std::sync::mpsc::sync_channel((expected_flashblocks + 1) as usize);
@@ -719,7 +731,7 @@ where
         let best_txs_start_time = Instant::now();
         best_txs.refresh_iterator(
             BestPayloadTransactions::new(
-                self.best_transactions_merged(ctx.best_transaction_attributes()),
+                self.best_transactions_merged(ctx.best_transaction_attributes(), ctx.timestamp()),
             ),
             flashblock_index,
         );

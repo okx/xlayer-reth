@@ -95,3 +95,17 @@ pub const EXTERNAL_CALLER_VERIFIER: Address =
 pub fn is_native_verifier(addr: Address) -> bool {
     NativeVerifier::from_address(addr).is_some()
 }
+
+/// All system contract addresses that must have non-empty bytecode
+/// after the NativeAA upgrade deposits execute.
+///
+/// Does **not** include precompile addresses (NonceManager, TxContext, K1)
+/// since those are handled by native code, not deployed bytecode.
+pub const DEPLOYED_SYSTEM_CONTRACT_ADDRESSES: [Address; 6] = [
+    ACCOUNT_CONFIG_ADDRESS,
+    DEFAULT_ACCOUNT_ADDRESS,
+    DEFAULT_HIGH_RATE_ACCOUNT_ADDRESS,
+    P256_RAW_VERIFIER_ADDRESS,
+    P256_WEBAUTHN_VERIFIER_ADDRESS,
+    DELEGATE_VERIFIER_ADDRESS,
+];

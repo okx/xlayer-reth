@@ -59,9 +59,9 @@ mod predeploys;
 pub use predeploys::{
     is_account_config_known_deployed, is_native_verifier, mark_account_config_deployed,
     ACCOUNT_CONFIG_ADDRESS, DEFAULT_ACCOUNT_ADDRESS, DEFAULT_HIGH_RATE_ACCOUNT_ADDRESS,
-    DELEGATE_VERIFIER_ADDRESS, EXTERNAL_CALLER_VERIFIER, K1_VERIFIER_ADDRESS,
-    NONCE_MANAGER_ADDRESS, P256_RAW_VERIFIER_ADDRESS, P256_WEBAUTHN_VERIFIER_ADDRESS,
-    REVOKED_VERIFIER, TX_CONTEXT_ADDRESS,
+    DELEGATE_VERIFIER_ADDRESS, DEPLOYED_SYSTEM_CONTRACT_ADDRESSES, EXTERNAL_CALLER_VERIFIER,
+    K1_VERIFIER_ADDRESS, NONCE_MANAGER_ADDRESS, P256_RAW_VERIFIER_ADDRESS,
+    P256_WEBAUTHN_VERIFIER_ADDRESS, REVOKED_VERIFIER, TX_CONTEXT_ADDRESS,
 };
 
 mod storage;
@@ -118,4 +118,93 @@ pub use native_verifier::{try_native_verify, NativeVerifyError, NativeVerifyResu
 /// Returns `true` if the given transaction type byte is an AA transaction.
 pub const fn is_aa_tx_type(tx_type: u8) -> bool {
     tx_type == AA_TX_TYPE_ID
+}
+
+/// Validates that a block does not contain AA transactions (type 0x7B)
+/// when the Native AA hardfork is not yet active.
+///
+/// Returns `Ok(())` if the block is valid, or `Err` with the index of the
+/// first offending transaction.
+///
+/// # Arguments
+/// * `is_aa_active` — whether the Native AA fork is active at the block's timestamp.
+///   The caller is responsible for computing this (e.g. via `xlayer_chainspec::is_native_aa_active`).
+/// * `tx_types` — an iterator over the EIP-2718 type bytes of transactions in the block body.
+pub fn validate_block_no_aa_tx(
+    is_aa_active: bool,
+    tx_types: impl Iterator<Item = u8>,
+) -> Result<(), AaTxBeforeActivationError> {
+    if is_aa_active {
+        return Ok(());
+    }
+    for (idx, ty) in tx_types.enumerate() {
+        if is_aa_tx_type(ty) {
+            return Err(AaTxBeforeActivationError { tx_index: idx });
+        }
+    }
+    Ok(())
+}
+
+/// Error returned when a block contains an AA transaction (type 0x7B)
+/// before the Native AA hardfork is active.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AaTxBeforeActivationError {
+    /// Index of the first AA transaction in the block body.
+    pub tx_index: usize,
+}
+
+impl core::fmt::Display for AaTxBeforeActivationError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "block contains AA transaction (type 0x7B) at index {} before NativeAA hardfork activation",
+            self.tx_index
+        )
+    }
+}
+
+impl std::error::Error for AaTxBeforeActivationError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EIP1559: u8 = 0x02;
+
+    #[test]
+    fn validate_block_no_aa_tx_empty_block() {
+        assert!(validate_block_no_aa_tx(false, std::iter::empty()).is_ok());
+    }
+
+    #[test]
+    fn validate_block_no_aa_tx_standard_txs_before_activation() {
+        let types = vec![EIP1559, EIP1559, 0x03];
+        assert!(validate_block_no_aa_tx(false, types.into_iter()).is_ok());
+    }
+
+    #[test]
+    fn validate_block_no_aa_tx_rejects_aa_before_activation() {
+        let types = vec![EIP1559, AA_TX_TYPE_ID, EIP1559];
+        let err = validate_block_no_aa_tx(false, types.into_iter()).unwrap_err();
+        assert_eq!(err.tx_index, 1);
+        assert!(err.to_string().contains("index 1"));
+    }
+
+    #[test]
+    fn validate_block_no_aa_tx_reports_first_offending() {
+        let types = vec![AA_TX_TYPE_ID, EIP1559, AA_TX_TYPE_ID];
+        let err = validate_block_no_aa_tx(false, types.into_iter()).unwrap_err();
+        assert_eq!(err.tx_index, 0);
+    }
+
+    #[test]
+    fn validate_block_no_aa_tx_allows_aa_after_activation() {
+        let types = vec![EIP1559, AA_TX_TYPE_ID, AA_TX_TYPE_ID];
+        assert!(validate_block_no_aa_tx(true, types.into_iter()).is_ok());
+    }
+
+    #[test]
+    fn validate_block_no_aa_tx_allows_empty_after_activation() {
+        assert!(validate_block_no_aa_tx(true, std::iter::empty()).is_ok());
+    }
 }
