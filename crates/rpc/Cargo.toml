@@ -11,6 +11,7 @@ repository.workspace = true
 default = []
 
 [dependencies]
+xlayer-builder.workspace = true
 xlayer-flashblocks.workspace = true
 xlayer-innertx.workspace = true
 

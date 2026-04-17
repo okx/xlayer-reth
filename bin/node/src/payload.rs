@@ -1,3 +1,5 @@
+use std::sync::{Arc, OnceLock};
+
 use reth::builder::components::PayloadServiceBuilder;
 use reth_node_api::NodeTypes;
 use reth_node_builder::{components::BasicPayloadServiceBuilder, BuilderContext};
@@ -7,6 +9,7 @@ use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
 use xlayer_bridge_intercept::BridgeInterceptConfig;
 use xlayer_builder::{
     args::BuilderArgs,
+    broadcast::PeerStatusTracker,
     default::DefaultBuilderServiceBuilder,
     flashblocks::{BuilderConfig, FlashblocksServiceBuilder},
     traits::{NodeBounds, PoolBounds},
@@ -34,11 +37,13 @@ impl XLayerPayloadServiceBuilder {
         xlayer_builder_args: BuilderArgs,
         compute_pending_block: bool,
         sequencer_mode: bool,
+        peer_status: Arc<OnceLock<PeerStatusTracker>>,
     ) -> eyre::Result<Self> {
         Self::with_config(
             xlayer_builder_args,
             compute_pending_block,
             sequencer_mode,
+            peer_status,
             OpDAConfig::default(),
             OpGasLimitConfig::default(),
         )
@@ -48,6 +53,7 @@ impl XLayerPayloadServiceBuilder {
         xlayer_builder_args: BuilderArgs,
         compute_pending_block: bool,
         sequencer_mode: bool,
+        peer_status: Arc<OnceLock<PeerStatusTracker>>,
         da_config: OpDAConfig,
         gas_limit_config: OpGasLimitConfig,
     ) -> eyre::Result<Self> {
@@ -58,6 +64,7 @@ impl XLayerPayloadServiceBuilder {
                 XLayerPayloadServiceBuilderInner::Flashblocks(Box::new(FlashblocksServiceBuilder {
                     config,
                     bridge_intercept: Default::default(),
+                    peer_status_sink: peer_status.clone(),
                 }))
             } else {
                 XLayerPayloadServiceBuilderInner::DefaultWithP2P(Box::new(
@@ -66,6 +73,7 @@ impl XLayerPayloadServiceBuilder {
                         config,
                         da_config,
                         gas_limit_config,
+                        peer_status_sink: peer_status.clone(),
                     },
                 ))
             }

@@ -55,6 +55,92 @@ async fn fb_flashblocks_enabled_returns_false_on_non_fb_node_test() {
 }
 
 // ========================================================================
+// Flashblocks P2P peer status tests
+// ========================================================================
+
+/// Verifies that `eth_flashblocksPeerStatus` returns valid responses on both
+/// sequencers and that each sees the other as a static peer.
+#[tokio::test]
+#[ignore = "requires conductor-enabled devnet with P2P keys"]
+async fn fb_peer_status_returns_data_on_sequencer_test() {
+    // seq1 → expects localPeerId = SEQ1, static peer = SEQ2
+    let seq1_status = operations::eth_flashblocks_peer_status(&operations::create_test_client(
+        operations::DEFAULT_L2_SEQ_URL,
+    ))
+    .await
+    .expect("RPC failed")
+    .expect("seq1 should return peer status");
+
+    assert_eq!(
+        seq1_status["localPeerId"].as_str().unwrap(),
+        operations::DEFAULT_SEQ_FB_P2P_PEER_ID
+    );
+    let summary = &seq1_status["summary"];
+    let total = summary["total"].as_u64().unwrap();
+    assert_eq!(
+        total,
+        summary["connected"].as_u64().unwrap()
+            + summary["disconnected"].as_u64().unwrap()
+            + summary["neverConnected"].as_u64().unwrap(),
+        "summary counts must add up"
+    );
+    let seq2_on_seq1 = seq1_status["peers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["peerId"].as_str() == Some(operations::DEFAULT_SEQ2_FB_P2P_PEER_ID))
+        .expect("seq2 must appear in seq1's peer list");
+    assert!(seq2_on_seq1["isStatic"].as_bool().unwrap());
+
+    // seq2 → expects localPeerId = SEQ2, static peer = SEQ1
+    let seq2_status = operations::eth_flashblocks_peer_status(&operations::create_test_client(
+        operations::DEFAULT_L2_SEQ2_URL,
+    ))
+    .await
+    .expect("RPC failed")
+    .expect("seq2 should return peer status");
+
+    assert_eq!(
+        seq2_status["localPeerId"].as_str().unwrap(),
+        operations::DEFAULT_SEQ2_FB_P2P_PEER_ID
+    );
+    let seq1_on_seq2 = seq2_status["peers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["peerId"].as_str() == Some(operations::DEFAULT_SEQ_FB_P2P_PEER_ID))
+        .expect("seq1 must appear in seq2's peer list");
+    assert!(seq1_on_seq2["isStatic"].as_bool().unwrap());
+}
+
+/// Verifies that `eth_flashblocksPeerStatus` returns `null` on an RPC node
+/// that does not have the P2P broadcast layer.
+#[tokio::test]
+async fn fb_peer_status_returns_null_on_rpc_node_test() {
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+
+    let result = operations::eth_flashblocks_peer_status(&fb_client)
+        .await
+        .expect("eth_flashblocksPeerStatus RPC call failed");
+
+    assert!(result.is_none(), "RPC node (non-sequencer) should return null for peer status");
+}
+
+/// Verifies that `eth_flashblocksPeerStatus` returns `null` on a node without
+/// flashblocks.
+#[tokio::test]
+#[ignore = "requires non-flashblocks node"]
+async fn fb_peer_status_returns_null_on_non_fb_node_test() {
+    let non_fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_NO_FB);
+
+    let result = operations::eth_flashblocks_peer_status(&non_fb_client)
+        .await
+        .expect("eth_flashblocksPeerStatus RPC call failed");
+
+    assert!(result.is_none(), "non-flashblocks node should return null for peer status");
+}
+
+// ========================================================================
 // Flashblocks pending state tests
 // ========================================================================
 
@@ -167,6 +253,59 @@ async fn fb_pending_block_queries_test() {
     .await
     .expect("eth_getRawTransactionByBlockNumberAndIndex failed");
     assert!(!raw_tx.is_null(), "Raw transaction at index 0 should not be null");
+}
+
+/// Header-level RPC queries on the flashblocks node.
+#[tokio::test]
+async fn fb_pending_header_queries_test() {
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+
+    // eth_getHeaderByNumber(Pending) returns a non-null header with essential fields.
+    // Note: pending hash is ephemeral (changes as the sequence advances), so we only
+    // validate field presence here — no by-hash re-query against the pending hash.
+    let pending_header =
+        operations::eth_get_header_by_number(&fb_client, operations::BlockId::Pending)
+            .await
+            .expect("eth_getHeaderByNumber(pending) failed");
+    assert!(!pending_header.is_null(), "Pending header should not be null");
+    assert!(pending_header["number"].is_string(), "Header should have a number field");
+    assert!(pending_header["hash"].is_string(), "Header should have a hash field");
+    assert!(pending_header["parentHash"].is_string(), "Header should have a parentHash field");
+    assert!(pending_header["stateRoot"].is_string(), "Header should have a stateRoot field");
+
+    // Use confirmed height for by-number and by-hash assertions — its hash is stable
+    let block_number =
+        operations::eth_block_number(&fb_client).await.expect("Failed to get block number");
+
+    let header_by_number =
+        operations::eth_get_header_by_number(&fb_client, operations::BlockId::Number(block_number))
+            .await
+            .expect("eth_getHeaderByNumber by confirmed number failed");
+    assert!(!header_by_number.is_null(), "Header by confirmed number should not be null");
+
+    // Header should match the block from eth_getBlockByNumber
+    let block = operations::eth_get_block_by_number_or_hash(
+        &fb_client,
+        operations::BlockId::Number(block_number),
+        false,
+    )
+    .await
+    .expect("eth_getBlockByNumber failed");
+    assert_eq!(header_by_number["hash"], block["hash"], "Header hash should match block hash");
+    assert_eq!(
+        header_by_number["stateRoot"], block["stateRoot"],
+        "Header stateRoot should match block stateRoot"
+    );
+
+    // eth_getHeaderByHash returns the same header (safe — confirmed hash is stable)
+    let block_hash = header_by_number["hash"].as_str().expect("Header should have a hash");
+    let header_by_hash = operations::eth_get_header_by_hash(&fb_client, block_hash)
+        .await
+        .expect("eth_getHeaderByHash failed");
+    assert_eq!(
+        header_by_number, header_by_hash,
+        "eth_getHeaderByNumber and eth_getHeaderByHash should return identical headers"
+    );
 }
 
 /// Transaction-level RPC queries on the flashblocks node.
@@ -1156,6 +1295,48 @@ async fn fb_compare_get_block_by_hash() {
 
 #[ignore = "Requires a second non-flashblock RPC node to be running"]
 #[tokio::test]
+async fn fb_compare_get_header() {
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+    let non_fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_NO_FB);
+
+    let latest = operations::eth_block_number(&non_fb_client)
+        .await
+        .expect("Failed to get latest block number");
+
+    for i in 0..10 {
+        let block_id = operations::BlockId::Number(latest - i);
+
+        // By number
+        let fb_header = operations::eth_get_header_by_number(&fb_client, block_id.clone())
+            .await
+            .expect("Failed to get header from fb client");
+        let non_fb_header = operations::eth_get_header_by_number(&non_fb_client, block_id)
+            .await
+            .expect("Failed to get header from non-fb client");
+        assert_eq!(
+            fb_header,
+            non_fb_header,
+            "eth_getHeaderByNumber not identical at block {}",
+            latest - i
+        );
+
+        // By hash
+        let block_hash = fb_header["hash"].as_str().expect("Header should have hash");
+        let fb_header_by_hash = operations::eth_get_header_by_hash(&fb_client, block_hash)
+            .await
+            .expect("Failed to get header by hash from fb client");
+        let non_fb_header_by_hash = operations::eth_get_header_by_hash(&non_fb_client, block_hash)
+            .await
+            .expect("Failed to get header by hash from non-fb client");
+        assert_eq!(
+            fb_header_by_hash, non_fb_header_by_hash,
+            "eth_getHeaderByHash not identical for hash {block_hash}"
+        );
+    }
+}
+
+#[ignore = "Requires a second non-flashblock RPC node to be running"]
+#[tokio::test]
 async fn fb_compare_get_block_transaction_count() {
     let (fb_client, non_fb_client, _, block_num, fb_block_hash, non_fb_block_hash, _) =
         operations::comparison_test_setup().await;
@@ -1862,12 +2043,30 @@ async fn fb_negative_test() {
         operations::eth_call(&fb_client, Some(call_args), Some(operations::BlockId::Pending)).await;
     assert!(result.is_err(), "eth_call with invalid selector should revert, got: {result:?}");
 
-    // eth_getRawTransactionByBlockNumberAndIndex with out-of-range index returns null
-    let result =
-        operations::eth_get_raw_transaction_by_block_number_and_index(&fb_client, "0x1", "0xFFFF")
-            .await
-            .expect("eth_getRawTransactionByBlockNumberAndIndex should not error for bad index");
+    // eth_getRawTransactionByBlockNumberAndIndex with out-of-range index returns null.
+    // Use an actual block that exists (latest), then query a tx index that doesn't exist.
+    let current_block =
+        operations::eth_block_number(&fb_client).await.expect("Failed to get block number");
+    let block_hex = format!("0x{current_block:x}");
+    let result = operations::eth_get_raw_transaction_by_block_number_and_index(
+        &fb_client, &block_hex, "0xFFFF",
+    )
+    .await
+    .expect("eth_getRawTransactionByBlockNumberAndIndex should not error for bad index");
     assert!(result.is_null(), "Out-of-range tx index should return null, got: {result}");
+
+    // Non-existent header by number returns null
+    let header =
+        operations::eth_get_header_by_number(&fb_client, operations::BlockId::Number(0xFFFFFFFF))
+            .await
+            .expect("eth_getHeaderByNumber should not error for non-existent block");
+    assert!(header.is_null(), "Non-existent block header should return null, got: {header}");
+
+    // Non-existent header by hash returns null
+    let header = operations::eth_get_header_by_hash(&fb_client, fake_hash)
+        .await
+        .expect("eth_getHeaderByHash should not error for non-existent hash");
+    assert!(header.is_null(), "Non-existent hash header should return null, got: {header}");
 }
 
 /// Verifies that `eth_getLogs` returns logs from a flashblock when queried

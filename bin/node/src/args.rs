@@ -111,7 +111,6 @@ impl XLayerInterceptArgs {
         Ok(())
     }
 }
-
 /// X Layer specific configuration flags
 #[derive(Debug, Clone, Args, PartialEq, Eq, Default)]
 #[command(next_help_heading = "X Layer")]

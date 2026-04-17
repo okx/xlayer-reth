@@ -159,10 +159,12 @@ fn main() {
 
             // Create the X Layer payload service builder
             // It handles both flashblocks and default modes internally
+            let fb_p2p_status = Arc::new(OnceLock::new());
             let payload_builder = XLayerPayloadServiceBuilder::new(
                 args.xlayer_args.builder.clone(),
                 args.rollup_args.compute_pending_block,
                 xlayer_args.sequencer_mode,
+                fb_p2p_status.clone(),
             )?
             .with_bridge_config(bridge_config);
 
@@ -328,7 +330,11 @@ fn main() {
                     }
 
                     // Register X Layer RPC
-                    let xlayer_rpc = DefaultRpcExt::new(flashblocks_state);
+                    let peer_status = fb_p2p_status.get().cloned();
+                    if xlayer_args.sequencer_mode && peer_status.is_none() {
+                        tracing::warn!(target: "reth::cli", "fb_p2p_status not initialized — eth_flashblocksPeerStatus will return null on sequencer");
+                    }
+                    let xlayer_rpc = DefaultRpcExt::new(flashblocks_state, peer_status);
                     ctx.modules
                         .merge_configured(DefaultRpcExtApiServer::into_rpc(xlayer_rpc))?;
                     info!(target: "reth::cli", "xlayer eth rpc extension enabled");

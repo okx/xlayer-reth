@@ -5780,7 +5780,7 @@ dependencies = [
 
 [[package]]
 name = "macros"
-version = "0.1.0"
+version = "0.0.6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -14004,7 +14004,7 @@ dependencies = [
 
 [[package]]
 name = "xlayer-bridge-intercept"
-version = "0.1.0"
+version = "0.0.6"
 dependencies = [
  "alloy-primitives",
  "thiserror 2.0.18",
@@ -14013,7 +14013,7 @@ dependencies = [
 
 [[package]]
 name = "xlayer-builder"
-version = "0.1.0"
+version = "0.0.6"
 dependencies = [
  "alloy-consensus",
  "alloy-contract",
@@ -14119,7 +14119,7 @@ dependencies = [
 
 [[package]]
 name = "xlayer-chainspec"
-version = "0.1.0"
+version = "0.0.6"
 dependencies = [
  "alloy-chains",
  "alloy-consensus",
@@ -14141,7 +14141,7 @@ dependencies = [
 
 [[package]]
 name = "xlayer-e2e-test"
-version = "0.1.0"
+version = "0.0.6"
 dependencies = [
  "alloy-eips",
  "alloy-network",
@@ -14162,7 +14162,7 @@ dependencies = [
 
 [[package]]
 name = "xlayer-flashblocks"
-version = "0.1.0"
+version = "0.0.6"
 dependencies = [
  "alloy-consensus",
  "alloy-eip7928",
@@ -14272,7 +14272,7 @@ dependencies = [
 
 [[package]]
 name = "xlayer-legacy-rpc"
-version = "0.1.0"
+version = "0.0.6"
 dependencies = [
  "futures",
  "jsonrpsee",
@@ -14286,7 +14286,7 @@ dependencies = [
 
 [[package]]
 name = "xlayer-monitor"
-version = "0.1.0"
+version = "0.0.6"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -14311,7 +14311,7 @@ dependencies = [
 
 [[package]]
 name = "xlayer-reth-node"
-version = "0.1.0"
+version = "0.0.6"
 dependencies = [
  "alloy-consensus",
  "alloy-evm",
@@ -14369,7 +14369,7 @@ dependencies = [
 
 [[package]]
 name = "xlayer-reth-tools"
-version = "0.1.0"
+version = "0.0.6"
 dependencies = [
  "alloy-consensus",
  "alloy-genesis",
@@ -14407,7 +14407,7 @@ dependencies = [
 
 [[package]]
 name = "xlayer-rpc"
-version = "0.1.0"
+version = "0.0.6"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -14436,6 +14436,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "xlayer-builder",
  "xlayer-flashblocks",
  "xlayer-innertx",
 ]
@@ -14452,7 +14453,7 @@ dependencies = [
 
 [[package]]
 name = "xlayer-version"
-version = "0.1.0"
+version = "0.0.6"
 dependencies = [
  "reth-node-core",
  "vergen",

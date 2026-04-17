@@ -13,7 +13,8 @@ use crate::{
     traits::{NodeBounds, PoolBounds},
 };
 use eyre::WrapErr as _;
-use std::{sync::Arc, time::Duration};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use reth_basic_payload_builder::BasicPayloadJobGeneratorConfig;
 use reth_node_api::NodeTypes;
@@ -25,6 +26,7 @@ use reth_provider::CanonStateSubscriptions;
 pub struct FlashblocksServiceBuilder {
     pub config: BuilderConfig,
     pub bridge_intercept: xlayer_bridge_intercept::BridgeInterceptConfig,
+    pub peer_status_sink: Arc<OnceLock<crate::broadcast::PeerStatusTracker>>,
 }
 
 impl FlashblocksServiceBuilder {
@@ -92,6 +94,7 @@ impl FlashblocksServiceBuilder {
             node,
             outgoing_message_tx,
             mut incoming_message_rxs,
+            peer_status,
         } = broadcast_builder
             .with_agent_version(AGENT_VERSION.to_string())
             .with_protocol(FLASHBLOCKS_STREAM_PROTOCOL)
@@ -101,6 +104,7 @@ impl FlashblocksServiceBuilder {
             .with_max_peer_count(self.config.flashblocks.p2p_max_peer_count)
             .try_build()
             .wrap_err("failed to build flashblocks p2p node")?;
+        let _ = self.peer_status_sink.set(peer_status);
         let multiaddrs = node.multiaddrs();
         ctx.task_executor().spawn_task(async move {
             if let Err(e) = node.run().await {

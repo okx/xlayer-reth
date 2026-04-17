@@ -22,3 +22,4 @@ crates/chainspec/res/genesis/xlayer-devnet-state-root.txt
 
 # Local development: cargo config for debugging with local reth
 .cargo
+.omc
