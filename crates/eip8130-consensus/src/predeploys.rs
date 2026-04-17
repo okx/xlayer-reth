@@ -12,10 +12,10 @@
 //!   - `P256Verifier`, `WebAuthnVerifier`, `DelegateVerifier`
 //!   - `DefaultAccount` — wallet implementation for EIP-7702 auto-delegation
 //!
-//! All deployed contract addresses are deterministic via CREATE2.
-//!
-//! > **TODO**: Replace placeholder addresses with XLayer-specific deployment
-//! > addresses once system contracts are compiled and deployer addresses finalized.
+//! All deployed contract addresses are deterministic: each contract is
+//! deployed by a unique deployer via `deployer.create(0)`, yielding a
+//! fixed address. The deployer addresses are defined in
+//! [`super::system_bytecodes`].
 
 use alloy_primitives::{address, Address};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -59,31 +59,42 @@ pub const NONCE_MANAGER_ADDRESS: Address = address!("0x0000000000000000000000000
 pub const TX_CONTEXT_ADDRESS: Address = address!("0x000000000000000000000000000000000000aa03");
 
 // ── Deployed contracts ────────────────────────────────────────────
-// TODO: Replace with XLayer-specific deployment addresses.
-// Currently using Base's deterministic CREATE2 addresses as dev placeholders.
+// Addresses are deterministic: `deployer.create(0)`.
+// Deployer addresses are in `system_bytecodes.rs`.
 
 /// Default account (wallet) implementation contract.
-pub const DEFAULT_ACCOUNT_ADDRESS: Address = address!("0x31914Dd8C3901448D787b2097744Bf7D3241E85A");
+/// Deployed from `DEPLOYER_DEFAULT_ACCOUNT` (`0x4210…000d`).
+pub const DEFAULT_ACCOUNT_ADDRESS: Address = address!("0xAb4eE49EE97e49807e180BD5Fb9D9F35783b84F2");
 
 /// Account configuration system contract.
-pub const ACCOUNT_CONFIG_ADDRESS: Address = address!("0x4F20618Cf5c160e7AA385268721dA968F86F0e61");
+/// Deployed from `DEPLOYER_ACCOUNT_CONFIGURATION` (`0x4210…000b`).
+pub const ACCOUNT_CONFIG_ADDRESS: Address = address!("0xf946601D5424118A4e4054BB0B13133f216b4FeE");
 
 /// Explicit native K1/ecrecover verifier sentinel.
+///
+/// XLayer uses the ecrecover precompile address (`0x01`) as the K1 verifier
+/// routing key. The native verifier system intercepts this address and runs
+/// secp256k1 verification in Rust. This diverges from Base, which deploys
+/// a separate K1Verifier contract.
 pub const K1_VERIFIER_ADDRESS: Address = address!("0x0000000000000000000000000000000000000001");
 
 /// P256 raw ECDSA verifier contract.
+/// Deployed from `DEPLOYER_P256_VERIFIER` (`0x4210…0009`).
 pub const P256_RAW_VERIFIER_ADDRESS: Address =
-    address!("0x75E9779603e826f2D8d4dD7Edee3F0a737e4228d");
+    address!("0x6751c7ED0C58319e75437f8E6Dafa2d7F6b8306F");
 
 /// P256 WebAuthn verifier contract.
+/// Deployed from `DEPLOYER_WEBAUTHN_VERIFIER` (`0x4210…000a`).
 pub const P256_WEBAUTHN_VERIFIER_ADDRESS: Address =
-    address!("0xb2c8b7ec119882fBcc32FDe1be1341e19a5Bd53E");
+    address!("0x3572bb3F611a40DDcA70e5b55Cc797D58357AD44");
 
 /// Delegate verifier contract (1-hop delegation).
+/// Deployed from `DEPLOYER_DELEGATE_VERIFIER` (`0x4210…000c`).
 pub const DELEGATE_VERIFIER_ADDRESS: Address =
-    address!("0x30A76831b27732087561372f6a1bef6Fc391d805");
+    address!("0xc758A89C53542164aaB7f6439e8c8cAcf628fF62");
 
 /// Default high-rate account variant.
+// TODO: Compute from a dedicated deployer once the Solidity source is finalized.
 pub const DEFAULT_HIGH_RATE_ACCOUNT_ADDRESS: Address =
     address!("0x42Ebc02d3D7aaff19226D96F83C376B304BD25Cf");
 

@@ -64,6 +64,8 @@ pub use predeploys::{
     P256_WEBAUTHN_VERIFIER_ADDRESS, REVOKED_VERIFIER, TX_CONTEXT_ADDRESS,
 };
 
+pub mod system_bytecodes;
+
 mod storage;
 pub use storage::{
     account_state_slot, encode_account_state, encode_owner_config, expiring_ring_slot,

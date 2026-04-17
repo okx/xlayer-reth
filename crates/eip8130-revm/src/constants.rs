@@ -32,7 +32,7 @@ mod tests {
 
     #[test]
     fn account_config_address() {
-        let expected: Address = "0x4F20618Cf5c160e7AA385268721dA968F86F0e61".parse().unwrap();
+        let expected: Address = "0xf946601D5424118A4e4054BB0B13133f216b4FeE".parse().unwrap();
         assert_eq!(ACCOUNT_CONFIG_ADDRESS, expected);
     }
 

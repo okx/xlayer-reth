@@ -5,26 +5,25 @@ These do not block subsequent phases.
 
 ## Phase 6
 
-### Step 2: System Contract Bytecode Embedding
+### ~~Step 2: System Contract Bytecode Embedding~~ — DONE
 
-- **Item**: Embed compiled Solidity bytecodes for the 6 system contracts into the EL crate
-- **Reason**: Requires compiling Base's `contracts/eip-8130` Solidity sources. The addresses and validation scaffold are in place, but actual bytecodes are not yet embedded.
-- **Prerequisite**: Solidity compilation of Base's EIP-8130 contracts
-- **Current state**: `DEPLOYED_SYSTEM_CONTRACT_ADDRESSES` array defined; bytecode embedding deferred to Phase 6 Step 4
+Completed: Base's compiled bytecodes are now embedded in `eip8130-consensus/src/bytecode/`
+via `include_str!()`. See `system_bytecodes.rs` for deployer addresses, constructor arg
+encoding, and gas limits. Deployed contract addresses in `predeploys.rs` updated to
+Base's deterministic `deployer.create(0)` values.
 
 ### Step 2: Upgrade Deposit TX Generation (Go op-node)
 
 - **Item**: Go op-node must generate upgrade deposit transactions at NativeAA activation
 - **Reason**: Upgrade deposit tx generation is the CL (Go op-node) responsibility, not EL. See design doc §4.2 and §12.
 - **Prerequisite**: Go op-node changes in the `op-dev/optimism` repo
-- **Current state**: EL accepts and executes standard `TxDeposit` transactions (OP Stack baseline); Go-side generation not yet implemented
+- **Current state**: EL accepts and executes standard `TxDeposit` transactions (OP Stack baseline); Go-side generation not yet implemented. EL now has all bytecodes and deployer constants ready for the Go side to reference.
 
-### Step 2: Post-Deployment Bytecode Validation
+### ~~Step 2: Post-Deployment Bytecode Validation~~ — Unblocked
 
 - **Item**: Validate that system contract bytecodes at expected addresses match the expected compiled output
-- **Reason**: Without embedded bytecodes, we can only check for non-empty code, not bytecode equality
-- **Prerequisite**: Bytecode embedding (above)
-- **Current state**: `DEPLOYED_SYSTEM_CONTRACT_ADDRESSES` list available for existence checks
+- **Reason**: Bytecodes are now embedded; full runtime validation can be implemented
+- **Current state**: Bytecodes embedded, constructor arg encoding tested. Runtime bytecode equality check can be added when needed.
 
 ## Phase 7 Integration Points
 
