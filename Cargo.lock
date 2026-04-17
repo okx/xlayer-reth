@@ -14244,7 +14244,7 @@ dependencies = [
 
 [[package]]
 name = "xlayer-innertx"
-version = "0.1.0"
+version = "0.0.6"
 dependencies = [
  "alloy-consensus",
  "alloy-evm",
