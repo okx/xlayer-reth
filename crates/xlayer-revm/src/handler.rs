@@ -653,6 +653,12 @@ where
                 success: phase_ok,
                 gas_used: phase_gas_start.saturating_sub(gas_remaining),
             });
+
+            // EIP-8130: "if any call in a phase reverts, all state changes for
+            // that phase are discarded and remaining phases are skipped."
+            if !phase_ok {
+                break;
+            }
         }
 
         let any_phase_succeeded = phase_results.iter().any(|r| r.success);

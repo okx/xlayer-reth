@@ -4,6 +4,31 @@
 
 Running log of mistakes made during XLayerAA implementation, so we don't repeat them. Append new entries at the top.
 
+### 2026-04-21 — Phase execution loop did not skip remaining phases on failure
+
+EIP-8130 Block execution: *"if any call in a phase reverts, all state changes for that phase are discarded and remaining phases are skipped."*
+
+The initial port reverted the failing phase's checkpoint but let the outer `for phase in &parts.call_phases` loop continue, so subsequent phases still executed:
+
+```rust
+for phase in &parts.call_phases {
+    // ...inner call loop sets phase_ok = false on revert and breaks...
+    if phase_ok {
+        accumulated_refunds += phase_refunds;
+    } else {
+        evm.ctx().journal_mut().checkpoint_revert(checkpoint);
+    }
+    phase_results.push(...);
+    // ⚠️ no break — next phase runs anyway
+}
+```
+
+**Why it's wrong:** Sponsor-gated flows rely on this: phase 0 performs a sponsor-paid setup call, phase 1 does the user's actual action. If phase 1 reverts, phase 2..N must NOT run — they may depend on phase 1's writes or repeat its side effects. Continuing silently violates the atomicity contract the spec gives to verifier contracts.
+
+**Fix:** after pushing the failed phase's result, `break` out of the outer loop.
+
+**Lesson:** EIP-8130 phase semantics are "atomic per phase, sequential across phases, halt on first failure". When implementing a phased execution loop, the halt-on-failure needs an explicit `break` — revert-but-continue is not equivalent.
+
 ### 2026-04-21 — `thread_local!` as handler → precompile bridge when the data is derivable from `tx`
 
 Initial port cargo-culted base-revm's pattern: a thread-local `XLayerAATxContext` that the handler populated in `validate_against_state_and_deduct_caller` and the TxContext precompile read in `run_tx_context_precompile` for `getMaxCost()` / `getGasLimit()`.
