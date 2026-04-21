@@ -14148,6 +14148,7 @@ dependencies = [
  "alloy-eips",
  "alloy-primitives",
  "alloy-rlp",
+ "op-revm",
  "serde",
  "xlayer-revm",
 ]

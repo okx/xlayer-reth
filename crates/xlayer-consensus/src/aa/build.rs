@@ -26,13 +26,15 @@
 use std::vec::Vec;
 
 use alloy_primitives::{Address, B256, U256};
+use op_revm::OpSpecId;
 use xlayer_revm::transaction::XLayerAAParts;
 
 use super::{
+    gas_schedule::XLayerAAGasSchedule,
     native::{NativeVerifyError, NativeVerifyResult},
     signature::{parse_sender_auth, sender_signature_hash, ParsedSenderAuth},
     verifier::{verifier_kind, NativeVerifier, VerifierKind},
-    TxEip8130, AA_BASE_COST, EOA_AUTH_GAS, NONCE_KEY_COLD_GAS, NONCE_KEY_MAX,
+    TxEip8130, NONCE_KEY_MAX,
 };
 
 /// Output of [`build_aa_parts`].
@@ -81,7 +83,14 @@ impl From<NativeVerifyError> for BuildError {
 /// This is a **minimum viable** implementation that covers the K1 sender
 /// path — sufficient for the default builder path wired up in the following
 /// milestones. Extensions are tracked in [`BuildError`] variants.
-pub fn build_aa_parts(tx: &TxEip8130) -> Result<BuiltAaParts, BuildError> {
+///
+/// `spec` selects the fork-bound intrinsic-gas schedule; every caller
+/// already has the `OpSpecId` it's building under (pool validator, RPC
+/// filler, and the handler's transaction-env conversion all read
+/// `ctx.cfg().spec()`), so threading it through here is free but lets a
+/// future AA fee revision ship as a single [`XLayerAAGasSchedule`] arm
+/// without touching callers.
+pub fn build_aa_parts(tx: &TxEip8130, spec: OpSpecId) -> Result<BuiltAaParts, BuildError> {
     // Account-change entries require CREATE2 derivation + pre-writes + log
     // emission plumbing that ships with the full pipeline. Fail fast here
     // rather than silently dropping them.
@@ -105,14 +114,18 @@ pub fn build_aa_parts(tx: &TxEip8130) -> Result<BuiltAaParts, BuildError> {
 
     // --- Intrinsic gas (minimum viable) ----------------------------------
     //
-    // AA_BASE_COST + nonce-key SSTORE + a flat EOA auth cost when the
+    // base_cost + nonce-key SSTORE + a flat EOA auth cost when the
     // sender used ecrecover. This will under-estimate configured-owner,
     // sponsor, and create-entry paths; the handler's `validate_env`
     // structural guards still reject oversized txs, so the outcome is at
     // worst a tighter-than-expected gas budget that reverts cleanly.
-    let verification_gas = if tx.is_eoa() { EOA_AUTH_GAS } else { 0 };
-    let nonce_cost = if tx.nonce_key == NONCE_KEY_MAX { 0 } else { NONCE_KEY_COLD_GAS };
-    let aa_intrinsic_gas = AA_BASE_COST.saturating_add(verification_gas).saturating_add(nonce_cost);
+    //
+    // `schedule` is fork-bound — see [`XLayerAAGasSchedule::for_spec`].
+    let schedule = XLayerAAGasSchedule::for_spec(spec);
+    let verification_gas = if tx.is_eoa() { schedule.eoa_auth_gas } else { 0 };
+    let nonce_cost = if tx.nonce_key == NONCE_KEY_MAX { 0 } else { schedule.nonce_key_cold_gas };
+    let aa_intrinsic_gas =
+        schedule.base_cost.saturating_add(verification_gas).saturating_add(nonce_cost);
 
     // --- Call phases — wire → exec copy ----------------------------------
     let call_phases: Vec<Vec<xlayer_revm::transaction::XLayerAACall>> = tx
@@ -233,6 +246,12 @@ mod tests {
     use super::super::AccountChangeEntry;
     use super::*;
 
+    /// Spec every `build_aa_parts` call in these tests runs under. Pinned to
+    /// the same value the handler tests use (see
+    /// `xlayer-revm/src/handler/tests.rs::AA_ACTIVE_SPEC`) so a future fork
+    /// rename only needs to touch one constant per crate.
+    const TEST_SPEC: OpSpecId = OpSpecId::JOVIAN;
+
     fn tx_template() -> TxEip8130 {
         TxEip8130 {
             chain_id: 196,
@@ -255,7 +274,7 @@ mod tests {
             })],
             ..tx_template()
         };
-        assert!(matches!(build_aa_parts(&tx), Err(BuildError::FeatureNotReady(_))));
+        assert!(matches!(build_aa_parts(&tx, TEST_SPEC), Err(BuildError::FeatureNotReady(_))));
     }
 
     #[test]
@@ -265,7 +284,7 @@ mod tests {
             sender_auth: Bytes::from_static(&[0x01u8; 64]), // wrong length
             ..tx_template()
         };
-        assert!(matches!(build_aa_parts(&tx), Err(BuildError::MalformedAuth(_))));
+        assert!(matches!(build_aa_parts(&tx, TEST_SPEC), Err(BuildError::MalformedAuth(_))));
     }
 
     #[test]
@@ -275,7 +294,7 @@ mod tests {
         auth.extend_from_slice(custom.as_slice());
         auth.extend_from_slice(&[0u8; 32]);
         let tx = TxEip8130 { sender_auth: Bytes::from(auth), ..tx_template() };
-        match build_aa_parts(&tx) {
+        match build_aa_parts(&tx, TEST_SPEC) {
             Err(BuildError::CustomVerifierDeferred(addr)) => assert_eq!(addr, custom),
             other => panic!("expected CustomVerifierDeferred, got {other:?}"),
         }
@@ -287,7 +306,7 @@ mod tests {
         auth.extend_from_slice(super::super::verifier::P256_RAW_VERIFIER_ADDRESS.as_slice());
         auth.extend_from_slice(&[0u8; 64]);
         let tx = TxEip8130 { sender_auth: Bytes::from(auth), ..tx_template() };
-        match build_aa_parts(&tx) {
+        match build_aa_parts(&tx, TEST_SPEC) {
             Err(BuildError::UnsupportedVerifier(
                 super::super::verifier::NativeVerifier::P256Raw,
             )) => {}
@@ -311,6 +330,6 @@ mod tests {
             sender_auth: Bytes::from(auth),
             ..tx_template()
         };
-        assert!(matches!(build_aa_parts(&tx), Err(BuildError::VerifyFailed(_))));
+        assert!(matches!(build_aa_parts(&tx, TEST_SPEC), Err(BuildError::VerifyFailed(_))));
     }
 }

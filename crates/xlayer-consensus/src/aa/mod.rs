@@ -5,6 +5,7 @@ mod address;
 mod build;
 mod constants;
 mod encoding;
+mod gas_schedule;
 mod native;
 mod signature;
 mod tx;
@@ -21,6 +22,7 @@ pub use constants::{
     EOA_AUTH_GAS, MAX_ACCOUNT_CHANGES_PER_TX, MAX_CALLS_PER_TX, MAX_CONFIG_OPS_PER_TX,
     MAX_SIGNATURE_SIZE, NONCE_KEY_COLD_GAS, NONCE_KEY_MAX, NONCE_KEY_WARM_GAS, SLOAD_GAS,
 };
+pub use gas_schedule::XLayerAAGasSchedule;
 pub use native::{
     delegate_recover, k1_owner_id, k1_recover, native_verify, p256_raw_recover,
     p256_webauthn_recover, NativeVerifyError, NativeVerifyResult,

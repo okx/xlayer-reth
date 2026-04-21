@@ -4,6 +4,25 @@
 
 Running log of mistakes made during XLayerAA implementation, so we don't repeat them. Append new entries at the top.
 
+### 2026-04-21 — Intrinsic gas constants hard-coded in `build_aa_parts` with no fork binding
+
+First cut of `build_aa_parts` read `AA_BASE_COST`, `EOA_AUTH_GAS`, `NONCE_KEY_COLD_GAS` directly from module-level `const`s and took no `OpSpecId`:
+
+```rust
+pub fn build_aa_parts(tx: &TxEip8130) -> Result<BuiltAaParts, BuildError> {
+    let verification_gas = if tx.is_eoa() { EOA_AUTH_GAS } else { 0 };
+    let nonce_cost = if tx.nonce_key == NONCE_KEY_MAX { 0 } else { NONCE_KEY_COLD_GAS };
+    let aa_intrinsic_gas = AA_BASE_COST.saturating_add(verification_gas).saturating_add(nonce_cost);
+    // ...
+}
+```
+
+**Why it's wrong:** AA pricing is *going* to change — verifier costs get re-benched, new native algorithms land, storage-layout tweaks invalidate old SSTORE assumptions. Without a fork-bound schedule the first revision becomes a codebase-wide `const` rename + call-site churn, and downstream callers (pool validator, RPC filler, handler) can silently drift from consensus gas. Base and Tempo both fixed this up front — Base via `VerifierGasCosts::BASE_V1`, Tempo via `spec.is_t1b()` branches inside `key_auth_gas`.
+
+**Fix:** introduce [`XLayerAAGasSchedule`](../crates/xlayer-consensus/src/aa/gas_schedule.rs) — a pure fee table with one `pub const` per fork (`XLAYER_AA` today) and a `for_spec(OpSpecId)` resolver. Threaded `OpSpecId` through `build_aa_parts(tx, spec)`; callers (handler tx-env conversion, pool validator, RPC filler) all already have `ctx.cfg().spec()`.
+
+**Lesson:** any consensus-critical table (gas, slot layouts, feature flags) must be fork-indexed **from the first implementation** — retrofit is always more painful than paying the extra argument up front. Fork naming matches the XLayerAA hardfork (`XLAYER_AA`, `XLAYER_AA_V2`, …), **not** the underlying OP fork (Jovian, etc.) — OP forks don't carry AA pricing changes and coupling the two would mean bumping the schedule on every OP upgrade.
+
 ### 2026-04-21 — `crates/xlayer-revm` initially required `std`, blocking fault-proof reuse
 
 The first port pulled in `std` through several avenues:

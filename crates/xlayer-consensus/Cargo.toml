@@ -19,6 +19,11 @@ alloy-eips = { workspace = true, default-features = false }
 alloy-primitives = { workspace = true, default-features = false, features = ["k256"] }
 alloy-rlp = { workspace = true, default-features = false }
 
+# op-revm — needed only for `OpSpecId`, the fork discriminator threaded
+# through the gas schedule. `default-features = false` keeps this
+# `no_std`-compatible.
+op-revm = { workspace = true, default-features = false }
+
 # xlayer
 xlayer-revm = { workspace = true }
 
@@ -35,6 +40,7 @@ std = [
     "alloy-eips/std",
     "alloy-primitives/std",
     "alloy-rlp/std",
+    "op-revm/std",
     "serde?/std",
     "xlayer-revm/std",
 ]
