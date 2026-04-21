@@ -8,22 +8,20 @@
 //! branches and everything else delegates down to the upstream
 //! `op_revm::OpHandler`.
 
+use alloy_evm::{Database, Evm, EvmEnv, IntoTxEnv};
+use alloy_op_evm::error::{map_op_err, OpTxError};
+use alloy_primitives::{Address, Bytes};
 use core::{
     fmt::Debug,
     marker::PhantomData,
     ops::{Deref, DerefMut},
 };
-use std::boxed::Box;
-
-use alloy_evm::{Database, Evm, EvmEnv, IntoTxEnv};
-use alloy_op_evm::error::{map_op_err, OpTxError};
-use alloy_primitives::{Address, Bytes};
 use op_revm::{transaction::error::OpTransactionError, L1BlockInfo, OpHaltReason, OpSpecId};
 use revm::{
     context::{result::ExecResultAndState, BlockEnv, CfgEnv, TxEnv},
     context_interface::{result::EVMError, ContextTr, JournalTr},
     handler::{instructions::EthInstructions, EthFrame, Handler, PrecompileProvider},
-    inspector::{Inspector, NoOpInspector},
+    inspector::Inspector,
     interpreter::{interpreter::EthInterpreter, InterpreterResult},
     Context, Journal,
 };
@@ -193,13 +191,3 @@ where
         )
     }
 }
-
-// `Box` is used in this file only through downstream handler machinery;
-// re-export it here so `no_std` compiles cleanly pull in the `alloc` box.
-#[allow(dead_code)]
-type _BoxRef = Box<()>;
-
-// `NoOpInspector` is re-exported so downstream factories can reach the
-// default inspector without importing revm directly.
-#[allow(dead_code)]
-type _NoOpInspectorRef = NoOpInspector;
