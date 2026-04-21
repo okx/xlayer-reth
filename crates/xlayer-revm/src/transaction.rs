@@ -8,7 +8,7 @@
 use std::vec::Vec;
 
 use op_revm::transaction::abstraction::OpTxTr;
-use revm::primitives::{Address, B256, Bytes, Log, LogData, U256, keccak256};
+use revm::primitives::{keccak256, Address, Bytes, Log, LogData, B256, U256};
 
 use crate::constants::XLAYERAA_TX_TYPE;
 
@@ -410,7 +410,11 @@ pub fn extract_phase_statuses_from_logs<T: AsRef<Log>>(
 
 /// Helper: returns the XLayerAA parts iff `tx` carries XLayerAA type.
 pub fn xlayeraa_parts_if_aa<T: XLayerAATxTr>(tx: &T) -> Option<&XLayerAAParts> {
-    if tx.tx_type() == XLAYERAA_TX_TYPE { Some(tx.xlayeraa_parts()) } else { None }
+    if tx.tx_type() == XLAYERAA_TX_TYPE {
+        Some(tx.xlayeraa_parts())
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

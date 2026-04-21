@@ -17,38 +17,33 @@ mod tests;
 use std::boxed::Box;
 
 use op_revm::{
-    L1BlockInfo, OpHaltReason, OpSpecId,
     constants::{BASE_FEE_RECIPIENT, L1_FEE_RECIPIENT, OPERATOR_FEE_RECIPIENT},
     handler::IsTxError,
     transaction::{
         abstraction::OpTxTr, deposit::DEPOSIT_TRANSACTION_TYPE, error::OpTransactionError,
     },
+    L1BlockInfo, OpHaltReason, OpSpecId,
 };
 use revm::{
     context::{
-        LocalContextTr,
-        journaled_state::account::JournaledAccountTr,
-        result::InvalidTransaction,
+        journaled_state::account::JournaledAccountTr, result::InvalidTransaction, LocalContextTr,
     },
     context_interface::{
-        Block, Cfg, ContextTr, JournalTr, Transaction,
         context::ContextError,
         result::{EVMError, ExecutionResult, FromStringError},
+        Block, Cfg, ContextTr, JournalTr, Transaction,
     },
     handler::{
+        evm::FrameTr, handler::EvmTrError, post_execution, pre_execution::calculate_caller_fee,
         EthFrame, EvmTr, FrameResult, Handler, MainnetHandler,
-        evm::FrameTr,
-        handler::EvmTrError,
-        post_execution,
-        pre_execution::calculate_caller_fee,
     },
     inspector::{Inspector, InspectorEvmTr, InspectorHandler},
     interpreter::{
-        CallOutcome, Gas, InstructionResult, InterpreterResult, SharedMemory,
         interpreter::EthInterpreter,
         interpreter_action::{CallInput, CallInputs, CallScheme, CallValue, FrameInit, FrameInput},
+        CallOutcome, Gas, InstructionResult, InterpreterResult, SharedMemory,
     },
-    primitives::{Address, B256, U256, hardfork::SpecId, keccak256},
+    primitives::{hardfork::SpecId, keccak256, Address, B256, U256},
     state::EvmState,
 };
 
@@ -59,16 +54,16 @@ use crate::{
     },
     precompiles::{NONCE_MANAGER_ADDRESS, TX_CONTEXT_ADDRESS},
     transaction::{
-        XLayerAATxTr, config_log_to_system_log, encode_phase_statuses, phase_statuses_system_log,
+        config_log_to_system_log, encode_phase_statuses, phase_statuses_system_log, XLayerAATxTr,
     },
 };
 
 use helpers::{
+    aa_expiring_ring_slot, aa_expiring_seen_slot, aa_nonce_slot, check_account_lock,
+    estimation_calldata_overhead, run_custom_verifier_staticcall, validate_authorizer_chain,
+    validate_config_change_preconditions, validate_native_verifier_owner, validate_owner_config,
     ACCOUNT_CONFIG_ADDRESS, EXPIRING_NONCE_SET_CAPACITY, EXPIRING_RING_PTR_SLOT,
-    NONCE_COLD_WARM_DELTA, NONCE_FREE_MAX_EXPIRY_WINDOW, NONCE_KEY_MAX, aa_expiring_ring_slot,
-    aa_expiring_seen_slot, aa_nonce_slot, check_account_lock, estimation_calldata_overhead,
-    run_custom_verifier_staticcall, validate_authorizer_chain, validate_config_change_preconditions,
-    validate_native_verifier_owner, validate_owner_config,
+    NONCE_COLD_WARM_DELTA, NONCE_FREE_MAX_EXPIRY_WINDOW, NONCE_KEY_MAX,
 };
 
 // ---------------------------------------------------------------------------
@@ -78,21 +73,21 @@ use helpers::{
 /// Context bound used throughout XLayerAA-aware handler code.
 pub trait XLayerAAContextTr:
     ContextTr<
-        Journal: JournalTr<State = EvmState>,
-        Tx: XLayerAATxTr,
-        Cfg: Cfg<Spec = OpSpecId>,
-        Chain = L1BlockInfo,
-    >
+    Journal: JournalTr<State = EvmState>,
+    Tx: XLayerAATxTr,
+    Cfg: Cfg<Spec = OpSpecId>,
+    Chain = L1BlockInfo,
+>
 {
 }
 
 impl<T> XLayerAAContextTr for T where
     T: ContextTr<
-            Journal: JournalTr<State = EvmState>,
-            Tx: XLayerAATxTr,
-            Cfg: Cfg<Spec = OpSpecId>,
-            Chain = L1BlockInfo,
-        >
+        Journal: JournalTr<State = EvmState>,
+        Tx: XLayerAATxTr,
+        Cfg: Cfg<Spec = OpSpecId>,
+        Chain = L1BlockInfo,
+    >
 {
 }
 
@@ -391,12 +386,9 @@ where
             // Nonce-free mode: expiring ring buffer replay protection.
             let now: u64 = block.timestamp().to();
             let expiry = parts.expiry;
-            let skip_checks =
-                cfg.is_nonce_check_disabled() || cfg.is_base_fee_check_disabled();
+            let skip_checks = cfg.is_nonce_check_disabled() || cfg.is_base_fee_check_disabled();
 
-            if !skip_checks
-                && (expiry <= now || expiry > now + NONCE_FREE_MAX_EXPIRY_WINDOW)
-            {
+            if !skip_checks && (expiry <= now || expiry > now + NONCE_FREE_MAX_EXPIRY_WINDOW) {
                 return Err(ERROR::from_string(format!(
                     "nonce-free expiry out of window: expiry={expiry}, now={now}"
                 )));
@@ -520,7 +512,11 @@ where
             let nonce_slot = aa_nonce_slot(sender, parts.nonce_key);
             let nonce_value =
                 evm.ctx().journal_mut().sload(NONCE_MANAGER_ADDRESS, nonce_slot)?.data;
-            if nonce_value > U256::from(1) { NONCE_COLD_WARM_DELTA } else { 0 }
+            if nonce_value > U256::from(1) {
+                NONCE_COLD_WARM_DELTA
+            } else {
+                0
+            }
         } else {
             0
         };
@@ -647,8 +643,7 @@ where
         if !parts.sequence_updates.is_empty() {
             evm.ctx().journal_mut().load_account(ACCOUNT_CONFIG_ADDRESS)?;
             for upd in &parts.sequence_updates {
-                let current =
-                    evm.ctx().journal_mut().sload(ACCOUNT_CONFIG_ADDRESS, upd.slot)?.data;
+                let current = evm.ctx().journal_mut().sload(ACCOUNT_CONFIG_ADDRESS, upd.slot)?.data;
                 let new_packed = upd.apply(current);
                 evm.ctx().journal_mut().sstore(ACCOUNT_CONFIG_ADDRESS, upd.slot, new_packed)?;
             }
@@ -816,9 +811,9 @@ where
         let is_regolith = evm.ctx().cfg().spec().is_enabled_in(OpSpecId::REGOLITH);
         let is_gas_refund_disabled = is_deposit && !is_regolith;
         if !is_gas_refund_disabled {
-            frame_result
-                .gas_mut()
-                .set_final_refund(evm.ctx().cfg().spec().into_eth_spec().is_enabled_in(SpecId::LONDON));
+            frame_result.gas_mut().set_final_refund(
+                evm.ctx().cfg().spec().into_eth_spec().is_enabled_in(SpecId::LONDON),
+            );
         }
     }
 
@@ -916,10 +911,10 @@ where
 impl<EVM, ERROR> InspectorHandler for XLayerAAHandler<EVM, ERROR, EthFrame<EthInterpreter>>
 where
     EVM: InspectorEvmTr<
-            Context: XLayerAAContextTr,
-            Frame = EthFrame<EthInterpreter>,
-            Inspector: Inspector<<EVM as revm::handler::EvmTr>::Context, EthInterpreter>,
-        >,
+        Context: XLayerAAContextTr,
+        Frame = EthFrame<EthInterpreter>,
+        Inspector: Inspector<<EVM as revm::handler::EvmTr>::Context, EthInterpreter>,
+    >,
     ERROR: EvmTrError<EVM> + From<OpTransactionError> + FromStringError + IsTxError,
 {
     type IT = EthInterpreter;
@@ -930,4 +925,3 @@ pub type XLayerAAError<CTX> = EVMError<
     <<CTX as ContextTr>::Db as revm::context_interface::Database>::Error,
     OpTransactionError,
 >;
-

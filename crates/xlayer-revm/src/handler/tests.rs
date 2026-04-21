@@ -5,31 +5,71 @@
 //! `op-revm`; we only verify that delegation routes correctly for a handful
 //! of deposit/regular cases.
 
+// ---------------------------------------------------------------------------
+// EIP-8130 conformance regressions
+// ---------------------------------------------------------------------------
+//
+// Tests in this section pin behaviour defined by EIP-8130. Each test:
+//   - fixes a concrete spec (OpSpecId::JOVIAN) so a future hardfork that
+//     changes semantics is a *new* test rather than a silent drift here;
+//   - asserts against error *variants* for upstream-owned errors (e.g.
+//     `InvalidTransaction::InvalidChainId`) so a future rename surfaces as
+//     a compile-time break, not a silent false positive;
+//   - asserts against short, stable substrings for our own
+//     `InvalidTransaction::Str(..)` errors — the strings are our code, so
+//     if we rename them we also update the test.
+//
+// Upstream revm/op-revm fork bumps that touch these code paths will either:
+//   a) rename an imported symbol — tests fail to compile, we fix;
+//   b) restructure an error enum — tests fail to compile, we fix;
+//   c) change *behaviour* — tests fail at runtime, which is the signal we
+//      need to re-read the EIP or adjust our handler accordingly.
+//
+// -- When AA hardforks introduce fork-gated semantics ----------------------
+//
+// All tests below currently pin `OpSpecId::JOVIAN` because EIP-8130 was
+// introduced whole-cloth at JOVIAN and the handler has no `spec.is_*()`
+// branches inside these paths. Once a future fork gates AA behaviour,
+// follow one of two patterns (cf. `tempo/crates/revm/src/handler.rs`):
+//
+//   * New-in-fork behaviour (e.g. a rule introduced at FJORD):
+//     write TWO tests — `*_pre_fjord` on JOVIAN asserting old behaviour,
+//     `*_post_fjord` on FJORD asserting new. The pre-test is a regression
+//     guard against accidental back-porting. See tempo's
+//     `test_self_sponsored_fee_payer_{rejected_post_t2,not_rejected_pre_t2}`.
+//
+//   * Same rule, fork-varying parameter (e.g. gas cost changes at FJORD):
+//     single table-driven test — `for spec in [JOVIAN, FJORD, ...]` with
+//     an `if spec.is_fjord() { a } else { b }` on the expected value, and
+//     `"{spec:?}: ..."` in every assert message so failures pinpoint the
+//     offending fork. See tempo's `test_2d_nonce_gas_in_intrinsic_gas`.
+
 use op_revm::{
-    L1BlockInfo, OpBuilder, OpSpecId, OpTransaction,
-    transaction::error::OpTransactionError,
+    transaction::error::OpTransactionError, L1BlockInfo, OpBuilder, OpSpecId, OpTransaction,
 };
 use revm::{
-    Context, Journal, MainContext,
     bytecode::Bytecode,
-    context::{BlockEnv, CfgEnv, TxEnv, result::InvalidTransaction},
-    context_interface::{ContextTr, JournalTr, result::EVMError},
+    context::{result::InvalidTransaction, BlockEnv, CfgEnv, TxEnv},
+    context_interface::{result::EVMError, ContextTr, JournalTr},
     database::InMemoryDB,
     database_interface::EmptyDB,
     handler::{EthFrame, EvmTr, FrameResult, Handler},
-    interpreter::{CallOutcome, Gas, InstructionResult, InterpreterResult, interpreter::EthInterpreter},
-    primitives::{Address, B256, Bytes, U256},
+    interpreter::{
+        interpreter::EthInterpreter, CallOutcome, Gas, InstructionResult, InterpreterResult,
+    },
+    primitives::{Address, Bytes, B256, U256},
     state::AccountInfo,
+    Context, Journal, MainContext,
 };
 
 use super::{
+    helpers::{aa_lock_slot, aa_nonce_slot, ACCOUNT_CONFIG_ADDRESS, NONCE_KEY_MAX},
     XLayerAAHandler,
-    helpers::{ACCOUNT_CONFIG_ADDRESS, NONCE_KEY_MAX, aa_lock_slot, aa_nonce_slot},
 };
 use crate::{
     constants::{MAX_ACCOUNT_CHANGES_PER_TX, MAX_CALLS_PER_TX, XLAYERAA_TX_TYPE},
     precompiles::NONCE_MANAGER_ADDRESS,
-    transaction::{XLayerAACall, XLayerAACodePlacement, XLayerAAParts, decode_phase_statuses},
+    transaction::{decode_phase_statuses, XLayerAACall, XLayerAACodePlacement, XLayerAAParts},
     tx_env::XLayerAATransaction,
 };
 
@@ -37,14 +77,8 @@ use crate::{
 // Fixtures
 // ---------------------------------------------------------------------------
 
-type TestCtx<DB> = Context<
-    BlockEnv,
-    XLayerAATransaction<TxEnv>,
-    CfgEnv<OpSpecId>,
-    DB,
-    Journal<DB>,
-    L1BlockInfo,
->;
+type TestCtx<DB> =
+    Context<BlockEnv, XLayerAATransaction<TxEnv>, CfgEnv<OpSpecId>, DB, Journal<DB>, L1BlockInfo>;
 
 fn base_ctx() -> TestCtx<EmptyDB> {
     Context::mainnet()
@@ -58,8 +92,11 @@ fn base_ctx() -> TestCtx<EmptyDB> {
 fn build_aa_tx(base: TxEnv, parts: XLayerAAParts) -> XLayerAATransaction<TxEnv> {
     let mut base = base;
     base.tx_type = XLAYERAA_TX_TYPE;
-    let op =
-        OpTransaction { base, enveloped_tx: Some(Bytes::from_static(&[0u8])), deposit: Default::default() };
+    let op = OpTransaction {
+        base,
+        enveloped_tx: Some(Bytes::from_static(&[0u8])),
+        deposit: Default::default(),
+    };
     XLayerAATransaction::with_parts(op, parts)
 }
 
@@ -70,19 +107,16 @@ fn build_aa_tx(base: TxEnv, parts: XLayerAAParts) -> XLayerAATransaction<TxEnv> 
 #[test]
 fn validate_env_rejects_too_many_calls() {
     let parts = XLayerAAParts {
-        call_phases: vec![
-            (0..=MAX_CALLS_PER_TX as u64).map(|_| XLayerAACall::default()).collect(),
-        ],
+        call_phases: vec![(0..=MAX_CALLS_PER_TX as u64).map(|_| XLayerAACall::default()).collect()],
         ..Default::default()
     };
 
-    let ctx = base_ctx().with_tx(build_aa_tx(
-        TxEnv::builder().gas_limit(1_000_000).build_fill(),
-        parts,
-    ));
+    let ctx =
+        base_ctx().with_tx(build_aa_tx(TxEnv::builder().gas_limit(1_000_000).build_fill(), parts));
     let mut evm = ctx.build_op();
 
-    let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> = XLayerAAHandler::new();
+    let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> =
+        XLayerAAHandler::new();
     let err = Handler::validate_env(&handler, &mut evm).unwrap_err();
     assert!(format!("{err:?}").contains("too many calls"), "{err:?}");
 }
@@ -94,13 +128,12 @@ fn validate_env_rejects_too_many_account_changes() {
         ..Default::default()
     };
 
-    let ctx = base_ctx().with_tx(build_aa_tx(
-        TxEnv::builder().gas_limit(1_000_000).build_fill(),
-        parts,
-    ));
+    let ctx =
+        base_ctx().with_tx(build_aa_tx(TxEnv::builder().gas_limit(1_000_000).build_fill(), parts));
     let mut evm = ctx.build_op();
 
-    let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> = XLayerAAHandler::new();
+    let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> =
+        XLayerAAHandler::new();
     let err = Handler::validate_env(&handler, &mut evm).unwrap_err();
     assert!(format!("{err:?}").contains("too many account changes"), "{err:?}");
 }
@@ -116,7 +149,8 @@ fn validate_env_rejects_expired_tx() {
         .with_tx(build_aa_tx(TxEnv::builder().gas_limit(1_000_000).build_fill(), parts));
     let mut evm = ctx.build_op();
 
-    let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> = XLayerAAHandler::new();
+    let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> =
+        XLayerAAHandler::new();
     let err = Handler::validate_env(&handler, &mut evm).unwrap_err();
     assert!(format!("{err:?}").contains("expired"), "{err:?}");
 }
@@ -135,7 +169,8 @@ fn validate_env_passes_unexpired_tx() {
         .with_tx(build_aa_tx(TxEnv::builder().gas_limit(1_000_000).build_fill(), parts));
     let mut evm = ctx.build_op();
 
-    let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> = XLayerAAHandler::new();
+    let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> =
+        XLayerAAHandler::new();
     Handler::validate_env(&handler, &mut evm).unwrap();
 }
 
@@ -155,7 +190,8 @@ fn validate_initial_tx_gas_returns_aa_intrinsic() {
         .with_tx(build_aa_tx(TxEnv::builder().gas_limit(100_000).build_fill(), parts));
     let mut evm = ctx.build_op();
 
-    let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> = XLayerAAHandler::new();
+    let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> =
+        XLayerAAHandler::new();
     let gas = Handler::validate_initial_tx_gas(&handler, &mut evm).unwrap();
     assert_eq!(gas.initial_gas, 50_000);
     assert_eq!(gas.floor_gas, 0);
@@ -165,13 +201,12 @@ fn validate_initial_tx_gas_returns_aa_intrinsic() {
 fn validate_initial_tx_gas_rejects_intrinsic_above_gas_limit() {
     let parts = XLayerAAParts { aa_intrinsic_gas: 200_000, ..Default::default() };
 
-    let ctx = base_ctx().with_tx(build_aa_tx(
-        TxEnv::builder().gas_limit(100_000).build_fill(),
-        parts,
-    ));
+    let ctx =
+        base_ctx().with_tx(build_aa_tx(TxEnv::builder().gas_limit(100_000).build_fill(), parts));
     let mut evm = ctx.build_op();
 
-    let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> = XLayerAAHandler::new();
+    let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> =
+        XLayerAAHandler::new();
     let err = Handler::validate_initial_tx_gas(&handler, &mut evm).unwrap_err();
     assert!(format!("{err:?}").contains("CallGasCostMoreThanGasLimit"), "{err:?}");
 }
@@ -193,7 +228,8 @@ fn validate_initial_tx_gas_estimation_adds_calldata_overhead() {
         .with_tx(build_aa_tx(TxEnv::builder().gas_limit(200_000).build_fill(), parts));
     let mut evm = ctx.build_op();
 
-    let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> = XLayerAAHandler::new();
+    let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> =
+        XLayerAAHandler::new();
     let gas = Handler::validate_initial_tx_gas(&handler, &mut evm).unwrap();
     // 50_000 + 2 * ESTIMATION_AUTH_CALLDATA_GAS (1_100 each).
     assert_eq!(gas.initial_gas, 50_000 + 1_100 * 2);
@@ -214,7 +250,8 @@ fn call_last_frame_return(
         0..0,
     ));
 
-    let mut handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> = XLayerAAHandler::new();
+    let mut handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> =
+        XLayerAAHandler::new();
     Handler::last_frame_result(&mut handler, &mut evm, &mut exec_result).unwrap();
     Handler::refund(&handler, &mut evm, &mut exec_result, 0);
     *exec_result.gas()
@@ -273,10 +310,7 @@ fn last_frame_result_deposit_bedrock_spends_all() {
 fn validate_against_state_deposit_credits_mint() {
     let caller = Address::ZERO;
     let mut db = InMemoryDB::default();
-    db.insert_account_info(
-        caller,
-        AccountInfo { balance: U256::from(1000), ..Default::default() },
-    );
+    db.insert_account_info(caller, AccountInfo { balance: U256::from(1000), ..Default::default() });
 
     let mut ctx: TestCtx<InMemoryDB> = Context::mainnet()
         .with_db(db)
@@ -294,7 +328,8 @@ fn validate_against_state_deposit_credits_mint() {
     });
 
     let mut evm = ctx.build_op();
-    let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> = XLayerAAHandler::new();
+    let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> =
+        XLayerAAHandler::new();
     Handler::validate_against_state_and_deduct_caller(&handler, &mut evm).unwrap();
 
     let account = evm.ctx().journal_mut().load_account(caller).unwrap();
@@ -335,22 +370,16 @@ fn validate_against_state_aa_deducts_from_payer() {
     cfg.disable_balance_check = true;
 
     let tx = build_aa_tx(
-        TxEnv::builder()
-            .caller(sender)
-            .gas_limit(100_000)
-            .gas_price(10)
-            .build_fill(),
+        TxEnv::builder().caller(sender).gas_limit(100_000).gas_price(10).build_fill(),
         parts,
     );
 
-    let ctx: TestCtx<InMemoryDB> = Context::mainnet()
-        .with_db(db)
-        .with_cfg(cfg)
-        .with_tx(tx)
-        .with_chain(L1BlockInfo::default());
+    let ctx: TestCtx<InMemoryDB> =
+        Context::mainnet().with_db(db).with_cfg(cfg).with_tx(tx).with_chain(L1BlockInfo::default());
 
     let mut evm = ctx.build_op();
-    let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> = XLayerAAHandler::new();
+    let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> =
+        XLayerAAHandler::new();
     Handler::validate_against_state_and_deduct_caller(&handler, &mut evm).unwrap();
 
     // Payer balance should have been decremented (non-zero).
@@ -394,14 +423,12 @@ fn validate_against_state_aa_increments_nonce_manager_slot() {
         parts,
     );
 
-    let ctx: TestCtx<InMemoryDB> = Context::mainnet()
-        .with_db(db)
-        .with_cfg(cfg)
-        .with_tx(tx)
-        .with_chain(L1BlockInfo::default());
+    let ctx: TestCtx<InMemoryDB> =
+        Context::mainnet().with_db(db).with_cfg(cfg).with_tx(tx).with_chain(L1BlockInfo::default());
 
     let mut evm = ctx.build_op();
-    let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> = XLayerAAHandler::new();
+    let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> =
+        XLayerAAHandler::new();
     Handler::validate_against_state_and_deduct_caller(&handler, &mut evm).unwrap();
 
     let slot = aa_nonce_slot(sender, U256::from(7));
@@ -419,14 +446,8 @@ fn reimburse_caller_aa_refunds_payer() {
     let payer = Address::with_last_byte(0xBB);
 
     let mut db = InMemoryDB::default();
-    db.insert_account_info(
-        sender,
-        AccountInfo { balance: U256::ZERO, ..Default::default() },
-    );
-    db.insert_account_info(
-        payer,
-        AccountInfo { balance: U256::ZERO, ..Default::default() },
-    );
+    db.insert_account_info(sender, AccountInfo { balance: U256::ZERO, ..Default::default() });
+    db.insert_account_info(payer, AccountInfo { balance: U256::ZERO, ..Default::default() });
 
     let parts = XLayerAAParts { sender, payer, ..Default::default() };
 
@@ -437,19 +458,12 @@ fn reimburse_caller_aa_refunds_payer() {
     cfg.disable_nonce_check = true;
 
     let tx = build_aa_tx(
-        TxEnv::builder()
-            .caller(sender)
-            .gas_limit(100_000)
-            .gas_price(10)
-            .build_fill(),
+        TxEnv::builder().caller(sender).gas_limit(100_000).gas_price(10).build_fill(),
         parts,
     );
 
-    let ctx: TestCtx<InMemoryDB> = Context::mainnet()
-        .with_db(db)
-        .with_cfg(cfg)
-        .with_tx(tx)
-        .with_chain(L1BlockInfo::default());
+    let ctx: TestCtx<InMemoryDB> =
+        Context::mainnet().with_db(db).with_cfg(cfg).with_tx(tx).with_chain(L1BlockInfo::default());
 
     let mut evm = ctx.build_op();
 
@@ -460,7 +474,8 @@ fn reimburse_caller_aa_refunds_payer() {
         0..0,
     ));
 
-    let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> = XLayerAAHandler::new();
+    let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> =
+        XLayerAAHandler::new();
     Handler::reimburse_caller(&handler, &mut evm, &mut exec_result).unwrap();
 
     // Payer received 50_000 * 10 = 500_000.
@@ -471,45 +486,6 @@ fn reimburse_caller_aa_refunds_payer() {
     let sender_acc = evm.ctx().journal_mut().load_account(sender).unwrap();
     assert_eq!(sender_acc.info.balance, U256::ZERO);
 }
-
-// ---------------------------------------------------------------------------
-// EIP-8130 conformance regressions
-// ---------------------------------------------------------------------------
-//
-// Tests in this section pin behaviour defined by EIP-8130. Each test:
-//   - fixes a concrete spec (OpSpecId::JOVIAN) so a future hardfork that
-//     changes semantics is a *new* test rather than a silent drift here;
-//   - asserts against error *variants* for upstream-owned errors (e.g.
-//     `InvalidTransaction::InvalidChainId`) so a future rename surfaces as
-//     a compile-time break, not a silent false positive;
-//   - asserts against short, stable substrings for our own
-//     `InvalidTransaction::Str(..)` errors — the strings are our code, so
-//     if we rename them we also update the test.
-//
-// Upstream revm/op-revm fork bumps that touch these code paths will either:
-//   a) rename an imported symbol — tests fail to compile, we fix;
-//   b) restructure an error enum — tests fail to compile, we fix;
-//   c) change *behaviour* — tests fail at runtime, which is the signal we
-//      need to re-read the EIP or adjust our handler accordingly.
-//
-// -- When AA hardforks introduce fork-gated semantics ----------------------
-//
-// All tests below currently pin `OpSpecId::JOVIAN` because EIP-8130 was
-// introduced whole-cloth at JOVIAN and the handler has no `spec.is_*()`
-// branches inside these paths. Once a future fork gates AA behaviour,
-// follow one of two patterns (cf. `tempo/crates/revm/src/handler.rs`):
-//
-//   * New-in-fork behaviour (e.g. a rule introduced at FJORD):
-//     write TWO tests — `*_pre_fjord` on JOVIAN asserting old behaviour,
-//     `*_post_fjord` on FJORD asserting new. The pre-test is a regression
-//     guard against accidental back-porting. See tempo's
-//     `test_self_sponsored_fee_payer_{rejected_post_t2,not_rejected_pre_t2}`.
-//
-//   * Same rule, fork-varying parameter (e.g. gas cost changes at FJORD):
-//     single table-driven test — `for spec in [JOVIAN, FJORD, ...]` with
-//     an `if spec.is_fjord() { a } else { b }` on the expected value, and
-//     `"{spec:?}: ..."` in every assert message so failures pinpoint the
-//     offending fork. See tempo's `test_2d_nonce_gas_in_intrinsic_gas`.
 
 // --- P0 #1: phase break ----------------------------------------------------
 
@@ -564,16 +540,10 @@ fn execution_skips_remaining_phases_after_failure() {
     cfg.disable_base_fee = true;
     cfg.disable_nonce_check = true;
 
-    let tx = build_aa_tx(
-        TxEnv::builder().caller(sender).gas_limit(1_000_000).build_fill(),
-        parts,
-    );
+    let tx = build_aa_tx(TxEnv::builder().caller(sender).gas_limit(1_000_000).build_fill(), parts);
 
-    let ctx: TestCtx<InMemoryDB> = Context::mainnet()
-        .with_db(db)
-        .with_cfg(cfg)
-        .with_tx(tx)
-        .with_chain(L1BlockInfo::default());
+    let ctx: TestCtx<InMemoryDB> =
+        Context::mainnet().with_db(db).with_cfg(cfg).with_tx(tx).with_chain(L1BlockInfo::default());
 
     let mut evm = ctx.build_op();
     let mut handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> =
@@ -608,8 +578,8 @@ fn validate_env_rejects_nonce_free_without_expiry() {
         ..Default::default()
     };
 
-    let ctx = base_ctx()
-        .with_tx(build_aa_tx(TxEnv::builder().gas_limit(1_000_000).build_fill(), parts));
+    let ctx =
+        base_ctx().with_tx(build_aa_tx(TxEnv::builder().gas_limit(1_000_000).build_fill(), parts));
     let mut evm = ctx.build_op();
     let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> =
         XLayerAAHandler::new();
@@ -627,10 +597,8 @@ fn validate_env_rejects_nonce_free_with_nonzero_sequence() {
         ..Default::default()
     };
 
-    let ctx = base_ctx().with_tx(build_aa_tx(
-        TxEnv::builder().gas_limit(1_000_000).nonce(42).build_fill(),
-        parts,
-    ));
+    let ctx = base_ctx()
+        .with_tx(build_aa_tx(TxEnv::builder().gas_limit(1_000_000).nonce(42).build_fill(), parts));
     let mut evm = ctx.build_op();
     let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> =
         XLayerAAHandler::new();
@@ -651,8 +619,8 @@ fn validate_env_rejects_nonce_free_without_hash() {
         ..Default::default()
     };
 
-    let ctx = base_ctx()
-        .with_tx(build_aa_tx(TxEnv::builder().gas_limit(1_000_000).build_fill(), parts));
+    let ctx =
+        base_ctx().with_tx(build_aa_tx(TxEnv::builder().gas_limit(1_000_000).build_fill(), parts));
     let mut evm = ctx.build_op();
     let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> =
         XLayerAAHandler::new();
@@ -705,10 +673,7 @@ fn state_validation_rejects_locked_account_with_delegation_entry() {
     cfg.disable_base_fee = true;
     cfg.disable_nonce_check = true;
 
-    let tx = build_aa_tx(
-        TxEnv::builder().caller(sender).gas_limit(100_000).build_fill(),
-        parts,
-    );
+    let tx = build_aa_tx(TxEnv::builder().caller(sender).gas_limit(100_000).build_fill(), parts);
 
     let ctx: TestCtx<InMemoryDB> = Context::mainnet()
         .with_db(db)
@@ -720,8 +685,7 @@ fn state_validation_rejects_locked_account_with_delegation_entry() {
     let mut evm = ctx.build_op();
     let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> =
         XLayerAAHandler::new();
-    let err =
-        Handler::validate_against_state_and_deduct_caller(&handler, &mut evm).unwrap_err();
+    let err = Handler::validate_against_state_and_deduct_caller(&handler, &mut evm).unwrap_err();
     assert!(format!("{err:?}").contains("account is locked"), "{err:?}");
 }
 
@@ -743,10 +707,8 @@ fn validate_env_rejects_mismatched_chain_id() {
         XLayerAAParts::default(),
     );
 
-    let ctx: TestCtx<EmptyDB> = Context::mainnet()
-        .with_cfg(cfg)
-        .with_tx(tx)
-        .with_chain(L1BlockInfo::default());
+    let ctx: TestCtx<EmptyDB> =
+        Context::mainnet().with_cfg(cfg).with_tx(tx).with_chain(L1BlockInfo::default());
     let mut evm = ctx.build_op();
     let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> =
         XLayerAAHandler::new();
@@ -781,12 +743,11 @@ fn validate_env_rejects_multiple_create_entries() {
         ..Default::default()
     };
 
-    let ctx = base_ctx()
-        .with_tx(build_aa_tx(TxEnv::builder().gas_limit(1_000_000).build_fill(), parts));
+    let ctx =
+        base_ctx().with_tx(build_aa_tx(TxEnv::builder().gas_limit(1_000_000).build_fill(), parts));
     let mut evm = ctx.build_op();
     let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> =
         XLayerAAHandler::new();
     let err = Handler::validate_env(&handler, &mut evm).unwrap_err();
     assert!(format!("{err:?}").contains("multiple create entries"), "{err:?}");
 }
-

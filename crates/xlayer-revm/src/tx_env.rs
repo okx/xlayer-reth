@@ -8,7 +8,7 @@ use op_revm::transaction::{abstraction::OpTxTr, deposit::DEPOSIT_TRANSACTION_TYP
 use revm::{
     context_interface::Transaction,
     handler::SystemCallTx,
-    primitives::{Address, B256, Bytes, TxKind, U256},
+    primitives::{Address, Bytes, TxKind, B256, U256},
 };
 
 use crate::{

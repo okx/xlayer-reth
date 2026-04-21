@@ -11,29 +11,23 @@ use alloy_sol_types::SolValue;
 use op_revm::transaction::error::OpTransactionError;
 use revm::{
     context::{
-        LocalContextTr,
-        journaled_state::account::JournaledAccountTr,
-        result::InvalidTransaction,
+        journaled_state::account::JournaledAccountTr, result::InvalidTransaction, LocalContextTr,
     },
     context_interface::{Block, Cfg, ContextTr, JournalTr},
-    handler::{
-        EvmTr, FrameResult, Handler, MainnetHandler,
-        evm::FrameTr,
-        handler::EvmTrError,
-    },
+    handler::{evm::FrameTr, handler::EvmTrError, EvmTr, FrameResult, Handler, MainnetHandler},
     interpreter::{
-        SharedMemory,
         interpreter_action::{CallInput, CallInputs, CallScheme, CallValue, FrameInit, FrameInput},
+        SharedMemory,
     },
-    primitives::{Address, B256, Bytes, U256, address, keccak256, uint},
+    primitives::{address, keccak256, uint, Address, Bytes, B256, U256},
 };
 
 use crate::{
     constants::{DELEGATE_VERIFIER_ADDRESS, OWNER_SCOPE_CONFIG},
     handler::XLayerAAContextTr,
     policy::{
-        PendingOwnerState, PendingOwnerValidationError, pending_owner_state_for_change,
-        validate_pending_owner_state,
+        pending_owner_state_for_change, validate_pending_owner_state, PendingOwnerState,
+        PendingOwnerValidationError,
     },
     transaction::XLayerAAParts,
 };
@@ -146,7 +140,11 @@ pub fn parse_owner_config_word(word: U256) -> (Address, u8) {
 /// Reads one sequence value from packed
 /// `AccountState { multichain, local, unlocksAt, unlockDelay }`.
 pub fn read_packed_sequence(slot_value: U256, is_multichain: bool) -> u64 {
-    if is_multichain { slot_value.as_limbs()[0] } else { (slot_value >> 64_u8).as_limbs()[0] }
+    if is_multichain {
+        slot_value.as_limbs()[0]
+    } else {
+        (slot_value >> 64_u8).as_limbs()[0]
+    }
 }
 
 /// Extra gas to reserve during `eth_estimateGas` for auth blob calldata that
@@ -462,8 +460,7 @@ where
         depth: 0,
         memory: {
             let ctx = evm.ctx();
-            let mut mem =
-                SharedMemory::new_with_buffer(ctx.local().shared_memory_buffer().clone());
+            let mut mem = SharedMemory::new_with_buffer(ctx.local().shared_memory_buffer().clone());
             mem.set_memory_limit(ctx.cfg().memory_limit());
             mem
         },
@@ -567,4 +564,3 @@ where
 
     Ok(pending_owners)
 }
-

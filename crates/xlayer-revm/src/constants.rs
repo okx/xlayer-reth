@@ -1,7 +1,7 @@
 //! XLayerAA (EIP-8130) constants.
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use revm::primitives::{Address, address};
+use revm::primitives::{address, Address};
 
 /// XLayerAA transaction type byte (originally EIP-8130 `0x7B`).
 pub const XLAYERAA_TX_TYPE: u8 = 0x7B;

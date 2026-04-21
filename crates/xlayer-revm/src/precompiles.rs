@@ -18,15 +18,15 @@
 
 use std::{boxed::Box, string::String, vec::Vec};
 
-use alloy_sol_types::{SolCall, SolValue, sol};
+use alloy_sol_types::{sol, SolCall, SolValue};
 use op_revm::OpSpecId;
 use revm::{
-    Database,
     context::{Cfg, LocalContextTr},
     context_interface::{ContextTr, Transaction},
     handler::PrecompileProvider,
     interpreter::{CallInput, CallInputs, Gas, InstructionResult, InterpreterResult},
-    primitives::{Address, B256, Bytes, U256, address, keccak256, uint},
+    primitives::{address, keccak256, uint, Address, Bytes, B256, U256},
+    Database,
 };
 
 use crate::{
@@ -185,8 +185,7 @@ where
     let tx = context.tx();
     let aa_parts = if tx.tx_type() == XLAYERAA_TX_TYPE { Some(tx.xlayeraa_parts()) } else { None };
 
-    let selector: [u8; 4] =
-        input[0..4].try_into().map_err(|_| "short selector".to_string())?;
+    let selector: [u8; 4] = input[0..4].try_into().map_err(|_| "short selector".to_string())?;
 
     let output = match selector {
         ITxContext::getSenderCall::SELECTOR => {
@@ -208,8 +207,7 @@ where
             ITxContext::getMaxCostCall::abi_encode_returns(&max_cost)
         }
         ITxContext::getGasLimitCall::SELECTOR => {
-            let gas_limit =
-                aa_parts.map_or(0u64, |p| aa_execution_gas_limit(p, tx.gas_limit()));
+            let gas_limit = aa_parts.map_or(0u64, |p| aa_execution_gas_limit(p, tx.gas_limit()));
             ITxContext::getGasLimitCall::abi_encode_returns(&U256::from(gas_limit))
         }
         ITxContext::getCallsCall::SELECTOR => {
