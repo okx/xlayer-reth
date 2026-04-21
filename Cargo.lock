@@ -14375,6 +14375,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "xlayer-revm"
+version = "0.0.6"
+dependencies = [
+ "alloy-sol-types",
+ "auto_impl",
+ "op-revm",
+ "revm",
+ "serde",
+]
+
+[[package]]
 name = "xlayer-rpc"
 version = "0.0.6"
 dependencies = [

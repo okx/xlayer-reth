@@ -1,0 +1,95 @@
+# XLayerAA — Implementation Notes
+
+## Mistakes
+
+Running log of mistakes made during XLayerAA implementation, so we don't repeat them. Append new entries at the top.
+
+### 2026-04-21 — `U256::from_limbs([N, 0, 0, 0])` for small-integer constants
+
+```rust
+pub const NONCE_BASE_SLOT: U256 = U256::from_limbs([1, 0, 0, 0]);
+pub const EXPIRING_SEEN_BASE_SLOT: U256 = U256::from_limbs([2, 0, 0, 0]);
+```
+
+**Why it's wrong:** same readability problem as byte-array addresses. `from_limbs` exposes alloy's internal little-endian limb representation to every reader; nobody wants to decode that.
+
+**Fix:** use the `uint!` macro (re-exported from `revm::primitives::uint`).
+
+```rust
+pub const NONCE_BASE_SLOT: U256 = uint!(1_U256);
+pub const EXPIRING_SEEN_BASE_SLOT: U256 = uint!(2_U256);
+```
+
+### 2026-04-21 — Hand-rolled ABI encoding / selectors instead of `sol!`
+
+The first port of the precompile layer hand-wrote `abi.encode` for every return type:
+
+```rust
+pub fn selector(sig: &[u8]) -> [u8; 4] { let h = keccak256(sig); [h[0], h[1], h[2], h[3]] }
+pub fn encode_address(a: Address) -> Bytes { /* left-pad 20 bytes to 32 */ }
+pub fn encode_calls_abi(phases: &[Vec<XLayerAACall>]) -> Bytes { /* 60-line head/tail offset math */ }
+
+// dispatch:
+if selector_bytes == selector(b"getNonce(address,uint256)") { /* manually slice 4+12..4+32 */ }
+```
+
+And the storage-slot helpers were written byte-by-byte into fixed buffers:
+
+```rust
+pub fn aa_nonce_slot(account: Address, nonce_key: U256) -> U256 {
+    let inner = { let mut buf = [0u8; 64]; buf[12..32].copy_from_slice(account.as_slice()); /* ... */ };
+    // etc.
+}
+```
+
+**Why it's wrong:**
+
+- every encoder is a re-derivation of the Solidity ABI spec, which is exactly what `alloy-sol-types` already generates from a `sol!` block — bugs in offset math, padding, or selector case are uniquely painful because the EVM just sees "wrong bytes";
+- manual dispatch via `selector(b"getNonce(...)")` re-hashes on every precompile call, and loses type information about arguments;
+- storage-slot helpers are Solidity mapping layout (`keccak256(key ‖ slot)`), which `SolValue::abi_encode((key, slot))` expresses in one line.
+
+**Fix:** declare the interface once with `sol!`, then use `SolCall::SELECTOR`, `SolCall::abi_decode`, `SolCall::abi_encode_returns`, and `SolValue::abi_encode` for keys.
+
+```rust
+sol! {
+    struct CallTuple { address target; bytes data; }
+    interface INonceManager {
+        function getNonce(address account, uint256 nonceKey) external view returns (uint256);
+    }
+    interface ITxContext {
+        function getCalls() external view returns (CallTuple[][] memory);
+        // ...
+    }
+}
+
+// dispatch:
+match selector {
+    ITxContext::getSenderCall::SELECTOR => ITxContext::getSenderCall::abi_encode_returns(&sender),
+    // ...
+}
+
+// slot helpers:
+pub fn aa_nonce_slot(account: Address, nonce_key: U256) -> U256 {
+    let inner = keccak256((account, NONCE_BASE_SLOT).abi_encode());
+    U256::from_be_bytes(keccak256((nonce_key, inner).abi_encode()).0)
+}
+```
+
+The `sol!` block becomes the single source of truth; encoder/decoder/selector all derive from it.
+
+### 2026-04-21 — `Address::new([byte, ...])` instead of hex `address!("0x...")`
+
+When porting base-revm's handler and precompile addresses, I used the byte-array form:
+
+```rust
+pub const NONCE_MANAGER_ADDRESS: Address =
+    Address::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xaa, 0x02]);
+```
+
+**Why it's wrong:** byte arrays are unreadable at a glance — you have to count nibbles to see the actual address. The ecosystem (alloy, reth, op-revm) uniformly uses the `address!("0x...")` macro for constant addresses, which is a checksummed hex literal that survives review.
+
+**Fix:** always use `address!("0x...")` for constant addresses.
+
+```rust
+pub const NONCE_MANAGER_ADDRESS: Address = address!("0x000000000000000000000000000000000000aa02");
+```

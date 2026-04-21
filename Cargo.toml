@@ -23,6 +23,7 @@ members = [
     "crates/rpc",
     "crates/tests",
     "crates/version",
+    "crates/xlayer-revm",
     "crates/builder/src/tests/framework/macros",
 
     "bin/tools",
@@ -72,6 +73,7 @@ xlayer-flashblocks = { path = "crates/flashblocks" }
 xlayer-legacy-rpc = { path = "crates/legacy-rpc" }
 xlayer-monitor = { path = "crates/monitor" }
 xlayer-reth-node = { path = "bin/node" }
+xlayer-revm = { path = "crates/xlayer-revm" }
 xlayer-rpc = { path = "crates/rpc" }
 xlayer-version = { path = "crates/version" }
 
