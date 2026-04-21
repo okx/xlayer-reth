@@ -14,7 +14,7 @@ pub mod helpers;
 #[cfg(test)]
 mod tests;
 
-use std::boxed::Box;
+use std::{boxed::Box, vec::Vec};
 
 use op_revm::{
     constants::{BASE_FEE_RECIPIENT, L1_FEE_RECIPIENT, OPERATOR_FEE_RECIPIENT},

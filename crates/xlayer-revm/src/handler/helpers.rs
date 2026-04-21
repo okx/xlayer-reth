@@ -5,7 +5,8 @@
 //! base-revm `handler.rs` with names rewritten from `eip8130_*` / `Eip8130`
 //! to `xlayeraa_*` / `XLayerAA`.
 
-use std::{boxed::Box, collections::HashMap};
+use core::sync::atomic::{AtomicBool, Ordering};
+use std::{boxed::Box, collections::BTreeMap};
 
 use alloy_sol_types::SolValue;
 use op_revm::transaction::error::OpTransactionError;
@@ -55,8 +56,7 @@ pub const REVOKED_VERIFIER: Address = address!("0xffffffffffffffffffffffffffffff
 
 /// Monotonic cache: once the `AccountConfiguration` contract is detected,
 /// the handler skips the code-existence check on subsequent calls.
-pub static ACCOUNT_CONFIG_DEPLOYED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+pub static ACCOUNT_CONFIG_DEPLOYED: AtomicBool = AtomicBool::new(false);
 
 /// Base storage slot for the nonce mapping in `NonceManager` (slot index 1).
 pub const NONCE_BASE_SLOT: U256 = uint!(1_U256);
@@ -182,7 +182,7 @@ pub fn validate_owner_against_effective_config<EVM, ERROR>(
     expected_verifier: Address,
     required_scope: u8,
     allow_implicit_eoa: bool,
-    pending_owner_overrides: Option<&HashMap<U256, PendingOwnerState>>,
+    pending_owner_overrides: Option<&BTreeMap<U256, PendingOwnerState>>,
 ) -> Result<(), ERROR>
 where
     EVM: EvmTr<Context: XLayerAAContextTr>,
@@ -254,7 +254,7 @@ pub fn validate_owner_config<EVM, ERROR>(
     owner_id: U256,
     expected_verifier: Address,
     required_scope: u8,
-    pending_owner_overrides: Option<&HashMap<U256, PendingOwnerState>>,
+    pending_owner_overrides: Option<&BTreeMap<U256, PendingOwnerState>>,
 ) -> Result<(), ERROR>
 where
     EVM: EvmTr<Context: XLayerAAContextTr>,
@@ -281,7 +281,7 @@ pub fn validate_native_verifier_owner<EVM, ERROR>(
     verifier: Address,
     owner_id: B256,
     required_scope: u8,
-    pending_owner_overrides: Option<&HashMap<U256, PendingOwnerState>>,
+    pending_owner_overrides: Option<&BTreeMap<U256, PendingOwnerState>>,
 ) -> Result<(), ERROR>
 where
     EVM: EvmTr<Context: XLayerAAContextTr>,
@@ -366,12 +366,12 @@ where
         return Ok(());
     }
 
-    if !ACCOUNT_CONFIG_DEPLOYED.load(std::sync::atomic::Ordering::Relaxed) {
+    if !ACCOUNT_CONFIG_DEPLOYED.load(Ordering::Relaxed) {
         let acct = evm.ctx().journal_mut().load_account_with_code_mut(ACCOUNT_CONFIG_ADDRESS)?.data;
         let has_code = acct.account().info.code_hash != keccak256([]);
         drop(acct);
         if has_code {
-            ACCOUNT_CONFIG_DEPLOYED.store(true, std::sync::atomic::Ordering::Relaxed);
+            ACCOUNT_CONFIG_DEPLOYED.store(true, Ordering::Relaxed);
         } else {
             return Err(xlayeraa_invalid_tx::<ERROR>(
                 "config changes require AccountConfiguration to be deployed",
@@ -501,17 +501,17 @@ pub fn validate_authorizer_chain<EVM, ERROR, FRAME>(
     sender: Address,
     parts: &XLayerAAParts,
     verification_gas_used: &mut u64,
-) -> Result<HashMap<U256, PendingOwnerState>, ERROR>
+) -> Result<BTreeMap<U256, PendingOwnerState>, ERROR>
 where
     EVM: EvmTr<Context: XLayerAAContextTr, Frame = FRAME>,
     ERROR: EvmTrError<EVM> + From<OpTransactionError>,
     FRAME: FrameTr<FrameResult = FrameResult, FrameInit = FrameInit>,
 {
     if parts.authorizer_validations.is_empty() {
-        return Ok(HashMap::new());
+        return Ok(BTreeMap::new());
     }
 
-    let mut pending_owners: HashMap<U256, PendingOwnerState> = HashMap::new();
+    let mut pending_owners: BTreeMap<U256, PendingOwnerState> = BTreeMap::new();
 
     for validation in &parts.authorizer_validations {
         if validation.verify_call.is_none()

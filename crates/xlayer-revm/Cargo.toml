@@ -17,7 +17,7 @@ revm = { workspace = true, default-features = false }
 op-revm = { workspace = true, default-features = false }
 
 # sol! bindings for precompile interfaces & ABI encoding
-alloy-sol-types = { workspace = true }
+alloy-sol-types = { workspace = true, default-features = false }
 
 # misc
 auto_impl = "1"
@@ -30,6 +30,7 @@ revm = { workspace = true, default-features = false, features = ["optional_no_ba
 [features]
 default = ["std"]
 std = [
+    "alloy-sol-types/std",
     "op-revm/std",
     "revm/std",
     "serde?/std",

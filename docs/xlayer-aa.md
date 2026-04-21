@@ -4,6 +4,33 @@
 
 Running log of mistakes made during XLayerAA implementation, so we don't repeat them. Append new entries at the top.
 
+### 2026-04-21 — `crates/xlayer-revm` initially required `std`, blocking fault-proof reuse
+
+The first port pulled in `std` through several avenues:
+
+- `std::sync::atomic::AtomicBool` for the `ACCOUNT_CONFIG_DEPLOYED` cache (unavailable under `alloc` — `sync::atomic` lives in `core`);
+- `std::collections::HashMap` for the authorizer-chain pending-owner overlay (`alloc` has `BTreeMap`, not `HashMap`);
+- `alloy-sol-types` with default features (defaults to `std`);
+- `format!` / `vec!` / `.to_string()` in error paths without `#[macro_use] extern crate alloc` (macros don't come through the `extern crate alloc as std` rename alone).
+
+**Why it's wrong:** XLayerAA execution logic needs to cross into **fault-proof** / **ZK** prover programs (kona, op-program, custom provers), which build for MIPS / RISC-V targets with `no_std`. A handler that requires `std` cannot be embedded in those environments — the chain's validity-prover path is dead on arrival.
+
+**Fix:**
+
+- `core::sync::atomic::{AtomicBool, Ordering}` (not `std::sync::atomic`).
+- `alloc::collections::BTreeMap` for the pending-owner overlay; access patterns (insert / get / iterate in order) map cleanly, cardinality is bounded (≤ `MAX_ACCOUNT_CHANGES_PER_TX`), and it drops one transitive dep (`hashbrown`).
+- `alloy-sol-types = { default-features = false }` + gate `alloy-sol-types/std` inside our crate's `std` feature.
+- `#[macro_use] extern crate alloc as std;` at lib.rs root so `format!` / `vec!` / `write!` macros work; add explicit `use std::string::ToString;` at call sites that need `.to_string()`.
+
+Smoke-test: `cargo build -p xlayer-revm --no-default-features` + `cargo build -p xlayer-revm` + `cargo test -p xlayer-revm --lib` all green.
+
+**Lesson:** any execution-critical crate (handler, precompiles, config-layout helpers) must build `--no-default-features` from day one — retrofitting later means chasing every transitive dep and every stray `format!`. Rules of thumb:
+
+- Prefer `core::` paths over `std::` / `alloc::` where both exist (atomics, `cmp`, `mem`, `num`, `str`, `result`).
+- Collection choice: if cardinality is small and order-agnostic, `BTreeMap` / `BTreeSet` beat `HashMap` / `HashSet` for no_std reach (alloc ships them, `hashbrown` is another dep).
+- Third-party deps: always check `default-features` — most alloy / revm crates default to `std` and need explicit gating.
+- Macro surface: `#[macro_use] extern crate alloc;` at lib.rs once, rather than `alloc::format!(...)` at every call site.
+
 ### 2026-04-21 — No structural guard against multiple create entries in `XLayerAAParts`
 
 EIP-8130 allows at most one create entry per transaction. `XLayerAAParts`

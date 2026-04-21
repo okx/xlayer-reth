@@ -24,7 +24,12 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
+// Alias `alloc` as `std` so all our `use std::{boxed, vec, string, borrow, ...}`
+// paths keep working under `--no-default-features`. `#[macro_use]` pulls
+// `format!`, `vec!`, `write!`, etc. into scope at the crate level so the
+// handler / precompile error paths can interpolate strings under no_std.
 #[cfg(not(feature = "std"))]
+#[macro_use]
 extern crate alloc as std;
 
 pub mod constants;

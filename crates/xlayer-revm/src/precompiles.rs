@@ -16,7 +16,11 @@
 //! `context.tx()` + `tx.xlayeraa_parts()` at call time, so there is no
 //! handler → precompile side channel — no thread-local, no transient storage.
 
-use std::{boxed::Box, string::String, vec::Vec};
+use std::{
+    boxed::Box,
+    string::{String, ToString},
+    vec::Vec,
+};
 
 use alloy_sol_types::{sol, SolCall, SolValue};
 use op_revm::OpSpecId;
