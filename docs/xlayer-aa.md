@@ -4,6 +4,19 @@
 
 Running log of mistakes made during XLayerAA implementation, so we don't repeat them. Append new entries at the top.
 
+### 2026-04-21 — Lock check only ran for config changes, not for delegation entries; and ran after gas deduction
+
+EIP-8130 Block execution, step 1: *"If `account_changes` contains config change or delegation entries, read lock state for `from`. Reject transaction if account is locked."*
+
+Two issues with the original placement:
+
+1. Lock check was embedded inside `validate_config_change_preconditions` (called from `execution()`), so it fired **only when `sequence_updates` or `config_writes` were present**. A tx that carried a delegation entry on a locked account would skip the check entirely and the delegation would apply.
+2. Even for config changes, the check happened inside `execution()`, after gas deduction in `validate_against_state_and_deduct_caller`. A locked account would pay for the rejection before being rejected.
+
+**Fix:** extract `check_account_lock` into helpers and call it at the top of `validate_against_state_and_deduct_caller` (before gas deduction) whenever the tx carries a delegation entry OR config writes OR sequence updates. Remove the now-redundant check from `validate_config_change_preconditions`.
+
+**Lesson:** when the spec says "step 1", do it in step 1 — pushing a validation deeper into execution can still be correct for *rejection* but alters *side effects* (here, gas deduction). And cross-reference: a check gated by predicate A must also cover predicate B if the spec lists both (`config change or delegation`).
+
 ### 2026-04-21 — `nonce_free_hash.unwrap_or_default()` collapses all `None` txs onto one replay slot
 
 EIP-8130 does not mandate a specific replay-protection mechanism for nonce-free mode beyond the expiry window, but our implementation uses a ring buffer keyed by `nonce_free_hash`. The state-validation stage originally wrote:

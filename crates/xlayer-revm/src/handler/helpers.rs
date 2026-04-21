@@ -321,14 +321,43 @@ where
     Ok(())
 }
 
+/// EIP-8130 step 1: if the tx carries config-change or delegation entries,
+/// the sender's account MUST NOT be locked.
+///
+/// Safe to call when `ACCOUNT_CONFIG_ADDRESS` may be undeployed — treats a
+/// missing contract as "no lock recorded" (the read returns zero, which
+/// means `unlocks_at == 0`).
+pub fn check_account_lock<EVM, ERROR>(evm: &mut EVM, sender: Address) -> Result<(), ERROR>
+where
+    EVM: EvmTr<Context: XLayerAAContextTr>,
+    ERROR: EvmTrError<EVM> + From<OpTransactionError>,
+{
+    evm.ctx().journal_mut().load_account(ACCOUNT_CONFIG_ADDRESS)?;
+    let lock_slot = aa_lock_slot(sender);
+    let lock_word = evm.ctx().journal_mut().sload(ACCOUNT_CONFIG_ADDRESS, lock_slot)?.data;
+    let lock_bytes = lock_word.to_be_bytes::<32>();
+    let mut ua = [0u8; 8];
+    ua[3..8].copy_from_slice(&lock_bytes[11..16]);
+    let unlocks_at = u64::from_be_bytes(ua);
+    let now: u64 = evm.ctx().block().timestamp().to();
+    if now < unlocks_at {
+        return Err(xlayeraa_invalid_tx::<ERROR>(
+            "account is locked: cannot process config change or delegation entries",
+        ));
+    }
+    Ok(())
+}
+
 /// Re-validates config-change preconditions at inclusion time.
 ///
-/// - account is not locked
 /// - each config-change sequence matches expected on-chain value, with
 ///   in-tx chaining across multiple entries.
+///
+/// Lock-state is checked separately via [`check_account_lock`] earlier,
+/// at EIP-8130 step 1.
 pub fn validate_config_change_preconditions<EVM, ERROR>(
     evm: &mut EVM,
-    sender: Address,
+    _sender: Address,
     parts: &XLayerAAParts,
 ) -> Result<(), ERROR>
 where
@@ -353,18 +382,6 @@ where
     }
 
     evm.ctx().journal_mut().load_account(ACCOUNT_CONFIG_ADDRESS)?;
-
-    // Lock-state check: locked accounts cannot process config changes.
-    let lock_slot = aa_lock_slot(sender);
-    let lock_word = evm.ctx().journal_mut().sload(ACCOUNT_CONFIG_ADDRESS, lock_slot)?.data;
-    let lock_bytes = lock_word.to_be_bytes::<32>();
-    let mut ua = [0u8; 8];
-    ua[3..8].copy_from_slice(&lock_bytes[11..16]);
-    let unlocks_at = u64::from_be_bytes(ua);
-    let now: u64 = evm.ctx().block().timestamp().to();
-    if now < unlocks_at {
-        return Err(xlayeraa_invalid_tx::<ERROR>("config changes not allowed: account is locked"));
-    }
 
     if parts.sequence_updates.is_empty() {
         return Ok(());

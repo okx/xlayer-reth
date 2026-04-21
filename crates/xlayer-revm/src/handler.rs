@@ -66,7 +66,7 @@ use crate::{
 use helpers::{
     ACCOUNT_CONFIG_ADDRESS, EXPIRING_NONCE_SET_CAPACITY, EXPIRING_RING_PTR_SLOT,
     NONCE_COLD_WARM_DELTA, NONCE_FREE_MAX_EXPIRY_WINDOW, NONCE_KEY_MAX, aa_expiring_ring_slot,
-    aa_expiring_seen_slot, aa_nonce_slot, estimation_calldata_overhead,
+    aa_expiring_seen_slot, aa_nonce_slot, check_account_lock, estimation_calldata_overhead,
     run_custom_verifier_staticcall, validate_authorizer_chain, validate_config_change_preconditions,
     validate_native_verifier_owner, validate_owner_config,
 };
@@ -274,6 +274,19 @@ where
             return self.op.validate_against_state_and_deduct_caller(evm);
         }
 
+        let sender = evm.ctx().tx().caller();
+        let parts = evm.ctx().tx().xlayeraa_parts().clone();
+
+        // EIP-8130 step 1: if the tx carries config-change or delegation
+        // entries, the sender's account MUST NOT be locked. Must run before
+        // gas deduction so a locked account never pays for a rejected tx.
+        let needs_lock_check = parts.delegation_target.is_some()
+            || !parts.sequence_updates.is_empty()
+            || !parts.config_writes.is_empty();
+        if needs_lock_check {
+            check_account_lock::<EVM, ERROR>(evm, sender)?;
+        }
+
         let (block, tx, cfg, journal, chain, _) = evm.ctx().all_mut();
         let spec = cfg.spec();
 
@@ -282,9 +295,7 @@ where
             *chain = L1BlockInfo::try_fetch(journal.db_mut(), block.number(), spec)?;
         }
 
-        let sender = tx.caller();
         let nonce_sequence = tx.nonce();
-        let parts = tx.xlayeraa_parts().clone();
 
         // --- Gas deduction from payer ---
         let payer = parts.payer;
