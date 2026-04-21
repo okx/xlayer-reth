@@ -4,6 +4,29 @@
 
 Running log of mistakes made during XLayerAA implementation, so we don't repeat them. Append new entries at the top.
 
+### 2026-04-21 — `XLayerEvmConfig` pinned to `OpChainSpec` without a wrapper escape hatch
+
+Initial E4a wired `XLayerEvmConfig` as:
+
+```rust
+pub type XLayerEvmConfig = OpEvmConfig<
+    OpChainSpec,                            // ← hard-coded
+    OpPrimitives,
+    OpRethReceiptBuilder,
+    XLayerAAEvmFactory<XLayerAATransaction<TxEnv>>,
+>;
+```
+
+XLayer's hardforks currently live as module-level `const`s in `crates/chainspec/src/lib.rs` (e.g. `XLAYER_MAINNET_JOVIAN_TIMESTAMP`) and everything types through as `Arc<OpChainSpec>`. That works *today* because every XLayer fork still maps onto an `OpHardfork` variant. It stops working the moment we add an XLayer-exclusive fork (first candidate: `XLayerHardfork::XLayerAA` at M3) — `OpHardfork` has no variant for it, and the `OpChainSpec`-typed context can't answer `is_xlayer_aa_active_at_timestamp(ts)`.
+
+**Why leaving it as-is is a trap:** the cost of the wrapper grows with every additional downstream crate that inherits the `Arc<OpChainSpec>` type (pool validator, RPC filler, legacy-rpc). Retrofitting later means chasing every transitive type param.
+
+**Fix (deferred to M3, TODO in place):** introduce `XLayerChainSpec` as a newtype wrapping `Arc<OpChainSpec>` + XLayer-specific fork metadata, impl `OpHardforks` + `EthChainSpec<Header = Header>` (the only trait bounds `OpEvmConfig` requires), and flip the alias to `OpEvmConfig<XLayerChainSpec, …>`. Follow tempo's `TempoChainSpec` / `TempoHardforks` split.
+
+**Why not now:** we only have one XLayer fork in flight (AA), so introducing the wrapper before it has a second user would add indirection without payoff. The TODO comment on the type alias records the plan so whoever lands M3 doesn't have to re-derive it.
+
+**Lesson:** "deferred but documented" beats both "premature abstraction" and "discover it when the ceiling caves in". A forward-pointing TODO with a concrete migration sketch is cheap to write now and expensive to reconstruct later.
+
 ### 2026-04-21 — Intrinsic gas constants hard-coded in `build_aa_parts` with no fork binding
 
 First cut of `build_aa_parts` read `AA_BASE_COST`, `EOA_AUTH_GAS`, `NONCE_KEY_COLD_GAS` directly from module-level `const`s and took no `OpSpecId`:

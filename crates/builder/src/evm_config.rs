@@ -37,6 +37,27 @@ use xlayer_revm::{XLayerAAEvmFactory, XLayerAATransaction};
 /// XLayerAA-capable [`OpEvmConfig`]: identical to the upstream
 /// [`reth_optimism_evm::OpEvmConfig`] except the EVM factory produces an
 /// [`XLayerAAEvm`](xlayer_revm::XLayerAAEvm) rather than an `OpEvm`.
+///
+/// TODO(xlayer-aa M3): the `ChainSpec` parameter is pinned to
+/// [`OpChainSpec`] because xlayer-reth doesn't yet have its own
+/// chainspec wrapper. Once `XLayerHardfork::XLayerAA` lands — or any
+/// other XLayer-exclusive hardfork — we need:
+///
+/// 1. an `XLayerChainSpec` newtype wrapping `Arc<OpChainSpec>` (+ XLayer
+///    fork activations currently scattered as module-level `const`s in
+///    `crates/chainspec/src/lib.rs`), implementing `OpHardforks` +
+///    `EthChainSpec<Header = Header>` (the only trait bounds
+///    `OpEvmConfig` requires);
+/// 2. a separate `XLayerHardforks` trait for AA-specific queries (e.g.
+///    `is_xlayer_aa_active_at_timestamp`);
+/// 3. this alias flipped to `OpEvmConfig<XLayerChainSpec, …>` and the
+///    constructor updated to wrap `ctx.chain_spec()` into the newtype.
+///
+/// Pattern reference: tempo's `TempoChainSpec` / `TempoHardforks` split
+/// (`/home/po/now/tempo/crates/chainspec/src/{spec,hardfork}.rs`). We
+/// deliberately defer the wrapper until a second XLayer fork gives it a
+/// reason to exist — introducing it now would add indirection without
+/// a user for the extra type parameter.
 pub type XLayerEvmConfig = OpEvmConfig<
     OpChainSpec,
     OpPrimitives,
