@@ -4,6 +4,20 @@
 
 Running log of mistakes made during XLayerAA implementation, so we don't repeat them. Append new entries at the top.
 
+### 2026-04-21 — `nonce_free_hash.unwrap_or_default()` collapses all `None` txs onto one replay slot
+
+EIP-8130 does not mandate a specific replay-protection mechanism for nonce-free mode beyond the expiry window, but our implementation uses a ring buffer keyed by `nonce_free_hash`. The state-validation stage originally wrote:
+
+```rust
+let nf_hash = parts.nonce_free_hash.unwrap_or_default();
+```
+
+**Why it's wrong:** if `nonce_free_hash` arrives as `None`, every such tx shares the zero-hash slot — a single seen entry blocks all of them, or worse (depending on ordering) lets them all pass. Silently defaulting to zero is never the right behavior for a replay key.
+
+**Fix:** reject `None` up front in `validate_env` for nonce-free txs, and use `.ok_or_else(...)?` (not `.unwrap`) at the state-validation site as belt-and-suspenders.
+
+**Lesson:** `unwrap_or_default()` on identity-bearing fields (hashes, nonces, addresses) is almost always wrong. Default values collide; collisions on replay keys are catastrophic.
+
 ### 2026-04-21 — Missing structural checks for `nonce_key == NONCE_KEY_MAX`
 
 EIP-8130: *"When `nonce_key == NONCE_KEY_MAX`, the protocol does not read or increment nonce state. `nonce_sequence` MUST be `0`. Replay protection relies on `expiry`, which MUST be non-zero."*

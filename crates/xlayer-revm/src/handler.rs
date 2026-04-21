@@ -191,6 +191,15 @@ where
                 ))
                 .into());
             }
+            // Our replay-protection implementation slots the tx's
+            // `nonce_free_hash` into a ring buffer. A missing hash would
+            // collide on zero across every such tx, so require it present.
+            if parts.nonce_free_hash.is_none() {
+                return Err(OpTransactionError::Base(InvalidTransaction::Str(
+                    "XLayerAA: nonce-free tx requires nonce_free_hash".into(),
+                ))
+                .into());
+            }
         }
 
         // Expiry check.
@@ -354,7 +363,12 @@ where
                 )));
             }
 
-            let nf_hash = parts.nonce_free_hash.unwrap_or_default();
+            // `validate_env` already rejects `None` for nonce-free txs;
+            // re-check here rather than unwrap, so a skipped validate_env
+            // path still cannot collide on zero-hash.
+            let nf_hash = parts.nonce_free_hash.ok_or_else(|| {
+                ERROR::from_string("XLayerAA: nonce-free tx requires nonce_free_hash".into())
+            })?;
             journal.load_account(NONCE_MANAGER_ADDRESS)?;
 
             let seen_slot = aa_expiring_seen_slot(nf_hash);
