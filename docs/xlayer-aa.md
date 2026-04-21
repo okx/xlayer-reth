@@ -4,6 +4,19 @@
 
 Running log of mistakes made during XLayerAA implementation, so we don't repeat them. Append new entries at the top.
 
+### 2026-04-21 — Missing structural checks for `nonce_key == NONCE_KEY_MAX`
+
+EIP-8130: *"When `nonce_key == NONCE_KEY_MAX`, the protocol does not read or increment nonce state. `nonce_sequence` MUST be `0`. Replay protection relies on `expiry`, which MUST be non-zero."*
+
+The handler's `validate_env` had neither check:
+
+- `expiry == 0` was not rejected up front; it was only caught indirectly in `validate_against_state_and_deduct_caller` via `expiry <= now` (which happens to be true when `expiry == 0` since `now > 0`). This conflates a structural error with a time-window error and relies on coincidence.
+- `nonce_sequence != 0` was never checked at all — the nonce-free branch in the state-validation stage does not read `tx.nonce()`, so a nonce-free tx with `nonce_sequence = 42` would be accepted and included, violating a spec MUST.
+
+**Fix:** in `validate_env`, when `parts.nonce_key == NONCE_KEY_MAX`, explicitly return `Err(...)` if `parts.expiry == 0` or `tx.nonce() != 0`. `Err`, not `assert!` — a malformed tx must be rejected at the tx level, not crash the node.
+
+**Lesson:** spec MUSTs on structural fields belong in `validate_env` (the stateless validation stage), not indirectly in state-dependent stages. And when translating MUSTs into Rust: always `return Err(...)`, never `assert!` / `panic!` / `unreachable!` — those would take down the entire node process on a single malformed tx.
+
 ### 2026-04-21 — Phase execution loop did not skip remaining phases on failure
 
 EIP-8130 Block execution: *"if any call in a phase reverts, all state changes for that phase are discarded and remaining phases are skipped."*

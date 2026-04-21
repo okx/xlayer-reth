@@ -175,6 +175,24 @@ where
 
         let parts = ctx.tx().xlayeraa_parts();
 
+        // EIP-8130: when `nonce_key == NONCE_KEY_MAX` (nonce-free mode), the
+        // protocol does not read or increment nonce state; replay protection
+        // relies on `expiry`. Spec MUSTs: `expiry != 0`, `nonce_sequence == 0`.
+        if parts.nonce_key == NONCE_KEY_MAX {
+            if parts.expiry == 0 {
+                return Err(OpTransactionError::Base(InvalidTransaction::Str(
+                    "XLayerAA: nonce-free tx requires non-zero expiry".into(),
+                ))
+                .into());
+            }
+            if ctx.tx().nonce() != 0 {
+                return Err(OpTransactionError::Base(InvalidTransaction::Str(
+                    "XLayerAA: nonce-free tx requires nonce_sequence == 0".into(),
+                ))
+                .into());
+            }
+        }
+
         // Expiry check.
         if parts.expiry != 0 {
             let block_ts = ctx.block().timestamp().saturating_to::<u64>();
