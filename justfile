@@ -23,6 +23,7 @@ alias wt := watch-test
 alias wc := watch-check
 alias xl := xlayer
 alias sc := sweep-check
+alias cns := check-no-std
 
 default:
     @just --list
@@ -67,9 +68,41 @@ check:
     # Upstream flashblocks inner dependency reth-optimism-primitives does not
     # specify feats reth-codec and serde-bincode-compat. So we skip.
     just sweep-check
+    just check-no-std
     just check-format
     just check-clippy
     just test
+
+# Crates that MUST compile `--no-default-features` so the XLayerAA handler /
+# precompile paths stay embeddable in fault-proof / ZK prover targets (kona,
+# op-program, custom provers build for MIPS / RISC-V `no_std`). Any dep on
+# `std::` / `thread_local!` / `HashMap` / `format!`-without-alloc here is a
+# merge blocker.
+NO_STD_CRATES := "xlayer-revm"
+
+# Verify every crate in NO_STD_CRATES still compiles with no default features,
+# and — if the crate declares a `serde` feature — that the `serde` variant
+# also stays no_std. Uses `cargo check` (not `build`) for ~3-5x speedup;
+# `--locked` ensures an unexpected `Cargo.lock` bump that re-enables `std` on
+# a transitive dep fails here rather than months later during prover
+# integration.
+check-no-std:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "🔒 Verifying no_std compilation for fault-proof / prover targets..."
+    for crate in {{NO_STD_CRATES}}; do
+        echo "=== no_std check: $crate ==="
+        cargo check -p "$crate" --no-default-features --locked
+        # If the crate declares a `serde` feature, also verify `--features serde`
+        # compiles no_std — catches std leaks gated behind optional features.
+        if cargo metadata --no-deps --format-version 1 \
+            | jq -e --arg c "$crate" \
+                '.packages[] | select(.name==$c) | .features | has("serde")' >/dev/null 2>&1; then
+            echo "=== no_std + serde check: $crate ==="
+            cargo check -p "$crate" --no-default-features --features serde --locked
+        fi
+    done
+    echo "✅ no_std gate: all crates OK"
 
 fix: fix-format fix-clippy
 

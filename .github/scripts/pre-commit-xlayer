@@ -22,4 +22,50 @@ fi
 
 echo "$CHANGED_RS_FILES" | xargs git add
 echo "Finished rustfmt, staged any formatted files."
+
+# Gate: if any staged file touches a no_std-required crate, verify it still
+# compiles --no-default-features before allowing the commit. Fault-proof /
+# ZK prover targets (MIPS, RISC-V) require these crates to stay std-free.
+#
+# Keep these two lists in sync with NO_STD_CRATES in justfile.
+NO_STD_PATHS="crates/xlayer-revm/"
+NO_STD_CRATES="xlayer-revm"
+
+NEEDS_NO_STD_CHECK=0
+for path in $NO_STD_PATHS; do
+    if echo "$CHANGED_RS_FILES" | grep -q "^$path"; then
+        NEEDS_NO_STD_CHECK=1
+        break
+    fi
+done
+
+if [ "$NEEDS_NO_STD_CHECK" = "1" ]; then
+    echo ""
+    echo "🔒 Staged files touch no_std-required crate(s); verifying..."
+    (
+        cd "$GIT_ROOT" || exit 1
+        STATUS=0
+        for crate in $NO_STD_CRATES; do
+            if ! cargo check -p "$crate" --no-default-features --locked; then
+                STATUS=1
+                break
+            fi
+        done
+        exit $STATUS
+    )
+    if [ $? -ne 0 ]; then
+        echo ""
+        echo "❌ Commit aborted: a no_std-required crate no longer compiles"
+        echo "   with --no-default-features. XLayerAA handler/precompiles must"
+        echo "   stay no_std for fault-proof / prover targets (MIPS, RISC-V)."
+        echo "   Replace std-only items with alloc/core equivalents, e.g."
+        echo "     HashMap            -> alloc::collections::BTreeMap"
+        echo "     std::sync::atomic  -> core::sync::atomic"
+        echo "     thread_local!      -> (redesign; pass state through args)"
+        echo "   Iterate locally with: just check-no-std"
+        exit 1
+    fi
+    echo "✅ no_std gate passed."
+fi
+
 exit 0
