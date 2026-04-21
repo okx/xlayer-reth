@@ -23,6 +23,7 @@ members = [
     "crates/rpc",
     "crates/tests",
     "crates/version",
+    "crates/xlayer-consensus",
     "crates/xlayer-revm",
     "crates/builder/src/tests/framework/macros",
 
@@ -69,6 +70,7 @@ codegen-units = 1
 xlayer-bridge-intercept = { path = "crates/intercept" }
 xlayer-builder = { path = "crates/builder" }
 xlayer-chainspec = { path = "crates/chainspec" }
+xlayer-consensus = { path = "crates/xlayer-consensus" }
 xlayer-flashblocks = { path = "crates/flashblocks" }
 xlayer-legacy-rpc = { path = "crates/legacy-rpc" }
 xlayer-monitor = { path = "crates/monitor" }

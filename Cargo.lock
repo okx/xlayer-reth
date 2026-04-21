@@ -14140,6 +14140,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "xlayer-consensus"
+version = "0.0.6"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-primitives",
+ "alloy-rlp",
+ "serde",
+]
+
+[[package]]
 name = "xlayer-e2e-test"
 version = "0.0.6"
 dependencies = [

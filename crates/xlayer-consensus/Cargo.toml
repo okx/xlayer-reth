@@ -1,0 +1,41 @@
+[package]
+name = "xlayer-consensus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "XLayer consensus-layer wire types — XLayerAA (EIP-8130) transaction and supporting RLP types"
+
+[lints]
+workspace = true
+
+[dependencies]
+# alloy
+alloy-consensus = { workspace = true, default-features = false }
+alloy-eips = { workspace = true, default-features = false }
+alloy-primitives = { workspace = true, default-features = false }
+alloy-rlp = { workspace = true, default-features = false }
+
+# misc
+serde = { workspace = true, features = ["derive", "rc"], optional = true }
+
+[dev-dependencies]
+alloy-rlp = { workspace = true, default-features = false }
+
+[features]
+default = ["std"]
+std = [
+    "alloy-consensus/std",
+    "alloy-eips/std",
+    "alloy-primitives/std",
+    "alloy-rlp/std",
+    "serde?/std",
+]
+serde = [
+    "alloy-consensus/serde",
+    "alloy-eips/serde",
+    "alloy-primitives/serde",
+    "dep:serde",
+]
