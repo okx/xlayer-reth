@@ -491,6 +491,25 @@ fn reimburse_caller_aa_refunds_payer() {
 //   b) restructure an error enum — tests fail to compile, we fix;
 //   c) change *behaviour* — tests fail at runtime, which is the signal we
 //      need to re-read the EIP or adjust our handler accordingly.
+//
+// -- When AA hardforks introduce fork-gated semantics ----------------------
+//
+// All tests below currently pin `OpSpecId::JOVIAN` because EIP-8130 was
+// introduced whole-cloth at JOVIAN and the handler has no `spec.is_*()`
+// branches inside these paths. Once a future fork gates AA behaviour,
+// follow one of two patterns (cf. `tempo/crates/revm/src/handler.rs`):
+//
+//   * New-in-fork behaviour (e.g. a rule introduced at FJORD):
+//     write TWO tests — `*_pre_fjord` on JOVIAN asserting old behaviour,
+//     `*_post_fjord` on FJORD asserting new. The pre-test is a regression
+//     guard against accidental back-porting. See tempo's
+//     `test_self_sponsored_fee_payer_{rejected_post_t2,not_rejected_pre_t2}`.
+//
+//   * Same rule, fork-varying parameter (e.g. gas cost changes at FJORD):
+//     single table-driven test — `for spec in [JOVIAN, FJORD, ...]` with
+//     an `if spec.is_fjord() { a } else { b }` on the expected value, and
+//     `"{spec:?}: ..."` in every assert message so failures pinpoint the
+//     offending fork. See tempo's `test_2d_nonce_gas_in_intrinsic_gas`.
 
 // --- P0 #1: phase break ----------------------------------------------------
 
