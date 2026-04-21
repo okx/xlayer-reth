@@ -2,8 +2,6 @@
 //!
 //! Provides:
 //!
-//! - [`XLayerAATxContext`] + thread-local accessors used by the TxContext
-//!   precompile to reach the in-flight AA transaction's fields.
 //! - A [`sol!`] block ([`INonceManager`], [`ITxContext`], [`CallTuple`])
 //!   that supplies ABI encoders, decoders, and selectors — no hand-rolled
 //!   ABI serialization.
@@ -12,8 +10,13 @@
 //! - A [`XLayerAAPrecompiles`] decorator that wraps an inner
 //!   [`PrecompileProvider`] and intercepts calls to the NonceManager /
 //!   TxContext system addresses during XLayerAA transaction execution.
+//!
+//! Every value surfaced by the TxContext precompile (sender, payer,
+//! `owner_id`, `max_cost`, `gas_limit`, `calls`) is derivable from
+//! `context.tx()` + `tx.xlayeraa_parts()` at call time, so there is no
+//! handler → precompile side channel — no thread-local, no transient storage.
 
-use std::{boxed::Box, cell::RefCell, string::String, vec::Vec};
+use std::{boxed::Box, string::String, vec::Vec};
 
 use alloy_sol_types::{SolCall, SolValue, sol};
 use op_revm::OpSpecId;
@@ -65,74 +68,23 @@ impl From<&XLayerAACall> for CallTuple {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Thread-local XLayerAA transaction context
-// ---------------------------------------------------------------------------
-
-thread_local! {
-    static XLAYERAA_TX_CONTEXT: RefCell<Option<XLayerAATxContext>>
-        = const { RefCell::new(None) };
+/// Derives `getGasLimit()` — the sender's execution-only gas budget.
+#[inline]
+fn aa_execution_gas_limit(parts: &XLayerAAParts, tx_gas_limit: u64) -> u64 {
+    tx_gas_limit.saturating_sub(parts.aa_intrinsic_gas)
 }
 
-/// Lightweight snapshot of XLayerAA tx fields needed by the TxContext precompile.
-///
-/// Stored in a thread-local so `DynPrecompile` closures (which only receive
-/// `EvmInternals`) can access them without using transient storage.
-#[derive(Clone, Debug)]
-pub struct XLayerAATxContext {
-    /// Effective sender address.
-    pub sender: Address,
-    /// Effective payer address.
-    pub payer: Address,
-    /// Owner ID from sender authentication.
-    pub owner_id: B256,
-    /// Execution-only gas limit (the sender's `gas_limit` field).
-    pub gas_limit: u64,
-    /// `(gas_limit + known_intrinsic) * max_fee_per_gas`.
-    ///
-    /// `known_intrinsic` includes all protocol costs computed so far
-    /// **except** `payer_auth_cost` (the payer verifier may still be
-    /// running when it calls `getMaxCost()`).
-    pub max_cost: U256,
-    /// Phased call batches.
-    pub call_phases: Vec<Vec<XLayerAACall>>,
-}
-
-impl XLayerAATxContext {
-    /// Builds the context from parts and tx fields.
-    pub fn new(
-        parts: &XLayerAAParts,
-        execution_gas_limit: u64,
-        known_intrinsic: u64,
-        max_fee_per_gas: U256,
-    ) -> Self {
-        let total_gas = U256::from(execution_gas_limit)
-            + U256::from(known_intrinsic)
-            + U256::from(parts.custom_verifier_gas_cap);
-        Self {
-            sender: parts.sender,
-            payer: parts.payer,
-            owner_id: parts.owner_id,
-            gas_limit: execution_gas_limit,
-            max_cost: total_gas * max_fee_per_gas,
-            call_phases: parts.call_phases.clone(),
-        }
-    }
-}
-
-/// Sets the XLayerAA transaction context for the current thread.
-pub fn set_xlayeraa_tx_context(ctx: XLayerAATxContext) {
-    XLAYERAA_TX_CONTEXT.with(|c| *c.borrow_mut() = Some(ctx));
-}
-
-/// Clears the XLayerAA transaction context for the current thread.
-pub fn clear_xlayeraa_tx_context() {
-    XLAYERAA_TX_CONTEXT.with(|c| *c.borrow_mut() = None);
-}
-
-/// Reads the current XLayerAA transaction context from the thread-local.
-pub fn get_xlayeraa_tx_context() -> Option<XLayerAATxContext> {
-    XLAYERAA_TX_CONTEXT.with(|c| c.borrow().clone())
+/// Derives `getMaxCost()` — the upper bound on spend visible to verifier
+/// contracts. Excludes `payer_auth_cost` because the payer verifier may
+/// still be executing when it calls `getMaxCost()`.
+#[inline]
+fn aa_max_cost(parts: &XLayerAAParts, tx_gas_limit: u64, max_fee_per_gas: U256) -> U256 {
+    let exec_gas_limit = aa_execution_gas_limit(parts, tx_gas_limit);
+    let known_intrinsic = parts.aa_intrinsic_gas.saturating_sub(parts.payer_intrinsic_gas);
+    let total = U256::from(exec_gas_limit)
+        + U256::from(known_intrinsic)
+        + U256::from(parts.custom_verifier_gas_cap);
+    total * max_fee_per_gas
 }
 
 // ---------------------------------------------------------------------------
@@ -250,11 +202,14 @@ where
             ITxContext::getOwnerIdCall::abi_encode_returns(&owner_id)
         }
         ITxContext::getMaxCostCall::SELECTOR => {
-            let max_cost = get_xlayeraa_tx_context().map_or(U256::ZERO, |ctx| ctx.max_cost);
+            let max_cost = aa_parts.map_or(U256::ZERO, |p| {
+                aa_max_cost(p, tx.gas_limit(), U256::from(tx.max_fee_per_gas()))
+            });
             ITxContext::getMaxCostCall::abi_encode_returns(&max_cost)
         }
         ITxContext::getGasLimitCall::SELECTOR => {
-            let gas_limit = get_xlayeraa_tx_context().map_or(0u64, |ctx| ctx.gas_limit);
+            let gas_limit =
+                aa_parts.map_or(0u64, |p| aa_execution_gas_limit(p, tx.gas_limit()));
             ITxContext::getGasLimitCall::abi_encode_returns(&U256::from(gas_limit))
         }
         ITxContext::getCallsCall::SELECTOR => {

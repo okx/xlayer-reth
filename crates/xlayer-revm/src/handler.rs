@@ -57,10 +57,7 @@ use crate::{
         DELEGATE_VERIFIER_ADDRESS, MAX_ACCOUNT_CHANGES_PER_TX, MAX_CALLS_PER_TX, OWNER_SCOPE_PAYER,
         OWNER_SCOPE_SENDER, XLAYERAA_TX_TYPE,
     },
-    precompiles::{
-        NONCE_MANAGER_ADDRESS, TX_CONTEXT_ADDRESS, XLayerAATxContext,
-        clear_xlayeraa_tx_context, set_xlayeraa_tx_context,
-    },
+    precompiles::{NONCE_MANAGER_ADDRESS, TX_CONTEXT_ADDRESS},
     transaction::{
         XLayerAATxTr, config_log_to_system_log, encode_phase_statuses, phase_statuses_system_log,
     },
@@ -246,10 +243,6 @@ where
         &self,
         evm: &mut Self::Evm,
     ) -> Result<(), Self::Error> {
-        // Always reset any stale AA tx context from a previous execution
-        // (thread-local state is shared across this handler's invocations).
-        clear_xlayeraa_tx_context();
-
         if evm.ctx().tx().tx_type() != XLAYERAA_TX_TYPE {
             return self.op.validate_against_state_and_deduct_caller(evm);
         }
@@ -265,18 +258,6 @@ where
         let sender = tx.caller();
         let nonce_sequence = tx.nonce();
         let parts = tx.xlayeraa_parts().clone();
-
-        // Install the thread-local AA tx context for the TxContext precompile.
-        {
-            let execution_gas_limit = tx.gas_limit().saturating_sub(parts.aa_intrinsic_gas);
-            let known_intrinsic = parts.aa_intrinsic_gas.saturating_sub(parts.payer_intrinsic_gas);
-            set_xlayeraa_tx_context(XLayerAATxContext::new(
-                &parts,
-                execution_gas_limit,
-                known_intrinsic,
-                U256::from(tx.max_fee_per_gas()),
-            ));
-        }
 
         // --- Gas deduction from payer ---
         let payer = parts.payer;

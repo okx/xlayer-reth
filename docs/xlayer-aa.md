@@ -4,6 +4,34 @@
 
 Running log of mistakes made during XLayerAA implementation, so we don't repeat them. Append new entries at the top.
 
+### 2026-04-21 — `thread_local!` as handler → precompile bridge when the data is derivable from `tx`
+
+Initial port cargo-culted base-revm's pattern: a thread-local `XLayerAATxContext` that the handler populated in `validate_against_state_and_deduct_caller` and the TxContext precompile read in `run_tx_context_precompile` for `getMaxCost()` / `getGasLimit()`.
+
+```rust
+thread_local! { static XLAYERAA_TX_CONTEXT: RefCell<Option<XLayerAATxContext>> = ... }
+
+// handler:
+set_xlayeraa_tx_context(XLayerAATxContext::new(&parts, execution_gas_limit, known_intrinsic, max_fee));
+
+// precompile:
+let max_cost = get_xlayeraa_tx_context().map_or(U256::ZERO, |ctx| ctx.max_cost);
+```
+
+**Why it's wrong:** I defended the thread-local as necessary because the handler computes `max_cost` and `gas_limit` and the precompile can't reach handler state. But those values are just deterministic formulas over `tx.xlayeraa_parts()` and `tx.max_fee_per_gas()`:
+
+```
+gas_limit = tx.gas_limit - parts.aa_intrinsic_gas
+max_cost  = (gas_limit + parts.aa_intrinsic_gas - parts.payer_intrinsic_gas
+             + parts.custom_verifier_gas_cap) × tx.max_fee_per_gas
+```
+
+All inputs are inclusion-time immutable data available to the precompile through `context.tx()`. There is no dynamic handler state involved. Tempo's AA design avoids this entirely — derived values live on the tx env and are computed on demand.
+
+**Fix:** delete the thread-local, the `XLayerAATxContext` struct, and the `set_*` / `clear_*` / `get_*` functions. Compute on demand in the precompile via two small helpers (`aa_execution_gas_limit`, `aa_max_cost`).
+
+**Lesson for future "handler → precompile" plumbing:** before reaching for a thread-local / transient-storage bridge, ask whether the value is already a pure function of `tx + parts`. If yes, compute it at the call site — no global state, no clear-before-every-tx invariant to maintain, no cross-tx pollution risk.
+
 ### 2026-04-21 — `U256::from_limbs([N, 0, 0, 0])` for small-integer constants
 
 ```rust

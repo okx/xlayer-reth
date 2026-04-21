@@ -47,8 +47,7 @@ pub use policy::{
 };
 pub use precompiles::{
     CallTuple, INonceManager, ITxContext, NONCE_BASE_SLOT, NONCE_MANAGER_ADDRESS,
-    NONCE_MANAGER_GAS, TX_CONTEXT_ADDRESS, TX_CONTEXT_GAS, XLayerAAPrecompiles, XLayerAATxContext,
-    aa_nonce_slot, clear_xlayeraa_tx_context, get_xlayeraa_tx_context, set_xlayeraa_tx_context,
+    NONCE_MANAGER_GAS, TX_CONTEXT_ADDRESS, TX_CONTEXT_GAS, XLayerAAPrecompiles, aa_nonce_slot,
 };
 pub use transaction::{
     XLayerAAAuthorizerValidation, XLayerAACall, XLayerAACodePlacement, XLayerAAConfigLog,
