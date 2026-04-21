@@ -4,6 +4,25 @@
 
 Running log of mistakes made during XLayerAA implementation, so we don't repeat them. Append new entries at the top.
 
+### 2026-04-21 — AA branch bypassed `chain_id` check
+
+Upstream op-revm's `validate_env` delegates the EIP-155 `chain_id` check to `revm-handler`'s mainnet `validate_env`:
+
+```rust
+// op-revm handler.rs
+fn validate_env(&self, evm: &mut Self::Evm) -> ... {
+    if tx_type == DEPOSIT_TRANSACTION_TYPE { ... return Ok(()); }
+    if tx.enveloped_tx().is_none() { return Err(MissingEnvelopedTx); }
+    self.mainnet.validate_env(evm)  // ← does chain_id here
+}
+```
+
+The XLayerAA `validate_env` returns early before the `self.op.validate_env(evm)` delegation, so mainnet never runs for AA txs and the `chain_id != cfg.chain_id` check was silently skipped. A cross-chain AA tx could pass stateless validation.
+
+**Fix:** inline the same chain_id check at the end of the AA branch, gated by `ctx.cfg().tx_chain_id_check()`. Return `InvalidTransaction::InvalidChainId` on mismatch and `MissingChainId` when absent (AA is a custom tx type, not legacy).
+
+**Lesson:** any new tx type whose `validate_env` branches out of the delegation chain inherits a debt: every universal check upstream enforces (`chain_id`, `gas_limit_cap`, etc.) must be re-checked locally. Don't assume "OP handled it" — verify by reading the upstream path.
+
 ### 2026-04-21 — Lock check only ran for config changes, not for delegation entries; and ran after gas deduction
 
 EIP-8130 Block execution, step 1: *"If `account_changes` contains config change or delegation entries, read lock state for `from`. Reject transaction if account is locked."*

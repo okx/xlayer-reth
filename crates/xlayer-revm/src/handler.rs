@@ -236,6 +236,18 @@ where
             .into());
         }
 
+        // EIP-155-style chain_id check. Upstream mainnet validate_env does
+        // this for OP txs; the AA branch bypasses mainnet so we replicate it.
+        if ctx.cfg().tx_chain_id_check() {
+            match ctx.tx().chain_id() {
+                Some(tx_chain_id) if tx_chain_id != ctx.cfg().chain_id() => {
+                    return Err(InvalidTransaction::InvalidChainId.into());
+                }
+                None => return Err(InvalidTransaction::MissingChainId.into()),
+                _ => {}
+            }
+        }
+
         Ok(())
     }
 
