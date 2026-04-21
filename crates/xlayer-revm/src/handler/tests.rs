@@ -10,8 +10,9 @@
 // ---------------------------------------------------------------------------
 //
 // Tests in this section pin behaviour defined by EIP-8130. Each test:
-//   - fixes a concrete spec (OpSpecId::JOVIAN) so a future hardfork that
-//     changes semantics is a *new* test rather than a silent drift here;
+//   - fixes a concrete spec via `AA_ACTIVE_SPEC` (see fixtures) so a future
+//     hardfork that changes semantics is a *new* test rather than a silent
+//     drift here;
 //   - asserts against error *variants* for upstream-owned errors (e.g.
 //     `InvalidTransaction::InvalidChainId`) so a future rename surfaces as
 //     a compile-time break, not a silent false positive;
@@ -27,22 +28,21 @@
 //
 // -- When AA hardforks introduce fork-gated semantics ----------------------
 //
-// All tests below currently pin `OpSpecId::JOVIAN` because EIP-8130 was
-// introduced whole-cloth at JOVIAN and the handler has no `spec.is_*()`
-// branches inside these paths. Once a future fork gates AA behaviour,
-// follow one of two patterns (cf. `tempo/crates/revm/src/handler.rs`):
+// All tests below currently pin `AA_ACTIVE_SPEC` (= `OpSpecId::JOVIAN`)
+// because the handler has no `spec.is_*()` branches inside these paths.
+// When a dedicated XLayerAA fork lands, the migration is:
 //
-//   * New-in-fork behaviour (e.g. a rule introduced at FJORD):
-//     write TWO tests — `*_pre_fjord` on JOVIAN asserting old behaviour,
-//     `*_post_fjord` on FJORD asserting new. The pre-test is a regression
-//     guard against accidental back-porting. See tempo's
-//     `test_self_sponsored_fee_payer_{rejected_post_t2,not_rejected_pre_t2}`.
+//   1. Flip `AA_ACTIVE_SPEC` to the new fork. Every AA-active test below
+//      follows automatically.
+//   2. Add `*_pre_<fork>` regression pairs that hard-code the *old* spec
+//      (`OpSpecId::JOVIAN`) to catch accidental back-porting. See tempo's
+//      `test_self_sponsored_fee_payer_{rejected_post_t2,not_rejected_pre_t2}`.
 //
-//   * Same rule, fork-varying parameter (e.g. gas cost changes at FJORD):
-//     single table-driven test — `for spec in [JOVIAN, FJORD, ...]` with
-//     an `if spec.is_fjord() { a } else { b }` on the expected value, and
-//     `"{spec:?}: ..."` in every assert message so failures pinpoint the
-//     offending fork. See tempo's `test_2d_nonce_gas_in_intrinsic_gas`.
+// Once gas or scope rules start varying *across* AA forks (multiple AA
+// specs both active), switch those specific tests to table-driven —
+// `for spec in [...]` with an `if spec.is_*()` on the expected value and
+// `"{spec:?}: ..."` in every assert message so failures pinpoint the
+// offending fork. See tempo's `test_2d_nonce_gas_in_intrinsic_gas`.
 
 use op_revm::{
     transaction::error::OpTransactionError, L1BlockInfo, OpBuilder, OpSpecId, OpTransaction,
@@ -77,13 +77,24 @@ use crate::{
 // Fixtures
 // ---------------------------------------------------------------------------
 
+/// The spec under which XLayerAA transactions are *active*. AA-exercising
+/// tests pin this; tests for pre-fork behaviour must pin the fork *below*
+/// it explicitly (e.g. `OpSpecId::JOVIAN` once AA moves to its own fork).
+///
+/// Currently set to `OpSpecId::JOVIAN` because the AA handler has no
+/// `spec.is_*()` gates yet. When a dedicated XLayerAA fork lands, flip
+/// this constant to the new spec — every AA-active test tracks it
+/// automatically, and new `*_pre_<fork>` regression tests can be added
+/// alongside with the old spec hard-coded.
+const AA_ACTIVE_SPEC: OpSpecId = OpSpecId::JOVIAN;
+
 type TestCtx<DB> =
     Context<BlockEnv, XLayerAATransaction<TxEnv>, CfgEnv<OpSpecId>, DB, Journal<DB>, L1BlockInfo>;
 
 fn base_ctx() -> TestCtx<EmptyDB> {
     Context::mainnet()
         .with_tx(XLayerAATransaction::new(OpTransaction::<TxEnv>::default()))
-        .with_cfg(CfgEnv::new_with_spec(OpSpecId::JOVIAN))
+        .with_cfg(CfgEnv::new_with_spec(AA_ACTIVE_SPEC))
         .with_chain(L1BlockInfo::default())
 }
 
@@ -160,7 +171,7 @@ fn validate_env_passes_unexpired_tx() {
     let parts = XLayerAAParts { expiry: 500, ..Default::default() };
 
     let block = BlockEnv { timestamp: U256::from(100u64), ..Default::default() };
-    let mut cfg = CfgEnv::new_with_spec(OpSpecId::JOVIAN);
+    let mut cfg = CfgEnv::new_with_spec(AA_ACTIVE_SPEC);
     cfg.disable_base_fee = true;
 
     let ctx = base_ctx()
@@ -182,7 +193,7 @@ fn validate_env_passes_unexpired_tx() {
 fn validate_initial_tx_gas_returns_aa_intrinsic() {
     let parts = XLayerAAParts { aa_intrinsic_gas: 50_000, ..Default::default() };
 
-    let mut cfg = CfgEnv::new_with_spec(OpSpecId::JOVIAN);
+    let mut cfg = CfgEnv::new_with_spec(AA_ACTIVE_SPEC);
     cfg.disable_base_fee = false; // not estimation
 
     let ctx = base_ctx()
@@ -220,7 +231,7 @@ fn validate_initial_tx_gas_estimation_adds_calldata_overhead() {
         ..Default::default()
     };
 
-    let mut cfg = CfgEnv::new_with_spec(OpSpecId::JOVIAN);
+    let mut cfg = CfgEnv::new_with_spec(AA_ACTIVE_SPEC);
     cfg.disable_base_fee = true; // estimation mode
 
     let ctx = base_ctx()
@@ -414,7 +425,7 @@ fn validate_against_state_aa_increments_nonce_manager_slot() {
         ..Default::default()
     };
 
-    let mut cfg = CfgEnv::new_with_spec(OpSpecId::JOVIAN);
+    let mut cfg = CfgEnv::new_with_spec(AA_ACTIVE_SPEC);
     cfg.disable_base_fee = true;
     cfg.disable_nonce_check = true;
 
@@ -536,7 +547,7 @@ fn execution_skips_remaining_phases_after_failure() {
         ..Default::default()
     };
 
-    let mut cfg = CfgEnv::new_with_spec(OpSpecId::JOVIAN);
+    let mut cfg = CfgEnv::new_with_spec(AA_ACTIVE_SPEC);
     cfg.disable_base_fee = true;
     cfg.disable_nonce_check = true;
 
@@ -669,7 +680,7 @@ fn state_validation_rejects_locked_account_with_delegation_entry() {
     };
 
     let block = BlockEnv { timestamp: U256::from(500u64), ..Default::default() };
-    let mut cfg = CfgEnv::new_with_spec(OpSpecId::JOVIAN);
+    let mut cfg = CfgEnv::new_with_spec(AA_ACTIVE_SPEC);
     cfg.disable_base_fee = true;
     cfg.disable_nonce_check = true;
 
@@ -699,7 +710,7 @@ fn validate_env_rejects_mismatched_chain_id() {
     // Asserts the *structural* error variant (not a string) because
     // `InvalidChainId` is an upstream symbol — a future rename should
     // surface as a compile error, not as a silently-broken test.
-    let mut cfg = CfgEnv::new_with_spec(OpSpecId::JOVIAN);
+    let mut cfg = CfgEnv::new_with_spec(AA_ACTIVE_SPEC);
     cfg.chain_id = 1;
 
     let tx = build_aa_tx(
