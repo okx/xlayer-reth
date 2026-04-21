@@ -14390,6 +14390,9 @@ dependencies = [
 name = "xlayer-revm"
 version = "0.0.6"
 dependencies = [
+ "alloy-evm",
+ "alloy-op-evm",
+ "alloy-primitives",
  "alloy-sol-types",
  "auto_impl",
  "op-revm",

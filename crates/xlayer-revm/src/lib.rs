@@ -33,12 +33,16 @@
 extern crate alloc as std;
 
 pub mod constants;
+pub mod evm;
+pub mod factory;
 pub mod handler;
 pub mod policy;
 pub mod precompiles;
 pub mod transaction;
 pub mod tx_env;
 
+pub use evm::{XLayerAAContext, XLayerAAEvm};
+pub use factory::XLayerAAEvmFactory;
 pub use tx_env::XLayerAATransaction;
 
 pub use constants::{

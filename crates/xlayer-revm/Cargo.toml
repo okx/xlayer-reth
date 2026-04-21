@@ -16,6 +16,11 @@ workspace = true
 revm = { workspace = true, default-features = false }
 op-revm = { workspace = true, default-features = false }
 
+# alloy-evm provides the `EvmFactory` / `Evm` traits the node plugs into.
+alloy-evm = { workspace = true, default-features = false }
+alloy-op-evm = { workspace = true, default-features = false }
+alloy-primitives = { workspace = true, default-features = false }
+
 # sol! bindings for precompile interfaces & ABI encoding
 alloy-sol-types = { workspace = true, default-features = false }
 
@@ -30,6 +35,9 @@ revm = { workspace = true, default-features = false, features = ["optional_no_ba
 [features]
 default = ["std"]
 std = [
+    "alloy-evm/std",
+    "alloy-op-evm/std",
+    "alloy-primitives/std",
     "alloy-sol-types/std",
     "op-revm/std",
     "revm/std",
