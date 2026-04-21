@@ -24,6 +24,14 @@ use reth_node_api::NodeTypes;
 use reth_node_builder::{components::PayloadServiceBuilder, BuilderContext};
 use reth_optimism_evm::OpEvmConfig;
 use reth_optimism_payload_builder::config::{OpBuilderConfig, OpDAConfig, OpGasLimitConfig};
+
+// `OpEvmConfig` stays as the outer `PayloadServiceBuilder` type parameter
+// so the enum dispatch in `bin/node/src/payload.rs` remains uniform across
+// default / default-with-p2p / flashblocks variants; inside this impl we
+// ignore the `_: OpEvmConfig` argument and build an `XLayerEvmConfig`
+// locally. The flashblocks paths switch to `XLayerEvmConfig` in a later
+// milestone.
+use crate::{xlayer_evm_config, XLayerEvmConfig};
 use reth_payload_builder::{PayloadBuilderHandle, PayloadBuilderService};
 use reth_provider::CanonStateSubscriptions;
 
@@ -119,10 +127,19 @@ where
         };
 
         let conf = ctx.config().builder.clone();
+        // E4a: the default builder path constructs a payload builder over
+        // `XLayerEvmConfig`, which plugs `XLayerAAEvmFactory` into the
+        // upstream `OpEvmConfig` slot so every tx this builder touches
+        // routes through `XLayerAAHandler`. Non-AA txs still delegate to
+        // `op_revm::OpHandler` internally, so existing consensus semantics
+        // are unchanged. The `_: OpEvmConfig` argument from the outer
+        // `PayloadServiceBuilder` signature is ignored here — we construct
+        // a fresh `XLayerEvmConfig` locally.
+        let evm_config: XLayerEvmConfig = xlayer_evm_config(ctx.chain_spec());
         let default_builder = reth_optimism_payload_builder::OpPayloadBuilder::with_builder_config(
             pool,
             ctx.provider().clone(),
-            OpEvmConfig::optimism(ctx.chain_spec()),
+            evm_config,
             OpBuilderConfig { da_config: self.da_config, gas_limit_config: self.gas_limit_config },
         )
         .set_compute_pending_block(self.compute_pending_block);

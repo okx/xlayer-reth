@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 xlayer-trace-monitor.workspace = true
 xlayer-bridge-intercept.workspace = true
+xlayer-revm.workspace = true
 
 # reth
 reth.workspace = true

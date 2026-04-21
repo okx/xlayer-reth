@@ -20,6 +20,13 @@ op-revm = { workspace = true, default-features = false }
 alloy-evm = { workspace = true, default-features = false }
 alloy-op-evm = { workspace = true, default-features = false }
 alloy-primitives = { workspace = true, default-features = false }
+op-alloy-consensus = { workspace = true, default-features = false }
+
+# `reth_evm::TransactionEnv` — pulled in so downstream node code can treat
+# `XLayerAATransaction<T>` as a reth-compatible tx env. `reth-optimism-evm`
+# supplies the `OpTx` newtype we delegate wire→exec conversions to.
+reth-evm = { workspace = true, default-features = false }
+reth-optimism-evm = { workspace = true, default-features = false }
 
 # sol! bindings for precompile interfaces & ABI encoding
 alloy-sol-types = { workspace = true, default-features = false }
@@ -39,7 +46,9 @@ std = [
     "alloy-op-evm/std",
     "alloy-primitives/std",
     "alloy-sol-types/std",
+    "op-alloy-consensus/std",
     "op-revm/std",
+    "reth-evm/std",
     "revm/std",
     "serde?/std",
 ]

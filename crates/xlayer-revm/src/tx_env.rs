@@ -4,8 +4,12 @@
 //! [`OpTransaction`]. For non-AA types the parts stay default (empty) and
 //! all op-revm / mainnet behaviour is preserved.
 
+use alloy_evm::{FromRecoveredTx, FromTxWithEncoded, IntoTxEnv};
+use op_alloy_consensus::OpTxEnvelope;
 use op_revm::transaction::{abstraction::OpTxTr, deposit::DEPOSIT_TRANSACTION_TYPE};
+use reth_optimism_evm::OpTx;
 use revm::{
+    context::TxEnv as RevmTxEnv,
     context_interface::Transaction,
     handler::SystemCallTx,
     primitives::{Address, Bytes, TxKind, B256, U256},
@@ -152,3 +156,63 @@ impl<T: Transaction> XLayerAATxTr for XLayerAATransaction<T> {
 pub const XLAYERAA_TX_TYPE_DEPOSIT: u8 = DEPOSIT_TRANSACTION_TYPE;
 /// Convenience re-export of the XLayerAA tx-type byte.
 pub const XLAYERAA_TX_TYPE_AA: u8 = XLAYERAA_TX_TYPE;
+
+// Identity conversion so `XLayerAATransaction<T>` can be fed to
+// [`alloy_evm::EvmFactory::create_evm`] directly (the factory requires
+// `Self::Tx: IntoTxEnv<Self::Tx>`). Mirrors op-revm's blanket
+// `IntoTxEnv<Self> for OpTransaction<T>`.
+impl<T: Transaction> IntoTxEnv<Self> for XLayerAATransaction<T> {
+    fn into_tx_env(self) -> Self {
+        self
+    }
+}
+
+// The OP block executor factory surfaces the enveloped tx bytes via its
+// own `OpTxEnv` trait (used for L1 cost accounting). Delegate to the
+// inner `OpTransaction` so non-AA txs keep their canonical encoded bytes.
+impl<T: Transaction> alloy_op_evm::block::OpTxEnv for XLayerAATransaction<T> {
+    fn encoded_bytes(&self) -> Option<&Bytes> {
+        self.op.encoded_bytes()
+    }
+}
+
+// Reth's `ConfigureEvm` requires `Self::Tx: TransactionEnv` — a cluster of
+// set_* helpers used by the payload builder to adjust gas / nonce / access
+// list on pooled txs before execution. Delegate through the inner OP tx.
+impl<T> reth_evm::TransactionEnv for XLayerAATransaction<T>
+where
+    T: reth_evm::TransactionEnv + Transaction,
+{
+    fn set_gas_limit(&mut self, gas_limit: u64) {
+        self.op.set_gas_limit(gas_limit);
+    }
+    fn nonce(&self) -> u64 {
+        reth_evm::TransactionEnv::nonce(&self.op)
+    }
+    fn set_nonce(&mut self, nonce: u64) {
+        self.op.set_nonce(nonce);
+    }
+    fn set_access_list(&mut self, access_list: revm::context::transaction::AccessList) {
+        self.op.set_access_list(access_list);
+    }
+}
+
+// --- Wire → exec conversions for the OP tx envelope -----------------------
+//
+// The pool / payload builder hand pooled transactions to the EVM factory as
+// `OpTxEnvelope` (Legacy / 2930 / 1559 / 7702 / Deposit). We delegate the
+// non-AA shapes to `OpTx` (op-reth's newtype over `OpTransaction<TxEnv>`)
+// and wrap the result with empty `XLayerAAParts` — 0x7B transactions ride
+// on a separate extended envelope that lands in a follow-up milestone.
+
+impl FromRecoveredTx<OpTxEnvelope> for XLayerAATransaction<RevmTxEnv> {
+    fn from_recovered_tx(tx: &OpTxEnvelope, sender: Address) -> Self {
+        Self::new(OpTx::from_recovered_tx(tx, sender).into())
+    }
+}
+
+impl FromTxWithEncoded<OpTxEnvelope> for XLayerAATransaction<RevmTxEnv> {
+    fn from_encoded_tx(tx: &OpTxEnvelope, caller: Address, encoded: Bytes) -> Self {
+        Self::new(OpTx::from_encoded_tx(tx, caller, encoded).into())
+    }
+}
