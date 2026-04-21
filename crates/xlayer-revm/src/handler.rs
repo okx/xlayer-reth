@@ -236,6 +236,22 @@ where
             .into());
         }
 
+        // EIP-8130: at most one create entry per transaction. `code_placements`
+        // is populated exclusively from create entries (auto-delegation uses
+        // `auto_delegation_code`), so its length is the create count. The
+        // evm-compat parts constructor is expected to uphold this; this is a
+        // defensive runtime guard against a malformed parts bundle.
+        if parts.code_placements.len() > 1 {
+            return Err(OpTransactionError::Base(InvalidTransaction::Str(
+                format!(
+                    "XLayerAA: multiple create entries ({}); at most one allowed",
+                    parts.code_placements.len()
+                )
+                .into(),
+            ))
+            .into());
+        }
+
         // EIP-155-style chain_id check. Upstream mainnet validate_env does
         // this for OP txs; the AA branch bypasses mainnet so we replicate it.
         if ctx.cfg().tx_chain_id_check() {

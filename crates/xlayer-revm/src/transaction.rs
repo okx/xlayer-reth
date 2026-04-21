@@ -127,6 +127,10 @@ pub struct XLayerAAParts {
     /// `Some(target)` means the tx requests EIP-7702-style code delegation to
     /// `target`. `Some(Address::ZERO)` clears an existing delegation.
     /// `None` means no delegation entry is present.
+    ///
+    /// Invariant: EIP-8130 permits at most one delegation entry per
+    /// transaction; the `Option` type makes this structurally impossible
+    /// to violate — no runtime check is needed.
     pub delegation_target: Option<Address>,
     /// Total account-change units in the transaction.
     ///
@@ -173,6 +177,12 @@ pub struct XLayerAAParts {
     /// Applied alongside `config_writes` after authorizer validation.
     pub sequence_updates: Vec<XLayerAASequenceUpdate>,
     /// Code placements for account creation (runtime bytecode at CREATE2-derived addresses).
+    ///
+    /// Invariant: at most one entry. EIP-8130 permits at most one create
+    /// entry per transaction, and auto-delegation uses
+    /// [`auto_delegation_code`](Self::auto_delegation_code) rather than this
+    /// vector, so the length is exactly the create-entry count. The handler
+    /// enforces this in `validate_env` as a defensive runtime check.
     pub code_placements: Vec<XLayerAACodePlacement>,
     /// Phased call batches. Each inner `Vec` is one atomic phase.
     pub call_phases: Vec<Vec<XLayerAACall>>,

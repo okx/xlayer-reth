@@ -4,6 +4,25 @@
 
 Running log of mistakes made during XLayerAA implementation, so we don't repeat them. Append new entries at the top.
 
+### 2026-04-21 — No structural guard against multiple create entries in `XLayerAAParts`
+
+EIP-8130 allows at most one create entry per transaction. `XLayerAAParts`
+encodes delegation as `Option<Address>` (type-enforced "at most one"),
+but create entries flow into `code_placements: Vec<XLayerAACodePlacement>`
+with no size bound. If the evm-compat parts constructor regressed to
+emit two placements, the handler would silently process both.
+
+**Fix:** add a defensive `code_placements.len() > 1` check in `validate_env`
+returning an `Err` (not `assert!`), and document the invariant on the
+field itself. The delegation field got a matching doc note that makes
+the type-enforced guarantee explicit.
+
+**Lesson:** type-level invariants (`Option<T>`, newtype wrappers,
+`[T; N]`) are always preferable to runtime checks; when a spec constraint
+doesn't map to a type (bounded-cardinality `Vec`), document the invariant
+where the field is declared AND enforce it once in the outermost
+validation stage — don't rely on downstream code reading it correctly.
+
 ### 2026-04-21 — AA branch bypassed `chain_id` check
 
 Upstream op-revm's `validate_env` delegates the EIP-155 `chain_id` check to `revm-handler`'s mainnet `validate_env`:
