@@ -14148,6 +14148,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "serde",
+ "xlayer-revm",
 ]
 
 [[package]]
