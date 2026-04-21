@@ -18,6 +18,10 @@ alloy-eips = { workspace = true, default-features = false }
 # `k256` feature pulls in ecrecover — needed for the K1 native verifier.
 alloy-primitives = { workspace = true, default-features = false, features = ["k256"] }
 alloy-rlp = { workspace = true, default-features = false }
+# `alloy-serde::quantity` helpers used by the hex-encoded numeric
+# serde adapters on `TxEip8130`. Only pulled in when the `serde`
+# feature is active.
+alloy-serde = { workspace = true, optional = true }
 
 # op-revm — needed only for `OpSpecId`, the fork discriminator threaded
 # through the gas schedule. `default-features = false` keeps this
@@ -48,5 +52,6 @@ serde = [
     "alloy-consensus/serde",
     "alloy-eips/serde",
     "alloy-primitives/serde",
+    "dep:alloy-serde",
     "dep:serde",
 ]
