@@ -80,7 +80,6 @@ fn generate_instance_init(
                     let mut args = #args_expr;
                     args.flashblocks.enabled = true;
                     args.flashblocks.flashblocks_port = crate::tests::get_available_port();
-                    args.flashblocks.flashblocks_end_buffer_ms = 75;
                     args
                 }).await?
             }
@@ -91,7 +90,6 @@ fn generate_instance_init(
                     let mut args = crate::args::BuilderArgs::default();
                     args.flashblocks.enabled = true;
                     args.flashblocks.flashblocks_port = crate::tests::get_available_port();
-                    args.flashblocks.flashblocks_end_buffer_ms = 75;
                     args
                 }, #config_expr).await?
             }
@@ -102,7 +100,6 @@ fn generate_instance_init(
                     let mut args = #args_expr;
                     args.flashblocks.enabled = true;
                     args.flashblocks.flashblocks_port = crate::tests::get_available_port();
-                    args.flashblocks.flashblocks_end_buffer_ms = 75;
                     args
                 }, #config_expr).await?
             }
