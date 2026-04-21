@@ -14,6 +14,10 @@ use alloy_rlp::{length_of_length, BufMut, Decodable, Encodable, Header};
 
 use super::{
     constants::{AA_PAYER_TYPE, AA_TX_TYPE_ID},
+    encoding::{
+        decode_nested_calls, decode_optional_address, encode_list, encode_nested_calls,
+        encode_optional_address, list_len, nested_calls_len, optional_address_len,
+    },
     AccountChangeEntry, Call,
 };
 
@@ -425,91 +429,6 @@ impl Transaction for TxEip8130 {
 }
 
 // ---------------------------------------------------------------------------
-// RLP helpers for nested structures
-// ---------------------------------------------------------------------------
-
-fn encode_list<T: Encodable>(items: &[T], out: &mut dyn BufMut) {
-    let payload_len: usize = items.iter().map(Encodable::length).sum();
-    Header { list: true, payload_length: payload_len }.encode(out);
-    for item in items {
-        item.encode(out);
-    }
-}
-
-fn list_len<T: Encodable>(items: &[T]) -> usize {
-    let payload_len: usize = items.iter().map(Encodable::length).sum();
-    payload_len + length_of_length(payload_len)
-}
-
-fn encode_optional_address(addr: &Option<Address>, out: &mut dyn BufMut) {
-    match addr {
-        Some(address) => address.encode(out),
-        None => out.put_u8(0x80),
-    }
-}
-
-fn optional_address_len(addr: &Option<Address>) -> usize {
-    match addr {
-        Some(address) => address.length(),
-        None => 1,
-    }
-}
-
-fn decode_optional_address(buf: &mut &[u8]) -> alloy_rlp::Result<Option<Address>> {
-    let header = Header::decode(buf)?;
-    if header.list {
-        return Err(alloy_rlp::Error::UnexpectedList);
-    }
-    match header.payload_length {
-        0 => Ok(None),
-        20 => {
-            if buf.len() < 20 {
-                return Err(alloy_rlp::Error::UnexpectedLength);
-            }
-            let address = Address::from_slice(&buf[..20]);
-            *buf = &buf[20..];
-            Ok(Some(address))
-        }
-        _ => Err(alloy_rlp::Error::UnexpectedLength),
-    }
-}
-
-fn encode_nested_calls(phases: &[Vec<Call>], out: &mut dyn BufMut) {
-    let payload_len: usize = phases.iter().map(|phase| list_len(phase.as_slice())).sum();
-    Header { list: true, payload_length: payload_len }.encode(out);
-    for phase in phases {
-        encode_list(phase, out);
-    }
-}
-
-fn nested_calls_len(phases: &[Vec<Call>]) -> usize {
-    let payload_len: usize = phases.iter().map(|phase| list_len(phase.as_slice())).sum();
-    payload_len + length_of_length(payload_len)
-}
-
-fn decode_nested_calls(buf: &mut &[u8]) -> alloy_rlp::Result<Vec<Vec<Call>>> {
-    let outer = Header::decode(buf)?;
-    if !outer.list {
-        return Err(alloy_rlp::Error::UnexpectedString);
-    }
-    let outer_end = buf.len() - outer.payload_length;
-    let mut phases = Vec::new();
-    while buf.len() > outer_end {
-        let inner = Header::decode(buf)?;
-        if !inner.list {
-            return Err(alloy_rlp::Error::UnexpectedString);
-        }
-        let inner_end = buf.len() - inner.payload_length;
-        let mut calls = Vec::new();
-        while buf.len() > inner_end {
-            calls.push(Call::decode(buf)?);
-        }
-        phases.push(calls);
-    }
-    Ok(phases)
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -612,22 +531,6 @@ mod tests {
         tx.encode(&mut buf);
         let decoded = TxEip8130::decode(&mut buf.as_slice()).unwrap();
         assert_eq!(tx, decoded);
-    }
-
-    #[test]
-    fn optional_address_helpers_round_trip() {
-        let mut empty_buf = Vec::new();
-        encode_optional_address(&None, &mut empty_buf);
-        assert_eq!(empty_buf, vec![0x80]);
-        let empty_decoded = decode_optional_address(&mut empty_buf.as_slice()).unwrap();
-        assert_eq!(empty_decoded, None);
-
-        let address = Address::repeat_byte(0xAB);
-        let mut address_buf = Vec::new();
-        encode_optional_address(&Some(address), &mut address_buf);
-        assert_eq!(optional_address_len(&Some(address)), address_buf.len());
-        let address_decoded = decode_optional_address(&mut address_buf.as_slice()).unwrap();
-        assert_eq!(address_decoded, Some(address));
     }
 
     #[test]

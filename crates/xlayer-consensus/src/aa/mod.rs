@@ -4,6 +4,7 @@
 mod address;
 mod build;
 mod constants;
+mod encoding;
 mod native;
 mod signature;
 mod tx;
