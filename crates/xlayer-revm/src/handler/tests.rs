@@ -11,7 +11,8 @@ use op_revm::{
 };
 use revm::{
     Context, Journal, MainContext,
-    context::{BlockEnv, CfgEnv, TxEnv},
+    bytecode::Bytecode,
+    context::{BlockEnv, CfgEnv, TxEnv, result::InvalidTransaction},
     context_interface::{ContextTr, JournalTr, result::EVMError},
     database::InMemoryDB,
     database_interface::EmptyDB,
@@ -21,11 +22,14 @@ use revm::{
     state::AccountInfo,
 };
 
-use super::{XLayerAAHandler, helpers::aa_nonce_slot};
+use super::{
+    XLayerAAHandler,
+    helpers::{ACCOUNT_CONFIG_ADDRESS, NONCE_KEY_MAX, aa_lock_slot, aa_nonce_slot},
+};
 use crate::{
     constants::{MAX_ACCOUNT_CHANGES_PER_TX, MAX_CALLS_PER_TX, XLAYERAA_TX_TYPE},
     precompiles::NONCE_MANAGER_ADDRESS,
-    transaction::{XLayerAACall, XLayerAAParts},
+    transaction::{XLayerAACall, XLayerAACodePlacement, XLayerAAParts, decode_phase_statuses},
     tx_env::XLayerAATransaction,
 };
 
@@ -466,5 +470,304 @@ fn reimburse_caller_aa_refunds_payer() {
     // Sender balance unchanged.
     let sender_acc = evm.ctx().journal_mut().load_account(sender).unwrap();
     assert_eq!(sender_acc.info.balance, U256::ZERO);
+}
+
+// ---------------------------------------------------------------------------
+// EIP-8130 conformance regressions
+// ---------------------------------------------------------------------------
+//
+// Tests in this section pin behaviour defined by EIP-8130. Each test:
+//   - fixes a concrete spec (OpSpecId::JOVIAN) so a future hardfork that
+//     changes semantics is a *new* test rather than a silent drift here;
+//   - asserts against error *variants* for upstream-owned errors (e.g.
+//     `InvalidTransaction::InvalidChainId`) so a future rename surfaces as
+//     a compile-time break, not a silent false positive;
+//   - asserts against short, stable substrings for our own
+//     `InvalidTransaction::Str(..)` errors — the strings are our code, so
+//     if we rename them we also update the test.
+//
+// Upstream revm/op-revm fork bumps that touch these code paths will either:
+//   a) rename an imported symbol — tests fail to compile, we fix;
+//   b) restructure an error enum — tests fail to compile, we fix;
+//   c) change *behaviour* — tests fail at runtime, which is the signal we
+//      need to re-read the EIP or adjust our handler accordingly.
+
+// --- P0 #1: phase break ----------------------------------------------------
+
+#[test]
+fn execution_skips_remaining_phases_after_failure() {
+    // EIP-8130 Block execution: "if any call in a phase reverts, all state
+    // changes for that phase are discarded and remaining phases are skipped."
+    //
+    // Observation: `execution()` encodes the per-phase success flags into
+    // the returned `FrameResult` output. Correct behaviour → output has
+    // exactly one (failed) entry. Pre-fix behaviour continued the loop,
+    // producing two entries.
+    let sender = Address::with_last_byte(0x11);
+    let revert_target = Address::with_last_byte(0xAA);
+    let nop_target = Address::with_last_byte(0xBB);
+
+    let mut db = InMemoryDB::default();
+    db.insert_account_info(
+        sender,
+        AccountInfo { balance: U256::from(1_000_000_000u128), ..Default::default() },
+    );
+    // 0xfe = INVALID opcode — any call to this address aborts with an error.
+    db.insert_account_info(
+        revert_target,
+        AccountInfo {
+            code: Some(Bytecode::new_raw(Bytes::from_static(&[0xfe]))),
+            ..Default::default()
+        },
+    );
+    // 0x00 = STOP — any call here halts cleanly and succeeds.
+    db.insert_account_info(
+        nop_target,
+        AccountInfo {
+            code: Some(Bytecode::new_raw(Bytes::from_static(&[0x00]))),
+            ..Default::default()
+        },
+    );
+
+    let parts = XLayerAAParts {
+        sender,
+        payer: sender,
+        nonce_key: U256::from(1),
+        aa_intrinsic_gas: 21_000,
+        call_phases: vec![
+            vec![XLayerAACall { to: revert_target, data: Bytes::new(), value: U256::ZERO }],
+            vec![XLayerAACall { to: nop_target, data: Bytes::new(), value: U256::ZERO }],
+        ],
+        ..Default::default()
+    };
+
+    let mut cfg = CfgEnv::new_with_spec(OpSpecId::JOVIAN);
+    cfg.disable_base_fee = true;
+    cfg.disable_nonce_check = true;
+
+    let tx = build_aa_tx(
+        TxEnv::builder().caller(sender).gas_limit(1_000_000).build_fill(),
+        parts,
+    );
+
+    let ctx: TestCtx<InMemoryDB> = Context::mainnet()
+        .with_db(db)
+        .with_cfg(cfg)
+        .with_tx(tx)
+        .with_chain(L1BlockInfo::default());
+
+    let mut evm = ctx.build_op();
+    let mut handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> =
+        XLayerAAHandler::new();
+
+    Handler::validate_env(&handler, &mut evm).unwrap();
+    let init_gas = Handler::validate_initial_tx_gas(&handler, &mut evm).unwrap();
+    Handler::validate_against_state_and_deduct_caller(&handler, &mut evm).unwrap();
+    let frame_result = Handler::execution(&mut handler, &mut evm, &init_gas).unwrap();
+
+    let FrameResult::Call(outcome) = frame_result else {
+        panic!("expected Call outcome");
+    };
+    let statuses = decode_phase_statuses(&outcome.result.output);
+    assert_eq!(
+        statuses.len(),
+        1,
+        "phase 1 must be skipped after phase 0 failure; got statuses={statuses:?}"
+    );
+    assert!(!statuses[0], "phase 0 should be marked as failed");
+}
+
+// --- P0 #2: nonce-free structural MUSTs ------------------------------------
+
+#[test]
+fn validate_env_rejects_nonce_free_without_expiry() {
+    // EIP-8130: when `nonce_key == NONCE_KEY_MAX`, `expiry` MUST be non-zero.
+    let parts = XLayerAAParts {
+        nonce_key: NONCE_KEY_MAX,
+        expiry: 0,
+        nonce_free_hash: Some(B256::from([1u8; 32])),
+        ..Default::default()
+    };
+
+    let ctx = base_ctx()
+        .with_tx(build_aa_tx(TxEnv::builder().gas_limit(1_000_000).build_fill(), parts));
+    let mut evm = ctx.build_op();
+    let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> =
+        XLayerAAHandler::new();
+    let err = Handler::validate_env(&handler, &mut evm).unwrap_err();
+    assert!(format!("{err:?}").contains("non-zero expiry"), "{err:?}");
+}
+
+#[test]
+fn validate_env_rejects_nonce_free_with_nonzero_sequence() {
+    // EIP-8130: when `nonce_key == NONCE_KEY_MAX`, `nonce_sequence` MUST be 0.
+    let parts = XLayerAAParts {
+        nonce_key: NONCE_KEY_MAX,
+        expiry: 1_000,
+        nonce_free_hash: Some(B256::from([1u8; 32])),
+        ..Default::default()
+    };
+
+    let ctx = base_ctx().with_tx(build_aa_tx(
+        TxEnv::builder().gas_limit(1_000_000).nonce(42).build_fill(),
+        parts,
+    ));
+    let mut evm = ctx.build_op();
+    let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> =
+        XLayerAAHandler::new();
+    let err = Handler::validate_env(&handler, &mut evm).unwrap_err();
+    assert!(format!("{err:?}").contains("nonce_sequence == 0"), "{err:?}");
+}
+
+// --- P1-a: nonce_free_hash required ---------------------------------------
+
+#[test]
+fn validate_env_rejects_nonce_free_without_hash() {
+    // Our implementation uses `nonce_free_hash` as the replay-protection key;
+    // `None` would collide every such tx onto the zero-hash slot.
+    let parts = XLayerAAParts {
+        nonce_key: NONCE_KEY_MAX,
+        expiry: 1_000,
+        nonce_free_hash: None,
+        ..Default::default()
+    };
+
+    let ctx = base_ctx()
+        .with_tx(build_aa_tx(TxEnv::builder().gas_limit(1_000_000).build_fill(), parts));
+    let mut evm = ctx.build_op();
+    let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> =
+        XLayerAAHandler::new();
+    let err = Handler::validate_env(&handler, &mut evm).unwrap_err();
+    assert!(format!("{err:?}").contains("nonce_free_hash"), "{err:?}");
+}
+
+// --- P1-b: lock check at step 1 for delegation entries --------------------
+
+#[test]
+fn state_validation_rejects_locked_account_with_delegation_entry() {
+    // EIP-8130 Block execution step 1: "If `account_changes` contains config
+    // change or delegation entries, read lock state for `from`. Reject
+    // transaction if account is locked."
+    //
+    // Verifies that the lock check fires for a delegation-only tx (the
+    // pre-fix implementation only checked locks when config changes were
+    // present) AND that it runs before gas deduction.
+    let sender = Address::with_last_byte(0x11);
+
+    let mut db = InMemoryDB::default();
+    db.insert_account_info(
+        sender,
+        AccountInfo { balance: U256::from(10_000_000u128), ..Default::default() },
+    );
+
+    // Lock packing: `unlocks_at` is a u64 stored in bytes [11..16] of the
+    // 32-byte slot (see `check_account_lock`). Set unlocks_at = 1_000 while
+    // block timestamp = 500, so the account is still locked.
+    let unlocks_at: u64 = 1_000;
+    let mut lock_bytes = [0u8; 32];
+    lock_bytes[11..16].copy_from_slice(&unlocks_at.to_be_bytes()[3..8]);
+    db.insert_account_storage(
+        ACCOUNT_CONFIG_ADDRESS,
+        aa_lock_slot(sender),
+        U256::from_be_bytes(lock_bytes),
+    )
+    .unwrap();
+
+    let parts = XLayerAAParts {
+        sender,
+        payer: sender,
+        nonce_key: U256::from(1),
+        delegation_target: Some(Address::with_last_byte(0xEE)),
+        ..Default::default()
+    };
+
+    let block = BlockEnv { timestamp: U256::from(500u64), ..Default::default() };
+    let mut cfg = CfgEnv::new_with_spec(OpSpecId::JOVIAN);
+    cfg.disable_base_fee = true;
+    cfg.disable_nonce_check = true;
+
+    let tx = build_aa_tx(
+        TxEnv::builder().caller(sender).gas_limit(100_000).build_fill(),
+        parts,
+    );
+
+    let ctx: TestCtx<InMemoryDB> = Context::mainnet()
+        .with_db(db)
+        .with_cfg(cfg)
+        .with_block(block)
+        .with_tx(tx)
+        .with_chain(L1BlockInfo::default());
+
+    let mut evm = ctx.build_op();
+    let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> =
+        XLayerAAHandler::new();
+    let err =
+        Handler::validate_against_state_and_deduct_caller(&handler, &mut evm).unwrap_err();
+    assert!(format!("{err:?}").contains("account is locked"), "{err:?}");
+}
+
+// --- P2-a: chain_id check in AA branch ------------------------------------
+
+#[test]
+fn validate_env_rejects_mismatched_chain_id() {
+    // Upstream mainnet validate_env performs the EIP-155 chain_id check,
+    // but the AA branch returns early and must replicate it.
+    //
+    // Asserts the *structural* error variant (not a string) because
+    // `InvalidChainId` is an upstream symbol — a future rename should
+    // surface as a compile error, not as a silently-broken test.
+    let mut cfg = CfgEnv::new_with_spec(OpSpecId::JOVIAN);
+    cfg.chain_id = 1;
+
+    let tx = build_aa_tx(
+        TxEnv::builder().gas_limit(1_000_000).chain_id(Some(999)).build_fill(),
+        XLayerAAParts::default(),
+    );
+
+    let ctx: TestCtx<EmptyDB> = Context::mainnet()
+        .with_cfg(cfg)
+        .with_tx(tx)
+        .with_chain(L1BlockInfo::default());
+    let mut evm = ctx.build_op();
+    let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> =
+        XLayerAAHandler::new();
+    let err = Handler::validate_env(&handler, &mut evm).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            EVMError::Transaction(OpTransactionError::Base(InvalidTransaction::InvalidChainId))
+        ),
+        "{err:?}"
+    );
+}
+
+// --- P2-b: at most one create entry ---------------------------------------
+
+#[test]
+fn validate_env_rejects_multiple_create_entries() {
+    // EIP-8130 permits at most one create entry per transaction.
+    // `code_placements` is the post-parse representation of create entries.
+    let parts = XLayerAAParts {
+        code_placements: vec![
+            XLayerAACodePlacement {
+                address: Address::with_last_byte(0x1),
+                code: Bytes::from_static(&[0x00]),
+            },
+            XLayerAACodePlacement {
+                address: Address::with_last_byte(0x2),
+                code: Bytes::from_static(&[0x00]),
+            },
+        ],
+        account_change_units: 2,
+        ..Default::default()
+    };
+
+    let ctx = base_ctx()
+        .with_tx(build_aa_tx(TxEnv::builder().gas_limit(1_000_000).build_fill(), parts));
+    let mut evm = ctx.build_op();
+    let handler: XLayerAAHandler<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>> =
+        XLayerAAHandler::new();
+    let err = Handler::validate_env(&handler, &mut evm).unwrap_err();
+    assert!(format!("{err:?}").contains("multiple create entries"), "{err:?}");
 }
 
