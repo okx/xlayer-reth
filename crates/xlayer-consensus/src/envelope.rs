@@ -42,19 +42,27 @@
 //! [`OpPooledTransaction`]: op_alloy_consensus::OpPooledTransaction
 //! [`OpTransaction`]: op_alloy_consensus::OpTransaction
 
-use core::ops::Deref;
+use core::{mem::size_of_val, ops::Deref};
 
-use alloy_consensus::{transaction::Transaction, Extended, Sealable, Sealed};
+use alloy_consensus::{
+    crypto::RecoveryError,
+    transaction::{SignerRecoverable, Transaction, TxHashRef},
+    Extended, Sealable, Sealed,
+};
 use alloy_eips::eip2718::{Decodable2718, Eip2718Result, Encodable2718, IsTyped2718, Typed2718};
 use alloy_evm::{FromRecoveredTx, FromTxWithEncoded};
-use alloy_primitives::{Address, Bytes, ChainId, TxKind, B256, U256};
+use alloy_primitives::{Address, Bytes, ChainId, TxHash, TxKind, B256, U256};
 use alloy_rlp::{BufMut, Decodable, Encodable};
 use op_alloy_consensus::{OpTransaction, OpTxEnvelope, TxDeposit};
 use op_revm::OpSpecId;
+use reth_primitives_traits::InMemorySize;
 use revm::context::TxEnv as RevmTxEnv;
 use xlayer_revm::tx_env::XLayerAATransaction;
 
-use crate::aa::{build_aa_parts, TxEip8130};
+use crate::aa::{
+    build_aa_parts, k1_recover, parse_sender_auth, sender_signature_hash, ParsedSenderAuth,
+    TxEip8130,
+};
 
 /// Newtype wrapper over [`Sealed<TxEip8130>`] that lets us provide an
 /// [`OpTransaction`] impl (orphan rule blocks impl on bare
@@ -448,6 +456,121 @@ impl OpTransaction for XLayerTxEnvelope {
     }
 }
 
+// --- InMemorySize ------------------------------------------------
+//
+// reth uses this to estimate pool / payload buffer footprint. For
+// the sealed AA body that's the fixed sealed-struct overhead plus
+// the embedded tx's variable-sized fields (calls / account_changes
+// / sender_auth / payer_auth). Approximated via
+// `core::mem::size_of_val` — exact per-byte accuracy isn't required
+// because reth's pool / payload eviction heuristics treat these as
+// ballpark figures.
+
+impl InMemorySize for XLayerAAEnvelope {
+    fn size(&self) -> usize {
+        let tx = self.tx();
+        size_of_val(tx)
+            + tx.sender_auth.len()
+            + tx.payer_auth.len()
+            + tx.calls
+                .iter()
+                .map(|phase| phase.iter().map(|c| c.data.len()).sum::<usize>())
+                .sum::<usize>()
+    }
+}
+
+impl InMemorySize for XLayerTxEnvelope {
+    fn size(&self) -> usize {
+        match &self.0 {
+            Extended::BuiltIn(env) => env.size(),
+            Extended::Other(aa) => aa.size(),
+        }
+    }
+}
+
+// --- TxHashRef ---------------------------------------------------
+//
+// The sealed AA body carries its hash pre-computed; expose it as a
+// `&TxHash` (= `&B256`) so the pool / RPC don't recompute on every
+// lookup. Standard op envelopes already have `TxHashRef` via a
+// blanket impl on `EthereumTxEnvelope`-derived types.
+
+impl TxHashRef for XLayerAAEnvelope {
+    fn tx_hash(&self) -> &TxHash {
+        self.0.hash_ref()
+    }
+}
+
+impl TxHashRef for XLayerTxEnvelope {
+    fn tx_hash(&self) -> &TxHash {
+        match &self.0 {
+            // `OpTxEnvelope::tx_hash` resolves to the inherent method
+            // (returning `B256` by value) by default — force the
+            // `TxHashRef` trait lookup so we get `&B256` back.
+            Extended::BuiltIn(env) => <OpTxEnvelope as TxHashRef>::tx_hash(env),
+            Extended::Other(aa) => aa.tx_hash(),
+        }
+    }
+}
+
+// --- SignerRecoverable -------------------------------------------
+//
+// For **configured-account** XLayerAA transactions (`tx.from.is_some()`)
+// the sender is the declared `from` field — no ecrecover, no k1
+// derivation. The `sender_auth` blob still matters for authorization
+// at execution time (the handler validates it against the configured
+// owner set), but the envelope-level "who is the sender" answer is
+// just `from`.
+//
+// For **EOA-mode** transactions (`tx.from.is_none()`) we run the
+// native k1 recovery on `sender_auth` (a 65-byte ECDSA signature over
+// `sender_signature_hash(tx)`). Matches the same code path used by
+// `xlayer-revm`'s handler — see
+// [`crate::aa::native::k1_recover`].
+//
+// `recover_signer_unchecked` skips the EIP-2 low-s check. `k1_recover`
+// routes through alloy-primitives' ecrecover which enforces low-s,
+// so "unchecked" here degrades to the checked path — acceptable since
+// EIP-8130 is a post-EIP-2 tx type and no pre-EIP-2 replay concern
+// exists.
+impl SignerRecoverable for XLayerAAEnvelope {
+    fn recover_signer(&self) -> Result<Address, RecoveryError> {
+        let tx = self.tx();
+        if let Some(addr) = tx.from {
+            return Ok(addr);
+        }
+        let ParsedSenderAuth::Eoa { signature } =
+            parse_sender_auth(tx).map_err(|_| RecoveryError::new())?
+        else {
+            // Should be unreachable — configured-auth requires `from`.
+            return Err(RecoveryError::new());
+        };
+        let hash = sender_signature_hash(tx);
+        k1_recover(&hash, &signature).map(|r| r.address).map_err(|_| RecoveryError::new())
+    }
+
+    fn recover_signer_unchecked(&self) -> Result<Address, RecoveryError> {
+        // EIP-8130 is post-EIP-2; no separate unchecked path.
+        self.recover_signer()
+    }
+}
+
+impl SignerRecoverable for XLayerTxEnvelope {
+    fn recover_signer(&self) -> Result<Address, RecoveryError> {
+        match &self.0 {
+            Extended::BuiltIn(env) => env.recover_signer(),
+            Extended::Other(aa) => aa.recover_signer(),
+        }
+    }
+
+    fn recover_signer_unchecked(&self) -> Result<Address, RecoveryError> {
+        match &self.0 {
+            Extended::BuiltIn(env) => env.recover_signer_unchecked(),
+            Extended::Other(aa) => aa.recover_signer_unchecked(),
+        }
+    }
+}
+
 // --- Wire → exec conversions --------------------------------------
 //
 // These are the impls the node's pool / payload-builder plumbing
@@ -710,6 +833,60 @@ mod tests {
         // verifiable; either 0 (verification failed → default
         // fallback) or the wire tx's phase count is correct.
         assert!(converted.xlayeraa.call_phases.len() <= 1);
+    }
+
+    /// `SignerRecoverable::recover_signer` must return the declared
+    /// `from` field for configured-account AA txs — no ecrecover.
+    /// Our `sample_aa_tx` sets `from = Some(Address::repeat_byte(0x01))`,
+    /// so we expect exactly that address back.
+    #[test]
+    fn recover_signer_returns_configured_from_address() {
+        let env = XLayerTxEnvelope::aa(sample_aa_tx());
+        let recovered = env.recover_signer().expect("configured account recovers trivially");
+        assert_eq!(recovered, Address::repeat_byte(0x01));
+    }
+
+    /// EOA-mode AA txs require ecrecover over `sender_signature_hash`.
+    /// The stub 0xFF signature in `sample_aa_tx` won't verify cleanly,
+    /// but the recovery path must not panic — it surfaces a
+    /// `RecoveryError` instead. Pin the "no panic" invariant.
+    #[test]
+    fn eoa_mode_recover_doesnt_panic_on_bad_sig() {
+        let mut tx = sample_aa_tx();
+        tx.from = None;
+        tx.sender_auth = Bytes::from_static(&[0xFF; 65]);
+        let env = XLayerTxEnvelope::aa(tx);
+        // Either succeeds (if 0xFF magically yields a valid point) or
+        // surfaces an error — either way the call returns.
+        let _ = env.recover_signer();
+    }
+
+    /// `TxHashRef::tx_hash` on an AA envelope yields the pre-computed
+    /// seal hash, not a re-derived one. Pin that the ref matches
+    /// `XLayerAAEnvelope::hash()` which is the canonical source.
+    #[test]
+    fn tx_hash_ref_returns_precomputed_seal() {
+        let aa_tx = sample_aa_tx();
+        let expected = alloy_consensus::Sealable::hash_slow(&aa_tx);
+        let env = XLayerTxEnvelope::aa(aa_tx);
+        assert_eq!(*TxHashRef::tx_hash(&env), expected);
+    }
+
+    /// `InMemorySize::size` must at least account for `sender_auth`'s
+    /// length (one of the dominant variable-size fields in an AA tx).
+    /// Pins a sanity lower bound so a future "just return
+    /// size_of::<Self>()" regression fires.
+    #[test]
+    fn in_memory_size_grows_with_sender_auth() {
+        let small_auth = XLayerTxEnvelope::aa(TxEip8130 {
+            sender_auth: Bytes::from_static(&[0; 8]),
+            ..sample_aa_tx()
+        });
+        let big_auth = XLayerTxEnvelope::aa(TxEip8130 {
+            sender_auth: Bytes::from_static(&[0; 8192]),
+            ..sample_aa_tx()
+        });
+        assert!(big_auth.size() > small_auth.size());
     }
 
     /// The BuiltIn arm must delegate to the existing

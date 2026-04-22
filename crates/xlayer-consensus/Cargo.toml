@@ -44,6 +44,12 @@ op-revm = { workspace = true, default-features = false }
 # parent `op-revm` already pulls in transitively).
 revm = { workspace = true, default-features = false }
 
+# reth — `InMemorySize` / `SignedTransaction` trait bar we need to
+# satisfy so the combined envelope can slot into `NodePrimitives::SignedTx`
+# downstream (P2b.2+ milestones). `default-features = false` keeps this
+# no_std-clean.
+reth-primitives-traits = { workspace = true, default-features = false }
+
 # xlayer
 xlayer-revm = { workspace = true }
 
@@ -63,6 +69,7 @@ std = [
     "alloy-rlp/std",
     "op-alloy-consensus/std",
     "op-revm/std",
+    "reth-primitives-traits/std",
     "revm/std",
     "serde?/std",
     "xlayer-revm/std",
