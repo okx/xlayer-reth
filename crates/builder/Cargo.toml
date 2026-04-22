@@ -14,6 +14,10 @@ workspace = true
 xlayer-trace-monitor.workspace = true
 xlayer-bridge-intercept.workspace = true
 xlayer-revm = { workspace = true, features = ["std", "rpc"] }
+# `serde` + `reth-codec` together promote XLayerTxEnvelope from a
+# bare wire type to `FullSignedTx`, which the `NodePrimitives::SignedTx`
+# bound on `XLayerPrimitives` (see `src/primitives.rs`) depends on.
+xlayer-consensus = { workspace = true, features = ["serde", "reth-codec", "serde-bincode-compat"] }
 
 # reth
 reth.workspace = true

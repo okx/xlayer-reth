@@ -50,6 +50,15 @@ revm = { workspace = true, default-features = false }
 # no_std-clean.
 reth-primitives-traits = { workspace = true, default-features = false }
 
+# reth-codecs — only needed to provide a `Compact` impl for
+# `XLayerTxEnvelope`, which `FullSignedTx` requires once the
+# primitives-traits `reth-codec` feature is active. Gated behind
+# our own `reth-codec` feature so no_std / fault-proof / prover
+# builds (which disable reth-codec upstream and satisfy
+# `MaybeCompact` through its blanket impl) stay compilable.
+reth-codecs = { workspace = true, default-features = false, optional = true }
+bytes = { version = "1.6", default-features = false, optional = true }
+
 # xlayer — `default-features = false` is load-bearing: xlayer-revm's
 # default set enables `rpc`, which cascades `reth-optimism-evm/rpc` →
 # the full reth-node-api tree, which forces `serde` + `reth-codec` +
@@ -72,8 +81,10 @@ std = [
     "alloy-evm/std",
     "alloy-primitives/std",
     "alloy-rlp/std",
+    "bytes?/std",
     "op-alloy-consensus/std",
     "op-revm/std",
+    "reth-codecs?/std",
     "reth-primitives-traits/std",
     "revm/std",
     "serde?/std",
@@ -87,3 +98,16 @@ serde = [
     "dep:serde",
     "op-alloy-consensus/serde",
 ]
+# Enables the `Compact` impl on `XLayerTxEnvelope`, required for
+# `FullSignedTx` (and therefore `NodePrimitives::SignedTx`) when the
+# consumer has `reth-primitives-traits/reth-codec` active. Workspace /
+# node builds turn this on via transitive feature unification; no_std /
+# prover builds leave it off and rely on the blanket `MaybeCompact` impl.
+reth-codec = ["dep:reth-codecs", "dep:bytes"]
+# Enables the `RlpBincode` marker impls that promote `XLayerTxEnvelope`
+# into `SerdeBincodeCompat` through the existing RLP encode/decode path.
+# Required once the consumer turns on
+# `reth-primitives-traits/serde-bincode-compat` (driven by
+# `reth-chain-state`'s in-memory block cache). Implies `serde` because
+# `SerdeBincodeCompat`'s super-trait tower includes serde itself.
+serde-bincode-compat = ["reth-primitives-traits/serde-bincode-compat", "serde"]

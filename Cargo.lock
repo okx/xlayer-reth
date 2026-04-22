@@ -14114,6 +14114,7 @@ dependencies = [
  "tracing-subscriber 0.3.23",
  "url",
  "xlayer-bridge-intercept",
+ "xlayer-consensus",
  "xlayer-revm",
  "xlayer-trace-monitor",
 ]
@@ -14151,8 +14152,10 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "alloy-serde",
+ "bytes",
  "op-alloy-consensus",
  "op-revm",
+ "reth-codecs",
  "reth-primitives-traits",
  "revm",
  "serde",

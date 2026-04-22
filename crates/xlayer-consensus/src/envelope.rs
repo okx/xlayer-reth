@@ -610,6 +610,25 @@ impl SignerRecoverable for XLayerTxEnvelope {
 // - `is_broadcastable_in_full` — AA txs have no blob side-car, so the
 //   default `!self.is_eip4844()` correctly returns `true`
 
+// --- Bincode compatibility (via RLP) -----------------------------
+//
+// Marker impl that wires [`SerdeBincodeCompat`] through the RLP
+// encode/decode path. Required once
+// `reth-primitives-traits/serde-bincode-compat` is active — node
+// builds activate it transitively via the reth-chain-state stack
+// because in-memory block caches are bincode-serialised.
+//
+// The blanket `impl SerdeBincodeCompat for T: RlpBincode` in
+// primitives-traits makes this a one-line marker; we don't need to
+// hand-roll a bincode representation, we just say "use the RLP
+// wire form" which we've already tested round-trip.
+
+#[cfg(feature = "serde-bincode-compat")]
+impl reth_primitives_traits::serde_bincode_compat::RlpBincode for XLayerTxEnvelope {}
+
+#[cfg(feature = "serde-bincode-compat")]
+impl reth_primitives_traits::serde_bincode_compat::RlpBincode for XLayerAAEnvelope {}
+
 // Gate the impl on the crate's `serde` feature because
 // [`SignedTransaction`]'s super-trait [`MaybeSerde`] resolves to
 // `Serialize + Deserialize` once `reth-primitives-traits/serde` is
@@ -636,6 +655,68 @@ impl SignedTransaction for XLayerTxEnvelope {
         match &self.0 {
             Extended::BuiltIn(env) => env.is_broadcastable_in_full(),
             Extended::Other(_) => true,
+        }
+    }
+}
+
+// --- Compact (MDBX storage) ---------------------------------------
+//
+// `FullSignedTx` requires `MaybeCompact`, which — when
+// `reth-primitives-traits/reth-codec` is active — reduces to
+// `reth_codecs::Compact`. Workspace builds unify that feature on
+// through the reth-node-api tree, so a node-side
+// `NodePrimitives::SignedTx = XLayerTxEnvelope` needs a real impl.
+//
+// The naive implementation below stores the tx as its
+// length-prefixed EIP-2718 encoded byte string. It's not the most
+// space-efficient option — OpTxEnvelope's upstream Compact impl
+// uses bit-packed variant tags + field-level Compact and supports
+// zstd compression on big inputs — but it:
+//
+// 1. **Round-trips** cleanly via the existing 2718 encode/decode pair
+//    we've already proved correct via dedicated round-trip tests.
+// 2. **Stays stable** across variant additions — future op-stack
+//    hardforks can extend `OpTxEnvelope` without forcing an MDBX
+//    schema migration on XLayer because we're encoding the 2718
+//    wire form, which is fork-stable.
+// 3. **Is DB-safe** — MDBX stores arbitrary byte blobs; decode
+//    performance is not bottlenecked by 2718 vs Compact (both
+//    parse field-by-field).
+//
+// A future perf-tuning pass can replace this with a proper
+// `CompactEnvelope`-style impl if the DB footprint or decode cost
+// ever shows up in profiles. The choice is reversible because
+// `Compact` writes a length prefix we can branch on to detect the
+// old format during a forward migration.
+#[cfg(feature = "reth-codec")]
+mod compact_impl {
+    use super::{Decodable2718, Encodable2718, XLayerTxEnvelope};
+    use bytes::BufMut as BytesBufMut;
+    use reth_codecs::Compact;
+    // `std::vec::Vec` resolves to `alloc::vec::Vec` in no_std mode
+    // (via the `extern crate alloc as std` alias in `lib.rs`) and to
+    // the real `std::vec::Vec` otherwise. Same trick used elsewhere
+    // in this crate to keep one path across both feature-set shapes.
+    use std::vec::Vec;
+
+    impl Compact for XLayerTxEnvelope {
+        fn to_compact<B>(&self, buf: &mut B) -> usize
+        where
+            B: BytesBufMut + AsMut<[u8]>,
+        {
+            let mut scratch = Vec::with_capacity(self.encode_2718_len());
+            self.encode_2718(&mut scratch);
+            let written = scratch.len();
+            buf.put_slice(&scratch);
+            written
+        }
+
+        fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
+            let (head, tail) = buf.split_at(len);
+            let mut cursor: &[u8] = head;
+            let decoded = XLayerTxEnvelope::decode_2718(&mut cursor)
+                .expect("Compact stream was written by `to_compact` above");
+            (decoded, tail)
         }
     }
 }
