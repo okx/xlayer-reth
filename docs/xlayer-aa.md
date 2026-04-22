@@ -4,6 +4,45 @@
 
 Running log of mistakes made during XLayerAA implementation, so we don't repeat them. Append new entries at the top.
 
+### 2026-04-22 — Shipped XLayerAA upgrade-tx bundle with hardcoded `common.FromHex` constants, ignoring the newer NUT-bundle pattern OP has been migrating to since Karst
+
+**What I did.** When writing op-node's [`xlayer_aa_upgrade_transactions.go`](../deps/optimism/op-node/rollup/derive/xlayer_aa_upgrade_transactions.go), I followed the older per-fork style used by Ecotone / Fjord / Granite / Holocene / Isthmus / Jovian — see e.g. [`jovian_upgrade_transactions.go`](../deps/optimism/op-node/rollup/derive/jovian_upgrade_transactions.go) as the canonical example: a single Go file with 7 `common.FromHex("0x<huge hex>")` constants inline, a handwritten `XLayerAANetworkUpgradeTransactions()` function building each `DepositTx` from scratch, and `attributes.go` dispatch that ignores returned gas. The file was 275 lines, ~40KB of which was inline hex.
+
+**What's actually current.** OP introduced a generic "Network Upgrade Transactions" (NUT) bundle format in [`upgrade_transaction.go`](../deps/optimism/op-node/rollup/derive/upgrade_transaction.go) starting with Karst:
+
+- Bytecode lives in a standalone `<fork>_nut_bundle.json` file with a stable schema (`{metadata, transactions[]}`), loaded via `//go:embed`.
+- A single `readNUTBundle(forkName, reader)` + `bundle.toDepositTransactions()` + `bundle.totalGas()` pipeline replaces all per-fork boilerplate.
+- The dispatcher in `attributes.go` accumulates per-bundle gas into `upgradeGas` and adds it to the activation block's gas limit — so the ~9.5M-gas install set doesn't crowd out normal user txs in a 30M block.
+
+Skimming the directory before writing would have surfaced the newer pattern:
+
+```
+ecotone_upgrade_transactions.go:   3× common.FromHex  (pre-NUT)
+fjord_upgrade_transactions.go:     1× common.FromHex  (pre-NUT)
+interop_upgrade_transactions.go:   2× common.FromHex  (pre-NUT)
+isthmus_upgrade_transactions.go:   4× common.FromHex  (pre-NUT)
+jovian_upgrade_transactions.go:    2× common.FromHex  (pre-NUT)
+upgrade_transaction.go:            1× //go:embed     ← Karst+ NUT bundle
+```
+
+**Why it's wrong.**
+
+- **Maintenance cost.** Every Solidity / compiler-setting change produces a multi-KB diff in the Go source (hex strings), making bytecode review impossible. JSON bytecode diffs are still opaque but at least the surrounding tx metadata (`from`, `gasLimit`, `intent`) is readable.
+- **Lost gas budget.** Without the `upgradeGas +=` thread, the 7 ~9.5M-gas deploy txs have to squeeze into the activation block alongside normal user txs and the system tx — at the worst moment for the chain (fork activation, usually under load).
+- **Out of step with upstream direction.** OP explicitly added a TODO in `attributes.go:184` — `// TODO(#19239): migrate Interop to NUT bundle` — signaling existing pre-NUT forks are going to be migrated, not preserved. Shipping a new pre-NUT fork adds to the migration backlog.
+
+**Fix.** Migrate XLayerAA to the NUT bundle pattern:
+
+1. `contracts/eip8130/script/extract_runtime.py` writes `xlayer_aa_nut_bundle.json` directly into the op-node submodule (`deps/optimism/op-node/rollup/derive/`) alongside `karst_nut_bundle.json`. Per-contract metadata (deployer, gas, intent, constructor-arg-ness) lives in a `CONTRACTS` dict at the top of the script. For the 3 contracts with `(address accountConfiguration)` constructor arg, the script pre-appends the abi-encoded AC address to `data` so there's no post-processing in Go.
+2. `xlayer_aa_upgrade_transactions.go` shrinks from 275 lines → 112: `//go:embed xlayer_aa_nut_bundle.json` + a 10-line wrapper that calls the shared `readNUTBundle(forks.Name("xlayer_aa"), ...)` + `bundle.toDepositTransactions()` + `bundle.totalGas()`. Using `forks.Name("xlayer_aa")` as a free-string rather than adding XLayerAA to the upstream `forks.All` enum keeps the fork ladder untouched — XLayerAA remains XLayer-local.
+3. `attributes.go` dispatch now captures both return values: `upgradeTxs, xlayerAAGas, err := XLayerAANetworkUpgradeTransactions()` + `upgradeGas += xlayerAAGas`. The `var upgradeGas uint64` declaration is hoisted from just-before-Karst to just-after-`upgradeTxs` so XLayerAA (dispatched before Karst) can also contribute.
+4. Test updated to assert per-tx gas limits and total gas match the sum.
+
+**Lesson.**
+
+- Before cloning an existing pattern from a codebase, grep for variants. `grep -l "common.FromHex\|go:embed" *upgrade*.go` in the derive/ directory would have surfaced the split immediately. The existence of a newer parallel pattern usually signals the old one is on its way out.
+- "Many files do it this way" isn't evidence that it's current. Check recency by timestamp or by whether the upstream has an open migration TODO (`grep TODO\(#`) pointing away from it.
+
 ### 2026-04-22 — Assumed Canyon's `ensure_create2_deployer` was the standard OP-upgrade pattern, and that Base's `Deploy.s.sol` was a production rollout recipe
 
 **What I assumed.** When planning XLayerAA predeploy activation (M3 C4), I took Canyon's [`ensure_create2_deployer`](../deps/optimism/rust/alloy-op-evm/src/block/canyon.rs) as the canonical template for "install predeploys at a fork's activation block" — i.e. an EL-side `apply_pre_execution_changes` hook that checks `is_X_active_at_timestamp(ts) && !is_X_active_at_timestamp(ts - 2)` and force-writes bytecode. I also assumed Base's [`script/Deploy.s.sol`](https://github.com/base/eip-8130/blob/main/script/Deploy.s.sol) (which uses CREATE2 via Nick's factory at `0x4e59b448...` with salt=0) described how Base itself would install the 7 EIP-8130 predeploys on their live L2. The plan threaded both assumptions: vendor Base's Solidity source → forge build → `include_bytes!` runtime bytecode → install via an EL hook at activation.
