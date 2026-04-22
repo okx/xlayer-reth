@@ -4,6 +4,45 @@
 
 Running log of mistakes made during XLayerAA implementation, so we don't repeat them. Append new entries at the top.
 
+### 2026-04-22 — The original plan prescribed `Eip8130(Signed<TxEip8130>)` for the envelope variant, but the correct wrapper is `Sealed<TxEip8130>`
+
+**What the plan said.** [docs/xlayer-aa.md](xlayer-aa.md) (the M1 section) prescribed:
+
+> `deps/optimism/rust/op-alloy/crates/consensus/src/transaction/envelope.rs` — add **`Eip8130(Signed<TxEip8130>)`** variant to `OpTxEnvelope`
+
+and the corresponding extensions to `OpTypedTransaction`, `OpPooledTransaction`, `OpTxType`. `Signed<T>` is the canonical wrapper used by Ethereum tx types (`Signed<TxEip1559>`, `Signed<TxEip7702>`, …), so it was the natural first guess.
+
+**Why it's wrong for XLayerAA.** EIP-8130 bodies carry **embedded authentication** in their `sender_auth` / `payer_auth` blobs, not an external ECDSA signature. A `TxEip8130` **is** its signed form. Wrapping it in `Signed<TxEip8130>` would:
+
+1. Require `TxEip8130: SignableTransaction<Signature>` — forcing a `signature_hash() -> B256` impl that doesn't fit the domain-separated sender/payer hash model. Any concrete impl would have to arbitrarily pick one of the two domains (or return a dummy), misleading downstream code that reads it.
+2. Carry a redundant `Signature` alongside `sender_auth` — two sources of truth, guaranteed to drift.
+3. Force a pointless `ecrecover`-style sender computation on the envelope when the real recovery logic lives in the AA handler's authorizer phase.
+
+**What's actually correct.** `Sealed<TxEip8130>`. [`OpTxEnvelope::Deposit(Sealed<TxDeposit>)`](../deps/optimism/rust/op-alloy/crates/consensus/src/transaction/envelope.rs) is the existing precedent: Deposit txs also aren't externally-signed (they're CL-synthesized), and they use `Sealed` — a wrapper that just pairs the body with its pre-computed hash. The [upstream `TransactionEnvelope` derive macro](../../../home/po/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/alloy-tx-macros-1.7.3/src/parse.rs) explicitly supports both `Signed<T>` and `Sealed<T>` in variant positions (see the `inner_type()` helper it uses to extract the inner tx type).
+
+All the traits the macro-generated envelope impls need are covered by blanket impls on `Sealed<T>`:
+
+```
+impl<T: Encodable2718> Encodable2718 for Sealed<T>    // alloy-eips
+impl<T: Decodable2718 + Sealable> Decodable2718 for Sealed<T>
+impl<T: Typed2718>    Typed2718    for Sealed<T>
+impl<T: Transaction>  Transaction  for Sealed<T>      // alloy-consensus
+```
+
+`TxEip8130` already implements the RHS of each. **No new trait impls needed on the tx itself.**
+
+**Fix.** P1 scope shrinks to:
+
+1. Add a regression-guard roundtrip test — `sealed_wrapper_round_trip` in `crates/xlayer-consensus/src/aa/tx.rs` — that constructs `Sealed<TxEip8130>`, encodes via `Encodable2718`, decodes back, and asserts equality of both the inner tx and the seal hash. If the envelope landing in M1b/P2 ever breaks, this test fires first.
+2. Drop the `SignableTransaction`-related trait-impl work the plan had prescribed for P1 — it's wholly unnecessary.
+3. Correct downstream plan language: `Eip8130(Signed<TxEip8130>)` → `Eip8130(Sealed<TxEip8130>)` in every reference.
+
+**Lesson.**
+
+- When porting a plan that calls for "add this variant to the tx envelope", inspect the **existing non-`Signed<>` variants** first. `OpTxEnvelope::Deposit(Sealed<TxDeposit>)` was already a living precedent for a non-externally-signed wire type — directly analogous to ours.
+- Spec diagrams ("signed tx", "signed body") often overload "signed" to mean "authenticated", not "wrapped in `Signed<T>`". Inside alloy's type system those are different categories — `Signed<T>` strictly means a body + **external** ECDSA signature. Check the trait shape of the wrapper before copying its name.
+- Short roundtrip test up front is cheap and pins the right wrapper choice in code, not just prose — the test fails loudly if a future refactor tries to switch wrappers without updating the rest of the plumbing.
+
 ### 2026-04-22 — Shipped XLayerAA upgrade-tx bundle with hardcoded `common.FromHex` constants, ignoring the newer NUT-bundle pattern OP has been migrating to since Karst
 
 **What I did.** When writing op-node's [`xlayer_aa_upgrade_transactions.go`](../deps/optimism/op-node/rollup/derive/xlayer_aa_upgrade_transactions.go), I followed the older per-fork style used by Ecotone / Fjord / Granite / Holocene / Isthmus / Jovian — see e.g. [`jovian_upgrade_transactions.go`](../deps/optimism/op-node/rollup/derive/jovian_upgrade_transactions.go) as the canonical example: a single Go file with 7 `common.FromHex("0x<huge hex>")` constants inline, a handwritten `XLayerAANetworkUpgradeTransactions()` function building each `DepositTx` from scratch, and `attributes.go` dispatch that ignores returned gas. The file was 275 lines, ~40KB of which was inline hex.

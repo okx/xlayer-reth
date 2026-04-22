@@ -564,6 +564,53 @@ mod tests {
         assert!(TxEip8130::decode_2718(&mut buf.as_slice()).is_err());
     }
 
+    /// Regression guard for the planned `OpTxEnvelope::Eip8130` variant
+    /// (landing in M1b). The upstream `TransactionEnvelope` derive macro
+    /// will slot this variant in as `Eip8130(Sealed<TxEip8130>)` —
+    /// matching how [`Deposit(Sealed<TxDeposit>)`] already works — so
+    /// `Sealed<TxEip8130>` must round-trip cleanly through `Encodable2718`
+    /// / `Decodable2718` / `Typed2718` for the macro-generated envelope
+    /// impls to work.
+    ///
+    /// Why `Sealed<>` and not `Signed<>` (as the original plan said):
+    /// EIP-8130 bodies carry embedded authentication in
+    /// `sender_auth` / `payer_auth`, not an external ECDSA signature —
+    /// so a `Signed<TxEip8130>` wrapper would store a dummy signature
+    /// alongside the real-but-embedded one, and `SignableTransaction<Signature>`
+    /// impls would have to lie. `Sealed<TxEip8130>` instead just pins
+    /// a pre-computed hash alongside the tx, which is semantically
+    /// accurate and doesn't require any new trait impls on TxEip8130.
+    ///
+    /// Blanket impls in alloy-eips (`impl<T: Encodable2718> Encodable2718
+    /// for Sealed<T>`, likewise `Decodable2718`, `Typed2718`) plus
+    /// alloy-consensus (`impl<T: Transaction> Transaction for Sealed<T>`)
+    /// cover the trait surface the envelope derive requires — TxEip8130's
+    /// existing impls are sufficient.
+    #[test]
+    fn sealed_wrapper_round_trip() {
+        use alloy_consensus::Sealed;
+        use alloy_eips::eip2718::{Decodable2718, Encodable2718};
+
+        let tx = sample_tx();
+        let hash = tx.tx_hash();
+        let sealed = Sealed::new_unchecked(tx.clone(), hash);
+
+        // `Sealed<T>` must forward `Typed2718::ty()` to `T::ty()`.
+        assert_eq!(sealed.ty(), AA_TX_TYPE_ID);
+
+        // Encode via the blanket `Encodable2718 for Sealed<T>` impl.
+        let mut buf = Vec::new();
+        sealed.encode_2718(&mut buf);
+        assert_eq!(buf[0], AA_TX_TYPE_ID);
+        assert_eq!(buf.len(), sealed.encode_2718_len());
+
+        // Round-trip: decode as `Sealed<TxEip8130>`, expect exact
+        // equality of the inner tx + a recomputed seal hash.
+        let decoded: Sealed<TxEip8130> = Decodable2718::decode_2718(&mut buf.as_slice()).unwrap();
+        assert_eq!(decoded.inner(), &tx);
+        assert_eq!(*decoded.hash(), hash);
+    }
+
     #[test]
     fn decode_rejects_trailing_bytes() {
         let tx = sample_tx();

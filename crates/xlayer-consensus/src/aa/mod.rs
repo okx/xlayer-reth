@@ -1,5 +1,30 @@
 //! EIP-8130 account-abstraction transaction — wire-level types and
 //! wire-to-execution conversion.
+//!
+//! # Naming convention
+//!
+//! - [`TxEip8130`] (this module) — the literal wire struct per
+//!   EIP-8130. Named by EIP number to match the upstream
+//!   `alloy_consensus` pattern (`TxEip1559`, `TxEip7702`, …) and
+//!   signal that the encoding is the standard, not XLayer-specific.
+//!   If Base (the reference-implementation maintainer) or any other
+//!   chain ships EIP-8130, their wire struct will also be
+//!   `TxEip8130` with the same bytes on the wire.
+//! - `XLayerAA*` types ([`XLayerAAHandler`], [`XLayerAAEvm`],
+//!   [`XLayerAATransaction`], [`XLayerHardfork::XLayerAA`],
+//!   `xlayer-dev` chainspec, etc.) — XLayer's **specific
+//!   application** of EIP-8130: the 7 predeploys, the verifier
+//!   address set, the handler branches, the activation schedule.
+//!   Branded to distinguish XLayer's choices from the universal
+//!   spec.
+//!
+//! The split is deliberate: the wire format is universal, the
+//! runtime pipeline is ours.
+//!
+//! [`XLayerAAHandler`]: https://docs.rs/xlayer-revm/latest/xlayer_revm/struct.XLayerAAHandler.html
+//! [`XLayerAAEvm`]: https://docs.rs/xlayer-revm/latest/xlayer_revm/struct.XLayerAAEvm.html
+//! [`XLayerAATransaction`]: https://docs.rs/xlayer-revm/latest/xlayer_revm/struct.XLayerAATransaction.html
+//! [`XLayerHardfork::XLayerAA`]: https://docs.rs/xlayer-chainspec/latest/xlayer_chainspec/enum.XLayerHardfork.html#variant.XLayerAA
 
 mod address;
 mod build;
