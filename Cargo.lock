@@ -14483,6 +14483,8 @@ dependencies = [
  "alloy-eips",
  "alloy-primitives",
  "op-alloy-consensus",
+ "reth-optimism-txpool",
+ "reth-transaction-pool",
  "thiserror 2.0.18",
  "xlayer-consensus",
 ]

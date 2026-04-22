@@ -26,8 +26,10 @@
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
+pub mod transaction;
 pub mod validator;
 
+pub use transaction::XLayerPoolTransaction;
 pub use validator::{
     validate_aa_structure, validate_pooled_structure, AAValidationError, AA_VALID_BEFORE_MIN_SECS,
 };

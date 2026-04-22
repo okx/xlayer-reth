@@ -36,6 +36,7 @@
 
 use alloy_consensus::{
     crypto::RecoveryError,
+    error::ValueError,
     transaction::{SignerRecoverable, Transaction, TxHashRef},
     Extended,
 };
@@ -115,22 +116,24 @@ impl From<XLayerPooledTxEnvelope> for XLayerTxEnvelope {
 /// are sequencer-injected, not user-submittable. All other
 /// variants (0x00 / 0x01 / 0x02 / 0x04 / 0x7B) pass through.
 ///
-/// The `Error` type is the rejected consensus envelope itself,
-/// following the same shape as op-alloy's `TryFrom<OpTxEnvelope>
-/// for OpPooledTransaction`. Returning the owned value (not just a
-/// "reason" string) lets the caller re-use it for a diagnostic
-/// path without reconstructing.
+/// Error is [`ValueError<XLayerTxEnvelope>`] — same pattern
+/// op-alloy uses for `TryFrom<OpTxEnvelope> for OpPooledTransaction`.
+/// Carrying the rejected value (not just a reason string) lets
+/// callers re-use it for diagnostics, while `ValueError` supplies
+/// the `core::error::Error + Display` bounds that reth's
+/// [`OpPooledTransaction<Cons, Pooled>`] blanket `EthPoolTransaction`
+/// impl requires.
 impl TryFrom<XLayerTxEnvelope> for XLayerPooledTxEnvelope {
-    type Error = XLayerTxEnvelope;
+    type Error = ValueError<XLayerTxEnvelope>;
 
     fn try_from(tx: XLayerTxEnvelope) -> Result<Self, Self::Error> {
         match tx.0 {
             Extended::BuiltIn(op_env) => match OpPooledTransaction::try_from(op_env) {
                 Ok(pooled) => Ok(Self::builtin(pooled)),
-                // OpPooledTransaction's TryFrom returns the
-                // rejected OpTxEnvelope; re-wrap it as XLayerTxEnvelope
-                // so the caller's error surface is uniform.
-                Err(rejected) => Err(XLayerTxEnvelope::builtin(rejected.into_value())),
+                Err(rejected) => Err(ValueError::new_static(
+                    XLayerTxEnvelope::builtin(rejected.into_value()),
+                    "consensus variant is not poolable (likely Deposit 0x7E)",
+                )),
             },
             Extended::Other(aa) => Ok(Self(Extended::Other(aa))),
         }
@@ -448,7 +451,8 @@ mod tests {
         let err = XLayerPooledTxEnvelope::try_from(consensus).unwrap_err();
         // The rejection must return the original deposit so the
         // caller can surface it in an RPC error message.
-        assert!(matches!(err.as_extended(), Extended::BuiltIn(OpTxEnvelope::Deposit(_))));
+        let rejected = err.into_value();
+        assert!(matches!(rejected.as_extended(), Extended::BuiltIn(OpTxEnvelope::Deposit(_))));
     }
 
     /// `is_system_tx` on a pooled envelope is always false — pooled

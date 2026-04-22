@@ -15,6 +15,7 @@ workspace = true
 # Only used by the non-AA routing test to build a 1559 envelope.
 alloy-consensus = { workspace = true, default-features = false }
 op-alloy-consensus = { workspace = true, default-features = false, features = ["k256"] }
+reth-transaction-pool.workspace = true
 
 [dependencies]
 # xlayer — pooled envelope + AA structural types. Intentionally
@@ -32,6 +33,14 @@ xlayer-consensus = { workspace = true, features = ["serde", "reth-codec"] }
 # alloy
 alloy-eips = { workspace = true, default-features = false }
 alloy-primitives = { workspace = true, default-features = false }
+
+# op / reth — the concrete `XLayerPoolTransaction` alias is built on
+# `reth_optimism_txpool::OpPooledTransaction<Cons, Pooled>`, so we
+# need the crate exposed here. The blanket `EthPoolTransaction` /
+# `OpPooledTx` impls on that generic type already satisfy reth's
+# pool traits when we parameterize Cons/Pooled with our envelope
+# types; we just need to make the alias public.
+reth-optimism-txpool.workspace = true
 
 # misc
 thiserror = { workspace = true }
