@@ -1,139 +1,193 @@
-//! Canonical XLayerAA (EIP-8130) predeploy table.
+//! Canonical XLayerAA (EIP-8130) predeploy addresses.
 //!
-//! Each entry pairs a canonical CREATE2(salt=0, creationCode) address
-//! with the runtime bytecode that should be installed at that address
-//! when `XLayerHardfork::XLayerAA` activates. Runtime bytes are read
-//! via `include_bytes!` from [`contracts/eip8130/artifacts/<Name>.bin`]
-//! — the raw-binary sibling of the committed hex `.bin-runtime` files
-//! (both produced by `just contracts-eip8130-build`).
+//! Each entry pairs a fresh, human-assigned deployer address
+//! (`0x4210000000000000000000000000000000000010..0016`) with the
+//! `CREATE(deployer, nonce=0)`-derived predeploy address where that
+//! contract's runtime code lives after the `XLayerHardfork::XLayerAA`
+//! activation block.
 //!
-//! # ⚠ Activation hook — deferred (M3 C4)
+//! # Installation model — CL upgrade deposit transactions
 //!
-//! This table is **declarative only**. Nothing in this commit installs
-//! the bytecode into on-chain state at the activation block. The
-//! installer that consumes `AA_PREDEPLOYS` is still TODO:
+//! Unlike Canyon's [`ensure_create2_deployer`][canyon] (an EL-side
+//! irregular state transition), the 7 XLayerAA predeploys are
+//! installed by **`op-node`-synthesized upgrade deposit transactions**
+//! at the fork activation boundary block. This matches every OP
+//! fork from Ecotone onwards (Fjord / Granite / Holocene / Isthmus /
+//! Interop / Jovian). See
+//! [`xlayer_aa_upgrade_transactions.go`][ops] in the `deps/optimism`
+//! submodule.
 //!
-//! **Intended shape**: mirror
-//! [`alloy_op_evm::block::canyon::ensure_create2_deployer`] — a
-//! pre-execution hook on `OpBlockExecutor::apply_pre_execution_changes`
-//! that, at the first block where `is_xlayer_aa_active_at_timestamp`
-//! flips to true, writes each predeploy's bytecode + codehash to
-//! state.
+//! **Installation sequence.** At the activation boundary block,
+//! `op-node` emits 7 [`DepositTx`][deposit_tx] in order, one per
+//! predeploy. Each tx has:
 //!
-//! **Blocker**: the natural injection point requires either
-//! (a) extending `OpHardforks` with a `named_fork_activation(&str) ->
-//! ForkCondition` method so `alloy-op-evm` can detect XLayerAA
-//! activation without pulling `xlayer-chainspec` upward, or
-//! (b) a local block-executor wrapper inside xlayer-reth.
+//! - `from = deployer_i` (a fresh `0x4210...001X` address, nonce
+//!   guaranteed 0 because the account has never sent a tx).
+//! - `to = nil` (triggers `CREATE`).
+//! - `data = creation_code_i ++ abi.encode(constructor_args_i)`.
 //!
-//! Approach (a) was attempted in a submodule patch but triggered a
-//! rustc ICE during `cargo test` build of `reth-optimism-node`
-//! (spurious `Unpin` trait-obligation failure on
-//! `BasicPayloadJob<..., OpEvmConfig, ()>`). Approach (b) requires a
-//! non-trivial `BlockExecutorFactory` wrapper. Both are tracked for a
-//! dedicated C4 follow-up.
+//! For the 3 wallets / `DelegateVerifier` that take the
+//! `AccountConfiguration` address as a constructor arg, the op-node
+//! patch appends `abi.encode(AccountConfiguration.address)` to `data`.
 //!
-//! **Interim impact**: devnet's XLayerAA timestamp is `0` (genesis),
-//! so without the installer the 7 addresses have empty code at block
-//! zero. AA transactions that depend on `AccountConfiguration` or the
-//! verifier contracts will revert during execution. The chainspec
-//! fork entry is still in place, so
-//! `is_xlayer_aa_active_at_timestamp(_)` returns `true` as expected —
-//! only the on-chain bytecode is missing. Testnet / mainnet remain at
-//! `XLAYER_AA_TIMESTAMP_TBD = u64::MAX`, so they are unaffected.
+//! **Why addresses are chain-portable.** `CREATE(sender, nonce)` is
+//! fully determined by the pair, and both are identical across
+//! devnet / testnet / mainnet (same deployer constants, same
+//! creation-code bytes). No reliance on Nick's factory or CREATE2
+//! salting.
 //!
-//! **Addresses.** Derived from the vendored Solidity sources via
-//! `forge script script/Deploy.s.sol:Deploy --sig 'addresses()'` —
-//! deterministic functions of the runtime bytecode and the Nick's
-//! factory salt (`0x00..`). Any change to a `.sol` file, compiler
-//! setting in `contracts/eip8130/foundry.toml`, or pinned `lib/*`
-//! submodule commit shifts both the bytes and the address; after
-//! such a change, rerun `just contracts-eip8130-build` and re-paste
-//! the addresses here.
+//! # Activation timing — devnet fires at block 1, not genesis
 //!
-//! **Mirrored in.** [`contracts/eip8130/script/Deploy.s.sol`] keeps the
-//! same addresses in Solidity form for `cast code`-based devnet smoke
-//! tests.
+//! `op-node`'s upgrade-tx emission condition is
+//! `isActive(blockTs) && !isActive(parentTs)` (the activation
+//! boundary). Genesis has no parent, and the CL does not synthesize
+//! transactions into genesis — so even with
+//! `XLAYER_DEVNET_XLAYER_AA_TIMESTAMP = 0`, no predeploys would be
+//! installed. Devnet therefore sets
+//! `XLAYER_DEVNET_XLAYER_AA_TIMESTAMP = 1` and genesis timestamp =
+//! 0, placing the activation boundary at block 1. Users can submit
+//! AA transactions starting block 2.
+//!
+//! # What this table is used for in the EL
+//!
+//! Runtime bytecode is **not** embedded in the EL (it lives inside
+//! the op-node upgrade-tx payload). This table exists only for:
+//!
+//! - RPC / pool validation that must reference a canonical predeploy
+//!   (most importantly `AccountConfiguration.address`, which the AA
+//!   revm handler calls into to fetch owner config + spending
+//!   limits).
+//! - `cast code`-based devnet smoke tests that compare installed
+//!   runtime against expected hex.
+//!
+//! # Keeping the table in sync with op-node
+//!
+//! `op-node`'s Go file and this Rust table encode the same deployer
+//! addresses + computed predeploy addresses. A mismatch makes AA
+//! tx validation reference the wrong address and silently revert.
+//! Both sides are guarded by:
+//!
+//! - A unit test in this file (`create_address_matches_deployer`)
+//!   that recomputes every predeploy address from its deployer with
+//!   `alloy_primitives::Address::create` and asserts equality.
+//! - A mirror test in the op-node Go package that recomputes the
+//!   same set with `crypto.CreateAddress` and asserts equality
+//!   against the hard-coded addresses.
+//!
+//! [canyon]: ../../../deps/optimism/rust/alloy-op-evm/src/block/canyon.rs
+//! [ops]: ../../../deps/optimism/op-node/rollup/derive/xlayer_aa_upgrade_transactions.go
+//! [deposit_tx]: ../../../deps/optimism/rust/op-alloy/crates/consensus/src/transaction/deposit.rs
 
 use alloy_primitives::{address, Address};
 
-/// One XLayerAA predeploy — canonical address + runtime bytecode.
+/// One XLayerAA predeploy — name, op-node deployer, predeploy address.
 #[derive(Debug, Clone, Copy)]
 pub struct AAPredeploy {
-    /// Human-readable contract name (for logs + error messages).
+    /// Human-readable contract name (used in logs + error messages).
     pub name: &'static str,
-    /// Canonical CREATE2 address. Must match
-    /// `forge script ... addresses()` output for the vendored source.
+    /// Fresh op-node deployer account. `nonce=0` at the activation
+    /// boundary block; op-node's upgrade deposit tx uses this as `from`.
+    pub deployer: Address,
+    /// `CREATE(deployer, 0)`-derived predeploy address. Stable across
+    /// chains as long as `deployer` + creation-code are identical.
     pub address: Address,
-    /// Runtime bytecode to install at `address`. Read directly from
-    /// the raw-binary `.bin` file committed alongside the hex
-    /// `.bin-runtime`.
-    pub code: &'static [u8],
 }
 
-/// Complete ordered list of XLayerAA predeploys installed at
-/// activation. The order is reporting-friendly (core first, then
-/// wallets, then verifiers); installation logic must be idempotent
-/// and order-independent.
+/// Complete ordered list of XLayerAA predeploys. Order matters only
+/// because dependent contracts (`DefaultAccount`, `DefaultHighRateAccount`,
+/// `DelegateVerifier`) need `AccountConfiguration.address` as a
+/// constructor arg — so AccountConfiguration must be installed first.
+/// op-node must emit deposit txs in this exact order.
 pub const AA_PREDEPLOYS: &[AAPredeploy] = &[
     AAPredeploy {
         name: "AccountConfiguration",
-        address: address!("0x3621Acf9Fb8700777b69b97a648fC11944998FEe"),
-        code: include_bytes!("../../../contracts/eip8130/artifacts/AccountConfiguration.bin"),
+        deployer: address!("0x4210000000000000000000000000000000000010"),
+        address: address!("0xA6A551b856B139B3292128F3b36ADa58025c4b27"),
     },
     AAPredeploy {
         name: "DefaultAccount",
-        address: address!("0xa0Bf4bc7a9f6330f8D736728e8d427d67f76f347"),
-        code: include_bytes!("../../../contracts/eip8130/artifacts/DefaultAccount.bin"),
+        deployer: address!("0x4210000000000000000000000000000000000011"),
+        address: address!("0x5D82f4311f134052bb36b11BD665Ddab843ebb3D"),
     },
     AAPredeploy {
         name: "DefaultHighRateAccount",
-        address: address!("0x029B4de36B94B245Bf6565f32dECb7DD41bb176f"),
-        code: include_bytes!("../../../contracts/eip8130/artifacts/DefaultHighRateAccount.bin"),
+        deployer: address!("0x4210000000000000000000000000000000000012"),
+        address: address!("0x86bf4F2d426b3386a04a24fE21a0CEb34A7b806c"),
     },
     AAPredeploy {
         name: "K1Verifier",
-        address: address!("0xE15687b69F03B8D8d9CD66957efF78A12E7f3590"),
-        code: include_bytes!("../../../contracts/eip8130/artifacts/K1Verifier.bin"),
+        deployer: address!("0x4210000000000000000000000000000000000013"),
+        address: address!("0x7F2c04d16c53f2be99aD1a86771637568B718dBf"),
     },
     AAPredeploy {
         name: "P256Verifier",
-        address: address!("0x6Aa9e9159bf94c6e8a41B0bd8D9518336272369a"),
-        code: include_bytes!("../../../contracts/eip8130/artifacts/P256Verifier.bin"),
+        deployer: address!("0x4210000000000000000000000000000000000014"),
+        address: address!("0xAfc812351BE998FB088851a79Fc68887C42D7719"),
     },
     AAPredeploy {
         name: "WebAuthnVerifier",
-        address: address!("0xDD4fd5645360a8E885aA27F109CA097062eD3BE9"),
-        code: include_bytes!("../../../contracts/eip8130/artifacts/WebAuthnVerifier.bin"),
+        deployer: address!("0x4210000000000000000000000000000000000015"),
+        address: address!("0x4921DCFD2541f738990767852aB925B3b9f652A2"),
     },
     AAPredeploy {
         name: "DelegateVerifier",
-        address: address!("0xf8ed43eCADe91D382E8D36363721B5e30b2747e7"),
-        code: include_bytes!("../../../contracts/eip8130/artifacts/DelegateVerifier.bin"),
+        deployer: address!("0x4210000000000000000000000000000000000016"),
+        address: address!("0xE89A62553fE775AFe77464969b2296dc1745CF85"),
     },
 ];
+
+/// Canonical `AccountConfiguration` predeploy address.
+///
+/// Exposed as a named constant because the AA revm handler + pool
+/// validator + RPC all reference it by name (not by index into
+/// [`AA_PREDEPLOYS`]). A rename of the table entry must not break
+/// downstream consumers.
+pub const ACCOUNT_CONFIGURATION_ADDRESS: Address =
+    address!("0xA6A551b856B139B3292128F3b36ADa58025c4b27");
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn every_predeploy_has_nonempty_runtime() {
-        // Guard against an accidentally-empty artifact — would silently
-        // ship a no-code predeploy at genesis.
-        for predeploy in AA_PREDEPLOYS {
-            assert!(
-                !predeploy.code.is_empty(),
-                "{} runtime bytecode is empty — did `forge build` succeed?",
-                predeploy.name,
+    fn create_address_matches_deployer() {
+        // Regression: each predeploy address MUST equal
+        // CREATE(deployer, nonce=0). If this fails, either the
+        // deployer was changed without recomputing the address, or
+        // the address was typed wrong — both would silently break
+        // at chain launch (op-node would deploy the contract to one
+        // address while the EL expects it at another).
+        for entry in AA_PREDEPLOYS {
+            let expected = entry.deployer.create(0);
+            assert_eq!(
+                entry.address, expected,
+                "{}: address {} != CREATE({}, 0) = {}",
+                entry.name, entry.address, entry.deployer, expected,
             );
         }
     }
 
     #[test]
-    fn predeploy_addresses_are_unique() {
-        // Two predeploys colliding on one address would silently
-        // overwrite each other at install time.
+    fn deployers_are_unique() {
+        // Two entries sharing a deployer would compute the same
+        // predeploy address, collapsing the table silently.
+        for (i, a) in AA_PREDEPLOYS.iter().enumerate() {
+            for b in AA_PREDEPLOYS.iter().skip(i + 1) {
+                assert_ne!(
+                    a.deployer, b.deployer,
+                    "{} / {} share deployer {}",
+                    a.name, b.name, a.deployer,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn addresses_are_unique() {
+        // Defense in depth — `create_address_matches_deployer` +
+        // `deployers_are_unique` already imply this, but assert
+        // directly in case the CREATE derivation invariant ever
+        // weakens.
         for (i, a) in AA_PREDEPLOYS.iter().enumerate() {
             for b in AA_PREDEPLOYS.iter().skip(i + 1) {
                 assert_ne!(a.address, b.address, "{} / {} share address", a.name, b.name);
@@ -144,7 +198,19 @@ mod tests {
     #[test]
     fn expected_predeploy_count() {
         // Catches accidental removal of a contract from the table —
-        // the activation hook (C4) depends on all 7 being present.
+        // the op-node upgrade-tx bundle depends on all 7 being
+        // present and in this exact order.
         assert_eq!(AA_PREDEPLOYS.len(), 7);
+    }
+
+    #[test]
+    fn account_configuration_is_first_entry() {
+        // Dependent contracts (DefaultAccount, DefaultHighRateAccount,
+        // DelegateVerifier) take AccountConfiguration.address as a
+        // constructor arg. op-node's dispatch must therefore deploy
+        // AccountConfiguration first; both sides index the table by
+        // position 0 for AC, so guard the ordering.
+        assert_eq!(AA_PREDEPLOYS[0].name, "AccountConfiguration");
+        assert_eq!(AA_PREDEPLOYS[0].address, ACCOUNT_CONFIGURATION_ADDRESS);
     }
 }

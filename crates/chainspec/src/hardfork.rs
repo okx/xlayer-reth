@@ -43,9 +43,14 @@ hardfork!(
 /// touches one or two lines.
 pub const XLAYER_AA_TIMESTAMP_TBD: u64 = u64::MAX;
 
-/// Devnet activates XLayerAA at genesis so end-to-end tests exercise
-/// the predeploy installation path from block zero.
-pub const XLAYER_DEVNET_XLAYER_AA_TIMESTAMP: u64 = 0;
+/// Devnet activates XLayerAA at the earliest-possible non-genesis
+/// timestamp. `op-node` emits predeploy upgrade deposit txs at the
+/// activation boundary block (`isActive(blockTs) && !isActive(parentTs)`),
+/// and that check cannot fire inside genesis — so even a `0` here would
+/// leave the 7 AA contracts uninstalled. `1` puts the boundary at the
+/// first real L2 block (genesis timestamp stays at `0`), users can
+/// submit AA txs from block 2 onward.
+pub const XLAYER_DEVNET_XLAYER_AA_TIMESTAMP: u64 = 1;
 
 /// Testnet XLayerAA activation — product sign-off pending.
 pub const XLAYER_TESTNET_XLAYER_AA_TIMESTAMP: u64 = XLAYER_AA_TIMESTAMP_TBD;

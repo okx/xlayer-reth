@@ -16,7 +16,7 @@ pub use hardfork::{
     XLAYER_MAINNET_XLAYER_AA_TIMESTAMP, XLAYER_TESTNET_XLAYER_AA_TIMESTAMP,
 };
 pub use parser::XLayerChainSpecParser;
-pub use xlayer_aa_predeploys::{AAPredeploy, AA_PREDEPLOYS};
+pub use xlayer_aa_predeploys::{AAPredeploy, AA_PREDEPLOYS, ACCOUNT_CONFIGURATION_ADDRESS};
 pub use xlayer_chainspec::XLayerChainSpec;
 pub use xlayer_devnet::XLAYER_DEVNET;
 pub use xlayer_hardforks::XLayerHardforks;

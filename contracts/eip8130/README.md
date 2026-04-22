@@ -2,9 +2,8 @@
 
 Vendored EIP-8130 reference contracts used as XLayerAA system predeploys.
 Source tracks [base/eip-8130](https://github.com/base/eip-8130); we
-intentionally mirror bytecode + `foundry.toml` compiler settings so
-that CREATE2(salt=0, creationCode) addresses match whatever Base
-eventually deploys upstream.
+mirror the Solidity semantics but **not** their CREATE2 / Nick's-factory
+deployment scheme — see *Installation model* below.
 
 ## Scope
 
@@ -41,9 +40,27 @@ contracts/eip8130/
 │   ├── accounts/                   # DefaultAccount, DefaultHighRateAccount
 │   ├── interfaces/                 # IAccountConfiguration, INonceManager, ITxContext, IVerifier
 │   └── verifiers/                  # K1, P256, WebAuthn, Delegate
-├── script/Deploy.s.sol             # CREATE2(salt=0) — previews and deploys the canonical addresses
-└── artifacts/*.bin-runtime         # committed runtime bytecode — consumed by crates/chainspec/src/xlayer_aa_predeploys.rs
+├── script/Deploy.s.sol             # reference-only: Base-style CREATE2 preview. NOT the XLayer install path.
+└── artifacts/*.bin-runtime         # committed runtime bytecode — reference for `cast code` smoke tests
 ```
+
+## Installation model
+
+XLayerAA predeploys are **not** installed via an EL hook or CREATE2
+factory call. They're installed by `op-node`-synthesized upgrade
+deposit transactions at the `XLayerHardfork::XLayerAA` activation
+boundary block — the same recipe every OP fork since Ecotone uses
+(see `deps/optimism/op-node/rollup/derive/jovian_upgrade_transactions.go`
+for the nearest reference implementation).
+
+Each predeploy is assigned a fresh `0x4210...001X` deployer address,
+and its canonical address is `CREATE(deployer, nonce=0)`. `op-node`
+emits 7 `DepositTx { from: deployer_i, to: nil, data: creationCode_i }`
+in the activation block; the EL executes them on the normal tx path.
+
+The deployer → predeploy address map lives in
+[`crates/chainspec/src/xlayer_aa_predeploys.rs`](../../crates/chainspec/src/xlayer_aa_predeploys.rs)
+and is mirrored in the op-node Go patch.
 
 ## Building
 
@@ -55,41 +72,35 @@ to what the pinned `foundry.toml` targets (Solidity ≥ 0.8.30,
 forge build --root contracts/eip8130
 ```
 
-## Regenerating `artifacts/*.bin-runtime`
+## Regenerating artifacts
 
-The `.bin-runtime` files under `artifacts/` are committed alongside the
-source because they're consumed at chain genesis as hardfork predeploy
-payloads. Any change to a vendored `.sol` file, compiler setting, or
-pinned library commit must be followed by:
+Any change to a vendored `.sol` file, compiler setting, or pinned
+library commit must be followed by:
 
 ```bash
-# from repo root
-just contracts-eip8130-build    # re-runs `forge build` and copies
-                                # the runtime bytecode into artifacts/
+just contracts-eip8130-build
 ```
 
-(to add). Until that `just` target lands, run the equivalent manually:
-
-```bash
-forge build --root contracts/eip8130 --extra-output-files bin-runtime
-# copy target/out/*/runtime.bin to contracts/eip8130/artifacts/
-```
+This runs `forge build` and extracts bytecode into `artifacts/`. Both
+`op-node` (which embeds creation code hex into its upgrade-tx payload)
+and the devnet smoke-test harness (which compares runtime bytecode
+against `cast code`) consume these artifacts.
 
 ## Predeploy address table
 
-Addresses are CREATE2(salt=0, creationCode) — deterministic functions
-of the runtime bytecode — and are mirrored byte-identical in
-`crates/chainspec/src/xlayer_aa_predeploys.rs`. To preview them
-without deploying:
+The canonical 7 predeploy addresses are `CREATE(deployer, nonce=0)` —
+deterministic functions of the deployer constant alone (independent
+of the deployed bytecode). See
+[`crates/chainspec/src/xlayer_aa_predeploys.rs`](../../crates/chainspec/src/xlayer_aa_predeploys.rs)
+for the authoritative deployer → predeploy map, and its
+`create_address_matches_deployer` test which recomputes every entry
+at build time.
 
-```bash
-forge script script/Deploy.s.sol:Deploy --sig 'addresses()' --root contracts/eip8130
-```
-
-If the bytecode shifts, the addresses shift. The Rust-side predeploy
-table has a compile-time assertion that the address constants match
-the byte hash of the `bin-runtime` — a mismatch fails the build
-rather than silently ships a broken genesis.
+`script/Deploy.s.sol` (inherited from the upstream Base reference
+repo) uses a Nick's-factory + CREATE2 scheme — it is **not** the
+XLayer install path and its addresses will differ from those
+actually installed on XLayer chains. It is kept only for local
+testing convenience against an arbitrary anvil-style devnet.
 
 ## License
 
