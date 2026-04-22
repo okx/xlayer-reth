@@ -7,6 +7,41 @@
 //! — the raw-binary sibling of the committed hex `.bin-runtime` files
 //! (both produced by `just contracts-eip8130-build`).
 //!
+//! # ⚠ Activation hook — deferred (M3 C4)
+//!
+//! This table is **declarative only**. Nothing in this commit installs
+//! the bytecode into on-chain state at the activation block. The
+//! installer that consumes `AA_PREDEPLOYS` is still TODO:
+//!
+//! **Intended shape**: mirror
+//! [`alloy_op_evm::block::canyon::ensure_create2_deployer`] — a
+//! pre-execution hook on `OpBlockExecutor::apply_pre_execution_changes`
+//! that, at the first block where `is_xlayer_aa_active_at_timestamp`
+//! flips to true, writes each predeploy's bytecode + codehash to
+//! state.
+//!
+//! **Blocker**: the natural injection point requires either
+//! (a) extending `OpHardforks` with a `named_fork_activation(&str) ->
+//! ForkCondition` method so `alloy-op-evm` can detect XLayerAA
+//! activation without pulling `xlayer-chainspec` upward, or
+//! (b) a local block-executor wrapper inside xlayer-reth.
+//!
+//! Approach (a) was attempted in a submodule patch but triggered a
+//! rustc ICE during `cargo test` build of `reth-optimism-node`
+//! (spurious `Unpin` trait-obligation failure on
+//! `BasicPayloadJob<..., OpEvmConfig, ()>`). Approach (b) requires a
+//! non-trivial `BlockExecutorFactory` wrapper. Both are tracked for a
+//! dedicated C4 follow-up.
+//!
+//! **Interim impact**: devnet's XLayerAA timestamp is `0` (genesis),
+//! so without the installer the 7 addresses have empty code at block
+//! zero. AA transactions that depend on `AccountConfiguration` or the
+//! verifier contracts will revert during execution. The chainspec
+//! fork entry is still in place, so
+//! `is_xlayer_aa_active_at_timestamp(_)` returns `true` as expected —
+//! only the on-chain bytecode is missing. Testnet / mainnet remain at
+//! `XLAYER_AA_TIMESTAMP_TBD = u64::MAX`, so they are unaffected.
+//!
 //! **Addresses.** Derived from the vendored Solidity sources via
 //! `forge script script/Deploy.s.sol:Deploy --sig 'addresses()'` —
 //! deterministic functions of the runtime bytecode and the Nick's

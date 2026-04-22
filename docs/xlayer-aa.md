@@ -4,6 +4,31 @@
 
 Running log of mistakes made during XLayerAA implementation, so we don't repeat them. Append new entries at the top.
 
+### 2026-04-22 — Adding a default method to `OpHardforks` in the op-reth submodule triggers a rustc ICE
+
+**What I tried.** For M3 C4 (XLayerAA predeploy activation hook), I needed `alloy-op-evm::block::apply_pre_execution_changes` to detect XLayerAA activation without pulling `xlayer-chainspec` upward. Plan: add one default method on [`OpHardforks`](../deps/optimism/rust/alloy-op-hardforks/src/lib.rs):
+
+```rust
+fn named_fork_activation(&self, _name: &str) -> ForkCondition {
+    ForkCondition::Never
+}
+```
+
+…and override it on `OpChainSpec` to iterate the `ChainHardforks` list by `Hardfork::name()`. A separate `xlayer_aa.rs` module would then call `spec.named_fork_activation("XLayerAA").active_at_timestamp(ts)`.
+
+**What happened.** With just that default-method addition applied (before any downstream impls existed), `cargo test -p xlayer-chainspec --lib` panicked with a rustc internal error during build of the unrelated `reth-optimism-node` crate — a spurious `Unpin` trait-obligation failure on `reth_basic_payload_builder::BasicPayloadJob<_, OpPayloadBuilder<..., OpEvmConfig, (), _>>`. `cargo check --workspace` passed cleanly; the ICE only surfaced when the test harness built the full async-future type graph. Stashing the trait patch made the ICE disappear immediately.
+
+**Why it's wrong.** Adding a default method to a trait decorated with `#[auto_impl::auto_impl(&, Arc)]` forces `auto_impl` to regenerate blanket impls for `&T` and `Arc<T>`. When those blanket impls interact with a downstream trait-obligation stack that includes deeply nested generic types (`BasicPayloadJob` wraps `OpPayloadBuilder` wraps `OpTransactionValidator` wraps `BlockchainProvider` wraps `NodeTypesWithDBAdapter` wraps `OpNode` + `OpEvmConfig` + `OpPayloadBuilderAttributes<OpTxEnvelope>` …), rustc's solver can hit an internal state where `Unpin` auto-trait inference loops or over-recurses.
+
+**Fix.** Revert the trait-method approach. Two realistic paths for C4:
+
+1. **Block-executor wrapper inside xlayer-reth** (no op-reth patch): write a `XLayerOpBlockExecutorFactory` that delegates to `OpBlockExecutorFactory::create_executor` and wraps the returned `OpBlockExecutor` in a newtype whose `apply_pre_execution_changes` calls our installer first. Invasive (many `BlockExecutor` methods to delegate) but purely additive.
+2. **Required method on a new op-reth trait** (not a default on `OpHardforks`): define a fresh `NamedForkLookup` trait in alloy-op-hardforks with no default impls, parameter-bound on `OpBlockExecutor`'s `Spec`. This avoids the auto_impl blanket-regeneration path that appears to trigger the ICE.
+
+**Interim impact.** `AA_PREDEPLOYS` exists as a declarative table in `crates/chainspec/src/xlayer_aa_predeploys.rs` but nothing calls it at activation. Devnet (XLayerAA ts=0) therefore runs with empty code at the 7 predeploy addresses — any AA tx that depends on `AccountConfiguration` / verifier contract calls will revert at execution. Testnet / mainnet are at `u64::MAX` placeholders so unaffected. A dedicated C4 follow-up picks one of the two paths above.
+
+**Lesson.** Default methods on traits decorated with `auto_impl::auto_impl` should be treated as high-risk when the trait is deep in the `op-reth` dep graph. Test with `cargo test --workspace --no-run` (not just `cargo check`) to surface solver-heavy obligations before committing such patches.
+
 ### 2026-04-22 — E4a's "swap EvmConfig inside payload body" trick broke on the executor path
 
 E4a flipped the default builder to `XLayerEvmConfig` via a narrow trick: keep the outer `PayloadServiceBuilder` type param as upstream `OpEvmConfig` (for uniform enum dispatch) and ignore the `_: OpEvmConfig` argument inside the impl body, constructing `XLayerEvmConfig` locally. That worked because nothing downstream inspected the `PayloadServiceBuilder`'s EVM type param — payload builders are self-contained.
