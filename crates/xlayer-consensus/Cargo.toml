@@ -50,8 +50,13 @@ revm = { workspace = true, default-features = false }
 # no_std-clean.
 reth-primitives-traits = { workspace = true, default-features = false }
 
-# xlayer
-xlayer-revm = { workspace = true }
+# xlayer — `default-features = false` is load-bearing: xlayer-revm's
+# default set enables `rpc`, which cascades `reth-optimism-evm/rpc` →
+# the full reth-node-api tree, which forces `serde` + `reth-codec` +
+# every other primitive-traits feature on transitively. Keeping it
+# off here lets xlayer-consensus be built standalone with just its
+# own `std` / `serde` feature flags actually governing the shape.
+xlayer-revm = { workspace = true, default-features = false }
 
 # misc
 serde = { workspace = true, features = ["derive", "rc"], optional = true }

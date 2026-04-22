@@ -75,7 +75,7 @@ xlayer-flashblocks = { path = "crates/flashblocks" }
 xlayer-legacy-rpc = { path = "crates/legacy-rpc" }
 xlayer-monitor = { path = "crates/monitor" }
 xlayer-reth-node = { path = "bin/node" }
-xlayer-revm = { path = "crates/xlayer-revm" }
+xlayer-revm = { path = "crates/xlayer-revm", default-features = false }
 xlayer-rpc = { path = "crates/rpc" }
 xlayer-version = { path = "crates/version" }
 

@@ -56,6 +56,8 @@ use alloy_rlp::{BufMut, Decodable, Encodable};
 use op_alloy_consensus::{OpTransaction, OpTxEnvelope, TxDeposit};
 use op_revm::OpSpecId;
 use reth_primitives_traits::InMemorySize;
+#[cfg(feature = "serde")]
+use reth_primitives_traits::SignedTransaction;
 use revm::context::TxEnv as RevmTxEnv;
 use xlayer_revm::tx_env::XLayerAATransaction;
 
@@ -571,6 +573,73 @@ impl SignerRecoverable for XLayerTxEnvelope {
     }
 }
 
+// --- SignedTransaction -------------------------------------------
+//
+// The crown jewel of the P2b trait stack — this is the trait bar
+// `NodePrimitives::SignedTx` ultimately checks via `FullSignedTx`.
+// All super-trait requirements were populated in earlier steps:
+//
+// - `Clone + Debug + PartialEq + Eq + Hash` — derived on both types
+// - `Send + Sync + Unpin` — auto-implemented for all of our fields
+// - `Encodable + Decodable` — hand-written above
+// - `Encodable2718 + Decodable2718` — hand-written above
+// - `Transaction` — hand-written above
+// - `MaybeSerde` — blanket on any `T` (non-serde feature) / driven by
+//   our `serde` derive cfg-gate on the structs themselves
+// - `InMemorySize` — P2b.2a
+// - `SignerRecoverable` — P2b.2a
+// - `TxHashRef` — P2b.2a
+// - `IsTyped2718` — hand-written above
+//
+// With `reth-primitives-traits` built `default-features = false`
+// (no `reth-codec`, no `serde-bincode-compat`) the `FullSignedTx`
+// blanket (`SignedTransaction + MaybeCompact + MaybeSerdeBincodeCompat`)
+// also covers us for free — `MaybeCompact` and
+// `MaybeSerdeBincodeCompat` degrade to blanket impls on every `T`
+// when their respective features are off. Database-bound consumers
+// (reth node, provider) enable those features, in which case the
+// `FullSignedTx` bar tightens and we'll have to add a real `Compact`
+// impl for the envelope in P2b.2c or P2b.2d. See module docs.
+//
+// Both overridable methods (`is_system_tx`, `is_broadcastable_in_full`)
+// stay at their trait defaults:
+//
+// - `is_system_tx` — XLayerAA is user-initiated, not protocol-injected
+//   (contrast with OP's deposit type 0x7E which routes this to `true`
+//   via the existing `OpTxEnvelope` impl)
+// - `is_broadcastable_in_full` — AA txs have no blob side-car, so the
+//   default `!self.is_eip4844()` correctly returns `true`
+
+// Gate the impl on the crate's `serde` feature because
+// [`SignedTransaction`]'s super-trait [`MaybeSerde`] resolves to
+// `Serialize + Deserialize` once `reth-primitives-traits/serde` is
+// active — which every workspace build activates transitively through
+// the reth-node-api / reth-optimism-evm stack. Without gating, a
+// `cargo check -p xlayer-consensus --no-default-features` (used by
+// `just check-no-std` and fault-proof / prover consumers) would fail
+// even though the no-std target never actually calls into
+// [`SignedTransaction`]. The gate is not a feature flag "in the real
+// product" — workspace consumers always turn `serde` on.
+#[cfg(feature = "serde")]
+impl SignedTransaction for XLayerAAEnvelope {}
+
+#[cfg(feature = "serde")]
+impl SignedTransaction for XLayerTxEnvelope {
+    fn is_system_tx(&self) -> bool {
+        match &self.0 {
+            Extended::BuiltIn(env) => env.is_system_tx(),
+            Extended::Other(_) => false,
+        }
+    }
+
+    fn is_broadcastable_in_full(&self) -> bool {
+        match &self.0 {
+            Extended::BuiltIn(env) => env.is_broadcastable_in_full(),
+            Extended::Other(_) => true,
+        }
+    }
+}
+
 // --- Wire → exec conversions --------------------------------------
 //
 // These are the impls the node's pool / payload-builder plumbing
@@ -887,6 +956,55 @@ mod tests {
             ..sample_aa_tx()
         });
         assert!(big_auth.size() > small_auth.size());
+    }
+
+    /// Static check: `XLayerTxEnvelope` satisfies the full
+    /// [`SignedTransaction`] trait bar. This is the whole reason for
+    /// the trait stack — if one of the super-traits regresses, this
+    /// compile-gate catches it with a clearer error than surfacing
+    /// through a downstream `NodePrimitives::SignedTx` bound three
+    /// crates away. Gated on the `serde` feature for the same reason
+    /// the impl itself is — see the impl doc block.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn xlayer_tx_envelope_is_signed_transaction() {
+        fn assert_signed_tx<T: reth_primitives_traits::SignedTransaction>() {}
+        assert_signed_tx::<XLayerTxEnvelope>();
+        assert_signed_tx::<XLayerAAEnvelope>();
+    }
+
+    /// AA txs are not protocol-injected; they're user-submitted and
+    /// must fall on the non-system path. Deposit txs (0x7E) are the
+    /// only system-tx kind on op-stack and stay routed via the
+    /// BuiltIn arm.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn aa_is_not_system_tx() {
+        use reth_primitives_traits::SignedTransaction;
+        let env = XLayerTxEnvelope::aa(sample_aa_tx());
+        assert!(!env.is_system_tx());
+    }
+
+    /// AA txs have no blob sidecar, so they're broadcast-safe in full.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn aa_is_broadcastable_in_full() {
+        use reth_primitives_traits::SignedTransaction;
+        let env = XLayerTxEnvelope::aa(sample_aa_tx());
+        assert!(env.is_broadcastable_in_full());
+    }
+
+    /// `try_recover` / `try_clone_into_recovered` are default-method
+    /// provisions on [`SignedTransaction`]; they must route back
+    /// through our [`SignerRecoverable`] impl. The "happy path"
+    /// (configured `from`) exercises the recovered wrapper end-to-end.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn try_clone_into_recovered_roundtrips_configured_sender() {
+        use reth_primitives_traits::SignedTransaction;
+        let env = XLayerTxEnvelope::aa(sample_aa_tx());
+        let recovered = env.try_clone_into_recovered().expect("configured recovers trivially");
+        assert_eq!(recovered.signer(), Address::repeat_byte(0x01));
     }
 
     /// The BuiltIn arm must delegate to the existing
