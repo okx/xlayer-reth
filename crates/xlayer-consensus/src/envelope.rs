@@ -693,6 +693,8 @@ mod compact_impl {
     use super::{Decodable2718, Encodable2718, XLayerTxEnvelope};
     use bytes::BufMut as BytesBufMut;
     use reth_codecs::Compact;
+    use reth_db_api::table::{Compress, Decompress};
+    use reth_db_api::DatabaseError;
     // `std::vec::Vec` resolves to `alloc::vec::Vec` in no_std mode
     // (via the `extern crate alloc as std` alias in `lib.rs`) and to
     // the real `std::vec::Vec` otherwise. Same trick used elsewhere
@@ -717,6 +719,32 @@ mod compact_impl {
             let decoded = XLayerTxEnvelope::decode_2718(&mut cursor)
                 .expect("Compact stream was written by `to_compact` above");
             (decoded, tail)
+        }
+    }
+
+    // --- MDBX Compress / Decompress ------------------------------
+    //
+    // Required so `XLayerTxEnvelope: reth_db_api::table::Value`,
+    // which in turn satisfies the `Primitives::SignedTx: Value`
+    // bound on `NodeTypesForProvider` (required by
+    // `NodeBuilder::with_types_and_provider`). Upstream gates the
+    // equivalent impls for `OpTxEnvelope` behind
+    // `cfg(feature = "op")` inside reth-db-api itself, which we
+    // can't extend from outside; we hand-roll ours against the
+    // Compact impl above. Same byte-level shape as upstream (length
+    // implied by buf slice — scale to Compact bridge).
+    impl Compress for XLayerTxEnvelope {
+        type Compressed = Vec<u8>;
+
+        fn compress_to_buf<B: BytesBufMut + AsMut<[u8]>>(&self, buf: &mut B) {
+            let _ = Compact::to_compact(self, buf);
+        }
+    }
+
+    impl Decompress for XLayerTxEnvelope {
+        fn decompress(value: &[u8]) -> Result<Self, DatabaseError> {
+            let (obj, _) = Compact::from_compact(value, value.len());
+            Ok(obj)
         }
     }
 }

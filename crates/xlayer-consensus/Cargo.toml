@@ -57,6 +57,13 @@ reth-primitives-traits = { workspace = true, default-features = false }
 # builds (which disable reth-codec upstream and satisfy
 # `MaybeCompact` through its blanket impl) stay compilable.
 reth-codecs = { workspace = true, default-features = false, optional = true }
+# reth-db-api — supplies the `Compress` / `Decompress` traits we
+# impl on `XLayerTxEnvelope` so the node types satisfy
+# `NodeTypesForProvider`. Upstream gates its own impls for
+# OpTxEnvelope behind `cfg(feature = "op")` inside reth-db-api; we
+# can't extend those from here, so we hand-roll ours against the
+# Compact trait we already have.
+reth-db-api = { workspace = true, default-features = false, optional = true }
 bytes = { version = "1.6", default-features = false, optional = true }
 
 # xlayer — `default-features = false` is load-bearing: xlayer-revm's
@@ -103,7 +110,7 @@ serde = [
 # consumer has `reth-primitives-traits/reth-codec` active. Workspace /
 # node builds turn this on via transitive feature unification; no_std /
 # prover builds leave it off and rely on the blanket `MaybeCompact` impl.
-reth-codec = ["dep:reth-codecs", "dep:bytes"]
+reth-codec = ["dep:reth-codecs", "dep:bytes", "dep:reth-db-api"]
 # Enables the `RlpBincode` marker impls that promote `XLayerTxEnvelope`
 # into `SerdeBincodeCompat` through the existing RLP encode/decode path.
 # Required once the consumer turns on

@@ -14156,6 +14156,7 @@ dependencies = [
  "op-alloy-consensus",
  "op-revm",
  "reth-codecs",
+ "reth-db-api",
  "reth-primitives-traits",
  "revm",
  "serde",
