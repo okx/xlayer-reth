@@ -350,6 +350,34 @@ fn main() {
                     ctx.modules
                         .merge_configured(DefaultRpcExtApiServer::into_rpc(xlayer_rpc))?;
                     info!(target: "reth::cli", "xlayer eth rpc extension enabled");
+
+                    // XLayerAA (EIP-8130) RPC surface: override
+                    // `eth_getTransactionCount` with optional `nonce_key`
+                    // so AA clients can query the 2D nonce channel
+                    // maintained by the `NonceManager` predeploy.
+                    //
+                    // Registration order matters. Reth's JSON-RPC method
+                    // dispatcher routes duplicate names to the
+                    // last-registered handler, so attaching this override
+                    // *after* the stock eth module (which runs during
+                    // `.with_add_ons(add_ons)`) means:
+                    //
+                    // - `eth_getTransactionCount(addr, block)` keeps the
+                    //   standard-nonce semantics (override falls through
+                    //   to the account nonce read),
+                    // - `eth_getTransactionCount(addr, block, nonceKey)`
+                    //   transparently opts into the 2D-nonce read.
+                    //
+                    // See `crates/rpc/src/aa/mod.rs` for the trait / impl.
+                    let aa_nonce_override = xlayer_rpc::TransactionCountOverrideImpl::new(
+                        ctx.provider().clone(),
+                    );
+                    ctx.modules.add_or_replace_if_module_configured(
+                        RethRpcModule::Eth,
+                        xlayer_rpc::TransactionCountOverrideServer::into_rpc(aa_nonce_override),
+                    )?;
+                    info!(target: "reth::cli", "xlayer aa eth rpc overrides enabled");
+
                     info!(message = "X Layer RPC modules initialized");
                     Ok(())
                 })
