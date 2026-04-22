@@ -141,6 +141,16 @@ build:
     @rm -rf .cargo  # Clean dev mode files
     cargo build --release
 
+# Rebuild the XLayerAA (EIP-8130) predeploy bytecode. Runs `forge build`
+# inside `contracts/eip8130/` then extracts runtime bytecode to
+# `contracts/eip8130/artifacts/*.bin-runtime` — these are committed
+# and consumed by `crates/chainspec/src/xlayer_aa_predeploys.rs` via
+# `include_bytes!`. Re-run whenever a vendored .sol file, compiler
+# setting, or pinned lib/* submodule commit changes.
+contracts-eip8130-build:
+    forge build --root contracts/eip8130
+    python3 contracts/eip8130/script/extract_runtime.py
+
 [no-exit-message]
 build-dev reth_path="" build="true":
     #!/usr/bin/env bash
