@@ -21,6 +21,9 @@ reth-optimism-cli = { workspace = true }
 reth-optimism-forks = { workspace = true }
 reth-ethereum-forks = { workspace = true }
 
+# alloy — supplies the `hardfork!` macro used to derive XLayerHardfork.
+alloy-hardforks = { workspace = true }
+
 # ethereum
 alloy-genesis = { workspace = true }
 alloy-primitives = { workspace = true }

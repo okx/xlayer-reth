@@ -2,13 +2,24 @@
 //!
 //! This crate provides chain specifications for XLayer mainnet and testnet networks.
 
+mod hardfork;
 mod parser;
+mod xlayer_aa_predeploys;
+mod xlayer_chainspec;
 mod xlayer_devnet;
+mod xlayer_hardforks;
 mod xlayer_mainnet;
 mod xlayer_testnet;
 
+pub use hardfork::{
+    XLayerHardfork, XLAYER_AA_TIMESTAMP_TBD, XLAYER_DEVNET_XLAYER_AA_TIMESTAMP,
+    XLAYER_MAINNET_XLAYER_AA_TIMESTAMP, XLAYER_TESTNET_XLAYER_AA_TIMESTAMP,
+};
 pub use parser::XLayerChainSpecParser;
+pub use xlayer_aa_predeploys::{AAPredeploy, AA_PREDEPLOYS};
+pub use xlayer_chainspec::XLayerChainSpec;
 pub use xlayer_devnet::XLAYER_DEVNET;
+pub use xlayer_hardforks::XLayerHardforks;
 pub use xlayer_mainnet::XLAYER_MAINNET;
 pub use xlayer_testnet::XLAYER_TESTNET;
 
@@ -71,6 +82,10 @@ pub static XLAYER_MAINNET_HARDFORKS: Lazy<ChainHardforks> = Lazy::new(|| {
         (EthereumHardfork::Prague.boxed(), ForkCondition::Timestamp(0)),
         (OpHardfork::Isthmus.boxed(), ForkCondition::Timestamp(0)),
         (OpHardfork::Jovian.boxed(), ForkCondition::Timestamp(XLAYER_MAINNET_JOVIAN_TIMESTAMP)),
+        (
+            XLayerHardfork::XLayerAA.boxed(),
+            ForkCondition::Timestamp(XLAYER_MAINNET_XLAYER_AA_TIMESTAMP),
+        ),
     ])
 });
 
@@ -112,6 +127,10 @@ pub static XLAYER_TESTNET_HARDFORKS: Lazy<ChainHardforks> = Lazy::new(|| {
         (EthereumHardfork::Prague.boxed(), ForkCondition::Timestamp(0)),
         (OpHardfork::Isthmus.boxed(), ForkCondition::Timestamp(0)),
         (OpHardfork::Jovian.boxed(), ForkCondition::Timestamp(XLAYER_TESTNET_JOVIAN_TIMESTAMP)),
+        (
+            XLayerHardfork::XLayerAA.boxed(),
+            ForkCondition::Timestamp(XLAYER_TESTNET_XLAYER_AA_TIMESTAMP),
+        ),
     ])
 });
 
@@ -153,5 +172,9 @@ pub static XLAYER_DEVNET_HARDFORKS: Lazy<ChainHardforks> = Lazy::new(|| {
         (EthereumHardfork::Prague.boxed(), ForkCondition::Timestamp(0)),
         (OpHardfork::Isthmus.boxed(), ForkCondition::Timestamp(0)),
         (OpHardfork::Jovian.boxed(), ForkCondition::Timestamp(XLAYER_DEVNET_JOVIAN_TIMESTAMP)),
+        (
+            XLayerHardfork::XLayerAA.boxed(),
+            ForkCondition::Timestamp(XLAYER_DEVNET_XLAYER_AA_TIMESTAMP),
+        ),
     ])
 });
