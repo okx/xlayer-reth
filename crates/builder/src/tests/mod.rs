@@ -37,3 +37,6 @@ mod forks;
 #[cfg(test)]
 const FLASHBLOCKS_NUMBER_ADDRESS: alloy_primitives::Address =
     alloy_primitives::address!("95bd8d42f30351685e96c62eddc0d0613bf9a87a");
+
+#[cfg(test)]
+mod xlayer_evm_config;
