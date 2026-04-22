@@ -1,6 +1,49 @@
 # XLayerAA — Implementation Notes
 
-## Milestone status (P2 close-out)
+## Milestone status (M5 close-out)
+
+As of 2026-04-22, M5 mempool is feature-complete on the *library*
+layer but, like M4's P2b.2d, intentionally stops short of the
+top-level Node swap that would make 0x7B reach the pool
+end-to-end over `--chain xlayer-dev --dev`.
+
+| Sub | Status | What's in |
+|---|---|---|
+| M5a | done | `XLayerPooledTxEnvelope = Extended<OpPooledTransaction, XLayerAAEnvelope>` with full trait forwarding, `From<XLayerPooledTxEnvelope> for XLayerTxEnvelope`, and `TryFrom<XLayerTxEnvelope>` rejecting Deposit. `ValueError<XLayerTxEnvelope>` as the try-from error — required for upstream `OpPooledTransaction<Cons, Pooled>` blanket `EthPoolTransaction` impl. |
+| M5b | done | `xlayer-txpool` crate with `validate_aa_structure` / `validate_pooled_structure`. Enforces chain id, nonce_key range, call count / phase limits, account-change limits, auth-blob sizes, `parse_sender_auth` shape, expiry with a 3-second propagation buffer. `AAValidationError` discriminants mirror Base. |
+| M5c | done | `XLayerPoolTransaction = OpPooledTransaction<XLayerTxEnvelope, XLayerPooledTxEnvelope>` alias. Compile-gate tests pin that it satisfies `PoolTransaction + EthPoolTransaction + OpPooledTx` and that associated-type projections stay on our envelope types. |
+| M5d | blocked on **M6 Node swap** | The final main.rs step — replacing `OpPoolBuilder` in the components chain with a pool builder that carries `XLayerPoolTransaction` — requires a `NodeTypes::Primitives::SignedTx = XLayerTxEnvelope`. That in turn requires forking `OpEngineTypes` / `OpPayloadTypes` / `OpBuiltPayload` and swapping the top-level `OpNode` for `XLayerNode`. See M6 below. |
+
+### Why M5d is actually M6
+
+`OpPoolBuilder<T>` is generic and accepts `T = XLayerPoolTransaction`.
+Its trait bound
+
+```rust
+T: EthPoolTransaction<Consensus = TxTy<Node::Types>>
+```
+
+pins `T::Consensus == NodeTypes::Primitives::SignedTx`. With
+`OpNode`, `SignedTx = OpTxEnvelope`, not `XLayerTxEnvelope`. So the
+bound fails *at the pool-builder* layer even though the pool tx
+type itself is ready.
+
+The only honest fix is changing `NodeTypes::Primitives`. That
+cascade hits:
+
+- `OpEngineTypes: PayloadTypes` — requires
+  `BuiltPayload::Primitives: NodePrimitives<Block = OpBlock>`.
+  Our `XLayerBlock = Block<XLayerTxEnvelope>` is a different
+  concrete type, so `OpEngineTypes` can't host `XLayerPrimitives`.
+- Need `XLayerEngineTypes` + `XLayerPayloadTypes` + `XLayerBuiltPayload`
+  forks (each a thin wrapper, ~50-100 lines).
+- Then `OpNode` → `XLayerNode` with the new types plumbed through
+  `NodeTypes` + `Node` trait impls.
+
+That's a milestone in its own right — scoped as M6 to keep
+commits reviewable.
+
+### Milestone status (P2 close-out)
 
 As of 2026-04-22, P2b is feature-complete on the primitives layer but
 intentionally stops short of "node wiring" (original P2b.2d). The M5
