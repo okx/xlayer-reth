@@ -1,0 +1,37 @@
+[package]
+name = "xlayer-txpool"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "XLayer mempool — structural AA validation now; 2D-nonce sub-pool in a later phase"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# Only used by the non-AA routing test to build a 1559 envelope.
+alloy-consensus = { workspace = true, default-features = false }
+op-alloy-consensus = { workspace = true, default-features = false, features = ["k256"] }
+
+[dependencies]
+# xlayer — pooled envelope + AA structural types. Intentionally
+# does NOT pull in `serde-bincode-compat` — that feature activates
+# `reth-primitives-traits/serde-bincode-compat`, which creates a
+# `SerdeBincodeCompat` bound on `EthPrimitives::Receipt` that
+# upstream `reth-ethereum-primitives` can't satisfy when compiled
+# standalone (only when the full workspace chain also enables the
+# feature). The pool validator doesn't need bincode compat — it
+# never persists the tx shape to MDBX, it just inspects structural
+# fields — so leaving the feature off here keeps the crate
+# buildable on its own.
+xlayer-consensus = { workspace = true, features = ["serde", "reth-codec"] }
+
+# alloy
+alloy-eips = { workspace = true, default-features = false }
+alloy-primitives = { workspace = true, default-features = false }
+
+# misc
+thiserror = { workspace = true }

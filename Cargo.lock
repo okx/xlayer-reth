@@ -14476,6 +14476,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "xlayer-txpool"
+version = "0.0.6"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-primitives",
+ "op-alloy-consensus",
+ "thiserror 2.0.18",
+ "xlayer-consensus",
+]
+
+[[package]]
 name = "xlayer-version"
 version = "0.0.6"
 dependencies = [

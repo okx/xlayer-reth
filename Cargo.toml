@@ -26,6 +26,7 @@ members = [
     "crates/xlayer-consensus",
     "crates/xlayer-revm",
     "crates/xlayer-rpc-types",
+    "crates/xlayer-txpool",
     "crates/builder/src/tests/framework/macros",
 
     "bin/tools",
@@ -79,6 +80,7 @@ xlayer-reth-node = { path = "bin/node" }
 xlayer-revm = { path = "crates/xlayer-revm", default-features = false }
 xlayer-rpc = { path = "crates/rpc" }
 xlayer-rpc-types = { path = "crates/xlayer-rpc-types" }
+xlayer-txpool = { path = "crates/xlayer-txpool" }
 xlayer-version = { path = "crates/version" }
 
 # For X Layer
