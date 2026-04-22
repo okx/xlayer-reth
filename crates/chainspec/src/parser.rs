@@ -1,6 +1,6 @@
 //! XLayer chain specification parser
 
-use crate::{XLAYER_DEVNET, XLAYER_MAINNET, XLAYER_TESTNET};
+use crate::{XLAYER_DEV, XLAYER_DEVNET, XLAYER_MAINNET, XLAYER_TESTNET};
 use alloy_genesis::Genesis;
 use reth_cli::chainspec::ChainSpecParser;
 use reth_optimism_chainspec::{generated_chain_value_parser, OpChainSpec};
@@ -13,6 +13,9 @@ use tracing::debug;
 /// - xlayer-mainnet (chain id 196)
 /// - xlayer-testnet (chain id 1952)
 /// - xlayer-devnet (chain id 195)
+/// - xlayer-dev    (chain id 2195) — block-0 local chainspec for `reth --dev`,
+///   seeds the 7 XLayerAA predeploys + a pre-funded dev account into
+///   genesis alloc so no op-node is needed
 ///
 /// It also supports all standard Optimism chains through delegation to the
 /// upstream OpChainSpecParser.
@@ -36,6 +39,7 @@ impl ChainSpecParser for XLayerChainSpecParser {
         "xlayer-mainnet",
         "xlayer-testnet",
         "xlayer-devnet",
+        "xlayer-dev",
     ];
 
     fn parse(s: &str) -> eyre::Result<Arc<Self::ChainSpec>> {
@@ -90,6 +94,12 @@ fn xlayer_chain_value_parser(s: &str) -> eyre::Result<Arc<OpChainSpec>> {
             }
             Ok(XLAYER_DEVNET.clone())
         }
+        // `xlayer-dev` is intentionally a pure-Rust spec (no
+        // XLAYER_DEV_GENESIS env override): its alloc is programmatically
+        // seeded from `AA_PREDEPLOYS` at construction time, so a
+        // user-supplied JSON couldn't round-trip the embedded bytecode
+        // without duplicating it.
+        "xlayer-dev" => Ok(XLAYER_DEV.clone()),
         // For other inputs, try known OP chains first, then parse as genesis
         _ => {
             // Try to match known OP chains (optimism, base, etc.)

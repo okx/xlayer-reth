@@ -50,15 +50,23 @@
 //!
 //! # What this table is used for in the EL
 //!
-//! Runtime bytecode is **not** embedded in the EL (it lives inside
-//! the op-node upgrade-tx payload). This table exists only for:
-//!
 //! - RPC / pool validation that must reference a canonical predeploy
 //!   (most importantly `AccountConfiguration.address`, which the AA
 //!   revm handler calls into to fetch owner config + spending
 //!   limits).
+//! - `xlayer-dev` chainspec genesis alloc — `reth --dev` has no
+//!   op-node and therefore no CL to emit upgrade deposit txs, so
+//!   the 7 predeploys must be present in state from block 0. The
+//!   runtime bytecode embedded here (via `include_bytes!` against
+//!   `contracts/eip8130/artifacts/<Name>.bin`) is copied into the
+//!   chainspec's `Genesis::alloc` at construction time.
 //! - `cast code`-based devnet smoke tests that compare installed
 //!   runtime against expected hex.
+//!
+//! **Not** used for testnet/mainnet/`xlayer-devnet` production
+//! deployment — those run the op-node upgrade-deposit-tx path which
+//! carries `.bin-creation` payloads op-node-side, not runtime
+//! bytecode EL-side.
 //!
 //! # Keeping the table in sync with op-node
 //!
@@ -80,7 +88,8 @@
 
 use alloy_primitives::{address, Address};
 
-/// One XLayerAA predeploy — name, op-node deployer, predeploy address.
+/// One XLayerAA predeploy — name, op-node deployer, predeploy address,
+/// embedded runtime bytecode.
 #[derive(Debug, Clone, Copy)]
 pub struct AAPredeploy {
     /// Human-readable contract name (used in logs + error messages).
@@ -91,6 +100,15 @@ pub struct AAPredeploy {
     /// `CREATE(deployer, 0)`-derived predeploy address. Stable across
     /// chains as long as `deployer` + creation-code are identical.
     pub address: Address,
+    /// Runtime bytecode (immutables patched against
+    /// [`ACCOUNT_CONFIGURATION_ADDRESS`]). `include_bytes!`-ed from
+    /// `contracts/eip8130/artifacts/<Name>.bin`, which is regenerated
+    /// by `just contracts-eip8130-build`. Consumed **only** by the
+    /// `xlayer-dev` chainspec to seed `--dev` mode's genesis alloc.
+    /// op-node-backed chains (`xlayer-devnet` / `xlayer-testnet` /
+    /// `xlayer-mainnet`) install predeploys via CL upgrade deposit
+    /// txs and do not look at this field.
+    pub runtime_code: &'static [u8],
 }
 
 /// Complete ordered list of XLayerAA predeploys. Order matters only
@@ -103,36 +121,47 @@ pub const AA_PREDEPLOYS: &[AAPredeploy] = &[
         name: "AccountConfiguration",
         deployer: address!("0x4210000000000000000000000000000000000010"),
         address: address!("0xA6A551b856B139B3292128F3b36ADa58025c4b27"),
+        runtime_code: include_bytes!(
+            "../../../contracts/eip8130/artifacts/AccountConfiguration.bin"
+        ),
     },
     AAPredeploy {
         name: "DefaultAccount",
         deployer: address!("0x4210000000000000000000000000000000000011"),
         address: address!("0x5D82f4311f134052bb36b11BD665Ddab843ebb3D"),
+        runtime_code: include_bytes!("../../../contracts/eip8130/artifacts/DefaultAccount.bin"),
     },
     AAPredeploy {
         name: "DefaultHighRateAccount",
         deployer: address!("0x4210000000000000000000000000000000000012"),
         address: address!("0x86bf4F2d426b3386a04a24fE21a0CEb34A7b806c"),
+        runtime_code: include_bytes!(
+            "../../../contracts/eip8130/artifacts/DefaultHighRateAccount.bin"
+        ),
     },
     AAPredeploy {
         name: "K1Verifier",
         deployer: address!("0x4210000000000000000000000000000000000013"),
         address: address!("0x7F2c04d16c53f2be99aD1a86771637568B718dBf"),
+        runtime_code: include_bytes!("../../../contracts/eip8130/artifacts/K1Verifier.bin"),
     },
     AAPredeploy {
         name: "P256Verifier",
         deployer: address!("0x4210000000000000000000000000000000000014"),
         address: address!("0xAfc812351BE998FB088851a79Fc68887C42D7719"),
+        runtime_code: include_bytes!("../../../contracts/eip8130/artifacts/P256Verifier.bin"),
     },
     AAPredeploy {
         name: "WebAuthnVerifier",
         deployer: address!("0x4210000000000000000000000000000000000015"),
         address: address!("0x4921DCFD2541f738990767852aB925B3b9f652A2"),
+        runtime_code: include_bytes!("../../../contracts/eip8130/artifacts/WebAuthnVerifier.bin"),
     },
     AAPredeploy {
         name: "DelegateVerifier",
         deployer: address!("0x4210000000000000000000000000000000000016"),
         address: address!("0xE89A62553fE775AFe77464969b2296dc1745CF85"),
+        runtime_code: include_bytes!("../../../contracts/eip8130/artifacts/DelegateVerifier.bin"),
     },
 ];
 
@@ -201,6 +230,22 @@ mod tests {
         // the op-node upgrade-tx bundle depends on all 7 being
         // present and in this exact order.
         assert_eq!(AA_PREDEPLOYS.len(), 7);
+    }
+
+    #[test]
+    fn every_predeploy_has_nonempty_runtime() {
+        // Guard against an empty artifact slipping in (e.g. forge
+        // build was skipped or extract_runtime.py failed silently).
+        // Without runtime bytecode, `xlayer-dev`'s genesis alloc
+        // would install code-less accounts and every AA call would
+        // revert.
+        for p in AA_PREDEPLOYS {
+            assert!(
+                !p.runtime_code.is_empty(),
+                "{} runtime bytecode is empty — did `just contracts-eip8130-build` succeed?",
+                p.name,
+            );
+        }
     }
 
     #[test]

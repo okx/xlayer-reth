@@ -6,6 +6,7 @@ mod hardfork;
 mod parser;
 mod xlayer_aa_predeploys;
 mod xlayer_chainspec;
+mod xlayer_dev;
 mod xlayer_devnet;
 mod xlayer_hardforks;
 mod xlayer_mainnet;
@@ -13,11 +14,13 @@ mod xlayer_testnet;
 
 pub use hardfork::{
     XLayerHardfork, XLAYER_AA_TIMESTAMP_TBD, XLAYER_DEVNET_XLAYER_AA_TIMESTAMP,
-    XLAYER_MAINNET_XLAYER_AA_TIMESTAMP, XLAYER_TESTNET_XLAYER_AA_TIMESTAMP,
+    XLAYER_DEV_XLAYER_AA_TIMESTAMP, XLAYER_MAINNET_XLAYER_AA_TIMESTAMP,
+    XLAYER_TESTNET_XLAYER_AA_TIMESTAMP,
 };
 pub use parser::XLayerChainSpecParser;
 pub use xlayer_aa_predeploys::{AAPredeploy, AA_PREDEPLOYS, ACCOUNT_CONFIGURATION_ADDRESS};
 pub use xlayer_chainspec::XLayerChainSpec;
+pub use xlayer_dev::XLAYER_DEV;
 pub use xlayer_devnet::XLAYER_DEVNET;
 pub use xlayer_hardforks::XLayerHardforks;
 pub use xlayer_mainnet::XLAYER_MAINNET;
@@ -175,6 +178,56 @@ pub static XLAYER_DEVNET_HARDFORKS: Lazy<ChainHardforks> = Lazy::new(|| {
         (
             XLayerHardfork::XLayerAA.boxed(),
             ForkCondition::Timestamp(XLAYER_DEVNET_XLAYER_AA_TIMESTAMP),
+        ),
+    ])
+});
+
+/// Hardfork schedule for the local-dev chainspec ([`XLAYER_DEV`]).
+///
+/// Every fork (Ethereum + Optimism + XLayerAA) activates at genesis
+/// so `reth --dev --chain xlayer-dev` starts immediately in the
+/// latest feature set. Unlike `XLAYER_DEVNET_HARDFORKS`, the XLayerAA
+/// entry here is `Timestamp(0)` — `--dev` has no op-node to emit
+/// upgrade deposit txs, so predeploys are seeded via genesis alloc
+/// in [`xlayer_dev`](mod@xlayer_dev) and XLayerAA is live from block 0.
+pub static XLAYER_DEV_HARDFORKS: Lazy<ChainHardforks> = Lazy::new(|| {
+    ChainHardforks::new(vec![
+        (EthereumHardfork::Frontier.boxed(), ForkCondition::Block(0)),
+        (EthereumHardfork::Homestead.boxed(), ForkCondition::Block(0)),
+        (EthereumHardfork::Tangerine.boxed(), ForkCondition::Block(0)),
+        (EthereumHardfork::SpuriousDragon.boxed(), ForkCondition::Block(0)),
+        (EthereumHardfork::Byzantium.boxed(), ForkCondition::Block(0)),
+        (EthereumHardfork::Constantinople.boxed(), ForkCondition::Block(0)),
+        (EthereumHardfork::Petersburg.boxed(), ForkCondition::Block(0)),
+        (EthereumHardfork::Istanbul.boxed(), ForkCondition::Block(0)),
+        (EthereumHardfork::MuirGlacier.boxed(), ForkCondition::Block(0)),
+        (EthereumHardfork::Berlin.boxed(), ForkCondition::Block(0)),
+        (EthereumHardfork::London.boxed(), ForkCondition::Block(0)),
+        (EthereumHardfork::ArrowGlacier.boxed(), ForkCondition::Block(0)),
+        (EthereumHardfork::GrayGlacier.boxed(), ForkCondition::Block(0)),
+        (
+            EthereumHardfork::Paris.boxed(),
+            ForkCondition::TTD {
+                activation_block_number: 0,
+                fork_block: Some(0),
+                total_difficulty: U256::ZERO,
+            },
+        ),
+        (OpHardfork::Bedrock.boxed(), ForkCondition::Block(0)),
+        (OpHardfork::Regolith.boxed(), ForkCondition::Timestamp(0)),
+        (EthereumHardfork::Shanghai.boxed(), ForkCondition::Timestamp(0)),
+        (OpHardfork::Canyon.boxed(), ForkCondition::Timestamp(0)),
+        (EthereumHardfork::Cancun.boxed(), ForkCondition::Timestamp(0)),
+        (OpHardfork::Ecotone.boxed(), ForkCondition::Timestamp(0)),
+        (OpHardfork::Fjord.boxed(), ForkCondition::Timestamp(0)),
+        (OpHardfork::Granite.boxed(), ForkCondition::Timestamp(0)),
+        (OpHardfork::Holocene.boxed(), ForkCondition::Timestamp(0)),
+        (EthereumHardfork::Prague.boxed(), ForkCondition::Timestamp(0)),
+        (OpHardfork::Isthmus.boxed(), ForkCondition::Timestamp(0)),
+        (OpHardfork::Jovian.boxed(), ForkCondition::Timestamp(0)),
+        (
+            XLayerHardfork::XLayerAA.boxed(),
+            ForkCondition::Timestamp(XLAYER_DEV_XLAYER_AA_TIMESTAMP),
         ),
     ])
 });

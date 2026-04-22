@@ -124,6 +124,7 @@ For local development and testing, you can run a dev node without requiring an e
 
 ```bash
 OTEL_EXPORTER_OTLP_PROTOCOL=http cargo r -p xlayer-reth-node node \
+  --chain xlayer-dev \
   --datadir .op-reth-ttt \
   --engine.legacy-state-root \
   --dev \
@@ -144,6 +145,10 @@ OTEL_EXPORTER_OTLP_PROTOCOL=http cargo r -p xlayer-reth-node node \
 ```
 
 Key flags:
+- `--chain xlayer-dev`: Block-0 local chainspec (chain id 2195) that seeds the
+  7 XLayerAA (EIP-8130) predeploys + a pre-funded dev account into genesis
+  alloc so `0x7B` account-abstraction transactions work out of the box. Distinct
+  from `xlayer-devnet`, which is a shared L2 regenesis snapshot driven by op-node.
 - `--dev`: Enables dev mode (auto-mining, no consensus required)
 - `--dev.block-time 1s`: Mine a new block every second
 - `--engine.legacy-state-root`: Use legacy state root computation

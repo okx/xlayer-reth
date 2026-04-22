@@ -57,3 +57,12 @@ pub const XLAYER_TESTNET_XLAYER_AA_TIMESTAMP: u64 = XLAYER_AA_TIMESTAMP_TBD;
 
 /// Mainnet XLayerAA activation — product sign-off pending.
 pub const XLAYER_MAINNET_XLAYER_AA_TIMESTAMP: u64 = XLAYER_AA_TIMESTAMP_TBD;
+
+/// `xlayer-dev` (the `reth --dev` local chainspec) activates XLayerAA
+/// at genesis. Unlike the op-node-backed chains, `--dev` mode has no
+/// CL and therefore no upgrade-deposit-tx mechanism; the 7 predeploys
+/// are seeded directly into the genesis alloc (see
+/// [`crate::XLAYER_DEV`]). Setting `= 0` makes XLayerAA active from
+/// block 0 so the AA tx-type validation is on from the first block
+/// the auto-miner produces.
+pub const XLAYER_DEV_XLAYER_AA_TIMESTAMP: u64 = 0;
