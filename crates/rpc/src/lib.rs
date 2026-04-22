@@ -7,7 +7,11 @@ pub mod eth;
 pub mod filter;
 pub mod helper;
 
-pub use aa::{read_2d_nonce, TransactionCountOverrideImpl, TransactionCountOverrideServer};
+pub use aa::{
+    read_2d_nonce,
+    receipt::{build_eip8130_fields, build_fields_for_aa},
+    TransactionCountOverrideImpl, TransactionCountOverrideServer,
+};
 pub use default::{DefaultRpcExt, DefaultRpcExtApiServer, SequencerClientProvider};
 pub use eth::{FlashblocksEthApiExt, FlashblocksEthApiOverrideServer};
 pub use filter::{FlashblocksEthFilterExt, FlashblocksFilterOverrideServer};

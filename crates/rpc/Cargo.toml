@@ -12,12 +12,18 @@ default = []
 
 [dependencies]
 xlayer-builder.workspace = true
+# `serde` + `reth-codec` + `serde-bincode-compat`: every workspace
+# feature xlayer-consensus needs to satisfy the node-side trait
+# bars (FullSignedTx etc.) through the RPC surface's provider /
+# pool types. The three features must travel together — see the
+# feature-gate doc blocks in `crates/xlayer-consensus/src/envelope.rs`.
+xlayer-consensus = { workspace = true, features = ["serde", "reth-codec", "serde-bincode-compat"] }
 xlayer-flashblocks.workspace = true
 # `std` + `rpc` features: `rpc` pulls in `op-alloy-rpc-types` which
-# we need for the receipt converter wiring. The AA-specific
-# additions (consensus envelope types, receipt-type extension)
-# arrive in later phases alongside the converter impl.
+# we need for both the nonce-slot helper re-use and the forthcoming
+# receipt converter wiring.
 xlayer-revm = { workspace = true, features = ["std", "rpc"] }
+xlayer-rpc-types.workspace = true
 
 # reth
 reth-chain-state.workspace = true
@@ -57,8 +63,12 @@ tracing.workspace = true
 
 [dev-dependencies]
 # alloy-sol-types — used only in the nonce-slot pinning test in
-# `src/aa.rs`. Kept dev-only so a release build doesn't link it.
+# `src/aa/mod.rs`. Kept dev-only so a release build doesn't link it.
 alloy-sol-types.workspace = true
+# op-alloy-consensus — used only by the receipt-helper tests in
+# `src/aa/receipt.rs` to build a stock EIP-1559 envelope for the
+# non-AA routing assertion. Kept dev-only.
+op-alloy-consensus.workspace = true
 reth-trie-db.workspace = true
 tokio = { workspace = true, features = ["rt", "macros"] }
 

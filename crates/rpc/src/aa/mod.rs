@@ -1,19 +1,26 @@
 //! XLayerAA (EIP-8130) RPC extensions for the `eth` namespace.
 //!
-//! This module currently ships the [`TransactionCountOverride`]
-//! JSON-RPC trait, which extends `eth_getTransactionCount` with an
-//! optional `nonce_key` parameter so callers can query the 2D nonce
-//! channel maintained by the `NonceManager` predeploy. Without this
-//! override, AA clients have no cheap way to discover the next
-//! nonce for a `(sender, nonce_key)` pair — the receipt-side
-//! tracking in [`xlayer_rpc_types`] is after-the-fact.
+//! Two building blocks live here:
 //!
-//! Downstream of M5 (mempool), the same path will be consumed by
-//! the pool to validate incoming AA txs' `(from, nonce_key,
-//! nonce_sequence)` tuple against the current on-chain 2D nonce.
+//! 1. [`TransactionCountOverride`] — extends `eth_getTransactionCount`
+//!    with an optional `nonce_key` parameter so callers can query
+//!    the 2D nonce channel maintained by the `NonceManager`
+//!    predeploy. Without this, AA clients have no cheap way to
+//!    discover the next nonce for a `(sender, nonce_key)` pair.
 //!
-//! Mirrors Base's `TransactionCountOverride` shape exactly so
-//! existing AA tooling works on XLayer unchanged.
+//! 2. [`receipt::build_eip8130_fields`] — pure helper that derives
+//!    [`xlayer_rpc_types::Eip8130ReceiptFields`] from an AA tx
+//!    envelope + receipt logs. The receipt-converter wire-up that
+//!    actually threads these fields into `eth_getTransactionReceipt`
+//!    JSON lands alongside the M5 node-level `XLayerNode` swap;
+//!    until then the helper stays callable as a standalone so
+//!    future converter work and AA-aware test harnesses share one
+//!    derivation path.
+//!
+//! Both mirror Base's shape exactly so existing AA tooling works
+//! on XLayer unchanged.
+
+pub mod receipt;
 
 use alloy_eips::BlockId;
 use alloy_primitives::{Address, U256};
