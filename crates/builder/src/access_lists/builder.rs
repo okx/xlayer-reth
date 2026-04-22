@@ -72,25 +72,21 @@ impl FlashblockAccessListBuilder {
             }
 
             // Diff code
-            if original.code_hash != account.info.code_hash {
-                if let Some(ref code) = account.info.code {
-                    entry.code_changes.insert(tx_index, code.clone());
-                }
+            if original.code_hash != account.info.code_hash
+                && let Some(ref code) = account.info.code
+            {
+                entry.code_changes.insert(tx_index, code.clone());
             }
 
             // Process storage: reads and writes
             for (slot, slot_value) in &account.storage {
-                let slot_u256: U256 = (*slot).into();
+                let slot_u256: U256 = *slot;
                 let present: StorageValue = slot_value.present_value;
                 let original_val: StorageValue = slot_value.original_value;
 
                 if original_val != present {
                     // Storage write
-                    entry
-                        .storage_changes
-                        .entry(slot_u256)
-                        .or_default()
-                        .insert(tx_index, present.into());
+                    entry.storage_changes.entry(slot_u256).or_default().insert(tx_index, present);
                 } else {
                     // Storage read (accessed but not modified)
                     entry.storage_reads.insert(slot_u256);

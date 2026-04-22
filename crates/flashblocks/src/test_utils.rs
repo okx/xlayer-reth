@@ -294,8 +294,8 @@ impl TestFlashBlockBuilder {
             },
             metadata: OpFlashblockPayloadMetadata {
                 block_number: self.block_number,
-                receipts: Default::default(),
-                new_account_balances: Default::default(),
+                receipts: Some(Default::default()),
+                new_account_balances: Some(Default::default()),
                 access_list: self.access_list,
             },
         }

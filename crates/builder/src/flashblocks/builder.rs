@@ -18,7 +18,7 @@ use alloy_consensus::{
 };
 use alloy_eips::{eip7685::EMPTY_REQUESTS_HASH, merge::BEACON_NONCE, Encodable2718};
 use alloy_evm::block::BlockExecutionResult;
-use alloy_primitives::{Address, BlockHash, B256, U256};
+use alloy_primitives::{BlockHash, B256, U256};
 use eyre::WrapErr as _;
 use op_alloy_rpc_types_engine::{
     OpFlashblockPayload, OpFlashblockPayloadBase, OpFlashblockPayloadDelta,
@@ -34,7 +34,7 @@ use reth_optimism_consensus::{calculate_receipt_root_no_memo_optimism, isthmus};
 use reth_optimism_evm::{OpEvmConfig, OpNextBlockEnvAttributes};
 use reth_optimism_forks::OpHardforks;
 use reth_optimism_node::{OpBuiltPayload, OpPayloadBuilderAttributes};
-use reth_optimism_primitives::{OpReceipt, OpTransactionSigned};
+use reth_optimism_primitives::OpTransactionSigned;
 
 use reth_payload_primitives::BuiltPayload;
 use reth_payload_util::BestPayloadTransactions;
@@ -50,28 +50,10 @@ use reth_revm::{
 use reth_transaction_pool::TransactionPool;
 use reth_trie::{updates::TrieUpdates, HashedPostState, TrieInput};
 use revm::Database;
-use std::{collections::BTreeMap, sync::Arc, time::Instant};
+use std::{sync::Arc, time::Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
-
-/// Converts a reth OpReceipt to an op-alloy OpReceipt
-/// TODO: remove this once reth updates to use the op-alloy defined type as well.
-fn convert_receipt(receipt: &OpReceipt) -> op_alloy_consensus::OpReceipt {
-    match receipt {
-        OpReceipt::Legacy(r) => op_alloy_consensus::OpReceipt::Legacy(r.clone()),
-        OpReceipt::Eip2930(r) => op_alloy_consensus::OpReceipt::Eip2930(r.clone()),
-        OpReceipt::Eip1559(r) => op_alloy_consensus::OpReceipt::Eip1559(r.clone()),
-        OpReceipt::Eip7702(r) => op_alloy_consensus::OpReceipt::Eip7702(r.clone()),
-        OpReceipt::Deposit(r) => {
-            op_alloy_consensus::OpReceipt::Deposit(op_alloy_consensus::OpDepositReceipt {
-                inner: r.inner.clone(),
-                deposit_nonce: r.deposit_nonce,
-                deposit_receipt_version: r.deposit_receipt_version,
-            })
-        }
-    }
-}
 
 type NextBestFlashblocksTxs<Pool> = BestFlashblocksTxs<
     <Pool as TransactionPool>::Transaction,
@@ -1101,14 +1083,6 @@ where
     let (excess_blob_gas, blob_gas_used) = ctx.blob_fields(info);
     let extra_data = ctx.extra_data()?;
 
-    // need to read balances before take_bundle() below
-    let new_account_balances = state
-        .bundle_state
-        .state
-        .iter()
-        .filter_map(|(address, account)| account.info.as_ref().map(|info| (*address, info.balance)))
-        .collect::<BTreeMap<Address, U256>>();
-
     let bundle_state = state.take_bundle();
     let execution_output = BlockExecutionOutput {
         state: bundle_state.clone(),
@@ -1192,18 +1166,12 @@ where
     // For X Layer, monitoring logs
     let new_tx_hashes = new_transactions.iter().map(|tx| tx.tx_hash()).collect::<Vec<_>>();
 
-    let new_receipts = info.receipts[last_idx..].to_vec();
     if let Some(fb) = fb_state {
         if let Some(updates) = trie_updates_to_cache.take() {
             fb.prev_trie_updates = Some(updates);
         }
         fb.set_last_flashblock_tx_index(info.executed_transactions.len());
     }
-    let receipts_with_hash = new_transactions
-        .iter()
-        .zip(new_receipts.iter())
-        .map(|(tx, receipt)| (tx.tx_hash(), convert_receipt(receipt)))
-        .collect::<BTreeMap<B256, op_alloy_consensus::OpReceipt>>();
     // Build EIP-7928 access list for this flashblock's transaction range.
     // Takes the accumulated builder (resets it for the next flashblock).
     let min_tx_index = last_idx as u64;
@@ -1212,9 +1180,9 @@ where
     let access_list = fal_builder.build(min_tx_index, max_tx_index);
 
     let metadata = OpFlashblockPayloadMetadata {
-        receipts: receipts_with_hash,
-        new_account_balances,
         block_number: ctx.parent().number + 1,
+        new_account_balances: None,
+        receipts: None,
         access_list: Some(access_list.account_changes),
     };
 

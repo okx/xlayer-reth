@@ -183,7 +183,6 @@ mod tests {
         OpFlashblockPayloadBase, OpFlashblockPayloadDelta, OpFlashblockPayloadMetadata,
     };
     use reth_optimism_primitives::OpTransactionSigned;
-    use std::collections::BTreeMap;
 
     /// RAII guard for a temporary directory that cleans up on drop (success or failure).
     struct TempDir(PathBuf);
@@ -225,9 +224,9 @@ mod tests {
             diff: OpFlashblockPayloadDelta::default(),
             metadata: OpFlashblockPayloadMetadata {
                 block_number,
-                new_account_balances: BTreeMap::new(),
-                receipts: BTreeMap::new(),
-                access_list: None,
+                new_account_balances: Some(Default::default()),
+                receipts: Some(Default::default()),
+                access_list: Some(vec![]),
             },
         }
     }

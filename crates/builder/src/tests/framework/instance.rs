@@ -8,7 +8,6 @@ use crate::{
         TransactionPoolObserver,
     },
 };
-use alloy_primitives::B256;
 use alloy_provider::{Identity, ProviderBuilder, RootProvider};
 use clap::Parser;
 use core::{
@@ -380,18 +379,6 @@ impl FlashblocksListener {
             .iter()
             .find(|tf| tf.payload.index == index)
             .map(|tf| tf.payload.clone())
-    }
-
-    /// Check if any flashblock contains the given transaction hash
-    pub fn contains_transaction(&self, tx_hash: &B256) -> bool {
-        self.flashblocks.lock().iter().any(|fb| fb.payload.metadata.receipts.contains_key(tx_hash))
-    }
-
-    /// Find which flashblock index contains the given transaction hash
-    pub fn find_transaction_flashblock(&self, tx_hash: &B256) -> Option<u64> {
-        self.flashblocks.lock().iter().find_map(|fb| {
-            fb.payload.metadata.receipts.contains_key(tx_hash).then_some(fb.payload.index)
-        })
     }
 
     /// Stop the listener and wait for it to complete

@@ -3,7 +3,7 @@
 //! `FBALBuilderDb` wraps any `Database + DatabaseCommit` implementation, intercepting all
 //! EVM reads and writes to build an EIP-7928 access list transparently.
 
-use crate::access_lists::builder::{AccountChangesBuilder, FlashblockAccessListBuilder};
+use crate::access_lists::builder::FlashblockAccessListBuilder;
 use tracing::error;
 
 use revm::{
@@ -83,11 +83,7 @@ where
         changes: HashMap<Address, Account>,
     ) -> Result<(), <DB as Database>::Error> {
         for (address, account) in &changes {
-            let entry = self
-                .access_list
-                .changes
-                .entry(*address)
-                .or_insert_with(AccountChangesBuilder::default);
+            let entry = self.access_list.changes.entry(*address).or_default();
 
             // Diff against pre-state to record only actual mutations.
             let prev = self.db.basic(*address)?;
@@ -132,9 +128,9 @@ where
                 if slot_value.original_value != slot_value.present_value {
                     entry
                         .storage_changes
-                        .entry((*slot).into())
+                        .entry(*slot)
                         .or_default()
-                        .insert(self.index, slot_value.present_value.into());
+                        .insert(self.index, slot_value.present_value);
                 }
             }
         }
@@ -153,7 +149,7 @@ where
 
     fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
         // Register address as touched in the access list.
-        self.access_list.changes.entry(address).or_insert_with(AccountChangesBuilder::default);
+        self.access_list.changes.entry(address).or_default();
         self.db.basic(address)
     }
 
@@ -167,12 +163,7 @@ where
         index: StorageKey,
     ) -> Result<StorageValue, Self::Error> {
         // Record storage read.
-        self.access_list
-            .changes
-            .entry(address)
-            .or_insert_with(AccountChangesBuilder::default)
-            .storage_reads
-            .insert(index.into());
+        self.access_list.changes.entry(address).or_default().storage_reads.insert(index);
         self.db.storage(address, index)
     }
 
