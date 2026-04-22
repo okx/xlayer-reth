@@ -2,3 +2,12 @@
 	path = deps/optimism
 	url = https://github.com/okx/optimism
 	branch = feat/xlayer-aa-v1
+[submodule "contracts/eip8130/lib/forge-std"]
+	path = contracts/eip8130/lib/forge-std
+	url = https://github.com/foundry-rs/forge-std
+[submodule "contracts/eip8130/lib/openzeppelin-contracts"]
+	path = contracts/eip8130/lib/openzeppelin-contracts
+	url = https://github.com/OpenZeppelin/openzeppelin-contracts
+[submodule "contracts/eip8130/lib/solady"]
+	path = contracts/eip8130/lib/solady
+	url = https://github.com/Vectorized/solady

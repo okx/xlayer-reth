@@ -1,0 +1,6 @@
+# Foundry build output + cache — regenerate via `forge build`.
+# Only the extracted runtime bytecode under `artifacts/*.bin-runtime`
+# is committed (checked in by the `just contracts-eip8130-build`
+# target so the Rust-side predeploy table can `include_bytes!` it).
+out/
+cache/

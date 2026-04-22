@@ -1,0 +1,14 @@
+[profile.default]
+optimizer = true
+via_ir = true
+evm_version = "osaka"
+remappings = [
+    "openzeppelin/=lib/openzeppelin-contracts/contracts/",
+    "solady/=lib/solady/src/",
+]
+
+[lint]
+lint_on_build = false
+exclude_lints = [
+    "asm-keccak256",
+]
