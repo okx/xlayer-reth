@@ -1,6 +1,15 @@
 # Foundry build output + cache — regenerate via `forge build`.
-# Only the extracted runtime bytecode under `artifacts/*.bin-runtime`
-# is committed (checked in by the `just contracts-eip8130-build`
-# target so the Rust-side predeploy table can `include_bytes!` it).
+# Under `artifacts/`, three formats are committed:
+#
+#   *.bin-runtime  — hex runtime bytecode with immutables patched.
+#                    Used by `reth --dev` genesis alloc + `cast code`
+#                    smoke tests.
+#   *.bin          — raw-binary variant of .bin-runtime, consumed by
+#                    `include_bytes!` in `crates/chainspec/`.
+#   *.bin-creation — hex creation bytecode (constructor + runtime,
+#                    immutables unpatched), pasted into op-node's
+#                    upgrade-tx payload constants.
+#
+# All three are produced by `just contracts-eip8130-build`.
 out/
 cache/
