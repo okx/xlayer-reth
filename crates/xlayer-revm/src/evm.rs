@@ -20,7 +20,9 @@ use op_revm::{transaction::error::OpTransactionError, L1BlockInfo, OpHaltReason,
 use revm::{
     context::{result::ExecResultAndState, BlockEnv, CfgEnv, TxEnv},
     context_interface::{result::EVMError, ContextTr, JournalTr},
-    handler::{instructions::EthInstructions, EthFrame, Handler, PrecompileProvider},
+    handler::{
+        instructions::EthInstructions, EthFrame, Handler, PrecompileProvider, SystemCallEvm,
+    },
     inspector::Inspector,
     interpreter::{interpreter::EthInterpreter, InterpreterResult},
     Context, Journal,
@@ -151,19 +153,23 @@ where
 
     fn transact_system_call(
         &mut self,
-        _caller: Address,
-        _contract: Address,
-        _data: Bytes,
+        caller: Address,
+        contract: Address,
+        data: Bytes,
     ) -> Result<
         ExecResultAndState<revm::context_interface::result::ExecutionResult<Self::HaltReason>>,
         Self::Error,
     > {
-        // System calls (engine-API-driven beacon-root / historical-storage
-        // updates) never carry an AA payload, so routing them through the
-        // OP handler is correct. This hook is wired in a follow-up when
-        // the node actually exercises it — the default builder path does
-        // not invoke system calls during regular transaction execution.
-        unimplemented!("XLayerAAEvm::transact_system_call is wired in a later milestone")
+        // System calls (EIP-2935 historical block hashes, EIP-4788 beacon
+        // roots, EIP-7002 / EIP-7251 consolidation requests) are
+        // synthesized by the block executor at the start/end of every
+        // block — they carry no AA payload, so we delegate straight to
+        // `op_revm::OpEvm`'s system-call entry point, mirroring
+        // [`alloy_op_evm::OpEvm::transact_system_call`]. The system tx
+        // built inside `system_call_with_caller` is independent of
+        // `ctx.tx`, so we don't need to install an `XLayerAATransaction`
+        // first.
+        self.inner.system_call_with_caller(caller, contract, data).map_err(map_op_err)
     }
 
     fn finish(self) -> (Self::DB, EvmEnv<Self::Spec>) {
