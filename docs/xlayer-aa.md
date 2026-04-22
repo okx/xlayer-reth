@@ -4,6 +4,36 @@
 
 Running log of mistakes made during XLayerAA implementation, so we don't repeat them. Append new entries at the top.
 
+### 2026-04-22 — Assumed Canyon's `ensure_create2_deployer` was the standard OP-upgrade pattern, and that Base's `Deploy.s.sol` was a production rollout recipe
+
+**What I assumed.** When planning XLayerAA predeploy activation (M3 C4), I took Canyon's [`ensure_create2_deployer`](../deps/optimism/rust/alloy-op-evm/src/block/canyon.rs) as the canonical template for "install predeploys at a fork's activation block" — i.e. an EL-side `apply_pre_execution_changes` hook that checks `is_X_active_at_timestamp(ts) && !is_X_active_at_timestamp(ts - 2)` and force-writes bytecode. I also assumed Base's [`script/Deploy.s.sol`](https://github.com/base/eip-8130/blob/main/script/Deploy.s.sol) (which uses CREATE2 via Nick's factory at `0x4e59b448...` with salt=0) described how Base itself would install the 7 EIP-8130 predeploys on their live L2. The plan threaded both assumptions: vendor Base's Solidity source → forge build → `include_bytes!` runtime bytecode → install via an EL hook at activation.
+
+**What's actually true.**
+
+1. **Canyon is the exception, not the template.** Grepping `alloy-op-evm` for `ensure_*` in `apply_pre_execution_changes` returns exactly one function: `ensure_create2_deployer`. All other OP fork upgrades — Ecotone, Fjord, Granite, Holocene, Isthmus, Interop, Jovian — install their contracts via **CL-synthesized upgrade deposit transactions** emitted by op-node in `rollup/derive/<fork>_upgrade_transactions.go`. The EL receives these as ordinary deposit txs and executes them via the normal transaction path; no EL hook involved. Canyon is special because the CREATE2 deployer is a well-known Ethereum-mainnet contract deployed via a Nick-style keyless signature that can't be reproduced on L2 as a regular deposit tx — so Canyon falls back to an irregular state transition. **No other OP fork has this property.**
+2. **The OP-standard recipe for deploying a brand-new contract at a fork.** Pick a fresh, human-readable deployer address per contract (e.g. `L1BlockJovianDeployerAddress = 0x4210000000000000000000000000000000000006`), compute the predeploy address as `CREATE(deployer, nonce=0)`, and have op-node emit a `DepositTx { from: deployer, to: nil, data: creationCode, ... }` in the activation boundary block. Every deployer is a fresh account (nonce guaranteed 0) so the address is fully deterministic across chains. See [deps/optimism/op-node/rollup/derive/jovian_upgrade_transactions.go:18-48](../deps/optimism/op-node/rollup/derive/jovian_upgrade_transactions.go#L18) for the cleanest recent example.
+3. **Base's `Deploy.s.sol` is a local Foundry broadcast script**, not a production rollout mechanism. It wraps deployments in `vm.startBroadcast()` (i.e. signs txs from a funded EOA in a dev wallet) and assumes Nick's factory already exists at the target chain. It says nothing about how Base would actually install these at a fork boundary on Base mainnet — because **Base has not actually activated EIP-8130 on any live chain yet**. The repo is tagged "Reference implementation"; there is no production deployer.
+4. **The "match Base's CREATE2 addresses byte-for-byte" constraint was empty.** It assumed Base had committed to a specific set of addresses on production, which would be broken by any divergence. Since Base has no production deployment, the constraint protected nothing.
+
+**Why it's wrong.**
+
+- It inflated an irregular-state-transition hack (Canyon) into a general-purpose pattern, and inherited all of Canyon's pain (the rustc-ICE C4 blocker from the previous entry) unnecessarily.
+- It treated a Foundry dev-deployment script as a production spec, and built the XLayer plan around aligning with an address set that no live chain actually uses.
+- It optimized for a hypothetical cross-chain tooling compatibility that doesn't exist yet and may never exist in the assumed form (Base could easily pick a different mechanism when they do ship).
+
+**Fix.** Switch XLayerAA to the **standard OP-upgrade pattern**, matching Ecotone/Isthmus/Jovian:
+
+1. **Drop CREATE2 + Nick's factory + salt=0 for predeploys.** Allocate 7 fresh deployer addresses (e.g. `0x4210000000000000000000000000000000000010..0016`), compute the 7 predeploy addresses as `CREATE(deployer_i, 0)`. Addresses will differ from Base but remain deterministic and chain-portable.
+2. **Move predeploy installation to op-node.** Author `XLayerAANetworkUpgradeTransactions()` in `deps/optimism/op-node/rollup/derive/xlayer_aa_upgrade_transactions.go`, emitting 7 `DepositTx`s (one per predeploy) at the `XLayerAA` fork activation boundary block. Pattern follows `jovian_upgrade_transactions.go` exactly.
+3. **EL becomes trivial.** Delete `AA_PREDEPLOYS` as an activation-hook input (no bytecode needs to be embedded in the EL). Keep `XLayerHardfork::XLayerAA` + `is_xlayer_aa_active_at_timestamp` — those are still needed for AA-tx-type validation, not for predeploy injection. The C4 rustc-ICE problem **disappears entirely** because there is no EL hook to write.
+4. **Devnet: block 1, not block 0.** Set `genesis.timestamp = 0`, `XLAYER_DEVNET_XLAYER_AA_TIMESTAMP = 1`. op-node's activation-boundary logic (`isActive(blockTs) && !isActive(parentTs)`) can't fire inside genesis (no parent, CL doesn't synthesize txs for block 0), so the 7 upgrade deposit txs land in block 1. Users can send AA txs from block 2. Genesis-alloc was considered and rejected — it would create a devnet-only third code path on top of CL upgrade tx (used by testnet/mainnet) and add maintenance burden for a 2-second convenience.
+
+**Lesson.**
+
+- When a pattern appears only once in a large codebase, treat it as a historical exception until proven otherwise. `git log` on `canyon.rs` would have revealed that the irregular-state-transition trick was a one-off forced by a keyless-deployment constraint unique to the CREATE2 deployer. grep all `apply_pre_execution_changes` implementations before assuming any one of them is representative.
+- When a reference implementation is labeled "reference" and has no production deployment, don't treat its auxiliary scripts (Foundry, hardhat, docker-compose) as production contracts. Check whether the upstream has actually shipped before cloning their deployment mechanism.
+- "Byte-for-byte address compatibility" is a load-bearing constraint only when there's a concrete chain that would be broken by divergence. Without that, it's speculative alignment and can justify disproportionate engineering effort. Verify the counterparty chain has actually committed to addresses before letting the constraint shape architecture.
+
 ### 2026-04-22 — Adding a default method to `OpHardforks` in the op-reth submodule triggers a rustc ICE
 
 **What I tried.** For M3 C4 (XLayerAA predeploy activation hook), I needed `alloy-op-evm::block::apply_pre_execution_changes` to detect XLayerAA activation without pulling `xlayer-chainspec` upward. Plan: add one default method on [`OpHardforks`](../deps/optimism/rust/alloy-op-hardforks/src/lib.rs):
