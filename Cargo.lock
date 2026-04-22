@@ -14424,6 +14424,8 @@ dependencies = [
  "alloy-primitives",
  "alloy-rpc-types-eth",
  "alloy-serde",
+ "alloy-sol-types",
+ "async-trait",
  "futures",
  "jsonrpsee",
  "jsonrpsee-types",
@@ -14447,6 +14449,7 @@ dependencies = [
  "tracing",
  "xlayer-builder",
  "xlayer-flashblocks",
+ "xlayer-revm",
 ]
 
 [[package]]

@@ -1,11 +1,13 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+pub mod aa;
 pub mod default;
 pub mod eth;
 pub mod filter;
 pub mod helper;
 
+pub use aa::{read_2d_nonce, TransactionCountOverrideImpl, TransactionCountOverrideServer};
 pub use default::{DefaultRpcExt, DefaultRpcExtApiServer, SequencerClientProvider};
 pub use eth::{FlashblocksEthApiExt, FlashblocksEthApiOverrideServer};
 pub use filter::{FlashblocksEthFilterExt, FlashblocksFilterOverrideServer};

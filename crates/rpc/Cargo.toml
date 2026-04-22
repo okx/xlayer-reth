@@ -13,6 +13,11 @@ default = []
 [dependencies]
 xlayer-builder.workspace = true
 xlayer-flashblocks.workspace = true
+# `std` + `rpc` features: `rpc` pulls in `op-alloy-rpc-types` which
+# we need for the receipt converter wiring. The AA-specific
+# additions (consensus envelope types, receipt-type extension)
+# arrive in later phases alongside the converter impl.
+xlayer-revm = { workspace = true, features = ["std", "rpc"] }
 
 # reth
 reth-chain-state.workspace = true
@@ -40,6 +45,7 @@ op-alloy-network.workspace = true
 op-alloy-rpc-types.workspace = true
 
 # rpc
+async-trait.workspace = true
 jsonrpsee.workspace = true
 jsonrpsee-types.workspace = true
 
@@ -50,6 +56,9 @@ tokio-stream.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# alloy-sol-types — used only in the nonce-slot pinning test in
+# `src/aa.rs`. Kept dev-only so a release build doesn't link it.
+alloy-sol-types.workspace = true
 reth-trie-db.workspace = true
 tokio = { workspace = true, features = ["rt", "macros"] }
 
