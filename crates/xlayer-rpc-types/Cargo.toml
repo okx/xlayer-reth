@@ -1,0 +1,27 @@
+[package]
+name = "xlayer-rpc-types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "XLayer JSON-RPC response types, chiefly XLayerAA (EIP-8130) receipt extensions"
+
+[lints]
+workspace = true
+
+[dependencies]
+# alloy
+alloy-primitives = { workspace = true, default-features = false, features = ["serde"] }
+
+# op-alloy — re-exports `OpTransactionReceipt`, which our receipt
+# wrapper extends. Keeping this a hard dep (not optional) because the
+# crate has no no_std / prover consumers — RPC types are server-side.
+op-alloy-rpc-types = { workspace = true, default-features = false, features = ["serde"] }
+
+# misc
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }
