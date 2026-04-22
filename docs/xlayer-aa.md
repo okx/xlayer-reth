@@ -1,5 +1,46 @@
 # XLayerAA — Implementation Notes
 
+## Milestone status (M6 — Node swap, partial)
+
+M6 breaks into four phases. The first two land; the last two hit a
+genuine scope wall that's too big for a single PR.
+
+| Sub | Status | What's in |
+|---|---|---|
+| M6a | done | `XLayerPayloadTypes = OpPayloadTypes<XLayerPrimitives>` alias + `XLayerEngineTypes<T>` fork that drops the `Block = OpBlock` constraint on `OpEngineTypes`'s `EngineTypes` impl. Two compile-gate tests pin `PayloadTypes` / `EngineTypes` satisfaction. |
+| M6b | done | `XLayerNode` struct wrapping `OpNode` with its own `NodeTypes` impl: `Primitives = XLayerPrimitives`, `Payload = XLayerEngineTypes`, `Storage = EmptyBodyStorage<XLayerTxEnvelope, Header>`. Side-fix: `Compress` / `Decompress` impls for `XLayerTxEnvelope` under the `reth-codec` feature so `NodeTypesForProvider`'s `SignedTx: Value` bound is satisfied. Compile-gate test pins it. |
+| M6c | blocked — **~1 week scope** | Actual swap in `bin/node/main.rs` requires replacing the entire `op_node.components()` chain, each element of which is bound to OpPrimitives: pool (reusable via `OpPoolBuilder<XLayerPoolTransaction>`), executor (`XLayerExecutorBuilder` must lift its `Primitives = OpPrimitives` bound), payload (`OpPayloadBuilder` has tight receipt-builder bounds), network (`OpNetworkBuilder` is generic enough but needs checking), consensus (`OpConsensusBuilder` likely OK). Plus `OpAddOns` requires `OpNodeTypes` marker that pins `Primitives = OpPrimitives` — can't reuse; needs `XLayerAddOns`. Plus `XLayerTxEnvelope` needs `TransactionEnvelope` impl (so the receipt-builder's `TxType` projection works). Plus a new `XLayerReceiptBuilder: OpReceiptBuilder<Transaction = XLayerTxEnvelope>`. Each cascade has its own trait-bound ladder — the total is a multi-day fork. |
+| M6d | blocks on M6c | End-to-end dev-chain test. |
+
+### What M6c's punch list actually looks like
+
+Probing `main.rs` with `XLayerNode` swapped in surfaces:
+
+```
+error[E0277]: the trait bound `ComponentsBuilder<_, ..., ..., ..., ..., ...>: NodeComponentsBuilder<...>` is not satisfied
+    = help: the trait `NodeComponentsBuilder<FullNodeTypesAdapter<XLayerNode, ...>>` is not implemented for `ComponentsBuilder<_, OpPoolBuilder, ..., ..., ..., ...>`
+```
+
+The chain reaction:
+
+1. `OpPoolBuilder` (default-parameterized as `OpPoolBuilder<OpPooledTransaction>`) needs `T = XLayerPoolTransaction`. Cheap — `OpPoolBuilder<T>` is already generic; just type-annotate. M5c left this ready.
+2. `OpEvmConfig<ChainSpec, N, R, EvmF>`'s `ConfigureEvm` impl binds `N::SignedTx = R::Transaction`. With `N = XLayerPrimitives`, that's `XLayerTxEnvelope`; but `R = OpRethReceiptBuilder` has `Transaction = OpTxEnvelope`. Need `XLayerReceiptBuilder` with `Transaction = XLayerTxEnvelope`. Non-trivial: also needs the `TxType` projection through `TransactionEnvelope` trait, which `XLayerTxEnvelope` doesn't yet implement.
+3. `XLayerTxEnvelope` needs `impl TransactionEnvelope` — requires `type TxType` (probably a small enum for the 5 built-in OP types + AA).
+4. `OpPayloadBuilder` is generic but the payload-attributes-builder bounds cascade.
+5. `OpAddOns` requires the `OpNodeTypes` marker trait, which is defined as `NodeTypes<..., Primitives = OpPrimitives>` — can't be reused. Need `XLayerAddOns` or a relaxation upstream.
+6. `OpEthApi` in the RPC registry is similarly pinned to `OpPrimitives`.
+
+Each step has local bounds; the total is ~1 week of contiguous work.
+
+### Realistic near-term path
+
+Rather than ship a half-working Node swap, prefer one of:
+
+- **Hybrid dev mode**: expose a custom RPC method (not `eth_sendRawTransaction`) that accepts 0x7B and injects through a side-channel at payload-build time. Keeps OpNode intact, buys dev-chain testing ability without the fork. Caveat: not wire-compatible with standard tooling.
+- **Full M6c sprint**: do the fork over ~1 week, maintaining the commit phasing (one sub-target per commit: receipt builder, payload builder, add-ons, etc.). Deliverable: pristine XLayerNode end-to-end.
+
+Pick before starting. Current state leaves both options open — all the library-layer types (`XLayerTxEnvelope`, `XLayerPooledTxEnvelope`, `XLayerPoolTransaction`, `XLayerPrimitives`, `XLayerEngineTypes`, `XLayerNode`-as-NodeTypes) are in place; neither path wastes earlier work.
+
 ## Milestone status (M5 close-out)
 
 As of 2026-04-22, M5 mempool is feature-complete on the *library*
