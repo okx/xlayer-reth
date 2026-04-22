@@ -69,4 +69,27 @@ mod tests {
         fn assert_np<T: NodePrimitives>() {}
         assert_np::<XLayerPrimitives>();
     }
+
+    /// Pin the associated-type projections so a downstream crate
+    /// that matches on `<XLayerPrimitives as NodePrimitives>::SignedTx`
+    /// can rely on it being exactly [`XLayerTxEnvelope`] (not a
+    /// reshuffled newtype or a generic alias that happens to satisfy
+    /// the bound). Breaking the identity forces an explicit decision
+    /// rather than a silent type drift.
+    #[test]
+    fn signed_tx_projection_is_xlayer_tx_envelope() {
+        fn assert_same<A, B>()
+        where
+            A: core::any::Any + 'static,
+            B: core::any::Any + 'static,
+        {
+            // Structural identity check: TypeId equality fails to
+            // compile if the projection drifts — the bound won't be
+            // satisfied for a different type.
+            let a = core::any::TypeId::of::<A>();
+            let b = core::any::TypeId::of::<B>();
+            assert_eq!(a, b);
+        }
+        assert_same::<<XLayerPrimitives as NodePrimitives>::SignedTx, XLayerTxEnvelope>();
+    }
 }

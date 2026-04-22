@@ -1,5 +1,28 @@
 # XLayerAA — Implementation Notes
 
+## Milestone status (P2 close-out)
+
+As of 2026-04-22, P2b is feature-complete on the primitives layer but
+intentionally stops short of "node wiring" (original P2b.2d). The M5
+mempool work is what actually threads `XLayerPrimitives` through the
+top-level node builder.
+
+| Sub-milestone | Status | What's in |
+|---|---|---|
+| P2b.1 | done | `XLayerAAEnvelope` newtype + `XLayerTxEnvelope = Extended<OpTxEnvelope, XLayerAAEnvelope>` + wire→exec `FromRecoveredTx` |
+| P2b.2a | done | `InMemorySize` + `TxHashRef` + `SignerRecoverable` on both envelope types |
+| P2b.2b | done | `SignedTransaction` impl (gated on `serde`); side-fix: sever `xlayer-revm` default-feature cascade that forced serde/reth-codec on standalone builds |
+| P2b.2c | done | `XLayerPrimitives: NodePrimitives` with `SignedTx = XLayerTxEnvelope`; naive `Compact` impl (length-prefixed 2718 bytes, behind `reth-codec` feature); `RlpBincode` marker (behind `serde-bincode-compat` feature) |
+| P2b.2d | deferred to M5 | full node wiring — requires forking `OpEngineTypes` + pool builder + payload builder because reth's `NodeTypes::Payload: PayloadTypes<BuiltPayload: BuiltPayload<Primitives = Self::Primitives>>` bound pins the engine-types' `Primitives` slot to ours, which cascades through `reth-optimism-node::OpEngineTypes` (bounded on `NodePrimitives<Block = OpBlock>`, not our `XLayerBlock`). That's M5-scope mempool-and-payload surgery, not a primitives-layer fix. |
+
+`main.rs` still ties `bin/node` to `OpNode`. That's intentional: the
+current node is wire-compatible with stock 0x00/0x01/0x02/0x04/0x7E
+traffic and doesn't yet accept 0x7B at the pool boundary. M5 is what
+swaps the pool to `XLayerAATransactionPool` and replaces the payload
+builder so `XLayerPrimitives` becomes reachable end-to-end. Until
+then, `XLayerPrimitives` is a declarative target kept compile-green
+by the two gate tests in `crates/builder/src/primitives.rs`.
+
 ## Mistakes
 
 Running log of mistakes made during XLayerAA implementation, so we don't repeat them. Append new entries at the top.
