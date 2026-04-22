@@ -1,6 +1,7 @@
 pub mod args;
 pub mod broadcast;
 pub mod default;
+pub mod engine_types;
 pub mod evm_config;
 pub mod executor;
 pub mod flashblocks;
@@ -11,6 +12,7 @@ pub(crate) mod signer;
 pub mod tests;
 pub mod traits;
 
+pub use engine_types::{XLayerEngineTypes, XLayerPayloadTypes};
 pub use evm_config::{xlayer_evm_config, XLayerEvmConfig};
 pub use executor::XLayerExecutorBuilder;
 pub use primitives::{XLayerBlock, XLayerBlockBody, XLayerPrimitives};
