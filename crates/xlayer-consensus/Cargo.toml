@@ -15,6 +15,11 @@ workspace = true
 # alloy
 alloy-consensus = { workspace = true, default-features = false }
 alloy-eips = { workspace = true, default-features = false }
+# alloy-evm is needed for the wire→exec `FromRecoveredTx` /
+# `FromTxWithEncoded` impls in `envelope.rs`. It's the single break
+# from the "wire-level only" crate scope, mirroring the existing
+# (pre-P2) dep on xlayer-revm for `XLayerAAParts`.
+alloy-evm = { workspace = true, default-features = false }
 # `k256` feature pulls in ecrecover — needed for the K1 native verifier.
 alloy-primitives = { workspace = true, default-features = false, features = ["k256"] }
 alloy-rlp = { workspace = true, default-features = false }
@@ -34,6 +39,11 @@ op-alloy-consensus = { workspace = true, default-features = false }
 # `no_std`-compatible.
 op-revm = { workspace = true, default-features = false }
 
+# revm — TxEnv type used in the wire→exec conversion bridge.
+# `default-features = false` keeps this no_std-clean (same as its
+# parent `op-revm` already pulls in transitively).
+revm = { workspace = true, default-features = false }
+
 # xlayer
 xlayer-revm = { workspace = true }
 
@@ -48,10 +58,12 @@ default = ["std"]
 std = [
     "alloy-consensus/std",
     "alloy-eips/std",
+    "alloy-evm/std",
     "alloy-primitives/std",
     "alloy-rlp/std",
     "op-alloy-consensus/std",
     "op-revm/std",
+    "revm/std",
     "serde?/std",
     "xlayer-revm/std",
 ]

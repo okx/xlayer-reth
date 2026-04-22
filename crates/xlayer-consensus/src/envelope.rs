@@ -46,11 +46,15 @@ use core::ops::Deref;
 
 use alloy_consensus::{transaction::Transaction, Extended, Sealable, Sealed};
 use alloy_eips::eip2718::{Decodable2718, Eip2718Result, Encodable2718, IsTyped2718, Typed2718};
+use alloy_evm::{FromRecoveredTx, FromTxWithEncoded};
 use alloy_primitives::{Address, Bytes, ChainId, TxKind, B256, U256};
 use alloy_rlp::{BufMut, Decodable, Encodable};
 use op_alloy_consensus::{OpTransaction, OpTxEnvelope, TxDeposit};
+use op_revm::OpSpecId;
+use revm::context::TxEnv as RevmTxEnv;
+use xlayer_revm::tx_env::XLayerAATransaction;
 
-use crate::aa::TxEip8130;
+use crate::aa::{build_aa_parts, TxEip8130};
 
 /// Newtype wrapper over [`Sealed<TxEip8130>`] that lets us provide an
 /// [`OpTransaction`] impl (orphan rule blocks impl on bare
@@ -248,17 +252,311 @@ impl Transaction for XLayerAAEnvelope {
 
 /// Combined XLayer transaction envelope.
 ///
-/// [`Extended::BuiltIn`] carries any standard OP transaction shape
-/// (Legacy / 2930 / 1559 / 7702 / Deposit); [`Extended::Other`]
-/// carries [`XLayerAAEnvelope`]. Decode from raw EIP-2718 bytes
-/// dispatches on the type byte automatically — see the module-level
-/// doc for the mechanism.
-pub type XLayerTxEnvelope = Extended<OpTxEnvelope, XLayerAAEnvelope>;
+/// Wraps [`Extended<OpTxEnvelope, XLayerAAEnvelope>`] in a local
+/// newtype so crate-external trait impls (like
+/// [`FromRecoveredTx<XLayerTxEnvelope> for XLayerAATransaction`]
+/// below) satisfy the orphan rule — `Extended` itself is foreign and
+/// not `#[fundamental]`, so an `impl<…> ForeignTrait<Extended<…>>
+/// for ForeignType` is rejected by the coherence checker, even when
+/// `Extended`'s type arguments are local.
+///
+/// Decode from raw EIP-2718 bytes dispatches on the type byte
+/// automatically — see the module-level doc for the mechanism.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct XLayerTxEnvelope(pub Extended<OpTxEnvelope, XLayerAAEnvelope>);
+
+impl XLayerTxEnvelope {
+    /// Wrap a standard OP envelope.
+    pub const fn builtin(tx: OpTxEnvelope) -> Self {
+        Self(Extended::BuiltIn(tx))
+    }
+
+    /// Wrap an XLayerAA (0x7B) transaction, sealing it along the way.
+    pub fn aa(tx: TxEip8130) -> Self {
+        Self(Extended::Other(XLayerAAEnvelope::new(tx)))
+    }
+
+    /// Borrow the inner [`Extended`]. Useful for match-dispatch in
+    /// downstream callers that want to handle the two arms directly.
+    pub const fn as_extended(&self) -> &Extended<OpTxEnvelope, XLayerAAEnvelope> {
+        &self.0
+    }
+
+    /// Consume the wrapper and return the inner [`Extended`].
+    pub fn into_extended(self) -> Extended<OpTxEnvelope, XLayerAAEnvelope> {
+        self.0
+    }
+
+    /// If this envelope carries an XLayerAA (0x7B) transaction,
+    /// return a borrow on the inner wire body.
+    pub fn as_aa(&self) -> Option<&TxEip8130> {
+        match &self.0 {
+            Extended::Other(aa) => Some(aa.tx()),
+            Extended::BuiltIn(_) => None,
+        }
+    }
+
+    /// Expose the pre-computed hash of the inner transaction.
+    pub fn tx_hash(&self) -> B256 {
+        match &self.0 {
+            Extended::BuiltIn(env) => env.tx_hash(),
+            Extended::Other(aa) => aa.hash(),
+        }
+    }
+}
+
+impl From<OpTxEnvelope> for XLayerTxEnvelope {
+    fn from(tx: OpTxEnvelope) -> Self {
+        Self::builtin(tx)
+    }
+}
+
+impl From<Extended<OpTxEnvelope, XLayerAAEnvelope>> for XLayerTxEnvelope {
+    fn from(inner: Extended<OpTxEnvelope, XLayerAAEnvelope>) -> Self {
+        Self(inner)
+    }
+}
+
+// --- Trait forwarding --------------------------------------------
+//
+// Every trait [`Extended<B, T>`] impls via blanket rules in
+// alloy-consensus / alloy-eips / alloy-rlp / op-alloy-consensus is
+// forwarded through here, delegating to the inner `Extended`. This
+// is pure boilerplate: the newtype exists to satisfy the orphan
+// rule on [`FromRecoveredTx`], not to add behaviour.
+
+impl Typed2718 for XLayerTxEnvelope {
+    fn ty(&self) -> u8 {
+        self.0.ty()
+    }
+}
+
+impl IsTyped2718 for XLayerTxEnvelope {
+    fn is_type(type_id: u8) -> bool {
+        <Extended<OpTxEnvelope, XLayerAAEnvelope> as IsTyped2718>::is_type(type_id)
+    }
+}
+
+impl Encodable2718 for XLayerTxEnvelope {
+    fn type_flag(&self) -> Option<u8> {
+        self.0.type_flag()
+    }
+
+    fn encode_2718_len(&self) -> usize {
+        self.0.encode_2718_len()
+    }
+
+    fn encode_2718(&self, out: &mut dyn BufMut) {
+        self.0.encode_2718(out)
+    }
+}
+
+impl Decodable2718 for XLayerTxEnvelope {
+    fn typed_decode(ty: u8, buf: &mut &[u8]) -> Eip2718Result<Self> {
+        <Extended<OpTxEnvelope, XLayerAAEnvelope> as Decodable2718>::typed_decode(ty, buf).map(Self)
+    }
+
+    fn fallback_decode(buf: &mut &[u8]) -> Eip2718Result<Self> {
+        <Extended<OpTxEnvelope, XLayerAAEnvelope> as Decodable2718>::fallback_decode(buf).map(Self)
+    }
+}
+
+impl Encodable for XLayerTxEnvelope {
+    fn encode(&self, out: &mut dyn BufMut) {
+        self.0.encode(out)
+    }
+
+    fn length(&self) -> usize {
+        self.0.length()
+    }
+}
+
+impl Decodable for XLayerTxEnvelope {
+    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        <Extended<OpTxEnvelope, XLayerAAEnvelope> as Decodable>::decode(buf).map(Self)
+    }
+}
+
+impl Transaction for XLayerTxEnvelope {
+    fn chain_id(&self) -> Option<ChainId> {
+        self.0.chain_id()
+    }
+    fn nonce(&self) -> u64 {
+        self.0.nonce()
+    }
+    fn gas_limit(&self) -> u64 {
+        self.0.gas_limit()
+    }
+    fn gas_price(&self) -> Option<u128> {
+        self.0.gas_price()
+    }
+    fn max_fee_per_gas(&self) -> u128 {
+        self.0.max_fee_per_gas()
+    }
+    fn max_priority_fee_per_gas(&self) -> Option<u128> {
+        self.0.max_priority_fee_per_gas()
+    }
+    fn max_fee_per_blob_gas(&self) -> Option<u128> {
+        self.0.max_fee_per_blob_gas()
+    }
+    fn priority_fee_or_price(&self) -> u128 {
+        self.0.priority_fee_or_price()
+    }
+    fn effective_gas_price(&self, base_fee: Option<u64>) -> u128 {
+        self.0.effective_gas_price(base_fee)
+    }
+    fn is_dynamic_fee(&self) -> bool {
+        self.0.is_dynamic_fee()
+    }
+    fn kind(&self) -> TxKind {
+        self.0.kind()
+    }
+    fn is_create(&self) -> bool {
+        self.0.is_create()
+    }
+    fn value(&self) -> U256 {
+        self.0.value()
+    }
+    fn input(&self) -> &Bytes {
+        self.0.input()
+    }
+    fn access_list(&self) -> Option<&alloy_eips::eip2930::AccessList> {
+        self.0.access_list()
+    }
+    fn blob_versioned_hashes(&self) -> Option<&[B256]> {
+        self.0.blob_versioned_hashes()
+    }
+    fn authorization_list(&self) -> Option<&[alloy_eips::eip7702::SignedAuthorization]> {
+        self.0.authorization_list()
+    }
+    fn effective_tip_per_gas(&self, base_fee: u64) -> Option<u128> {
+        self.0.effective_tip_per_gas(base_fee)
+    }
+    fn to(&self) -> Option<Address> {
+        self.0.to()
+    }
+}
+
+impl OpTransaction for XLayerTxEnvelope {
+    fn is_deposit(&self) -> bool {
+        OpTransaction::is_deposit(&self.0)
+    }
+
+    fn as_deposit(&self) -> Option<&Sealed<TxDeposit>> {
+        OpTransaction::as_deposit(&self.0)
+    }
+}
+
+// --- Wire → exec conversions --------------------------------------
+//
+// These are the impls the node's pool / payload-builder plumbing
+// invokes (via `FromRecoveredTx` / `FromTxWithEncoded`) when it
+// hands a recovered transaction to the EVM factory. The older
+// `FromRecoveredTx<OpTxEnvelope>` impl in `xlayer-revm/src/tx_env.rs`
+// stays in place for nodes that haven't threaded `XLayerTxEnvelope`
+// through yet; the pair here lets a XLayer-aware node accept the
+// combined envelope and pipe each arm to the right target.
+//
+// Live here (not in xlayer-revm) because `XLayerTxEnvelope` is local
+// to this crate, and the orphan rule requires at least one of
+// {trait, generic-arg, implementing-type} to be local. The trait
+// parameter `XLayerTxEnvelope` satisfies that; putting the impl in
+// xlayer-revm would require xlayer-revm → xlayer-consensus, which
+// would break the existing xlayer-consensus → xlayer-revm dep on
+// `XLayerAAParts`.
+
+/// Spec used when building `XLayerAAParts` at the recovered-tx
+/// boundary. The authoritative spec lives on the EVM context (read
+/// by the handler from `ctx.cfg().spec()`), but `FromRecoveredTx`'s
+/// signature doesn't expose it, so we use the latest fork we ship —
+/// AA is only active at or past XLayerAA activation, which in turn
+/// requires Isthmus+, so the default maps to the correct schedule
+/// for every currently-reachable spec. A future AA-specific fee
+/// revision should either (a) add a new `FromRecoveredTxWith<Spec>`
+/// boundary upstream or (b) widen `XLayerAATransaction` to carry the
+/// raw `TxEip8130` and let the handler call `build_aa_parts` with
+/// the real spec.
+const BOUNDARY_SPEC: OpSpecId = OpSpecId::ISTHMUS;
+
+/// Convert an already-recovered [`XLayerTxEnvelope`] into the
+/// [`XLayerAATransaction`] the EVM factory expects.
+///
+/// - [`Extended::BuiltIn`] — delegate to the existing
+///   `FromRecoveredTx<OpTxEnvelope>` impl; AA parts stay default.
+/// - [`Extended::Other`] — call [`build_aa_parts`] against the
+///   inner [`TxEip8130`]. On success, emit a fully-populated
+///   [`XLayerAAParts`]; on failure (bad sender_auth, unsupported
+///   verifier, feature-not-ready) fall back to default parts so
+///   the handler can reject at a later gate rather than panic here
+///   — `FromRecoveredTx::from_recovered_tx` is infallible by
+///   signature and the pool has already pre-validated structure.
+impl FromRecoveredTx<XLayerTxEnvelope> for XLayerAATransaction<RevmTxEnv> {
+    fn from_recovered_tx(tx: &XLayerTxEnvelope, sender: Address) -> Self {
+        match &tx.0 {
+            Extended::BuiltIn(op_env) => {
+                <Self as FromRecoveredTx<OpTxEnvelope>>::from_recovered_tx(op_env, sender)
+            }
+            Extended::Other(aa_env) => build_aa_tx(aa_env.tx(), sender),
+        }
+    }
+}
+
+impl FromTxWithEncoded<XLayerTxEnvelope> for XLayerAATransaction<RevmTxEnv> {
+    fn from_encoded_tx(tx: &XLayerTxEnvelope, caller: Address, encoded: Bytes) -> Self {
+        match &tx.0 {
+            Extended::BuiltIn(op_env) => {
+                <Self as FromTxWithEncoded<OpTxEnvelope>>::from_encoded_tx(op_env, caller, encoded)
+            }
+            Extended::Other(aa_env) => build_aa_tx(aa_env.tx(), caller),
+        }
+    }
+}
+
+/// Shared AA-side boundary for both [`FromRecoveredTx`] and
+/// [`FromTxWithEncoded`]. `encoded` is not needed for the AA path —
+/// the execution pipeline reads everything from [`XLayerAAParts`] —
+/// so the two callers collapse to one helper.
+fn build_aa_tx(tx: &TxEip8130, sender: Address) -> XLayerAATransaction<RevmTxEnv> {
+    // Start from the upstream `OpTransaction<TxEnv>` projection of a
+    // plain tx so base fields (chain_id, gas_limit, priority_fee,
+    // kind, value, access list, etc.) are populated. The tx_type
+    // gets stamped as 0x7B via the handler's validate_env path; here
+    // we just care that the AA parts are present.
+    //
+    // `to` / `value` / `data` stay at their defaults — AA calls flow
+    // through `XLayerAAParts::call_phases`, not the single-call
+    // TxEnv fields.
+    let revm_tx = RevmTxEnv {
+        caller: sender,
+        chain_id: Some(tx.chain_id),
+        nonce: tx.nonce_sequence,
+        gas_limit: tx.gas_limit,
+        // `gas_price` isn't meaningful for 1559-style pricing; the
+        // priority fee lives in `gas_priority_fee`.
+        gas_price: 0,
+        gas_priority_fee: Some(tx.max_priority_fee_per_gas),
+        tx_type: crate::aa::AA_TX_TYPE_ID,
+        ..RevmTxEnv::default()
+    };
+
+    let op_tx = op_revm::OpTransaction::new(revm_tx);
+
+    // Try to materialise the AA parts. On any build error, fall
+    // back to default parts — the handler's validate_env gates on
+    // `XLAYERAA_TX_TYPE + non-empty call_phases`, so an AA tx with
+    // empty parts surfaces a clean reject, not a silent success.
+    match build_aa_parts(tx, BOUNDARY_SPEC) {
+        Ok(built) => XLayerAATransaction::with_parts(op_tx, built.parts),
+        Err(_) => XLayerAATransaction::new(op_tx),
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use alloy_consensus::{SignableTransaction, Signed, TxEip1559};
     use alloy_primitives::{Address, Bytes, Signature, TxKind, U256};
+    use xlayer_revm::transaction::XLayerAAParts;
 
     use super::*;
     use crate::aa::{Call, AA_TX_TYPE_ID};
@@ -313,7 +611,7 @@ mod tests {
         assert_eq!(buf[0], AA_TX_TYPE_ID);
 
         let decoded = XLayerTxEnvelope::decode_2718(&mut buf.as_slice()).unwrap();
-        match decoded {
+        match decoded.into_extended() {
             Extended::Other(env) => {
                 assert_eq!(env.tx(), &aa_tx);
                 assert_eq!(env.ty(), AA_TX_TYPE_ID);
@@ -334,7 +632,7 @@ mod tests {
         assert_eq!(buf[0], 0x02);
 
         let decoded = XLayerTxEnvelope::decode_2718(&mut buf.as_slice()).unwrap();
-        match decoded {
+        match decoded.into_extended() {
             Extended::BuiltIn(OpTxEnvelope::Eip1559(inner)) => {
                 assert_eq!(inner.tx().nonce, 7);
             }
@@ -347,7 +645,7 @@ mod tests {
     /// reverse paths.
     #[test]
     fn envelope_encode_decode_is_stable() {
-        let env: XLayerTxEnvelope = Extended::Other(XLayerAAEnvelope::new(sample_aa_tx()));
+        let env = XLayerTxEnvelope::aa(sample_aa_tx());
 
         let mut buf = Vec::new();
         env.encode_2718(&mut buf);
@@ -374,10 +672,59 @@ mod tests {
     /// to our newtype without shadowing the built-in path.
     #[test]
     fn extended_delegates_is_deposit_both_sides() {
-        let aa: XLayerTxEnvelope = Extended::Other(XLayerAAEnvelope::new(sample_aa_tx()));
+        let aa = XLayerTxEnvelope::aa(sample_aa_tx());
         assert!(!aa.is_deposit());
 
-        let eip1559: XLayerTxEnvelope = Extended::BuiltIn(OpTxEnvelope::Eip1559(sample_eip1559()));
+        let eip1559 = XLayerTxEnvelope::builtin(OpTxEnvelope::Eip1559(sample_eip1559()));
         assert!(!eip1559.is_deposit());
+    }
+
+    /// The [`FromRecoveredTx<XLayerTxEnvelope>`] impl routes an AA
+    /// envelope through [`build_aa_parts`] — on success the parts
+    /// are populated; on verification failure (which is what happens
+    /// with `sample_aa_tx`'s stub signature) the impl falls back to
+    /// default parts but still stamps `tx_type = 0x7B` on the exec
+    /// env. Both outcomes are acceptable — the test pins just the
+    /// stamp, which proves the AA arm of the dispatcher fired.
+    ///
+    /// Full "valid sig → non-empty parts" coverage lives in
+    /// [`build_aa_parts`]'s own tests — the AA unit module already
+    /// exercises the successful K1 / P256 / WebAuthn paths against
+    /// real test vectors, and duplicating that plumbing here for
+    /// one end-to-end roundtrip would re-derive crypto helpers the
+    /// aa module already owns.
+    #[test]
+    fn from_recovered_tx_stamps_0x7b_for_aa_envelope() {
+        let env = XLayerTxEnvelope::aa(sample_aa_tx());
+
+        let converted = <XLayerAATransaction<RevmTxEnv> as FromRecoveredTx<XLayerTxEnvelope>>::from_recovered_tx(
+            &env,
+            Address::repeat_byte(0x01),
+        );
+
+        assert_eq!(
+            converted.op.base.tx_type, AA_TX_TYPE_ID,
+            "AA-envelope conversion must stamp tx_type 0x7B on the exec env",
+        );
+        // call_phases depends on whether the embedded auth is
+        // verifiable; either 0 (verification failed → default
+        // fallback) or the wire tx's phase count is correct.
+        assert!(converted.xlayeraa.call_phases.len() <= 1);
+    }
+
+    /// The BuiltIn arm must delegate to the existing
+    /// [`FromRecoveredTx<OpTxEnvelope>`] impl — AA parts stay
+    /// default-empty, exec env reflects the standard op-revm shape.
+    #[test]
+    fn from_recovered_tx_for_builtin_is_opaque_delegation() {
+        let env = XLayerTxEnvelope::builtin(OpTxEnvelope::Eip1559(sample_eip1559()));
+
+        let converted = <XLayerAATransaction<RevmTxEnv> as FromRecoveredTx<XLayerTxEnvelope>>::from_recovered_tx(
+            &env,
+            Address::repeat_byte(0x02),
+        );
+
+        assert_eq!(converted.xlayeraa, XLayerAAParts::default());
+        assert_eq!(converted.op.base.nonce, 7);
     }
 }

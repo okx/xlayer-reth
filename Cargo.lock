@@ -14147,11 +14147,13 @@ version = "0.0.6"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
+ "alloy-evm",
  "alloy-primitives",
  "alloy-rlp",
  "alloy-serde",
  "op-alloy-consensus",
  "op-revm",
+ "revm",
  "serde",
  "xlayer-revm",
 ]
