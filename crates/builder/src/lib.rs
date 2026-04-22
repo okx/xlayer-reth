@@ -2,6 +2,7 @@ pub mod args;
 pub mod broadcast;
 pub mod default;
 pub mod evm_config;
+pub mod executor;
 pub mod flashblocks;
 pub mod metrics;
 pub(crate) mod signer;
@@ -10,3 +11,4 @@ pub mod tests;
 pub mod traits;
 
 pub use evm_config::{xlayer_evm_config, XLayerEvmConfig};
+pub use executor::XLayerExecutorBuilder;

@@ -114,13 +114,21 @@ impl LocalInstance {
             .with_database(create_test_db(config.clone()))
             .with_launch_context(runtime.clone())
             .with_types::<OpNode>()
-            .with_components(op_node.components().pool(pool_component(&rollup_args)).payload(
-                FlashblocksServiceBuilder {
-                    config: builder_config,
-                    bridge_intercept: Default::default(),
-                    peer_status_sink: std::sync::Arc::new(std::sync::OnceLock::new()),
-                },
-            ))
+            .with_components(
+                op_node
+                    .components()
+                    .pool(pool_component(&rollup_args))
+                    // Executor swap matches production wiring in
+                    // `bin/node/src/main.rs` — must fire before
+                    // `.payload(...)` so the pool / payload builders
+                    // see the XLayer-flavored EVM as `ExecB::EVM`.
+                    .executor(crate::XLayerExecutorBuilder::default())
+                    .payload(FlashblocksServiceBuilder {
+                        config: builder_config,
+                        bridge_intercept: Default::default(),
+                        peer_status_sink: std::sync::Arc::new(std::sync::OnceLock::new()),
+                    }),
+            )
             .with_add_ons(addons)
             .on_rpc_started(move |_, _| {
                 let _ = rpc_ready_tx.send(());

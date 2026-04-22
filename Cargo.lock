@@ -14399,6 +14399,7 @@ dependencies = [
  "alloy-sol-types",
  "auto_impl",
  "op-alloy-consensus",
+ "op-alloy-rpc-types",
  "op-revm",
  "reth-evm",
  "reth-optimism-evm",

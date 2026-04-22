@@ -28,6 +28,11 @@ op-alloy-consensus = { workspace = true, default-features = false }
 reth-evm = { workspace = true, default-features = false }
 reth-optimism-evm = { workspace = true, default-features = false }
 
+# Optional: RPC request type used by the `TryIntoTxEnv` delegation for
+# `eth_call` / `eth_estimateGas`. Feature-gated so no_std / prover
+# consumers of xlayer-revm never pull RPC types.
+op-alloy-rpc-types = { workspace = true, optional = true, default-features = false }
+
 # sol! bindings for precompile interfaces & ABI encoding
 alloy-sol-types = { workspace = true, default-features = false }
 
@@ -40,13 +45,14 @@ serde = { workspace = true, features = ["derive", "rc"], optional = true }
 revm = { workspace = true, default-features = false, features = ["optional_no_base_fee"] }
 
 [features]
-default = ["std"]
+default = ["std", "rpc"]
 std = [
     "alloy-evm/std",
     "alloy-op-evm/std",
     "alloy-primitives/std",
     "alloy-sol-types/std",
     "op-alloy-consensus/std",
+    "op-alloy-rpc-types?/std",
     "op-revm/std",
     "reth-evm/std",
     "revm/std",
@@ -57,3 +63,8 @@ serde = [
     "op-revm/serde",
     "revm/serde",
 ]
+# Enables `TryIntoTxEnv<XLayerAATransaction<TxEnv>>` for
+# `OpTransactionRequest` — required by the node's RPC stack
+# (`eth_call`, `eth_estimateGas`) and by `OpEthApi`'s `RpcConvert`
+# plumbing. Off by default on no_std / prover consumers.
+rpc = ["dep:op-alloy-rpc-types"]

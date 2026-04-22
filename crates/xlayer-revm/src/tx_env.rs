@@ -216,3 +216,44 @@ impl FromTxWithEncoded<OpTxEnvelope> for XLayerAATransaction<RevmTxEnv> {
         Self::new(OpTx::from_encoded_tx(tx, caller, encoded).into())
     }
 }
+
+// --- RPC request → exec env conversion -----------------------------------
+//
+// `eth_call` / `eth_estimateGas` / `eth_sendTransaction` hand the RPC
+// layer an [`OpTransactionRequest`], which reth's `RpcConvert` plumbing
+// funnels through [`alloy_evm::rpc::TryIntoTxEnv`] into the EVM's tx
+// type. Upstream `alloy-evm` only provides the impl for
+// [`op_revm::OpTransaction<TxEnv>`]; our [`XLayerAATransaction<TxEnv>`]
+// (the `EvmFactory::Tx` on [`XLayerAAEvmFactory`](crate::XLayerAAEvmFactory))
+// needs its own, so `OpEthApiBuilder` can satisfy
+// `EthApiBuilder<Node>` for nodes wired with `XLayerEvmConfig`.
+//
+// RPC-origin requests carry no AA parts (the XLayerAA body is a
+// separate envelope landing in a later milestone), so we forward to the
+// upstream `OpTransaction<TxEnv>` impl and wrap with default
+// `XLayerAAParts`. The `rpc` feature gates the pulled-in
+// `op-alloy-rpc-types` dep so no_std / prover consumers stay lean.
+#[cfg(feature = "rpc")]
+mod rpc_try_into {
+    use super::*;
+    use alloy_evm::{
+        env::BlockEnvironment,
+        rpc::{EthTxEnvError, TryIntoTxEnv},
+        EvmEnv,
+    };
+    use op_alloy_rpc_types::OpTransactionRequest;
+
+    impl<Block: BlockEnvironment> TryIntoTxEnv<XLayerAATransaction<RevmTxEnv>, Block>
+        for OpTransactionRequest
+    {
+        type Err = EthTxEnvError;
+
+        fn try_into_tx_env<Spec>(
+            self,
+            evm_env: &EvmEnv<Spec, Block>,
+        ) -> Result<XLayerAATransaction<RevmTxEnv>, Self::Err> {
+            let op_tx: op_revm::OpTransaction<RevmTxEnv> = self.try_into_tx_env(evm_env)?;
+            Ok(XLayerAATransaction::new(op_tx))
+        }
+    }
+}

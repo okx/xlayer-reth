@@ -22,15 +22,17 @@ use std::sync::{Arc, OnceLock};
 use reth_basic_payload_builder::{BasicPayloadJobGenerator, BasicPayloadJobGeneratorConfig};
 use reth_node_api::NodeTypes;
 use reth_node_builder::{components::PayloadServiceBuilder, BuilderContext};
-use reth_optimism_evm::OpEvmConfig;
 use reth_optimism_payload_builder::config::{OpBuilderConfig, OpDAConfig, OpGasLimitConfig};
 
-// `OpEvmConfig` stays as the outer `PayloadServiceBuilder` type parameter
-// so the enum dispatch in `bin/node/src/payload.rs` remains uniform across
-// default / default-with-p2p / flashblocks variants; inside this impl we
-// ignore the `_: OpEvmConfig` argument and build an `XLayerEvmConfig`
-// locally. The flashblocks paths switch to `XLayerEvmConfig` in a later
-// milestone.
+// The outer `PayloadServiceBuilder` type parameter is pinned to
+// `XLayerEvmConfig` (not upstream `OpEvmConfig`) so the component chain
+// built at `bin/node/src/main.rs` — which now pairs
+// `XLayerExecutorBuilder` with this payload service — satisfies reth's
+// `NodeComponentsBuilder` bound `PayloadB: PayloadServiceBuilder<Node,
+// Pool, ExecB::EVM>`. The `_: XLayerEvmConfig` argument is still
+// ignored here: we construct a fresh `XLayerEvmConfig` locally (same
+// value, simpler than threading the caller's through) so
+// `XLayerAAEvmFactory` stays on every tx this builder touches.
 use crate::{xlayer_evm_config, XLayerEvmConfig};
 use reth_payload_builder::{PayloadBuilderHandle, PayloadBuilderService};
 use reth_provider::CanonStateSubscriptions;
@@ -43,7 +45,7 @@ pub struct DefaultBuilderServiceBuilder {
     pub peer_status_sink: Arc<OnceLock<crate::broadcast::PeerStatusTracker>>,
 }
 
-impl<Node, Pool> PayloadServiceBuilder<Node, Pool, OpEvmConfig> for DefaultBuilderServiceBuilder
+impl<Node, Pool> PayloadServiceBuilder<Node, Pool, XLayerEvmConfig> for DefaultBuilderServiceBuilder
 where
     Node: NodeBounds,
     Pool: PoolBounds,
@@ -52,7 +54,7 @@ where
         self,
         ctx: &BuilderContext<Node>,
         pool: Pool,
-        _: OpEvmConfig,
+        _: XLayerEvmConfig,
     ) -> eyre::Result<PayloadBuilderHandle<<Node::Types as NodeTypes>::Payload>> {
         let cancel = tokio_util::sync::CancellationToken::new();
 
@@ -127,12 +129,12 @@ where
         };
 
         let conf = ctx.config().builder.clone();
-        // E4a: the default builder path constructs a payload builder over
+        // The default builder path constructs a payload builder over
         // `XLayerEvmConfig`, which plugs `XLayerAAEvmFactory` into the
         // upstream `OpEvmConfig` slot so every tx this builder touches
         // routes through `XLayerAAHandler`. Non-AA txs still delegate to
         // `op_revm::OpHandler` internally, so existing consensus semantics
-        // are unchanged. The `_: OpEvmConfig` argument from the outer
+        // are unchanged. The `_: XLayerEvmConfig` argument from the outer
         // `PayloadServiceBuilder` signature is ignored here — we construct
         // a fresh `XLayerEvmConfig` locally.
         let evm_config: XLayerEvmConfig = xlayer_evm_config(ctx.chain_spec());

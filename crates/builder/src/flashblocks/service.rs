@@ -11,6 +11,7 @@ use crate::{
     },
     metrics::{tokio::FlashblocksTaskMetrics, BuilderMetrics},
     traits::{NodeBounds, PoolBounds},
+    XLayerEvmConfig,
 };
 use eyre::WrapErr as _;
 use std::sync::{Arc, OnceLock};
@@ -197,7 +198,16 @@ impl FlashblocksServiceBuilder {
     }
 }
 
-impl<Node, Pool> PayloadServiceBuilder<Node, Pool, OpEvmConfig> for FlashblocksServiceBuilder
+// The outer `PayloadServiceBuilder` type parameter is pinned to
+// `XLayerEvmConfig` to align with `XLayerExecutorBuilder::EVM`, which
+// reth's `NodeComponentsBuilder` bound
+// `PayloadB: PayloadServiceBuilder<Node, Pool, ExecB::EVM>` requires.
+// The `_: XLayerEvmConfig` argument is ignored; this builder's own
+// internal EVM plumbing (for the flashblocks sequence validator and
+// sequence-sequencer EVM) is constructed locally — those two sites
+// still use upstream `OpEvmConfig::optimism(...)` and are tracked
+// under E4b.
+impl<Node, Pool> PayloadServiceBuilder<Node, Pool, XLayerEvmConfig> for FlashblocksServiceBuilder
 where
     Node: NodeBounds,
     Pool: PoolBounds,
@@ -206,7 +216,7 @@ where
         self,
         ctx: &BuilderContext<Node>,
         pool: Pool,
-        _: OpEvmConfig,
+        _: XLayerEvmConfig,
     ) -> eyre::Result<PayloadBuilderHandle<<Node::Types as NodeTypes>::Payload>> {
         let signer = self.config.builder_signer;
 

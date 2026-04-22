@@ -4,6 +4,32 @@
 
 Running log of mistakes made during XLayerAA implementation, so we don't repeat them. Append new entries at the top.
 
+### 2026-04-22 — E4a's "swap EvmConfig inside payload body" trick broke on the executor path
+
+E4a flipped the default builder to `XLayerEvmConfig` via a narrow trick: keep the outer `PayloadServiceBuilder` type param as upstream `OpEvmConfig` (for uniform enum dispatch) and ignore the `_: OpEvmConfig` argument inside the impl body, constructing `XLayerEvmConfig` locally. That worked because nothing downstream inspected the `PayloadServiceBuilder`'s EVM type param — payload builders are self-contained.
+
+The moment we tried to do the same for the executor side (peer block import / engine `newPayload` / state sync), the trick collapsed. reth's [`NodeComponentsBuilder`](https://github.com/paradigmxyz/reth/blob/main/crates/node/builder/src/components/builder.rs) bound is:
+
+```rust
+PoolB: PoolBuilder<Node, ExecB::EVM, ...>,
+PayloadB: PayloadServiceBuilder<Node, PoolB::Pool, ExecB::EVM>,
+```
+
+The **pool and payload builders carry `ExecB::EVM` as a type parameter**. Swapping the executor to produce `OpEvmConfig<..., XLayerAAEvmFactory<...>>` means every downstream component inherits the new EVM type and must impl its trait for it. The cascade we hit:
+
+1. `XLayerPayloadServiceBuilder` / `DefaultBuilderServiceBuilder` / `FlashblocksServiceBuilder` impls had to flip from `PayloadServiceBuilder<_, _, OpEvmConfig>` to `PayloadServiceBuilder<_, _, XLayerEvmConfig>`.
+2. `op-reth`'s `ConfigureEngineEvm for OpEvmConfig<ChainSpec, N, R>` (engine API `newPayload`) was pinned to the default `EvmFactory = OpEvmFactory<OpTx>` — had to patch the upstream impl (in our `deps/optimism` submodule) to accept an arbitrary `EvmF` generic. Body is EvmFactory-agnostic, so purely a bound-widening.
+3. `OpTransactionRequest: TryIntoTxEnv<_>` was only impl'd for upstream `OpTransaction<TxEnv>` — had to add a delegating impl in `xlayer-revm` under a new `rpc` feature (off by default so no_std prover consumers stay lean).
+4. `bin/node/src/main.rs` relied on `op_node.add_ons()`, which returns `Self::AddOns` with `NodeAdapter<_, DefaultComponents>` — i.e. with the upstream `OpExecutorBuilder`'s EVM baked in. Had to replace with `op_node.add_ons_builder::<Optimism>().build::<_, PVB, EB, EVB>()` so `N` is generic and Rust infers it as our XLayer-flavored NodeAdapter.
+5. `bin/node/src/main.rs:211`'s `FlashblockSequenceValidator::new(OpEvmConfig::optimism(...), ...)` had to become `xlayer_evm_config(...)` — `set_flashblocks`'s signature requires `FlashblockSequenceValidator<_, Evm, _, _>` to share `Evm` with `XLayerEngineValidator<_, Evm, _, _, _>`, which is bound to `Node::Evm`.
+6. `.with_components(op_node.components().payload(pb).executor(xb))` — **order matters**: `.executor(...)` must fire before `.payload(...)`, because each method-chain step type-checks the builder it receives against the current `ExecB::EVM`. Swapping executor last means the payload bound is checked against the stale upstream `OpEvmFactory<OpTx>` EVM.
+
+**Why it's wrong to assume "narrow fix".** When I first scoped the executor task, I thought it was `XLayerExecutorBuilder` + one line in `main.rs`. The real shape is: reth couples pool / payload / executor / add-ons / engine validator / RPC (`RpcConvert`, `TryIntoTxEnv`) through the same EVM type parameter, so flipping the executor's EVM forces every consumer to align. "Narrow" is a local illusion.
+
+**Fix:** do all six bullets in one commit. No way to split cleanly — each on its own causes the chain to fail type-checking.
+
+**Lesson:** for any node-level trait that threads `Self::EVM` (or `Self::Primitives`, or similar "wide" associated type) through a components chain, a minimal local swap at one end propagates through the whole graph. Before scoping, grep for every place that carries the EVM type as a generic — that's the actual blast radius.
+
 ### 2026-04-21 — `XLayerEvmConfig` pinned to `OpChainSpec` without a wrapper escape hatch
 
 Initial E4a wired `XLayerEvmConfig` as:

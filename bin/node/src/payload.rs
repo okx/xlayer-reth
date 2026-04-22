@@ -3,7 +3,6 @@ use std::sync::{Arc, OnceLock};
 use reth::builder::components::PayloadServiceBuilder;
 use reth_node_api::NodeTypes;
 use reth_node_builder::{components::BasicPayloadServiceBuilder, BuilderContext};
-use reth_optimism_evm::OpEvmConfig;
 use reth_optimism_node::node::OpPayloadBuilder;
 use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
 use xlayer_bridge_intercept::BridgeInterceptConfig;
@@ -13,6 +12,7 @@ use xlayer_builder::{
     default::DefaultBuilderServiceBuilder,
     flashblocks::{BuilderConfig, FlashblocksServiceBuilder},
     traits::{NodeBounds, PoolBounds},
+    XLayerEvmConfig,
 };
 
 /// Payload builder strategy for X Layer.
@@ -105,7 +105,18 @@ impl XLayerPayloadServiceBuilder {
     }
 }
 
-impl<Node, Pool> PayloadServiceBuilder<Node, Pool, OpEvmConfig> for XLayerPayloadServiceBuilder
+// The outer type param is `XLayerEvmConfig` (not upstream
+// `OpEvmConfig`) so `XLayerPayloadServiceBuilder` pairs cleanly with
+// `XLayerExecutorBuilder` in the component chain — reth's
+// `NodeComponentsBuilder` requires `PayloadB: PayloadServiceBuilder<
+// Node, Pool, ExecB::EVM>` and `ExecB::EVM` resolves to
+// `XLayerEvmConfig` under `NodeBounds`. Both inner sequencer branches
+// (`FlashblocksServiceBuilder`, `DefaultBuilderServiceBuilder`) ignore
+// their `_: XLayerEvmConfig` argument and build EVM locally; the RPC
+// branch uses upstream `BasicPayloadServiceBuilder<OpPayloadBuilder>`,
+// which is already generic over `EvmConfig` and threads
+// `XLayerEvmConfig` through to `OpPayloadBuilder` unchanged.
+impl<Node, Pool> PayloadServiceBuilder<Node, Pool, XLayerEvmConfig> for XLayerPayloadServiceBuilder
 where
     Node: NodeBounds,
     Pool: PoolBounds,
@@ -114,7 +125,7 @@ where
         self,
         ctx: &BuilderContext<Node>,
         pool: Pool,
-        evm_config: OpEvmConfig,
+        evm_config: XLayerEvmConfig,
     ) -> eyre::Result<reth_payload_builder::PayloadBuilderHandle<<Node::Types as NodeTypes>::Payload>>
     {
         match self.builder {

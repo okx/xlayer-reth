@@ -13,13 +13,12 @@ use tracing::info;
 
 use reth::rpc::eth::EthApiTypes;
 use reth::{
-    builder::{DebugNodeLauncher, EngineNodeLauncher, Node, NodeHandle},
+    builder::{DebugNodeLauncher, EngineNodeLauncher, NodeHandle},
     providers::providers::BlockchainProvider,
 };
 use reth_chainspec::ChainSpecProvider;
 use reth_node_builder::rpc::BasicEngineValidatorBuilder;
 use reth_optimism_cli::Cli;
-use reth_optimism_evm::OpEvmConfig;
 use reth_optimism_node::{args::RollupArgs, OpEngineValidatorBuilder, OpNode};
 use reth_provider::CanonStateSubscriptions;
 use reth_rpc_builder::config::RethRpcServerConfig;
@@ -28,7 +27,8 @@ use reth_rpc_server_types::RethRpcModule;
 use xlayer_chainspec::XLayerChainSpecParser;
 use xlayer_flashblocks::{
     FlashblockSequenceValidator, FlashblockStateCache, FlashblocksPersistCtx, FlashblocksPubSub,
-    FlashblocksRpcCtx, FlashblocksRpcService, WsFlashBlockStream, XLayerEngineValidatorBuilder,
+    FlashblocksRpcCtx, FlashblocksRpcService, WsFlashBlockStream, XLayerEngineValidator,
+    XLayerEngineValidatorBuilder,
 };
 use xlayer_legacy_rpc::{layer::LegacyRpcRouterLayer, LegacyRpcRouterConfig};
 use xlayer_monitor::{start_monitor_handle, RpcMonitorLayer, XLayerMonitor};
@@ -107,10 +107,29 @@ fn main() {
                 xlayer_args.sequencer_mode,
             );
 
-            let add_ons = op_node.add_ons().with_rpc_middleware((
-                RpcMonitorLayer::new(monitor.clone()),    // Execute first
-                LegacyRpcRouterLayer::new(legacy_config), // Execute second
-            ));
+            // `op_node.add_ons()` is not usable here: it returns
+            // `Self::AddOns`, whose type pins `NodeAdapter<_, DefaultComponents>`
+            // and therefore the upstream `OpExecutorBuilder`'s EVM
+            // (`OpEvmConfig<..., OpEvmFactory<OpTx>>`). We swap the
+            // executor to `XLayerExecutorBuilder` below, which changes
+            // `CB::Components` to carry `XLayerAAEvmFactory` — the
+            // pre-pinned `add_ons` type would then no longer satisfy
+            // `NodeAddOns<NodeAdapter<T, CB::Components>>` and
+            // `.with_add_ons(...)` fails. Calling `add_ons_builder().build()`
+            // leaves `N` generic so it unifies with the new Components
+            // via inference.
+            let add_ons = op_node
+                .add_ons_builder::<op_alloy_network::Optimism>()
+                .build::<
+                    _,
+                    reth_optimism_node::OpEngineValidatorBuilder,
+                    reth_optimism_node::OpEngineApiBuilder<reth_optimism_node::OpEngineValidatorBuilder>,
+                    reth_node_builder::rpc::BasicEngineValidatorBuilder<reth_optimism_node::OpEngineValidatorBuilder>,
+                >()
+                .with_rpc_middleware((
+                    RpcMonitorLayer::new(monitor.clone()),    // Execute first
+                    LegacyRpcRouterLayer::new(legacy_config), // Execute second
+                ));
 
             // Parse and validate bridge intercept configuration
             let bridge_config = args
@@ -141,7 +160,25 @@ fn main() {
             .with_bridge_config(bridge_config);
 
             // Get the engine validator for flashblocks RPC.
-            let engine_validator = Arc::new(OnceLock::new());
+            //
+            // Explicitly pin the `Evm` type param to [`XLayerEvmConfig`]
+            // — otherwise Rust's inference walks from the
+            // `.set_flashblocks(...)` call inside the later
+            // `extend_rpc_modules` closure, but the trait-bound check
+            // on `.with_add_ons(add_ons)` fires earlier and fails with
+            // an `OpAddOns: NodeAddOns` mismatch (Evm seen as upstream
+            // `OpEvmConfig` before the closure body is visited).
+            let engine_validator: Arc<
+                OnceLock<
+                    XLayerEngineValidator<
+                        _,
+                        xlayer_builder::XLayerEvmConfig,
+                        _,
+                        _,
+                        _,
+                    >,
+                >,
+            > = Arc::new(OnceLock::new());
 
             // Replace the default engine validator with `XLayerEngineValidator`, sharing
             // the engine's PayloadProcessor while unifying both the engine validator and
@@ -164,7 +201,29 @@ fn main() {
 
             let NodeHandle { node, node_exit_future } = builder
                 .with_types_and_provider::<OpNode, BlockchainProvider<_>>()
-                .with_components(op_node.components().payload(payload_builder))
+                .with_components(
+                    // Order matters: `.executor(...)` must fire **before**
+                    // `.payload(...)` because reth's `ComponentsBuilder`
+                    // checks each builder's trait bound at the point it's
+                    // attached, and the pool / payload builders carry the
+                    // current `ExecB::EVM` as a type parameter. Swapping
+                    // the executor last would type-check payload against
+                    // the stale upstream `OpEvmFactory<OpTx>` EVM and fail
+                    // with a misleading "PayloadServiceBuilder not
+                    // implemented" error.
+                    op_node
+                        .components()
+                        // Replay path: peer block import, engine API
+                        // `newPayload`, and state sync all flow through
+                        // the executor builder. Upstream
+                        // `OpExecutorBuilder` (set by `.components()`)
+                        // produces an `OpEvmConfig<OpEvmFactory<OpTx>>`
+                        // that misses the XLayerAA tx-type branch, so
+                        // swap in the XLayer builder to keep block
+                        // replay consistent with block production.
+                        .executor(xlayer_builder::XLayerExecutorBuilder::default())
+                        .payload(payload_builder),
+                )
                 .with_add_ons(add_ons)
                 .extend_rpc_modules(move |ctx| {
                     let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
@@ -183,10 +242,22 @@ fn main() {
                             engine_validator.get_changeset_cache(),
                         );
 
-                        // Initialize the flashblocks validator
+                        // Initialize the flashblocks validator.
+                        //
+                        // `FlashblockSequenceValidator` must share the
+                        // same EVM type as `XLayerEngineValidator`'s
+                        // `Evm` generic (see `set_flashblocks` in
+                        // `crates/flashblocks/src/execution/engine.rs`),
+                        // which in turn is bound to `Node::Evm` — i.e.
+                        // the EVM our `XLayerExecutorBuilder` produces
+                        // (`XLayerEvmConfig`). Using `xlayer_evm_config`
+                        // here (instead of upstream `OpEvmConfig::
+                        // optimism`) keeps `NodeAddOns` happy and means
+                        // flashblocks peer validation also routes 0x7B
+                        // through `XLayerAAHandler`.
                         engine_validator.set_flashblocks(
                             FlashblockSequenceValidator::new(
-                                OpEvmConfig::optimism(ctx.provider().chain_spec()),
+                                xlayer_builder::xlayer_evm_config(ctx.provider().chain_spec()),
                                 ctx.provider().clone(),
                                 ctx.provider().chain_spec(),
                                 flashblocks_state.clone(),
