@@ -4,6 +4,51 @@
 
 Running log of mistakes made during XLayerAA implementation, so we don't repeat them. Append new entries at the top.
 
+### 2026-04-22 — The plan said "add `OpTxEnvelope::Eip8130` variant to op-alloy"; the right move is `Extended<OpTxEnvelope, XLayerAAEnvelope>` with zero submodule patches
+
+**What the plan said.** M1 prescribed directly patching `OpTxEnvelope` in the `op-alloy` submodule — adding an `Eip8130` variant and cascading through `OpTxType`, `OpTypedTransaction`, `OpPooledTransaction`, every match arm, the receipt envelope, op-reth primitives' `Compact` / `InMemorySize` codecs, serde tagged-enum plumbing, etc. The scoping exercise before P2 put that work at 600–1000 lines of submodule diff across ~15 files, plus non-trivial rustc-ICE risk (shared with the earlier `OpHardforks` default-method misadventure — see the next-older entry below).
+
+**What's actually there.** `alloy_consensus::Extended<BuiltIn, Other>` exists specifically for this use case. Its own crate doc calls it out:
+
+> This is intended to be used to extend existing presets, for example the ethereum or opstack transaction types and receipts.
+
+It provides blanket impls for every trait the downstream consumers expect:
+
+```rust
+impl<B: Transaction, T: Transaction>   Transaction   for Extended<B, T>   // alloy-consensus
+impl<B: Typed2718,  T: Typed2718>      Typed2718     for Extended<B, T>   // alloy-eips
+impl<B: Encodable2718, T: Encodable2718> Encodable2718 for Extended<B, T>
+impl<B: Decodable2718 + IsTyped2718, T: Decodable2718> Decodable2718 for Extended<B, T>
+impl<B: Encodable, T: Encodable>       Encodable     for Extended<B, T>   // alloy-rlp
+impl<B: Decodable, T: Decodable>       Decodable     for Extended<B, T>
+impl<B: OpTransaction, T: OpTransaction> OpTransaction for Extended<B, T> // op-alloy
+```
+
+And the EIP-2718 dispatch in [`Decodable2718 for Extended`](../../.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/alloy-consensus-1.7.3/src/extended.rs#L219) already does the right thing:
+
+```rust
+if B::is_type(ty) { B::typed_decode(ty, buf).map(Self::BuiltIn) }
+else              { T::typed_decode(ty, buf).map(Self::Other)   }
+```
+
+Because `OpTxType::is_type(0x7B)` returns `false` (0x7B isn't in the OP variant set), **a raw 0x7B-prefixed blob automatically routes to `Self::Other`** — no envelope patching required.
+
+**Fix.** Define a single type alias in `crates/xlayer-consensus/src/envelope.rs`:
+
+```rust
+pub type XLayerTxEnvelope = Extended<OpTxEnvelope, XLayerAAEnvelope>;
+```
+
+where `XLayerAAEnvelope` is a local newtype over `Sealed<TxEip8130>` (the orphan rule blocks impl'ing foreign `OpTransaction` on foreign `Sealed<T>` — see the next-newer entry for the `Signed<>` vs `Sealed<>` diagnosis). All other traits on `Sealed<TxEip8130>` are forwarded through the newtype with boilerplate `self.0.x()` delegation — no new behaviour, no submodule changes.
+
+Five guard tests (`raw_0x7b_decodes_as_other`, `standard_eip1559_decodes_as_builtin`, `envelope_encode_decode_is_stable`, `xlayer_aa_envelope_is_not_deposit`, `extended_delegates_is_deposit_both_sides`) pin the routing invariants so a future attempt to add 0x7B to `OpTxType` (which would silently flip dispatch to `BuiltIn` and invalidate our AA handler) trips the test.
+
+**Lesson.**
+
+- When a plan says "patch this upstream enum to add a variant," always check whether the upstream author already built an extension mechanism. `Extended` exists **exactly** because downstream L2s kept copy-pasting envelope variants. A five-minute upstream-trait search saves ~1000 lines of submodule diff.
+- The extension mechanism's idiomatic consumer — the L2 plumbing layer — is upstream's ergonomic sweet spot. Downstream-only newtypes for inner types are orphan-rule friction (worked around here with a ~30-line forwarder), but the top-level `Extended<B, T>` has no such friction for anything that takes `B` or `T` individually.
+- For wire-level types, the trait bar is surprisingly narrow: `Transaction + Typed2718 + IsTyped2718 + Encodable2718 + Decodable2718 + Encodable + Decodable + OpTransaction`. If your type already has most of those (as `TxEip8130` did) the remaining work is a handful of one-liners, not an architectural rewrite.
+
 ### 2026-04-22 — The original plan prescribed `Eip8130(Signed<TxEip8130>)` for the envelope variant, but the correct wrapper is `Sealed<TxEip8130>`
 
 **What the plan said.** [docs/xlayer-aa.md](xlayer-aa.md) (the M1 section) prescribed:

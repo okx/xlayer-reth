@@ -14150,6 +14150,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "alloy-serde",
+ "op-alloy-consensus",
  "op-revm",
  "serde",
  "xlayer-revm",

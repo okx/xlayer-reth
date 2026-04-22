@@ -23,6 +23,9 @@
 extern crate alloc as std;
 
 pub mod aa;
+pub mod envelope;
+
+pub use envelope::XLayerTxEnvelope;
 
 pub use aa::{
     AccountChangeEntry, Call, ConfigChangeEntry, CreateEntry, DelegationEntry, Owner, OwnerChange,

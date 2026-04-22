@@ -23,6 +23,12 @@ alloy-rlp = { workspace = true, default-features = false }
 # feature is active.
 alloy-serde = { workspace = true, optional = true }
 
+# op-alloy-consensus — supplies `OpTxEnvelope` + the `OpTransaction`
+# trait we need to wrap into `Extended<_, Sealed<TxEip8130>>`. Same
+# layering argument as alloy-consensus itself: this crate is scoped
+# to wire-level concerns, and the envelope IS a wire-level concept.
+op-alloy-consensus = { workspace = true, default-features = false }
+
 # op-revm — needed only for `OpSpecId`, the fork discriminator threaded
 # through the gas schedule. `default-features = false` keeps this
 # `no_std`-compatible.
@@ -44,6 +50,7 @@ std = [
     "alloy-eips/std",
     "alloy-primitives/std",
     "alloy-rlp/std",
+    "op-alloy-consensus/std",
     "op-revm/std",
     "serde?/std",
     "xlayer-revm/std",
@@ -54,4 +61,5 @@ serde = [
     "alloy-primitives/serde",
     "dep:alloy-serde",
     "dep:serde",
+    "op-alloy-consensus/serde",
 ]
