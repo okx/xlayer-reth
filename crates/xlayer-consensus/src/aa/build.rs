@@ -260,8 +260,7 @@ mod tests {
             nonce_key: U256::ZERO,
             nonce_sequence: 0,
             expiry: 0,
-            max_priority_fee_per_gas: 1,
-            max_fee_per_gas: 100,
+            gas_price: 100,
             gas_limit: 100_000,
             ..Default::default()
         }

@@ -5,6 +5,13 @@ Manual smoke scripts for validating the XLayerAA tx path against a running
 
 ## Setup
 
+### build and runt the node
+```bash
+cargo b -p xlayer-reth-node node 
+target/debug/xlayer-reth-node node --chain xlayer-dev --dev
+```
+
+### send the X Layer AA tx
 ```bash
 cd scripts/aa
 npm install
@@ -38,12 +45,12 @@ Env overrides:
 | `NONCE_KEY`| `0`                                                               | 2D-nonce channel (u256 decimal)   |
 | `NONCE_SEQ`| (queried from node)                                               | 2D-nonce sequence                 |
 | `GAS_LIMIT`| `200000`                                                          | execution gas budget              |
-| `MAX_FEE`  | `1000000000`                                                      | max fee per gas (wei)             |
+| `GAS_PRICE`| `1000000000`                                                      | legacy-style gas price (wei)      |
 | `EXPIRY`   | `0`                                                               | block-ts expiry (0 disables)      |
 
 Output: prints the signed raw tx hex, submits via `eth_sendRawTransaction`,
-then polls for the receipt and prints it. Exits `0` on success, non-zero
-on revert / timeout.
+then polls for the receipt (up to 30s) and prints it. Exits `0` on mined
+success, non-zero on revert / timeout / type or sender mismatch.
 
 ### Expected outcomes
 
@@ -52,12 +59,7 @@ on revert / timeout.
 | RLP / 2718 envelope parse (RPC → pool)   | ✅ accepted — returns a tx hash                             |
 | K1 native sender auth verification       | ✅ succeeds — ecrecover picks up the signature              |
 | Pool admission                           | ✅ admitted — `eth_pendingTransactions` lists it            |
-| Block inclusion                          | ⚠️ pending — the dev-mode miner currently rejects the      |
-|                                          | post-fork payload with "base fee missing" (see the M6c     |
-|                                          | punch list in `docs/xlayer-aa.md`). The tx stays in the    |
-|                                          | pool until a compatible builder path lands.                |
+| Block inclusion                          | ✅ mined — receipt carries `type=0x7b`, `status=0x1`        |
 
-Getting a tx hash back (no RPC error) is the primary success signal for
-this script; the receipt poll will time out until the dev-mode miner is
-taught to finalize blocks containing the XLayerAA predeploy upgrade tx
-emitted at genesis.
+On success the script prints:
+`==> AA tx mined (block=…, idx=…, gasUsed=…, status=success)`.

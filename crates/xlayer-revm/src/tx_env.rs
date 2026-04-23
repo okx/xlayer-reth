@@ -5,7 +5,7 @@
 //! all op-revm / mainnet behaviour is preserved.
 
 use alloy_evm::{FromRecoveredTx, FromTxWithEncoded, IntoTxEnv};
-use op_alloy_consensus::OpTxEnvelope;
+use op_alloy_consensus::{eip8130::TxEip8130, OpTxEnvelope};
 use op_revm::transaction::{abstraction::OpTxTr, deposit::DEPOSIT_TRANSACTION_TYPE};
 use reth_optimism_evm::OpTx;
 use revm::{
@@ -17,7 +17,7 @@ use revm::{
 
 use crate::{
     constants::XLAYERAA_TX_TYPE,
-    transaction::{XLayerAAParts, XLayerAATxTr},
+    transaction::{XLayerAACall, XLayerAAParts, XLayerAATxTr},
 };
 
 /// XLayerAA-aware transaction: op-stack deposit/regular fields + optional
@@ -200,20 +200,61 @@ where
 // --- Wire → exec conversions for the OP tx envelope -----------------------
 //
 // The pool / payload builder hand pooled transactions to the EVM factory as
-// `OpTxEnvelope` (Legacy / 2930 / 1559 / 7702 / Deposit). We delegate the
-// non-AA shapes to `OpTx` (op-reth's newtype over `OpTransaction<TxEnv>`)
-// and wrap the result with empty `XLayerAAParts` — 0x7B transactions ride
-// on a separate extended envelope that lands in a follow-up milestone.
+// `OpTxEnvelope`. Non-AA shapes delegate to `OpTx` (op-reth's newtype over
+// `OpTransaction<TxEnv>`) and wrap with empty AA parts.
+//
+// The 0x7B (EIP-8130) branch projects the wire tx into `XLayerAAParts` so
+// the handler's `validate_against_state_and_deduct_caller` reads
+// `parts.payer` from the right field (not `Address::ZERO`). Fields that
+// require external context — intrinsic-gas schedule (needs `OpSpecId`),
+// native signature recovery (needs `k256`), custom verifier pre-encoding —
+// live in `xlayer-consensus::aa::build_aa_parts` and default to empty here
+// so `xlayer-revm` stays no_std-clean without a cyclical dep on
+// `xlayer-consensus`.
+
+fn parts_from_eip8130(tx: &TxEip8130, caller: Address) -> XLayerAAParts {
+    let payer = tx.payer.unwrap_or(caller);
+    let call_phases = tx
+        .calls
+        .iter()
+        .map(|phase| {
+            phase
+                .iter()
+                .map(|c| XLayerAACall { to: c.to, data: c.data.clone(), value: U256::ZERO })
+                .collect()
+        })
+        .collect();
+    XLayerAAParts {
+        expiry: tx.expiry,
+        sender: caller,
+        payer,
+        nonce_key: tx.nonce_key,
+        call_phases,
+        ..XLayerAAParts::default()
+    }
+}
 
 impl FromRecoveredTx<OpTxEnvelope> for XLayerAATransaction<RevmTxEnv> {
     fn from_recovered_tx(tx: &OpTxEnvelope, sender: Address) -> Self {
-        Self::new(OpTx::from_recovered_tx(tx, sender).into())
+        let op_tx = OpTx::from_recovered_tx(tx, sender).into();
+        match tx {
+            OpTxEnvelope::Eip8130(sealed) => {
+                Self::with_parts(op_tx, parts_from_eip8130(sealed.inner(), sender))
+            }
+            _ => Self::new(op_tx),
+        }
     }
 }
 
 impl FromTxWithEncoded<OpTxEnvelope> for XLayerAATransaction<RevmTxEnv> {
     fn from_encoded_tx(tx: &OpTxEnvelope, caller: Address, encoded: Bytes) -> Self {
-        Self::new(OpTx::from_encoded_tx(tx, caller, encoded).into())
+        let op_tx = OpTx::from_encoded_tx(tx, caller, encoded).into();
+        match tx {
+            OpTxEnvelope::Eip8130(sealed) => {
+                Self::with_parts(op_tx, parts_from_eip8130(sealed.inner(), caller))
+            }
+            _ => Self::new(op_tx),
+        }
     }
 }
 

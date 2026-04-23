@@ -4,8 +4,8 @@ use alloy_consensus::{
     Signed, TxEip1559, TxEip2930, TxEip4844, TxEip4844Variant, TxEip7702, TxLegacy,
 };
 use alloy_eips::{eip7594::Encodable7594, Encodable2718, Typed2718};
-use alloy_primitives::{Address, Bytes};
-use op_alloy::consensus::{OpTxEnvelope, TxDeposit};
+use alloy_primitives::{Address, Bytes, TxKind, U256};
+use op_alloy::consensus::{eip8130::TxEip8130, OpTxEnvelope, TxDeposit};
 use op_revm::{transaction::deposit::DepositTransactionParts, OpTransaction};
 use revm::context::TxEnv;
 
@@ -17,16 +17,7 @@ impl FromRecoveredTx<OpTxEnvelope> for TxEnv {
             OpTxEnvelope::Eip2930(tx) => Self::from_recovered_tx(tx.tx(), caller),
             OpTxEnvelope::Eip7702(tx) => Self::from_recovered_tx(tx.tx(), caller),
             OpTxEnvelope::Deposit(tx) => Self::from_recovered_tx(tx.inner(), caller),
-            // EIP-8130 (XLayerAA) — no single `to`/`input`/`value` projection
-            // is faithful here (phased calls, embedded auth). Fall back to a
-            // minimal TxEnv; the XLayerAA handler consumes TxEip8130 directly
-            // and never reads these fields.
-            OpTxEnvelope::Eip8130(tx) => Self {
-                tx_type: tx.inner().ty(),
-                caller,
-                gas_limit: tx.inner().gas_limit,
-                ..Default::default()
-            },
+            OpTxEnvelope::Eip8130(tx) => Self::from_recovered_tx(tx.inner(), caller),
         }
     }
 }
@@ -55,8 +46,46 @@ impl FromRecoveredTx<TxDeposit> for TxEnv {
     }
 }
 
+/// MVP K1-native EIP-8130 projection.
+///
+/// Projects the first call of the first phase into a legacy-shaped `TxEnv`
+/// from the recovered sender. Skips phased-call fan-out, sponsor/payer fee
+/// splitting, account-change entries, and the custom-verifier path — those
+/// land in a dedicated AA handler later. Keeps `tx_type = 0x7B` so revm's
+/// validator routes it through `TransactionType::Custom` (which skips both
+/// legacy and EIP-1559 fee-validation branches — the lightest path and the
+/// right one for XLayer AA's legacy-fee model).
+impl FromRecoveredTx<TxEip8130> for TxEnv {
+    fn from_recovered_tx(tx: &TxEip8130, caller: Address) -> Self {
+        let (kind, data) = tx
+            .calls
+            .first()
+            .and_then(|phase| phase.first())
+            .map(|c| (TxKind::Call(c.to), c.data.clone()))
+            .unwrap_or((TxKind::Call(Address::ZERO), Bytes::new()));
+        Self {
+            tx_type: tx.ty(),
+            caller,
+            gas_limit: tx.gas_limit,
+            gas_price: tx.gas_price,
+            kind,
+            value: U256::ZERO,
+            data,
+            nonce: tx.nonce_sequence,
+            chain_id: Some(tx.chain_id),
+            ..Default::default()
+        }
+    }
+}
+
 impl FromTxWithEncoded<OpTxEnvelope> for TxEnv {
     fn from_encoded_tx(tx: &OpTxEnvelope, caller: Address, _encoded: Bytes) -> Self {
+        Self::from_recovered_tx(tx, caller)
+    }
+}
+
+impl FromTxWithEncoded<TxEip8130> for TxEnv {
+    fn from_encoded_tx(tx: &TxEip8130, caller: Address, _encoded: Bytes) -> Self {
         Self::from_recovered_tx(tx, caller)
     }
 }
@@ -76,12 +105,15 @@ impl FromTxWithEncoded<OpTxEnvelope> for OpTransaction<TxEnv> {
             OpTxEnvelope::Eip2930(tx) => Self::from_encoded_tx(tx, caller, encoded),
             OpTxEnvelope::Eip7702(tx) => Self::from_encoded_tx(tx, caller, encoded),
             OpTxEnvelope::Deposit(tx) => Self::from_encoded_tx(tx.inner(), caller, encoded),
-            // EIP-8130: see note in `FromRecoveredTx<OpTxEnvelope> for TxEnv`.
-            OpTxEnvelope::Eip8130(_) => {
-                let base = TxEnv::from_recovered_tx(tx, caller);
-                Self { base, enveloped_tx: Some(encoded), deposit: Default::default() }
-            }
+            OpTxEnvelope::Eip8130(tx) => Self::from_encoded_tx(tx.inner(), caller, encoded),
         }
+    }
+}
+
+impl FromTxWithEncoded<TxEip8130> for OpTransaction<TxEnv> {
+    fn from_encoded_tx(tx: &TxEip8130, caller: Address, encoded: Bytes) -> Self {
+        let base = TxEnv::from_recovered_tx(tx, caller);
+        Self { base, enveloped_tx: Some(encoded), deposit: Default::default() }
     }
 }
 

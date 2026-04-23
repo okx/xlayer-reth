@@ -111,6 +111,36 @@ by the two gate tests in `crates/builder/src/primitives.rs`.
 
 Running log of mistakes made during XLayerAA implementation, so we don't repeat them. Append new entries at the top.
 
+### 2026-04-23 — Payload builder rejected AA tx with "lack of funds (0) for max fee"; the AA handler reads `parts.payer`, which our converter left at `Address::ZERO`
+
+**What I did.** Wired `FromRecoveredTx<OpTxEnvelope>` / `FromTxWithEncoded<OpTxEnvelope>` for `XLayerAATransaction<TxEnv>` (in `crates/xlayer-revm/src/tx_env.rs`) by forwarding to `OpTx::from_{recovered,encoded}_tx(...).into()` and wrapping with `XLayerAATransaction::new(op_tx)` — i.e. `XLayerAAParts::default()` (all zero) — for every envelope variant including `0x7B`. The underlying `TxEnv.caller` was correct (`0x14dc...9955`), balance at RPC `latest` was `10^25`, so I chased the balance query path first.
+
+**Why it's wrong.** The XLayer AA handler (`crates/xlayer-revm/src/handler.rs::validate_against_state_and_deduct_caller`) loads the fee-paying account from `parts.payer`, not from `tx.caller()`. With `parts = XLayerAAParts::default()`, `parts.payer == Address::ZERO`, so the handler read `journal.load_account_with_code_mut(ZERO)` which has balance 0, tripping `LackOfFundForMaxFee { balance: 0, fee: gas_limit * gas_price }`. The symptom looked like a state / state-provider issue because the signer was right in the tracing log — nothing pointed at a parts-field mismatch.
+
+**Fix.** In `tx_env.rs`, match on `OpTxEnvelope::Eip8130(sealed)` and build a minimal `XLayerAAParts` inline (`sender = caller`, `payer = tx.payer.unwrap_or(caller)`, `call_phases` from `tx.calls`, `nonce_key`, `expiry`). Non-AA envelopes keep the default-empty parts. Richer builds (sponsor flow, custom verifiers, account-changes, intrinsic gas schedule) stay in `crates/xlayer-consensus::aa::build_aa_parts` so `xlayer-revm` stays no_std-clean without a cyclical dep on `xlayer-consensus`.
+
+**Rule going forward.** When debugging "wrong address loaded" in the op-revm / XLayer handler, check **which field of the transaction struct** the handler dereferences. For the AA path it's `parts.payer`, not `tx.caller()`. More generally: the `FromRecoveredTx` / `FromTxWithEncoded` trait impls on `XLayerAATransaction` are the one-and-only place wire → exec parts should happen; any new wire field with semantic meaning downstream needs a copy here.
+
+### 2026-04-23 — Set `tx_type: 0` when projecting `OpTxEnvelope::Eip8130` into revm's `TxEnv`, losing the 0x7B marker for no benefit
+
+**What I did.** While wiring the MVP K1-native execution path — projecting the first call of the first phase into a legacy-shaped `TxEnv` so revm could run the tx end-to-end — I set `tx_type: 0` in `deps/alloy-evm/src/op/tx.rs` and the matching `op-reth` / `kona` arms. My reasoning was "the chain is legacy-fee, so pretend it's a legacy tx so revm skips the EIP-1559 base-fee check."
+
+**Why it's wrong.** revm's `validate_tx_env` maps any unknown `tx_type` to `TransactionType::Custom`, and the `Custom` branch in the validator does **no** EIP-specific fee validation at all — lighter than Legacy (which still runs `validate_legacy_gas_price(gas_price, base_fee)`). So setting `tx_type = 0x7B` gives us the lightest validation path for free, and preserves the envelope-level marker that downstream consumers (receipt builder ignores it anyway, but RPC / tracing / tx-type-aware op-revm paths all benefit) use to identify this as an AA tx. Setting `tx_type = 0` was a pointless lie that made the TxEnv diverge from the envelope for no improvement.
+
+**Fix.** Changed the three places back to `tx_type: aa.ty()` (= `AA_TX_TYPE_ID` = 0x7B). Added a comment explaining why: `Custom` branch in revm skips both legacy and 1559 fee-validation, which is exactly the behavior XLayer AA's legacy-fee model wants.
+
+**Rule going forward.** When reaching for "tell revm this is a legacy tx so base-fee check is skipped", check revm's actual validator first. `TransactionType::Custom` is the escape hatch for unknown types; don't mint a fake type to reach a validation behavior that the unknown-type path already gives for free.
+
+### 2026-04-23 — Shipped `TxEip8130` with Base's `(max_priority_fee_per_gas, max_fee_per_gas)` pair; XLayer is legacy-fee and needs a single `gas_price` field
+
+**What I did.** Copied the fee portion of Base's EIP-8130 reference into our vendored `op_alloy_consensus::eip8130::TxEip8130`: two u128 fields, `max_priority_fee_per_gas` + `max_fee_per_gas`, wired through `encode_fields` / `encode_for_sender_signing` / `encode_for_payer_signing` / the `Transaction` trait impl. Test fixtures and the TS smoke script mirrored the shape (`MAX_FEE` / `MAX_PRIO` env vars, a priority field in the preimage).
+
+**Why it's wrong.** XLayer does not run EIP-1559 dynamic base-fee accounting. The Go reference client for xlayer (`sendSimpleBatch` with `types.NewTransaction(nonce, to, value, gas, gasPrice, data)` signed by `types.NewLondonSigner`) confirms the canonical sender path is flat `gas_price`. Leaving `max_priority_fee_per_gas` on the wire means: (1) the exposed shape doesn't match what xlayer tooling / relayers expect, (2) the `Transaction` trait impl advertised `is_dynamic_fee = true` even though the chain has no tip lane to drive, and (3) the smoke script had to set a priority-fee value that carries no semantic meaning on xlayer. Block production's "base fee missing" error is genesis-level and orthogonal to this, but it surfaced the schema question in the first place.
+
+**Fix.** Dropped `max_priority_fee_per_gas` and renamed `max_fee_per_gas → gas_price` on `TxEip8130`. Updated the wire layout docstring, `encode_fields` / `fields_len` / `rlp_decode_fields`, both signing preimages (`encode_for_sender_signing` / `encode_for_payer_signing`), the `Transaction` trait impl (`gas_price = Some(self.gas_price)`, `max_priority_fee_per_gas = None`, `is_dynamic_fee = false`, `effective_gas_price` ignores base fee, `effective_tip_per_gas = gas_price.saturating_sub(base_fee)`), and every downstream fixture (`crates/xlayer-consensus/src/aa/build.rs` tx_template, `scripts/aa/send_k1_eoa_tx.ts`). Docstring now explicitly flags this as a **wire-level divergence** from Base's 0x7B — cross-chain tooling needs per-deployment configuration.
+
+**Rule going forward.** Before mirroring Base's spec for a field that encodes fee policy, verify the XLayer side supports the same fee mechanism. Concretely for EIP-8130: if the chain never activated the EIP-1559 tip/base-fee machinery for standard txs, don't carry that machinery into the AA variant either. When in doubt, check what the canonical on-chain client (go-ethereum-xlayer) emits for a plain value transfer.
+
 ### 2026-04-23 — Assumed xlayer-dev would auto-mine a 0x7B tx; the chain has legacy-only fee rules at genesis and no live EIP-1559 base-fee mechanism
 
 **What I did.** Wrote `scripts/aa/send_k1_eoa_tx.ts` to submit an EIP-8130 tx and then poll `eth_getTransactionReceipt` for up to 60s as the success signal. When receipt polling timed out, I traced it to the node's `WARN Failed to validate header ... base fee missing` on block 1 and started patching the genesis `extraData` to carry a valid 17-byte Jovian (`[version=1, denominator, elasticity, min_base_fee]`) encoding so `compute_jovian_base_fee(parent=genesis)` wouldn't fail.

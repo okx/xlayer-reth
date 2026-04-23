@@ -7,7 +7,7 @@
  * Wire layout (see `op_alloy_consensus::eip8130`):
  *
  *   preimage = 0x7B || rlp([chain_id, from, nonce_key, nonce_sequence, expiry,
- *                           max_priority_fee_per_gas, max_fee_per_gas, gas_limit,
+ *                           gas_price, gas_limit,
  *                           account_changes, calls, payer])
  *   tx       = 0x7B || rlp([...all above..., sender_auth, payer_auth])
  *
@@ -16,6 +16,9 @@
  *   • `calls` is `Vec<Vec<Call>>`; each inner Call is `[to, data]`.
  *   • `sender_auth` for K1 EOA mode = 65-byte `r || s || (27+recid)` ECDSA
  *     signature over keccak256(preimage).
+ *   • Fee model is legacy-style: a single `gas_price` field — XLayer does
+ *     not run EIP-1559 dynamic base-fee accounting for AA txs, so there is
+ *     no `max_priority_fee_per_gas` on the wire.
  *
  * See `../README.md` for env-var options.
  */
@@ -45,8 +48,12 @@ const TO = (process.env.TO ??
     "0x0000000000000000000000000000000000000001") as Hex;
 const NONCE_KEY = BigInt(process.env.NONCE_KEY ?? "0");
 const GAS_LIMIT = BigInt(process.env.GAS_LIMIT ?? "200000");
-const MAX_FEE = BigInt(process.env.MAX_FEE ?? "1000000000");
-const MAX_PRIO = BigInt(process.env.MAX_PRIO ?? "1");
+// XLayer AA uses a single legacy-style `gas_price` field. `MAX_FEE` is kept
+// as an alias env var for ergonomics (matches the struct name historically
+// used while we were tracking Base's spec).
+const GAS_PRICE = BigInt(
+    process.env.GAS_PRICE ?? process.env.MAX_FEE ?? "1000000000",
+);
 const EXPIRY = BigInt(process.env.EXPIRY ?? "0");
 
 const AA_TX_TYPE = 0x7b;
@@ -127,8 +134,7 @@ async function main() {
     console.log(`nonce_seq  : ${nonceSeq}`);
     console.log(`to         : ${TO}`);
     console.log(`gas_limit  : ${GAS_LIMIT}`);
-    console.log(`max_fee    : ${MAX_FEE}`);
-    console.log(`max_prio   : ${MAX_PRIO}`);
+    console.log(`gas_price  : ${GAS_PRICE}`);
     console.log(`expiry     : ${EXPIRY}`);
     if (balance === 0n) {
         throw new Error(
@@ -137,15 +143,15 @@ async function main() {
     }
 
     // Build RLP-shaped fields. Order + shape must match the Rust
-    // `TxEip8130::encode_fields` exactly.
+    // `TxEip8130::encode_fields` exactly. Legacy-style fee: single
+    // `gas_price` between `expiry` and `gas_limit`.
     const preimageFields: RlpNode = [
         uintToRlpHex(chainId),
         bytesToRlpHex(optionalAddress(null)), // from = None
         uintToRlpHex(NONCE_KEY),
         uintToRlpHex(nonceSeq),
         uintToRlpHex(EXPIRY),
-        uintToRlpHex(MAX_PRIO),
-        uintToRlpHex(MAX_FEE),
+        uintToRlpHex(GAS_PRICE),
         uintToRlpHex(GAS_LIMIT),
         [], // account_changes: empty list
         // calls: Vec<Vec<Call>> ; one phase with one call (to, data=empty)
@@ -204,37 +210,53 @@ async function main() {
     }
     console.log(`\ntx hash    : ${txHash}`);
 
-    // xlayer-dev doesn't auto-mine EIP-1559-shaped payloads (Jovian base-fee
-    // decode on genesis fails because `extraData` is empty — tracked in the
-    // M6c punch list under docs/xlayer-aa.md). The AA path is verified as
-    // soon as the node echoes back the tx in the pool: that proves the
-    // envelope decoded as 0x7B, the type bitmap admitted it, and structural
-    // + K1-native auth checks passed. Block inclusion is orthogonal.
-    console.log(`\n==> confirming pool admission via eth_getTransactionByHash`);
-    const pending = (await client.request({
-        method: "eth_getTransactionByHash",
-        params: [txHash],
-    })) as { hash: Hex; type: Hex; from: Hex; blockNumber: Hex | null } | null;
-    if (pending === null) {
-        console.error("!! tx hash was returned but tx is not in the pool");
+    // Verify the full in-pool → mined round trip. The payload builder
+    // now projects `OpTxEnvelope::Eip8130` into `XLayerAAParts` via
+    // `parts_from_eip8130` (see crates/xlayer-revm/src/tx_env.rs), so
+    // `validate_against_state_and_deduct_caller` loads fees from the
+    // right account and the AA handler runs end-to-end.
+    console.log(`\n==> waiting for receipt (up to 30s)`);
+    const deadline = Date.now() + 30_000;
+    type ReceiptShape = {
+        status: Hex;
+        blockNumber: Hex;
+        transactionIndex: Hex;
+        gasUsed: Hex;
+        from: Hex;
+        type: Hex;
+    } | null;
+    let receipt: ReceiptShape = null;
+    while (Date.now() < deadline) {
+        receipt = (await client.request({
+            method: "eth_getTransactionReceipt",
+            params: [txHash],
+        })) as ReceiptShape;
+        if (receipt !== null) break;
+        await new Promise((r) => setTimeout(r, 500));
+    }
+    if (receipt === null) {
+        console.error("!! receipt did not land within 30s");
         process.exit(2);
     }
-    console.log(JSON.stringify(pending, null, 2));
-    if (BigInt(pending.type) !== BigInt(AA_TX_TYPE)) {
+    console.log(JSON.stringify(receipt, null, 2));
+    if (BigInt(receipt.type) !== BigInt(AA_TX_TYPE)) {
         console.error(
-            `!! unexpected tx type in pool (got ${pending.type}, want ${toHex(AA_TX_TYPE)})`,
+            `!! receipt tx-type mismatch (got ${receipt.type}, want ${toHex(AA_TX_TYPE)})`,
         );
         process.exit(2);
     }
-    if (pending.from.toLowerCase() !== sender.toLowerCase()) {
+    if (receipt.from.toLowerCase() !== sender.toLowerCase()) {
         console.error(
-            `!! recovered sender mismatch (pool=${pending.from}, expected=${sender})`,
+            `!! receipt sender mismatch (got ${receipt.from}, expected=${sender})`,
         );
         process.exit(2);
     }
-    console.log(`\n==> AA tx accepted (type=0x7b, sender=${pending.from})`);
+    if (receipt.status !== "0x1") {
+        console.error(`!! tx reverted on-chain (status=${receipt.status})`);
+        process.exit(2);
+    }
     console.log(
-        `   block inclusion is pending the xlayer-dev miner fix — see docs/xlayer-aa.md.`,
+        `\n==> AA tx mined (block=${receipt.blockNumber}, idx=${receipt.transactionIndex}, gasUsed=${receipt.gasUsed}, status=success)`,
     );
     process.exit(0);
 }
