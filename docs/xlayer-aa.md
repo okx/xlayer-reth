@@ -111,6 +111,16 @@ by the two gate tests in `crates/builder/src/primitives.rs`.
 
 Running log of mistakes made during XLayerAA implementation, so we don't repeat them. Append new entries at the top.
 
+### 2026-04-23 — Assumed xlayer-dev would auto-mine a 0x7B tx; the chain has legacy-only fee rules at genesis and no live EIP-1559 base-fee mechanism
+
+**What I did.** Wrote `scripts/aa/send_k1_eoa_tx.ts` to submit an EIP-8130 tx and then poll `eth_getTransactionReceipt` for up to 60s as the success signal. When receipt polling timed out, I traced it to the node's `WARN Failed to validate header ... base fee missing` on block 1 and started patching the genesis `extraData` to carry a valid 17-byte Jovian (`[version=1, denominator, elasticity, min_base_fee]`) encoding so `compute_jovian_base_fee(parent=genesis)` wouldn't fail.
+
+**Why it's wrong.** XLayer has not activated EIP-1559-style dynamic base-fee accounting on the dev chain — the chain ships legacy-style / constant-fee semantics today. Jovian's base-fee validator is effectively vestigial infrastructure that the dev miner can't satisfy with the current genesis shape, and `xlayer-dev`'s local payload-builder path for AA txs is explicitly tracked as an open item in the M6c punch list earlier in this doc. Forcing Jovian `extraData` into genesis would have changed chain-spec semantics in a way that's orthogonal to the XLayerAA envelope being tested — and it still wouldn't have produced a mined block for the AA tx, because the dev miner's payload shape has other gaps.
+
+**Fix.** Scope the smoke script to what's actually wired up end-to-end: envelope decode → tx-type bitmap admission → structural validation → K1 native `sender_auth` ecrecover → pool storage. Replace the receipt poll with `eth_getTransactionByHash`, assert `type == "0x7b"` and that the echoed `from` equals the recovered sender address. Treat `already known` on re-submit as success (k256 sign is deterministic → same hash). `scripts/aa/README.md` and the script's own doc comment both note that block inclusion is out of scope for this smoke.
+
+**Rule going forward.** Before adding "make the block get mined" fixes to a dev-chain verification path, check whether block inclusion is in scope for the milestone. For XLayerAA pre-M6c, pool admission is the verifiable end state; touching genesis `extraData`, base-fee params, or the local payload builder to chase a receipt is out of scope and conflates the AA wire/pool surface with unrelated fee-engine work.
+
 ### 2026-04-22 — The plan said "add `OpTxEnvelope::Eip8130` variant to op-alloy"; the right move is `Extended<OpTxEnvelope, XLayerAAEnvelope>` with zero submodule patches
 
 **What the plan said.** M1 prescribed directly patching `OpTxEnvelope` in the `op-alloy` submodule — adding an `Eip8130` variant and cascading through `OpTxType`, `OpTypedTransaction`, `OpPooledTransaction`, every match arm, the receipt envelope, op-reth primitives' `Compact` / `InMemorySize` codecs, serde tagged-enum plumbing, etc. The scoping exercise before P2 put that work at 600–1000 lines of submodule diff across ~15 files, plus non-trivial rustc-ICE risk (shared with the earlier `OpHardforks` default-method misadventure — see the next-older entry below).
