@@ -196,12 +196,10 @@ async function main() {
         });
         if (receipt) {
             console.log(JSON.stringify(receipt, null, 2));
-            // @ts-expect-error — JSON-RPC shape
             if (receipt.status === "0x1") {
                 console.log(`\n==> tx mined OK`);
                 process.exit(0);
             } else {
-                // @ts-expect-error
                 console.error(`!! tx reverted (status=${receipt.status})`);
                 process.exit(2);
             }
