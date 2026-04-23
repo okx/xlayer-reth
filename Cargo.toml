@@ -326,7 +326,6 @@ reth-discv4 = { path = "/home/po/now/okx-reth/crates/net/discv4" }
 reth-discv5 = { path = "/home/po/now/okx-reth/crates/net/discv5" }
 reth-dns-discovery = { path = "/home/po/now/okx-reth/crates/net/dns" }
 reth-downloaders = { path = "/home/po/now/okx-reth/crates/net/downloaders" }
-reth-e2e-test-utils = { path = "/home/po/now/okx-reth/crates/e2e-test-utils" }
 reth-ecies = { path = "/home/po/now/okx-reth/crates/net/ecies" }
 reth-engine-local = { path = "/home/po/now/okx-reth/crates/engine/local" }
 reth-engine-primitives = { path = "/home/po/now/okx-reth/crates/engine/primitives" }
@@ -341,7 +340,6 @@ reth-ethereum-cli = { path = "/home/po/now/okx-reth/crates/ethereum/cli" }
 reth-ethereum-consensus = { path = "/home/po/now/okx-reth/crates/ethereum/consensus" }
 reth-ethereum-engine-primitives = { path = "/home/po/now/okx-reth/crates/ethereum/engine-primitives" }
 reth-ethereum-forks = { path = "/home/po/now/okx-reth/crates/ethereum/hardforks" }
-reth-ethereum = { path = "/home/po/now/okx-reth/crates/ethereum/reth" }
 reth-ethereum-payload-builder = { path = "/home/po/now/okx-reth/crates/ethereum/payload" }
 reth-ethereum-primitives = { path = "/home/po/now/okx-reth/crates/ethereum/primitives" }
 reth-eth-wire = { path = "/home/po/now/okx-reth/crates/net/eth-wire" }
@@ -352,7 +350,6 @@ reth-evm = { path = "/home/po/now/okx-reth/crates/evm/evm" }
 reth-execution-errors = { path = "/home/po/now/okx-reth/crates/evm/execution-errors" }
 reth-execution-types = { path = "/home/po/now/okx-reth/crates/evm/execution-types" }
 reth-exex = { path = "/home/po/now/okx-reth/crates/exex/exex" }
-reth-exex-test-utils = { path = "/home/po/now/okx-reth/crates/exex/test-utils" }
 reth-exex-types = { path = "/home/po/now/okx-reth/crates/exex/types" }
 reth-fs-util = { path = "/home/po/now/okx-reth/crates/fs-util" }
 reth-invalid-block-hooks = { path = "/home/po/now/okx-reth/crates/engine/invalid-block-hooks" }
@@ -384,15 +381,12 @@ reth-payload-validator = { path = "/home/po/now/okx-reth/crates/payload/validato
 reth-primitives = { path = "/home/po/now/okx-reth/crates/primitives" }
 reth-primitives-traits = { path = "/home/po/now/okx-reth/crates/primitives-traits" }
 reth-provider = { path = "/home/po/now/okx-reth/crates/storage/provider" }
-reth-prune-db = { path = "/home/po/now/okx-reth/crates/prune/db" }
 reth-prune = { path = "/home/po/now/okx-reth/crates/prune/prune" }
 reth-prune-types = { path = "/home/po/now/okx-reth/crates/prune/types" }
 reth-revm = { path = "/home/po/now/okx-reth/crates/revm" }
 reth-rpc-api = { path = "/home/po/now/okx-reth/crates/rpc/rpc-api" }
-reth-rpc-api-testing-util = { path = "/home/po/now/okx-reth/crates/rpc/rpc-testing-util" }
 reth-rpc-builder = { path = "/home/po/now/okx-reth/crates/rpc/rpc-builder" }
 reth-rpc-convert = { path = "/home/po/now/okx-reth/crates/rpc/rpc-convert" }
-reth-rpc-e2e-tests = { path = "/home/po/now/okx-reth/crates/rpc/rpc-e2e-tests" }
 reth-rpc-engine-api = { path = "/home/po/now/okx-reth/crates/rpc/rpc-engine-api" }
 reth-rpc-eth-api = { path = "/home/po/now/okx-reth/crates/rpc/rpc-eth-api" }
 reth-rpc-eth-types = { path = "/home/po/now/okx-reth/crates/rpc/rpc-eth-types" }
@@ -406,7 +400,6 @@ reth-static-file = { path = "/home/po/now/okx-reth/crates/static-file/static-fil
 reth-static-file-types = { path = "/home/po/now/okx-reth/crates/static-file/types" }
 reth-storage-api = { path = "/home/po/now/okx-reth/crates/storage/storage-api" }
 reth-storage-errors = { path = "/home/po/now/okx-reth/crates/storage/errors" }
-reth-storage-rpc-provider = { path = "/home/po/now/okx-reth/crates/storage/rpc-provider" }
 reth-tasks = { path = "/home/po/now/okx-reth/crates/tasks" }
 reth-tokio-util = { path = "/home/po/now/okx-reth/crates/tokio-util" }
 reth-tracing = { path = "/home/po/now/okx-reth/crates/tracing" }
