@@ -18,7 +18,7 @@
 
 use op_revm::OpSpecId;
 
-use super::constants::{
+use op_alloy_consensus::eip8130::{
     AA_BASE_COST, BYTECODE_BASE_GAS, BYTECODE_PER_BYTE_GAS, CONFIG_CHANGE_OP_GAS,
     CONFIG_CHANGE_SKIP_GAS, EOA_AUTH_GAS, NONCE_KEY_COLD_GAS, NONCE_KEY_WARM_GAS, SLOAD_GAS,
 };

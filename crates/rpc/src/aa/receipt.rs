@@ -15,7 +15,8 @@
 //! receipt" answer doesn't drift between callers.
 
 use alloy_primitives::{Address, Log};
-use xlayer_consensus::{TxEip8130, XLayerTxEnvelope};
+use op_alloy_consensus::OpTxEnvelope;
+use xlayer_consensus::TxEip8130;
 use xlayer_revm::{extract_phase_statuses_from_logs, TX_CONTEXT_ADDRESS};
 use xlayer_rpc_types::Eip8130ReceiptFields;
 
@@ -37,11 +38,14 @@ use xlayer_rpc_types::Eip8130ReceiptFields;
 /// RPC-shaped logs can just map through `.as_ref()` — most
 /// alloy-level RPC log types satisfy `AsRef<alloy_primitives::Log>`.
 pub fn build_eip8130_fields(
-    tx: &XLayerTxEnvelope,
+    tx: &OpTxEnvelope,
     recovered_sender: Address,
     logs: &[Log],
 ) -> Option<Eip8130ReceiptFields> {
-    let aa_tx = tx.as_aa()?;
+    let aa_tx = match tx {
+        OpTxEnvelope::Eip8130(sealed) => sealed.inner(),
+        _ => return None,
+    };
     Some(build_fields_for_aa(aa_tx, recovered_sender, logs, None))
 }
 
@@ -152,7 +156,7 @@ mod tests {
             input: Bytes::new(),
         };
         let sig = Signature::from_scalars_and_parity(Default::default(), Default::default(), false);
-        let env = XLayerTxEnvelope::builtin(OpTxEnvelope::Eip1559(tx.into_signed(sig)));
+        let env = OpTxEnvelope::Eip1559(tx.into_signed(sig));
         let empty_logs: [Log; 0] = [];
         assert!(build_eip8130_fields(&env, Address::repeat_byte(0x01), &empty_logs).is_none());
     }

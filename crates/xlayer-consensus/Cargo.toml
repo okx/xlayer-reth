@@ -6,115 +6,46 @@ rust-version.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "XLayer consensus-layer wire types — XLayerAA (EIP-8130) transaction and supporting RLP types"
+description = "XLayer consensus-layer glue — XLayerAA (EIP-8130) build + gas-schedule; wire types re-exported from op-alloy."
 
 [lints]
 workspace = true
 
 [dependencies]
-# alloy
-alloy-consensus = { workspace = true, default-features = false }
-alloy-eips = { workspace = true, default-features = false }
-# alloy-evm is needed for the wire→exec `FromRecoveredTx` /
-# `FromTxWithEncoded` impls in `envelope.rs`. It's the single break
-# from the "wire-level only" crate scope, mirroring the existing
-# (pre-P2) dep on xlayer-revm for `XLayerAAParts`.
-alloy-evm = { workspace = true, default-features = false }
-# `k256` feature pulls in ecrecover — needed for the K1 native verifier.
+# alloy-primitives — basic primitive types (B256, U256, Address) used by
+# build.rs. `k256` is needed transitively through op-alloy-consensus's k1
+# verifier path; we request it here so standalone `cargo check -p
+# xlayer-consensus` picks it up.
 alloy-primitives = { workspace = true, default-features = false, features = ["k256"] }
-alloy-rlp = { workspace = true, default-features = false }
-# `alloy-serde::quantity` helpers used by the hex-encoded numeric
-# serde adapters on `TxEip8130`. Only pulled in when the `serde`
-# feature is active.
-alloy-serde = { workspace = true, optional = true }
 
-# op-alloy-consensus — supplies `OpTxEnvelope` + the `OpTransaction`
-# trait we need to wrap into `Extended<_, Sealed<TxEip8130>>`. Same
-# layering argument as alloy-consensus itself: this crate is scoped
-# to wire-level concerns, and the envelope IS a wire-level concept.
-op-alloy-consensus = { workspace = true, default-features = false }
+# op-alloy-consensus — host for the vendored `eip8130` module. All wire
+# types + native verifiers live here; xlayer-consensus simply re-exports.
+# `k256` is required so the `k1_recover` native path is available.
+op-alloy-consensus = { workspace = true, default-features = false, features = ["k256"] }
 
 # op-revm — needed only for `OpSpecId`, the fork discriminator threaded
-# through the gas schedule. `default-features = false` keeps this
-# `no_std`-compatible.
+# through the gas schedule.
 op-revm = { workspace = true, default-features = false }
 
-# revm — TxEnv type used in the wire→exec conversion bridge.
-# `default-features = false` keeps this no_std-clean (same as its
-# parent `op-revm` already pulls in transitively).
-revm = { workspace = true, default-features = false }
-
-# reth — `InMemorySize` / `SignedTransaction` trait bar we need to
-# satisfy so the combined envelope can slot into `NodePrimitives::SignedTx`
-# downstream (P2b.2+ milestones). `default-features = false` keeps this
-# no_std-clean.
-reth-primitives-traits = { workspace = true, default-features = false }
-
-# reth-codecs — only needed to provide a `Compact` impl for
-# `XLayerTxEnvelope`, which `FullSignedTx` requires once the
-# primitives-traits `reth-codec` feature is active. Gated behind
-# our own `reth-codec` feature so no_std / fault-proof / prover
-# builds (which disable reth-codec upstream and satisfy
-# `MaybeCompact` through its blanket impl) stay compilable.
-reth-codecs = { workspace = true, default-features = false, optional = true }
-# reth-db-api — supplies the `Compress` / `Decompress` traits we
-# impl on `XLayerTxEnvelope` so the node types satisfy
-# `NodeTypesForProvider`. Upstream gates its own impls for
-# OpTxEnvelope behind `cfg(feature = "op")` inside reth-db-api; we
-# can't extend those from here, so we hand-roll ours against the
-# Compact trait we already have.
-reth-db-api = { workspace = true, default-features = false, optional = true }
-bytes = { version = "1.6", default-features = false, optional = true }
-
-# xlayer — `default-features = false` is load-bearing: xlayer-revm's
-# default set enables `rpc`, which cascades `reth-optimism-evm/rpc` →
-# the full reth-node-api tree, which forces `serde` + `reth-codec` +
-# every other primitive-traits feature on transitively. Keeping it
-# off here lets xlayer-consensus be built standalone with just its
-# own `std` / `serde` feature flags actually governing the shape.
+# xlayer-revm — `XLayerAAParts` is the exec-env handoff type build_aa_parts
+# returns. `default-features = false` keeps this no_std-clean.
 xlayer-revm = { workspace = true, default-features = false }
-
-# misc
-serde = { workspace = true, features = ["derive", "rc"], optional = true }
-
-[dev-dependencies]
-alloy-rlp = { workspace = true, default-features = false }
 
 [features]
 default = ["std"]
 std = [
-    "alloy-consensus/std",
-    "alloy-eips/std",
-    "alloy-evm/std",
     "alloy-primitives/std",
-    "alloy-rlp/std",
-    "bytes?/std",
     "op-alloy-consensus/std",
     "op-revm/std",
-    "reth-codecs?/std",
-    "reth-primitives-traits/std",
-    "revm/std",
-    "serde?/std",
     "xlayer-revm/std",
 ]
-serde = [
-    "alloy-consensus/serde",
-    "alloy-eips/serde",
-    "alloy-primitives/serde",
-    "dep:alloy-serde",
-    "dep:serde",
-    "op-alloy-consensus/serde",
-]
-# Enables the `Compact` impl on `XLayerTxEnvelope`, required for
-# `FullSignedTx` (and therefore `NodePrimitives::SignedTx`) when the
-# consumer has `reth-primitives-traits/reth-codec` active. Workspace /
-# node builds turn this on via transitive feature unification; no_std /
-# prover builds leave it off and rely on the blanket `MaybeCompact` impl.
-reth-codec = ["dep:reth-codecs", "dep:bytes", "dep:reth-db-api"]
-# Enables the `RlpBincode` marker impls that promote `XLayerTxEnvelope`
-# into `SerdeBincodeCompat` through the existing RLP encode/decode path.
-# Required once the consumer turns on
-# `reth-primitives-traits/serde-bincode-compat` (driven by
-# `reth-chain-state`'s in-memory block cache). Implies `serde` because
-# `SerdeBincodeCompat`'s super-trait tower includes serde itself.
-serde-bincode-compat = ["reth-primitives-traits/serde-bincode-compat", "serde"]
+serde = ["alloy-primitives/serde", "op-alloy-consensus/serde"]
+# Kept for API compatibility with downstream crates that previously set
+# `features = ["reth-codec"]` or `features = ["serde-bincode-compat"]`
+# expecting the envelope Compact impl. Those lived in the removed
+# `envelope.rs`; the envelope is now plain `OpTxEnvelope` from op-alloy,
+# which carries its own Compact impl through `reth-codecs/op`. The
+# features are now no-ops so existing Cargo.toml lines continue to
+# build without modification.
+reth-codec = []
+serde-bincode-compat = []

@@ -1,18 +1,19 @@
-//! XLayer consensus-layer wire types.
+//! XLayer consensus-layer execution glue.
 //!
-//! Houses the [`TxEip8130`] transaction (tx type byte `0x7B`) along with the
-//! sub-types (`Call`, `AccountChangeEntry`, …) that appear in the RLP
-//! payload. The crate is deliberately scoped to **wire-level** concerns —
-//! RLP encoding / EIP-2718 framing / `alloy_consensus::Transaction` trait
-//! impls — so it can be reused by every layer that needs to parse an AA
-//! transaction without pulling in execution, mempool, or crypto code.
+//! Houses the XLayer-specific glue between the universal EIP-8130 wire
+//! format (now in `op_alloy_consensus::eip8130`) and the execution-time
+//! pipeline in `xlayer-revm` — primarily:
 //!
-//! Downstream responsibilities (separate crates):
+//! - [`aa::build_aa_parts`] — "wire → exec env" boundary: reads a
+//!   `TxEip8130` + chain-spec + state, verifies native auth, returns the
+//!   [`xlayer_revm::transaction::XLayerAAParts`] the handler consumes.
+//! - [`aa::XLayerAAGasSchedule`] — fork-bound intrinsic-gas table for AA
+//!   txs, resolved per `OpSpecId`.
 //!
-//! - crypto verification of `sender_auth` / `payer_auth` — left to a later
-//!   milestone;
-//! - execution-time parts (`XLayerAAParts`) — lives in `xlayer-revm`;
-//! - EVM handler / precompile interception — also `xlayer-revm`.
+//! Wire-level types ([`aa::TxEip8130`], `AccountChangeEntry`, …) are
+//! re-exported from `aa` for ergonomic downstream use. They live in the
+//! vendored op-alloy submodule so the `0x7B` variant ships alongside
+//! `OpTxEnvelope` without a newtype wrapper.
 //!
 //! See `docs/xlayer-aa.md` for the protocol reference and a running log of
 //! design-choice mistakes collected during the port.
@@ -23,18 +24,14 @@
 extern crate alloc as std;
 
 pub mod aa;
-pub mod envelope;
-pub mod pooled;
-
-pub use envelope::XLayerTxEnvelope;
-pub use pooled::XLayerPooledTxEnvelope;
 
 pub use aa::{
-    AccountChangeEntry, Call, ConfigChangeEntry, CreateEntry, DelegationEntry, Owner, OwnerChange,
-    OwnerScope, TxEip8130, AA_BASE_COST, AA_PAYER_TYPE, AA_TX_TYPE_ID, BYTECODE_BASE_GAS,
-    BYTECODE_PER_BYTE_GAS, CHANGE_TYPE_CONFIG, CHANGE_TYPE_CREATE, CHANGE_TYPE_DELEGATION,
-    CONFIG_CHANGE_OP_GAS, CONFIG_CHANGE_SKIP_GAS, CUSTOM_VERIFIER_GAS_CAP, DEPLOYMENT_HEADER_SIZE,
-    EOA_AUTH_GAS, MAX_ACCOUNT_CHANGES_PER_TX, MAX_CALLS_PER_TX, MAX_CONFIG_OPS_PER_TX,
-    MAX_SIGNATURE_SIZE, NONCE_KEY_COLD_GAS, NONCE_KEY_MAX, NONCE_KEY_WARM_GAS, OP_AUTHORIZE_OWNER,
-    OP_REVOKE_OWNER, SLOAD_GAS,
+    build_aa_parts, AccountChangeEntry, BuildError, BuiltAaParts, Call, ConfigChangeEntry,
+    CreateEntry, DelegationEntry, Owner, OwnerChange, OwnerScope, TxEip8130, XLayerAAGasSchedule,
+    AA_BASE_COST, AA_PAYER_TYPE, AA_TX_TYPE_ID, BYTECODE_BASE_GAS, BYTECODE_PER_BYTE_GAS,
+    CHANGE_TYPE_CONFIG, CHANGE_TYPE_CREATE, CHANGE_TYPE_DELEGATION, CONFIG_CHANGE_OP_GAS,
+    CONFIG_CHANGE_SKIP_GAS, CUSTOM_VERIFIER_GAS_CAP, DEPLOYMENT_HEADER_SIZE, EOA_AUTH_GAS,
+    MAX_ACCOUNT_CHANGES_PER_TX, MAX_CALLS_PER_TX, MAX_CONFIG_OPS_PER_TX, MAX_SIGNATURE_SIZE,
+    NONCE_KEY_COLD_GAS, NONCE_KEY_MAX, NONCE_KEY_WARM_GAS, OP_AUTHORIZE_OWNER, OP_REVOKE_OWNER,
+    SLOAD_GAS,
 };

@@ -29,13 +29,12 @@ use alloy_primitives::{Address, B256, U256};
 use op_revm::OpSpecId;
 use xlayer_revm::transaction::XLayerAAParts;
 
-use super::{
-    gas_schedule::XLayerAAGasSchedule,
-    native::{NativeVerifyError, NativeVerifyResult},
-    signature::{parse_sender_auth, sender_signature_hash, ParsedSenderAuth},
-    verifier::{verifier_kind, NativeVerifier, VerifierKind},
-    TxEip8130, NONCE_KEY_MAX,
+use op_alloy_consensus::eip8130::{
+    parse_sender_auth, sender_signature_hash, verifier_kind, NativeVerifier, NativeVerifyError,
+    NativeVerifyResult, ParsedSenderAuth, TxEip8130, VerifierKind, NONCE_KEY_MAX,
 };
+
+use super::gas_schedule::XLayerAAGasSchedule;
 
 /// Output of [`build_aa_parts`].
 #[derive(Debug, Clone)]
@@ -191,8 +190,8 @@ fn resolve_sender(tx: &TxEip8130, prehash: &B256) -> Result<(Address, Address, B
             // EOA: ecrecover the sender from the preimage; both `sender`
             // and `owner_id` derive from the recovered address.
             let NativeVerifyResult { address, owner_id } =
-                super::native::k1_recover(prehash, &signature)?;
-            Ok((address, super::verifier::K1_VERIFIER_ADDRESS, owner_id))
+                op_alloy_consensus::eip8130::k1_recover(prehash, &signature)?;
+            Ok((address, op_alloy_consensus::eip8130::K1_VERIFIER_ADDRESS, owner_id))
         }
         ParsedSenderAuth::Configured { verifier, data } => {
             let Some(from) = tx.from else {
@@ -204,7 +203,7 @@ fn resolve_sender(tx: &TxEip8130, prehash: &B256) -> Result<(Address, Address, B
                 VerifierKind::Native(kind) => match kind {
                     NativeVerifier::K1 => {
                         let NativeVerifyResult { owner_id, .. } =
-                            super::native::k1_recover(prehash, &data)?;
+                            op_alloy_consensus::eip8130::k1_recover(prehash, &data)?;
                         Ok((from, verifier, owner_id))
                     }
                     other => Err(BuildError::UnsupportedVerifier(other)),
@@ -230,8 +229,9 @@ fn resolve_payer(tx: &TxEip8130, sender: Address) -> Result<(Address, Address, B
     let data = &tx.payer_auth[20..];
     match verifier_kind(verifier) {
         VerifierKind::Native(NativeVerifier::K1) => {
-            let prehash = super::signature::payer_signature_hash(tx);
-            let NativeVerifyResult { owner_id, .. } = super::native::k1_recover(&prehash, data)?;
+            let prehash = op_alloy_consensus::eip8130::payer_signature_hash(tx);
+            let NativeVerifyResult { owner_id, .. } =
+                op_alloy_consensus::eip8130::k1_recover(&prehash, data)?;
             Ok((payer, verifier, owner_id))
         }
         VerifierKind::Native(other) => Err(BuildError::UnsupportedVerifier(other)),
@@ -243,7 +243,8 @@ fn resolve_payer(tx: &TxEip8130, sender: Address) -> Result<(Address, Address, B
 mod tests {
     use alloy_primitives::{Bytes, U256};
 
-    use super::super::AccountChangeEntry;
+    use op_alloy_consensus::eip8130::AccountChangeEntry;
+
     use super::*;
 
     /// Spec every `build_aa_parts` call in these tests runs under. Pinned to
@@ -269,9 +270,9 @@ mod tests {
     #[test]
     fn account_changes_feature_not_ready() {
         let tx = TxEip8130 {
-            account_changes: vec![AccountChangeEntry::Delegation(super::super::DelegationEntry {
-                target: Address::repeat_byte(0x42),
-            })],
+            account_changes: vec![AccountChangeEntry::Delegation(
+                op_alloy_consensus::eip8130::DelegationEntry { target: Address::repeat_byte(0x42) },
+            )],
             ..tx_template()
         };
         assert!(matches!(build_aa_parts(&tx, TEST_SPEC), Err(BuildError::FeatureNotReady(_))));
@@ -303,13 +304,11 @@ mod tests {
     #[test]
     fn configured_unsupported_native_rejected() {
         let mut auth = Vec::new();
-        auth.extend_from_slice(super::super::verifier::P256_RAW_VERIFIER_ADDRESS.as_slice());
+        auth.extend_from_slice(op_alloy_consensus::eip8130::P256_RAW_VERIFIER_ADDRESS.as_slice());
         auth.extend_from_slice(&[0u8; 64]);
         let tx = TxEip8130 { sender_auth: Bytes::from(auth), ..tx_template() };
         match build_aa_parts(&tx, TEST_SPEC) {
-            Err(BuildError::UnsupportedVerifier(
-                super::super::verifier::NativeVerifier::P256Raw,
-            )) => {}
+            Err(BuildError::UnsupportedVerifier(NativeVerifier::P256Raw)) => {}
             other => panic!("expected UnsupportedVerifier(P256Raw), got {other:?}"),
         }
     }
@@ -322,7 +321,7 @@ mod tests {
         // surface VerifyFailed rather than accept the tx, but the preimage
         // hashing path is exercised.
         let mut auth = Vec::new();
-        auth.extend_from_slice(super::super::verifier::K1_VERIFIER_ADDRESS.as_slice());
+        auth.extend_from_slice(op_alloy_consensus::eip8130::K1_VERIFIER_ADDRESS.as_slice());
         auth.extend_from_slice(&[0u8; 65]);
         let tx = TxEip8130 {
             nonce_key: NONCE_KEY_MAX,

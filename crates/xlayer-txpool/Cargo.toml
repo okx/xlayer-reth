@@ -14,10 +14,14 @@ workspace = true
 [dev-dependencies]
 # Only used by the non-AA routing test to build a 1559 envelope.
 alloy-consensus = { workspace = true, default-features = false }
-op-alloy-consensus = { workspace = true, default-features = false, features = ["k256"] }
 reth-transaction-pool.workspace = true
 
 [dependencies]
+# op-alloy — the EIP-8130 variant lives on `OpTxEnvelope` /
+# `OpPooledTransaction` directly (see the vendored `eip8130` module),
+# so the pool alias and validator reach for it through op-alloy rather
+# than a local newtype.
+op-alloy-consensus = { workspace = true, default-features = false, features = ["k256"] }
 # xlayer — pooled envelope + AA structural types. Intentionally
 # does NOT pull in `serde-bincode-compat` — that feature activates
 # `reth-primitives-traits/serde-bincode-compat`, which creates a

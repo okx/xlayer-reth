@@ -49,6 +49,12 @@ impl Signer {
             OpTypedTransaction::Eip1559(tx) => tx.signature_hash(),
             OpTypedTransaction::Eip7702(tx) => tx.signature_hash(),
             OpTypedTransaction::Deposit(_) => B256::ZERO,
+            // EIP-8130 bodies carry embedded auth; the standard
+            // `signature_hash` contract does not apply here. The node's
+            // internal signer never produces AA txs — if this path is
+            // reached, it signals a routing bug, so fall back to a
+            // zero hash rather than panicking.
+            OpTypedTransaction::Eip8130(_) => B256::ZERO,
         };
         let signature = self.sign_message(signature_hash)?;
         let signed = OpTransactionSigned::new_unhashed(tx, signature);

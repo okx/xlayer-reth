@@ -63,6 +63,7 @@ fn convert_receipt(receipt: &OpReceipt) -> op_alloy_consensus::OpReceipt {
         OpReceipt::Eip2930(r) => op_alloy_consensus::OpReceipt::Eip2930(r.clone()),
         OpReceipt::Eip1559(r) => op_alloy_consensus::OpReceipt::Eip1559(r.clone()),
         OpReceipt::Eip7702(r) => op_alloy_consensus::OpReceipt::Eip7702(r.clone()),
+        OpReceipt::Eip8130(r) => op_alloy_consensus::OpReceipt::Eip8130(r.clone()),
         OpReceipt::Deposit(r) => {
             op_alloy_consensus::OpReceipt::Deposit(op_alloy_consensus::OpDepositReceipt {
                 inner: r.inner.clone(),

@@ -28,10 +28,13 @@
 
 use alloy_eips::eip2718::Typed2718;
 use alloy_primitives::U256;
+use op_alloy_consensus::{
+    eip8130::parse_sender_auth, OpPooledTransaction as XLayerPooledTxEnvelope,
+};
 use thiserror::Error;
 use xlayer_consensus::{
-    aa::parse_sender_auth, TxEip8130, XLayerPooledTxEnvelope, AA_TX_TYPE_ID,
-    MAX_ACCOUNT_CHANGES_PER_TX, MAX_CALLS_PER_TX, MAX_SIGNATURE_SIZE, NONCE_KEY_MAX,
+    TxEip8130, AA_TX_TYPE_ID, MAX_ACCOUNT_CHANGES_PER_TX, MAX_CALLS_PER_TX, MAX_SIGNATURE_SIZE,
+    NONCE_KEY_MAX,
 };
 
 /// Minimum `expiry` margin (seconds) ahead of the current block
@@ -231,12 +234,14 @@ pub fn validate_pooled_structure(
     chain_id: u64,
     now: u64,
 ) -> Result<(), AAValidationError> {
-    match tx.as_aa() {
-        Some(aa) => validate_aa_structure(aa, chain_id, now),
-        None => {
+    match tx {
+        XLayerPooledTxEnvelope::Eip8130(sealed) => {
+            validate_aa_structure(sealed.inner(), chain_id, now)
+        }
+        _ => {
             // Non-AA. Quick sanity: the type byte shouldn't be
             // AA's (defence in depth against a future routing bug
-            // that wraps an AA body in the BuiltIn arm).
+            // that assigns an AA type byte to a non-AA variant).
             let ty = tx.ty();
             if ty == AA_TX_TYPE_ID {
                 return Err(AAValidationError::NotAnAATransaction { ty });
@@ -374,7 +379,6 @@ mod tests {
     fn non_aa_envelope_is_ok_via_pooled_path() {
         use alloy_consensus::{SignableTransaction, TxEip1559};
         use alloy_primitives::{Signature, TxKind};
-        use op_alloy_consensus::OpPooledTransaction;
 
         let tx = TxEip1559 {
             chain_id: CHAIN_ID,
@@ -388,8 +392,7 @@ mod tests {
             input: Bytes::new(),
         };
         let sig = Signature::from_scalars_and_parity(Default::default(), Default::default(), false);
-        let env =
-            XLayerPooledTxEnvelope::builtin(OpPooledTransaction::Eip1559(tx.into_signed(sig)));
+        let env = XLayerPooledTxEnvelope::Eip1559(tx.into_signed(sig));
         assert!(validate_pooled_structure(&env, CHAIN_ID, NOW).is_ok());
     }
 }
