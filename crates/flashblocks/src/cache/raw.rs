@@ -289,10 +289,10 @@ impl<T: SignedTransaction> RawFlashblocksEntry<T> {
             base: self.base()?.clone(),
             payload_id: self.payload_id()?,
             transactions: self.transactions_up_to(best_revision),
-            access_list: if disable_access_list {
-                None
-            } else {
+            access_list: if !disable_access_list {
                 self.access_list_up_to(best_revision)
+            } else {
+                None
             },
             withdrawals: self.withdrawals_at(best_revision),
             last_flashblock_index: best_revision,
