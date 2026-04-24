@@ -9,8 +9,9 @@ use tracing::error;
 
 use crate::access_lists::builder::FlashblockAccessListBuilder;
 
-/// A [`Database`] implementation that builds an access list based on reads and writes
-/// Use [`FBALBuilderDb::finish`] to build and retrieve the access list
+/// A [`Database`] implementation that builds an access list based on reads and writes.
+/// Use `std::mem::take(&mut *lock.guard)` at flashblock-finalization time on the access
+/// list builder reference to retrieve the accumulated builder.
 #[derive(Debug)]
 pub struct FBALBuilderDb<DB>
 where

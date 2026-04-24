@@ -267,7 +267,7 @@ impl FlashblocksBuilderCtx {
     ) -> Result<ExecutionInfo, PayloadBuilderError> {
         let mut info = ExecutionInfo::with_capacity(self.attributes().transactions.len());
 
-        let min_tx_index = info.executed_transactions.iter().len() as u64;
+        let min_tx_index = info.executed_transactions.len() as u64;
         let mut fbal_db = FBALBuilderDb::new(&mut *db, info.access_list_builder.clone());
         fbal_db.set_index(min_tx_index);
         let mut evm = self.evm_config.evm_with_env(&mut fbal_db, self.evm_env.clone());

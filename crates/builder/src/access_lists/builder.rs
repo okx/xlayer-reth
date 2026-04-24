@@ -22,16 +22,6 @@ impl FlashblockAccessListBuilder {
         Self { changes: Default::default() }
     }
 
-    /// Merges another [`FlashblockAccessListBuilder`] with this one
-    pub fn merge(&mut self, other: Self) {
-        for (address, changes) in other.changes {
-            self.changes
-                .entry(address)
-                .and_modify(|prev| prev.merge(changes.clone()))
-                .or_insert(changes);
-        }
-    }
-
     /// Consumes the builder and produces a [`FlashblockAccessList`]
     pub fn build(self, min_tx_index: u64, max_tx_index: u64) -> FlashblockAccessList {
         let mut changes: Vec<_> = self.changes.into_iter().map(|(k, v)| v.build(k)).collect();
