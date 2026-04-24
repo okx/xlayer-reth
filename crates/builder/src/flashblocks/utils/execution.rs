@@ -4,6 +4,7 @@ use alloy_primitives::{Address, U256};
 use derive_more::Display;
 use op_revm::OpTransactionError;
 use reth_optimism_primitives::{OpReceipt, OpTransactionSigned};
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Display)]
 pub enum TxnExecutionResult {
@@ -44,7 +45,7 @@ pub struct ExecutionInfo {
     pub optional_blob_fields: Option<(Option<u64>, Option<u64>)>,
     /// EIP-7928 flashblock access list builder — accumulates state reads/writes
     /// during EVM execution, indexed by transaction position.
-    pub access_list_builder: FlashblockAccessListBuilder,
+    pub access_list_builder: Arc<Mutex<FlashblockAccessListBuilder>>,
 }
 
 impl ExecutionInfo {
@@ -59,7 +60,7 @@ impl ExecutionInfo {
             total_fees: U256::ZERO,
             da_footprint_scalar: None,
             optional_blob_fields: None,
-            access_list_builder: FlashblockAccessListBuilder::new(),
+            access_list_builder: Arc::new(Mutex::new(FlashblockAccessListBuilder::new())),
         }
     }
 

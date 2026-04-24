@@ -1176,7 +1176,8 @@ where
     // Takes the accumulated builder (resets it for the next flashblock).
     let min_tx_index = last_idx as u64;
     let max_tx_index = min_tx_index + new_transactions.len() as u64;
-    let fal_builder = std::mem::take(&mut info.access_list_builder);
+    let fal_builder =
+        std::mem::take(&mut *info.access_list_builder.lock().expect("access list mutex poisoned"));
     let access_list = fal_builder.build(min_tx_index, max_tx_index);
 
     let metadata = OpFlashblockPayloadMetadata {

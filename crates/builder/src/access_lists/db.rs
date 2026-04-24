@@ -1,141 +1,121 @@
-//! Flashblock Access List Builder Database wrapper.
-//!
-//! `FBALBuilderDb` wraps any `Database + DatabaseCommit` implementation, intercepting all
-//! EVM reads and writes to build an EIP-7928 access list transparently.
-
-use crate::access_lists::builder::FlashblockAccessListBuilder;
+use alloy_primitives::{Address, B256};
+use revm::{
+    primitives::{HashMap, StorageKey, StorageValue, KECCAK_EMPTY},
+    state::{Account, AccountInfo, Bytecode},
+    Database, DatabaseCommit,
+};
+use std::sync::{Arc, Mutex};
 use tracing::error;
 
-use revm::{
-    bytecode::Bytecode,
-    database_interface::{Database, DatabaseCommit},
-    primitives::{Address, HashMap, StorageKey, StorageValue, B256},
-    state::{Account, AccountInfo},
-};
+use crate::access_lists::builder::FlashblockAccessListBuilder;
 
-/// A revm `Database` + `DatabaseCommit` wrapper that intercepts EVM reads and writes
-/// to build an EIP-7928 flashblock access list.
-///
-/// Wraps an underlying database transparently. On each `basic()` call, registers the
-/// address as touched. On each `storage()` call, records the slot as read. On each
-/// `commit()`, diffs the changeset against pre-state and records only actual mutations.
-///
-/// # Error Handling
-///
-/// `DatabaseCommit::commit()` returns `()`, so errors from `try_commit()` are stored
-/// internally and surfaced when `finish()` is called.
+/// A [`Database`] implementation that builds an access list based on reads and writes
+/// Use [`FBALBuilderDb::finish`] to build and retrieve the access list
+#[derive(Debug)]
 pub struct FBALBuilderDb<DB>
 where
     DB: DatabaseCommit + Database,
 {
-    /// The underlying database.
+    /// Underlying `CacheDB`
     db: DB,
-    /// Current transaction index within the block.
+    /// Transaction index of the transaction currently being executed
     index: u64,
-    /// Accumulates access list entries.
-    access_list: FlashblockAccessListBuilder,
-    /// Stores the first error from `try_commit()` since `commit()` can't return errors.
-    error: Option<<DB as Database>::Error>,
+    /// Builder for the access list
+    access_list: Arc<Mutex<FlashblockAccessListBuilder>>,
 }
 
 impl<DB> FBALBuilderDb<DB>
 where
     DB: DatabaseCommit + Database,
 {
-    /// Creates a new wrapper around the given database.
-    pub fn new(db: DB) -> Self {
-        Self { db, index: 0, access_list: FlashblockAccessListBuilder::new(), error: None }
+    /// Creates a new instance of [`FBALBuilderDb`] with the given underlying database
+    pub fn new(db: DB, access_list: Arc<Mutex<FlashblockAccessListBuilder>>) -> Self {
+        Self { db, index: 0, access_list }
     }
 
-    /// Returns a reference to the underlying database.
-    pub fn db(&self) -> &DB {
+    /// Returns a reference to the underlying database
+    pub const fn db(&self) -> &DB {
         &self.db
     }
 
-    /// Returns a mutable reference to the underlying database.
-    pub fn db_mut(&mut self) -> &mut DB {
+    /// Returns a mutable reference to the underlying database
+    pub const fn db_mut(&mut self) -> &mut DB {
         &mut self.db
     }
 
-    /// Sets the current transaction index.
-    pub fn set_index(&mut self, index: u64) {
+    /// Sets the transaction index of the transaction currently being executed
+    pub const fn set_index(&mut self, index: u64) {
         self.index = index;
     }
 
-    /// Increments the current transaction index.
-    pub fn inc_index(&mut self) {
+    /// Increments the transaction index of the transaction currently being executed
+    pub const fn inc_index(&mut self) {
         self.index += 1;
     }
 
-    /// Consumes the wrapper and returns the accumulated access list builder,
-    /// or an error if `commit()` failed.
-    pub fn finish(self) -> Result<FlashblockAccessListBuilder, <DB as Database>::Error> {
-        if let Some(err) = self.error {
-            return Err(err);
-        }
-        Ok(self.access_list)
-    }
-
-    /// Core diff logic: processes committed state changes, comparing against pre-state
-    /// to record only actual mutations.
+    /// Attempts to commit the changes to the underlying database
+    /// as well as applies account/storage changes to the access list builder
     fn try_commit(
         &mut self,
         changes: HashMap<Address, Account>,
     ) -> Result<(), <DB as Database>::Error> {
         for (address, account) in &changes {
-            let entry = self.access_list.changes.entry(*address).or_default();
+            let mut access_list = self.access_list.lock().expect("access list mutex poisoned");
+            let account_changes = access_list.changes.entry(*address).or_default();
 
-            // Diff against pre-state to record only actual mutations.
-            let prev = self.db.basic(*address)?;
+            // Update balance, nonce, and code
+            match self.db.basic(*address)? {
+                Some(prev) => {
+                    if prev.balance != account.info.balance {
+                        account_changes.balance_changes.insert(self.index, account.info.balance);
+                    }
 
-            if let Some(prev) = prev {
-                // Existing account: diff fields
-                if prev.balance != account.info.balance {
-                    entry.balance_changes.insert(self.index, account.info.balance);
+                    if prev.nonce != account.info.nonce {
+                        account_changes.nonce_changes.insert(self.index, account.info.nonce);
+                    }
+
+                    if prev.code_hash != account.info.code_hash {
+                        let bytecode = match account.info.code.clone() {
+                            Some(code) => code,
+                            None => self.db.code_by_hash(account.info.code_hash)?,
+                        };
+                        account_changes.code_changes.insert(self.index, bytecode);
+                    }
                 }
-                if prev.nonce != account.info.nonce {
-                    entry.nonce_changes.insert(self.index, account.info.nonce);
-                }
-                if prev.code_hash != account.info.code_hash {
-                    // Code changed — fetch the new bytecode
-                    let code = if let Some(ref code) = account.info.code {
-                        code.clone()
-                    } else {
-                        self.db.code_by_hash(account.info.code_hash)?
-                    };
-                    entry.code_changes.insert(self.index, code);
-                }
-            } else {
-                // New account: record non-default values
-                if !account.info.balance.is_zero() {
-                    entry.balance_changes.insert(self.index, account.info.balance);
-                }
-                if account.info.nonce != 0 {
-                    entry.nonce_changes.insert(self.index, account.info.nonce);
-                }
-                if account.info.code_hash != revm::primitives::KECCAK_EMPTY {
-                    let code = if let Some(ref code) = account.info.code {
-                        code.clone()
-                    } else {
-                        self.db.code_by_hash(account.info.code_hash)?
-                    };
-                    entry.code_changes.insert(self.index, code);
+                None => {
+                    // For new accounts, only record changes if they differ from defaults
+                    if !account.info.balance.is_zero() {
+                        account_changes.balance_changes.insert(self.index, account.info.balance);
+                    }
+                    if account.info.nonce != 0 {
+                        account_changes.nonce_changes.insert(self.index, account.info.nonce);
+                    }
+                    // Only record code changes if the account actually has code
+                    if account.info.code_hash != KECCAK_EMPTY {
+                        let bytecode = match account.info.code.clone() {
+                            Some(code) => code,
+                            None => self.db.code_by_hash(account.info.code_hash)?,
+                        };
+                        account_changes.code_changes.insert(self.index, bytecode);
+                    }
                 }
             }
 
-            // Record storage changes: only where original_value != present_value.
-            for (slot, slot_value) in &account.storage {
-                if slot_value.original_value != slot_value.present_value {
-                    entry
+            // Update storage
+            for (slot, value) in &account.storage {
+                let prev = value.original_value;
+                let new = value.present_value;
+
+                if prev != new {
+                    account_changes
                         .storage_changes
                         .entry(*slot)
                         .or_default()
-                        .insert(self.index, slot_value.present_value);
+                        .insert(self.index, new);
                 }
             }
         }
 
-        // Commit to underlying DB.
         self.db.commit(changes);
         Ok(())
     }
@@ -148,8 +128,12 @@ where
     type Error = <DB as Database>::Error;
 
     fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-        // Register address as touched in the access list.
-        self.access_list.changes.entry(address).or_default();
+        self.access_list
+            .lock()
+            .expect("access list mutex poisoned")
+            .changes
+            .entry(address)
+            .or_default();
         self.db.basic(address)
     }
 
@@ -162,8 +146,14 @@ where
         address: Address,
         index: StorageKey,
     ) -> Result<StorageValue, Self::Error> {
-        // Record storage read.
-        self.access_list.changes.entry(address).or_default().storage_reads.insert(index);
+        self.access_list
+            .lock()
+            .expect("access list mutex poisoned")
+            .changes
+            .entry(address)
+            .or_default()
+            .storage_reads
+            .insert(index);
         self.db.storage(address, index)
     }
 
@@ -175,12 +165,10 @@ where
 impl<DB> DatabaseCommit for FBALBuilderDb<DB>
 where
     DB: DatabaseCommit + Database,
-    <DB as Database>::Error: std::fmt::Display,
 {
     fn commit(&mut self, changes: HashMap<Address, Account>) {
-        if let Err(err) = self.try_commit(changes) {
-            error!(error = %err, "FBALBuilderDb: failed to commit access list changes");
-            self.error = Some(err);
+        if let Err(e) = self.try_commit(changes) {
+            error!(target: "payload_builder", error = ?e, "Failed to commit changes via FBALBuilderDb");
         }
     }
 }
