@@ -26,3 +26,4 @@ crates/chainspec/res/genesis/xlayer-devnet-state-root.txt
 
 # scripts
 scripts/aa/node_modules
+scripts/aa/devstack/devnet.log

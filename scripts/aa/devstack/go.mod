@@ -233,5 +233,5 @@ require (
 
 replace (
 	github.com/ethereum-optimism/optimism => ../../../deps/optimism
-	github.com/ethereum/go-ethereum => github.com/okx/op-geth v0.2.0
+	github.com/ethereum/go-ethereum => ../../../../okx-op-geth
 )
