@@ -106,10 +106,17 @@ async function main() {
 
     const sender = addressFromPriv(PRIV);
 
-    // eth_getTransactionCount at this sender returns the standard nonce which
-    // is fine for the default nonce_key=0 channel (the NonceManager stores the
-    // 2D-nonce sequence in the same slot the standard EOA nonce tracker uses
-    // when nonce_key=0). If you override NONCE_KEY, pass NONCE_SEQ explicitly.
+    // Per EIP-8130, `nonce_key=0` is just the "Standard" channel of the 2D
+    // namespace — it is stored in the NonceManager precompile, NOT in the
+    // sender's legacy EOA account nonce field, and AA tx execution does NOT
+    // bump the account nonce. So `eth_getTransactionCount(sender)` is the
+    // wrong source for `nonce_sequence` — it will stay 0 no matter how many
+    // AA txs you land, and a second AA tx submitted with the same seq=0 will
+    // collide.
+    //
+    // TODO: query `NonceManager.getNonce(sender, nonce_key)` instead (RPC
+    // override or raw storage read). Until that's wired, pass NONCE_SEQ
+    // explicitly between runs.
     const nonceSeq = process.env.NONCE_SEQ
         ? BigInt(process.env.NONCE_SEQ)
         : BigInt(

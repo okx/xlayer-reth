@@ -1,20 +1,24 @@
 # XLayerAA (EIP-8130) verification scripts
 
-Manual smoke scripts for validating the XLayerAA tx path against a running
-`xlayer-reth-node --chain xlayer-dev --dev` instance.
+Manual smoke scripts for validating the XLayerAA tx path.
 
-## Setup
+---
 
-### build and runt the node
+## Quick start — single EL (`--dev` mode)
+
+The fastest path: one node, no L1, uses the built-in dev chain.
+
 ```bash
-cargo b -p xlayer-reth-node node 
+# build
+cargo build -p xlayer-reth-node
+
+# run
 target/debug/xlayer-reth-node node --chain xlayer-dev --dev
-```
 
-### send the X Layer AA tx
-```bash
+# send AA tx (defaults to http://127.0.0.1:18545, xlayer-dev rich key)
 cd scripts/aa
 npm install
+npm run send-k1
 ```
 
 ## Scripts
@@ -64,7 +68,9 @@ success, non-zero on revert / timeout / type or sender mismatch.
 On success the script prints:
 `==> AA tx mined (block=…, idx=…, gasUsed=…, status=success)`.
 
-## Running against a full L1 + L2 devnet (op-devstack, no Docker)
+---
+
+## Full L1 + L2 devnet (op-devstack, no Docker)
 
 `devstack/holdalive_test.go` boots an in-process op-stack devnet — L1 geth,
 both L2 EL nodes (sequencer + validator, **both running xlayer-reth-node**),
@@ -72,6 +78,50 @@ op-node CL on each, op-batcher, op-proposer — and blocks on `SIGINT` so you
 can drive it manually with `cast` / `curl`. Useful for A/B/C/D blocker
 triage: submit a 0x7B tx to the sequencer and watch both the sequencer's
 txpool and the validator's `engine_newPayload` result.
+
+### Quick start
+
+- stop the devnet if it's running
+```
+ps -eo pid,cmd | grep -E "devstack\.test|xlayer-reth-node" | grep -v grep
+kill related process
+```
+
+```bash
+# step 1 — build the node (mold avoids OOM on large debug binaries)
+RUSTFLAGS="-C link-arg=-fuse-ld=mold" cargo build -p xlayer-reth-node -j4
+
+# step 2 — start the devnet (new terminal)
+cd scripts/aa/devstack
+./run.sh          # first run downloads Go deps (~minutes); wait for banner
+
+# step 3 — send an AA tx once the banner appears (another terminal) to the sequencer
+#   copy port + key from the banner printed by run.sh
+cd scripts/aa
+PRIV="" # copy from banner
+RPC="http://127.0.0.1:{L2 sequencer  EL UserRPC}" PRIV=""$PRIV" npx tsx send_k1_eoa_tx.ts
+
+# step 4 - check receipt from the validator
+hash="0x..."
+val_port="46647"  #L2 validator  EL UserRPC
+curl -s "http://127.0.0.1:$val_port" -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"eth_getTransactionReceipt","params":["'"$hash"'"],"id":1}' \
+  | python3 -m json.tool
+```
+
+The banner looks like:
+
+```
+======================================================================
+XLAYER AA DEVNET READY — press Ctrl+C to tear down
+======================================================================
+L2 sequencer  EL UserRPC   ws://127.0.0.1:40025
+L2 validator  EL UserRPC   ws://127.0.0.1:34465
+Funded EOA priv hex  0x<key>
+======================================================================
+```
+
+Use `http://` not `ws://` for the RPC env var — the port serves both protocols.
 
 ### One-time setup
 
@@ -101,20 +151,9 @@ cd deps/optimism
 # one-time: compile op-stack contracts
 cd deps/optimism/packages/contracts-bedrock
 forge build --skip '/**/test/**'
-
-# one-time: build xlayer-reth-node (release or debug is fine)
-cd /path/to/xlayer-reth
-cargo build -p xlayer-reth-node
 ```
 
-### Launch the devnet
-
-```bash
-cd scripts/aa/devstack
-./run.sh                    # first run: downloads Go deps (~minutes)
-```
-
-Environment variables honored by `run.sh`:
+### `run.sh` environment variables
 
 | var                                 | default                                               | description                         |
 |-------------------------------------|-------------------------------------------------------|-------------------------------------|
@@ -124,25 +163,12 @@ Environment variables honored by `run.sh`:
 | `OP_DEVSTACK_PROOF_VALIDATOR_EL`    | `op-reth`                                             | `op-reth` or `op-geth`              |
 | `DISABLE_OP_E2E_LEGACY`             | `true`                                                | skip legacy op-e2e artifacts        |
 
-On startup the test prints the L1/L2 user RPCs, Engine API URLs, op-node
-RPCs, plus a pre-funded EOA (address + hex private key) you can sign
-transactions with. `Ctrl+C` tears the whole stack down.
+`Ctrl+C` tears the whole stack down.
 
-### Example: send an AA tx to the sequencer
-
-After the devnet prints its endpoints:
+### Verify the validator
 
 ```bash
-SEQ_RPC="ws://127.0.0.1:xxxxx"     # copy from the banner
-VAL_RPC="ws://127.0.0.1:yyyyy"
-PRIV="0x..."                         # copy from the banner
-
-# reuse the k1 AA script against the sequencer's RPC
-cd scripts/aa
-RPC="$SEQ_RPC" PRIV="$PRIV" npx tsx send_k1_eoa_tx.ts
-
-# and verify the validator sees the same receipt
-cast tx <hash> --rpc-url "$VAL_RPC"
+cast tx <hash> --rpc-url "http://127.0.0.1:<val-port>"
 ```
 
 ### Triage map
@@ -156,13 +182,9 @@ cast tx <hash> --rpc-url "$VAL_RPC"
 
 ### Known caveats
 
-**AA fork activation** — op-devstack generates a stock OP-Stack L2 genesis.
-XLayerAA (EIP-8130) will only activate if the chainspec code treats it as
-part of a fork that is enabled in the generated genesis (or an override is
-injected). Until then, a 0x7B tx is expected to fail at blocker A — which
-is exactly what this harness is for: verifying the failure mode before we
-decide whether to bind AA to an always-on fork or inject a deployer
-override.
+**AA fork activation** — the AA handler runs unconditionally (no fork gate),
+so 0x7B txs are accepted on the stock OP-Stack genesis generated by
+op-devstack without any chainspec override.
 
 **Validator `proof-history` panic** — on the very first run the validator
 node (which op-devstack starts with `--proofs-history` enabled, see
@@ -175,3 +197,6 @@ path, not an op-devstack integration problem. Until it's fixed, rely on the
 sequencer RPC for A-stage (tx-pool) triage; for B-stage (follower accepts
 the payload) we'll need to fork the preset to start the validator without
 `--proofs-history`.
+
+
+

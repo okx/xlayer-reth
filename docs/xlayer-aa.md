@@ -107,9 +107,109 @@ builder so `XLayerPrimitives` becomes reachable end-to-end. Until
 then, `XLayerPrimitives` is a declarative target kept compile-green
 by the two gate tests in `crates/builder/src/primitives.rs`.
 
+## E2E batcher fix & test plan (2026-04-24)
+
+### Problem fixed
+
+`ethclient.BlockByNumber()` in the Go op-batcher called
+`types.Transaction.UnmarshalJSON()` for every tx in the block. For type
+`0x7B`, `decodeTyped()` returned `ErrTxTypeNotSupported`, making the entire
+`BlockByNumber` call fail. The batcher crashed on any L2 block that contained
+an AA tx.
+
+**Fix.** Added `AATx` (type `0x7B`) to `core/types` in the `okx-op-geth` fork
+(`feat/xlayer-aa-v1` branch):
+
+- New `core/types/tx_eip8130.go` — `AATx` struct, `aaOptAddr` optional-address
+  encoding, `aaTxWire` for RLP, all 14 `TxData` interface methods including
+  `rawSignatureValues() = (0,0,0)`, correct `sigHash()` excluding auth blobs.
+- `core/types/transaction.go` — `AATxType = 0x7B` constant, `case AATxType:
+  inner = new(AATx)` in `decodeTyped()`.
+- `deps/optimism/go.mod` — commented out remote `github.com/okx/op-geth
+  v0.2.0` replace, added local `../../../okx-op-geth` replace so the Go
+  op-batcher (and op-node) pick up the AATx support.
+
+### Key technical findings
+
+**Pool validator** (`crates/xlayer-txpool/src/validator.rs`): purely structural
+— chain-id, size limits, expiry, `sender_auth` parse shape. No predeploy check,
+no hardfork gate. Not yet wired into the pool builder (M5d, deferred).
+
+**AA execution handler** (`crates/xlayer-revm/src/handler.rs`): no hardfork
+gate. `XLayerAAHandler` fires for any `0x7B` tx regardless of chainspec. The
+`is_xlayer_aa_active_at_timestamp` query on the chainspec is defined and used in
+named chains (`xlayer-dev`, `xlayer-devnet`), but the handler itself does not
+call it.
+
+**NonceManager and TxContext are system precompiles, not deployable contracts.**
+`NONCE_MANAGER_ADDRESS = 0x...aa02` and `TX_CONTEXT_ADDRESS = 0x...aa03` are
+intercepted by `XLayerAAPrecompiles` (`crates/xlayer-revm/src/precompiles.rs`)
+before any EVM dispatch. They work on any chain, with or without the AA
+predeploy set deployed.
+
+**K1 EOA native verification** (`from = None`, 65-byte `sender_auth`): recovery
+goes through the ecrecover precompile at `address(1)` — always available, no
+on-chain contract needed.
+
+**`AccountConfiguration` deployment check is skipped when `account_changes` is
+empty** (`helpers.rs:365`): `if parts.sequence_updates.is_empty() &&
+parts.config_writes.is_empty() { return Ok(()); }`. A minimal tx with no
+`account_changes` never touches the `AccountConfiguration` predeploy.
+
+**Conclusion:** a basic K1 EOA AA tx (`from=None`, `account_changes=[]`, simple
+`calls`) executes successfully end-to-end with **no AA predeploys deployed**.
+The op-devstack (standard OP Stack genesis, no XLayer AA predeploys) is
+therefore sufficient for a batcher E2E test without any infrastructure changes.
+
+### E2E test procedure (no op-devstack modification needed)
+
+```
+# 1. Build xlayer-reth-node
+just build
+
+# 2. Build Go op-batcher and op-node with AATx fix (uses local okx-op-geth)
+cd deps/optimism
+go build ./op-batcher/... ./op-node/...
+cd ../..
+
+# 3. Start devstack (hold-alive: L1 + L2 sequencer + L2 validator + op-batcher)
+scripts/aa/devstack/run.sh
+# Ctrl+C when done
+
+# 4. In a second terminal, send a 0x7B tx to the sequencer
+RPC=<sequencer-EL-UserRPC> npx tsx scripts/aa/send_k1_eoa_tx.ts
+
+# 5. Verify: L2 receipt with type=0x7b appears
+# 6. Verify: L1 op-batcher channel tx appears (batcher no longer crashes)
+# 7. Verify: validator node syncs the AA-containing L2 block via derivation
+```
+
+`run.sh` prints all RPC URLs on startup. The sequencer EL UserRPC is labelled
+`L2 sequencer  EL UserRPC`.
+
 ## Mistakes
 
 Running log of mistakes made during XLayerAA implementation, so we don't repeat them. Append new entries at the top.
+
+### 2026-04-24 — Jumped into implementing an AA-nonce-patch pool validator wrapper without scope-checking against the already-planned M5d 2D sub-pool
+
+**What I did.** Right after the user agreed to "让 pool validator 读 NonceManager.getNonce(sender, nonce_key)", I mapped the pool plumbing, added `xlayer-revm` / `reth-transaction-pool` / `reth-storage-api` deps to `crates/xlayer-txpool`, and wrote a ~200-line `XLayerAANonceValidator<V, Client>` wrapper implementing `TransactionValidator`. The intent was to patch `state_nonce` on `Valid` outcomes for 0x7B txs only (non-AA pass-through unchanged). I was about to add a second ~60-line `XLayerPoolBuilder` forked from `OpPoolBuilder::build_pool` and wire it in `bin/node/src/main.rs`. The user stopped me: "这个改动复杂吗，如果复杂的话，还不如到时候单独的2d_pool上了再说".
+
+**Why it's wrong.** Two related failures. (1) I didn't surface the cost up front — the wrapper was more than trait-bound-surgery than anticipated (5 compile errors on first check, more to come), and forking `OpPoolBuilder::build_pool` introduces an upstream-rebase liability that was never in scope for a quick fix. (2) More fundamentally, `crates/xlayer-txpool/src/lib.rs` **already documents** that a dedicated 2D-nonce sub-pool (`Eip8130Pool`) is the planned M5d work item. A validator-wrapper workaround would be a short-lived band-aid that gets ripped out the moment M5d lands — classic negative-leverage effort. The plan doc was visible to me; I should have cross-referenced before committing to implementation.
+
+**Fix.** Reverted the wrapper, the Cargo dep additions, and the `lib.rs` re-export. Left the misleading `send_k1_eoa_tx.ts` comment fix from the previous mistake entry in place (that was a pure doc fix, no code churn). For interim E2E verification: (a) restart the devnet to reset pool state before submitting a fresh seq=0 AA tx, or (b) pass `NONCE_SEQ=N` explicitly between runs on a warm devnet. The "proper" fix ships with M5d.
+
+**Rule going forward.** Before writing code for any change that touches the pool/validator/consensus plumbing, check `crates/<area>/src/lib.rs` or the milestone doc for a "Deferred to M…" / "Out of scope for M…" marker. If the change lines up with an already-planned phase, the interim workaround must be demonstrably cheap (edit-in-place, a few lines, no new file / dep) — otherwise write it up for the planned phase and stop. And before plunging into trait-bound code, state the estimated cost (file count, new deps, plus upstream-fork risk) in the reply so the user can veto at scope-check time, not after 200 lines are on disk.
+
+### 2026-04-24 — Misread EIP-8130 nonce semantics: assumed `nonce_key=0` reuses the sender's standard EOA account nonce
+
+**What I did.** The comment in `scripts/aa/send_k1_eoa_tx.ts` next to `eth_getTransactionCount` reads: "the NonceManager stores the 2D-nonce sequence in the same slot the standard EOA nonce tracker uses when nonce_key=0". During E2E verification of the 0x7B JSON-decode fix, the user's second AA tx (nonce_key=0, nonce_sequence=1) landed in `queued` instead of `pending`. I diagnosed this as an implementation gap — "AA tx execution doesn't bump standard EOA nonce" — and proposed either bumping the EOA nonce from the handler OR making the AA pool validator read NonceManager state. The user pushed back: "why are we involving 2D nonce again, weren't we using the default tx pool with nonce_key=0?" and pointed me at the EIP. The EIP (Nonce Storage section, execution steps line 532, validation line 515) is explicit: "`nonce_key` range `0` → Standard, Sequential ordering, mempool default" / "If `nonce_key != NONCE_KEY_MAX`, increment nonce in Nonce Manager storage for `(from, nonce_key)`". Only `NONCE_KEY_MAX` skips NonceManager. `nonce_key=0` is just the Standard channel of the 2D namespace, stored in NonceManager, and AA execution is **not** supposed to touch the legacy EOA account nonce.
+
+**Why it's wrong.** (1) The script's code comment encodes a wrong mental model that leaked into my diagnosis. (2) I used the script's comment as evidence rather than checking the spec when something contradicted it. (3) Had I read the spec first, the "correct" fix would have been obvious: AA pool validator must read NonceManager, not account.nonce — there is no "make AA bump EOA nonce" option that's spec-compliant.
+
+**Fix.** Update `scripts/aa/send_k1_eoa_tx.ts`'s NONCE_SEQ inference: default must call `NonceManager.getNonce(sender, nonce_key)` (or the equivalent RPC override), not `eth_getTransactionCount`. For pool: track "next expected sequence" from NonceManager storage per `(sender, nonce_key)`, not from the sender account's nonce field.
+
+**Rule going forward.** When a dev-chain symptom contradicts the convenience assumption in a tooling script (or in any comment), **go to the spec before you design a fix**. Script comments are the place where casual simplifications get written and then rot; the EIP is the source of truth. For EIP-8130 specifically: nonces are always NonceManager storage (except `NONCE_KEY_MAX`), never the legacy account nonce — don't propose EOA-nonce-bumping as a fix path.
 
 ### 2026-04-23 — Spent time architecting a fix for the proof-worker `wait_cloned` panic; paradigm already fixed it upstream the day after they introduced it
 
