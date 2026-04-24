@@ -261,6 +261,11 @@ impl TestFlashBlockBuilder {
         self
     }
 
+    pub(crate) fn access_list(mut self, access_list: Option<BlockAccessList>) -> Self {
+        self.access_list = access_list;
+        self
+    }
+
     pub(crate) fn build(mut self) -> OpFlashblockPayload {
         // Auto-create base for index 0 if not set
         if self.index == 0 && self.base.is_none() {

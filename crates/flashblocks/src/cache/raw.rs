@@ -940,4 +940,145 @@ mod tests {
 
         assert_eq!(flashblock, roundtrip);
     }
+
+    // ========================================================================
+    // Tests for `access_list_up_to` and `try_to_buildable_args` access-list flow
+    // ========================================================================
+
+    use alloy_eip7928::{AccountChanges, BalanceChange};
+    use alloy_primitives::{address, Address, U256};
+
+    /// Helper: minimal `AccountChanges` with balance changes and storage reads.
+    fn make_account_changes(
+        addr: Address,
+        balance_changes: Vec<(u64, u64)>,
+        storage_reads: Vec<u64>,
+    ) -> AccountChanges {
+        AccountChanges {
+            address: addr,
+            balance_changes: balance_changes
+                .into_iter()
+                .map(|(tx_idx, bal)| BalanceChange {
+                    block_access_index: tx_idx,
+                    post_balance: U256::from(bal),
+                })
+                .collect(),
+            storage_reads: storage_reads.into_iter().map(U256::from).collect(),
+            ..Default::default()
+        }
+    }
+
+    const ADDR_A: Address = address!("0000000000000000000000000000000000000001");
+    const ADDR_B: Address = address!("0000000000000000000000000000000000000002");
+
+    #[test]
+    fn test_access_list_up_to_merges_across_flashblocks() {
+        // Covers: same-address merge with disjoint tx indices preserved, and
+        // separate entry for a distinct address in a later flashblock.
+        let factory = TestFlashBlockFactory::new();
+        let ac0_a = make_account_changes(ADDR_A, vec![(0, 100)], vec![]);
+        let ac1_a = make_account_changes(ADDR_A, vec![(5, 200)], vec![]);
+        let ac1_b = make_account_changes(ADDR_B, vec![(6, 300)], vec![]);
+        let fb0 = factory.flashblock_at(0).access_list(Some(vec![ac0_a])).build();
+        let fb1 = factory.flashblock_after(&fb0).access_list(Some(vec![ac1_a, ac1_b])).build();
+
+        let mut cache = TestRawCache::new(false);
+        cache.handle_flashblock(wrap(fb0)).expect("fb0 insert");
+        cache.handle_flashblock(wrap(fb1)).expect("fb1 insert");
+
+        let args = cache.try_get_buildable_args(100).expect("should be buildable");
+        let al = args.access_list.expect("access list present");
+        assert_eq!(al.len(), 2, "ADDR_A merged into one entry, ADDR_B separate");
+        // Output sorted by address ascending.
+        assert_eq!(al[0].address, ADDR_A);
+        assert_eq!(al[1].address, ADDR_B);
+
+        // ADDR_A carries both flashblocks' balance changes with exact values preserved.
+        assert_eq!(al[0].balance_changes.len(), 2);
+        let a_changes: Vec<(u64, U256)> =
+            al[0].balance_changes.iter().map(|c| (c.block_access_index, c.post_balance)).collect();
+        assert!(a_changes.contains(&(0, U256::from(100))));
+        assert!(a_changes.contains(&(5, U256::from(200))));
+
+        // ADDR_B carries only fb1's single change.
+        assert_eq!(al[1].balance_changes.len(), 1);
+        assert_eq!(al[1].balance_changes[0].block_access_index, 6);
+        assert_eq!(al[1].balance_changes[0].post_balance, U256::from(300));
+    }
+
+    #[test]
+    fn test_access_list_up_to_dedupes_storage_reads() {
+        // Same slot read in two flashblocks — must appear once in storage_reads.
+        let factory = TestFlashBlockFactory::new();
+        let ac0 = make_account_changes(ADDR_A, vec![], vec![1, 2]);
+        let ac1 = make_account_changes(ADDR_A, vec![], vec![1, 3]);
+        let fb0 = factory.flashblock_at(0).access_list(Some(vec![ac0])).build();
+        let fb1 = factory.flashblock_after(&fb0).access_list(Some(vec![ac1])).build();
+
+        let mut cache = TestRawCache::new(false);
+        cache.handle_flashblock(wrap(fb0)).expect("fb0 insert");
+        cache.handle_flashblock(wrap(fb1)).expect("fb1 insert");
+
+        let args = cache.try_get_buildable_args(100).expect("should be buildable");
+        let entry = &args.access_list.expect("present")[0];
+        // Exact dedup + sort: slot 1 once, 2 and 3 retained, ascending order.
+        assert_eq!(entry.storage_reads, vec![U256::from(1), U256::from(2), U256::from(3)]);
+    }
+
+    #[test]
+    fn test_access_list_up_to_skips_missing_and_returns_none_when_all_missing() {
+        // Covers two behaviors: a missing middle flashblock is skipped (not
+        // treated as an abort), and if ALL flashblocks lack access list data
+        // the aggregated output is `None`.
+        let factory = TestFlashBlockFactory::new();
+        let ac0 = make_account_changes(ADDR_A, vec![(0, 100)], vec![]);
+        let fb0 = factory.flashblock_at(0).access_list(Some(vec![ac0])).build();
+        let fb1 = factory.flashblock_after(&fb0).access_list(None).build();
+
+        let mut cache = TestRawCache::new(false);
+        cache.handle_flashblock(wrap(fb0)).expect("fb0 insert");
+        cache.handle_flashblock(wrap(fb1)).expect("fb1 insert");
+
+        // Partial data preserved with exact value survived fb1's absence.
+        let args = cache.try_get_buildable_args(100).expect("should be buildable");
+        let al = args.access_list.expect("fb0 data preserved despite fb1 having None");
+        assert_eq!(al.len(), 1);
+        assert_eq!(al[0].address, ADDR_A);
+        assert_eq!(al[0].balance_changes.len(), 1);
+        assert_eq!(al[0].balance_changes[0].block_access_index, 0);
+        assert_eq!(al[0].balance_changes[0].post_balance, U256::from(100));
+
+        // Swap in a cache where both flashblocks lack access list data.
+        let fb0_empty = factory.flashblock_at(0).access_list(None).build();
+        let fb1_empty = factory.flashblock_after(&fb0_empty).access_list(None).build();
+        let mut empty_cache = TestRawCache::new(false);
+        empty_cache.handle_flashblock(wrap(fb0_empty)).expect("fb0 insert");
+        empty_cache.handle_flashblock(wrap(fb1_empty)).expect("fb1 insert");
+        let args = empty_cache.try_get_buildable_args(100).expect("should be buildable");
+        assert!(args.access_list.is_none(), "no data at all → None");
+    }
+
+    #[test]
+    fn test_buildable_args_disable_flag_strips_access_list() {
+        // With the disable flag set, even a flashblock carrying access list data
+        // must produce `BuildArgs.access_list == None`.
+        let factory = TestFlashBlockFactory::new();
+        let ac = make_account_changes(ADDR_A, vec![(0, 100)], vec![]);
+        let fb0 = factory.flashblock_at(0).access_list(Some(vec![ac])).build();
+
+        let mut cache_enabled = TestRawCache::new(false);
+        cache_enabled.handle_flashblock(wrap(fb0.clone())).expect("fb0 insert");
+        let args = cache_enabled.try_get_buildable_args(100).expect("should be buildable");
+        let al = args.access_list.expect("flag off + data → access list surfaced");
+        assert_eq!(al.len(), 1);
+        assert_eq!(al[0].address, ADDR_A);
+        assert_eq!(al[0].balance_changes.len(), 1);
+        assert_eq!(al[0].balance_changes[0].block_access_index, 0);
+        assert_eq!(al[0].balance_changes[0].post_balance, U256::from(100));
+
+        let mut cache_disabled = TestRawCache::new(true);
+        cache_disabled.handle_flashblock(wrap(fb0)).expect("fb0 insert");
+        let args = cache_disabled.try_get_buildable_args(100).expect("should be buildable");
+        assert!(args.access_list.is_none(), "flag on → access list stripped");
+    }
 }
