@@ -3,10 +3,12 @@ use parking_lot::RwLock;
 use ringbuffer::{AllocRingBuffer, RingBuffer};
 use std::{collections::BTreeMap, sync::Arc};
 
+use alloy_eip7928::{AccountChanges, BlockAccessList};
 use alloy_eips::{eip2718::WithEncoded, eip4895::Withdrawal};
 use alloy_rpc_types_engine::PayloadId;
 use op_alloy_rpc_types_engine::{OpFlashblockPayload, OpFlashblockPayloadBase};
 use reth_primitives_traits::{Recovered, SignedTransaction};
+use std::collections::HashMap;
 
 use xlayer_builder::broadcast::{XLayerFlashblockMessage, XLayerFlashblockPayload};
 
@@ -242,12 +244,44 @@ impl<T: SignedTransaction> RawFlashblocksEntry<T> {
             .collect()
     }
 
+    fn access_list_up_to(&self, up_to: u64) -> Option<BlockAccessList> {
+        let mut merged = HashMap::new();
+        for (_, payload) in self.payloads.range(..=up_to) {
+            let Some(access_list) = payload.metadata.access_list.as_ref() else { continue };
+            for changes in access_list {
+                merged
+                    .entry(changes.address)
+                    .and_modify(|existing: &mut AccountChanges| {
+                        // tx indices across flashblocks are disjoint, so concatenating
+                        // preserves ordering semantics for each per-field change vector.
+                        existing.storage_changes.extend(changes.storage_changes.iter().cloned());
+                        existing.storage_reads.extend(changes.storage_reads.iter().cloned());
+                        existing.balance_changes.extend(changes.balance_changes.iter().cloned());
+                        existing.nonce_changes.extend(changes.nonce_changes.iter().cloned());
+                        existing.code_changes.extend(changes.code_changes.iter().cloned());
+                    })
+                    .or_insert_with(|| changes.clone());
+            }
+        }
+        if merged.is_empty() {
+            return None;
+        }
+        for ac in merged.values_mut() {
+            ac.storage_reads.sort_unstable();
+            ac.storage_reads.dedup();
+        }
+        let mut result: Vec<_> = merged.into_values().collect();
+        result.sort_unstable_by_key(|ac| ac.address);
+        Some(result)
+    }
+
     fn try_to_buildable_args(&self) -> Option<BuildArgs<Vec<WithEncoded<Recovered<T>>>>> {
         let best_revision = self.try_get_best_revision()?;
         Some(BuildArgs {
             base: self.base()?.clone(),
             payload_id: self.payload_id()?,
             transactions: self.transactions_up_to(best_revision),
+            access_list: self.access_list_up_to(best_revision),
             withdrawals: self.withdrawals_at(best_revision),
             last_flashblock_index: best_revision,
             target_index: self.target_index,
