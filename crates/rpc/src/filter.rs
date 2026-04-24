@@ -39,7 +39,6 @@ pub trait FlashblocksFilterOverride {
 /// Extended filter API with flashblocks cache overlay.
 #[derive(Debug)]
 pub struct FlashblocksEthFilterExt<Eth: EthApiTypes> {
-    eth_api: Eth,
     eth_filter: EthFilter<Eth>,
     flashblocks_state: FlashblockStateCache<OpPrimitives>,
     query_limits: QueryLimits,
@@ -49,7 +48,6 @@ pub struct FlashblocksEthFilterExt<Eth: EthApiTypes> {
 impl<Eth: EthApiTypes + RpcNodeCore> FlashblocksEthFilterExt<Eth> {
     /// Creates a new [`FlashblocksEthFilterExt`].
     pub fn new(
-        eth_api: Eth,
         eth_filter: EthFilter<Eth>,
         flashblocks_state: FlashblockStateCache<OpPrimitives>,
         config: EthFilterConfig,
@@ -57,7 +55,6 @@ impl<Eth: EthApiTypes + RpcNodeCore> FlashblocksEthFilterExt<Eth> {
         let EthFilterConfig { max_blocks_per_filter, max_logs_per_response, stale_filter_ttl } =
             config;
         Self {
-            eth_api,
             eth_filter,
             flashblocks_state,
             _stale_filter_ttl: stale_filter_ttl,
@@ -112,48 +109,47 @@ where
                     return self.eth_filter.logs(filter).await;
                 }
 
-                let from = from_block
-                    .map(|num| {
-                        if let Some(bar) = self.flashblocks_state.get_rpc_block(num) {
-                            Ok(Some(bar.block.number()))
-                        } else {
-                            self.eth_api.provider().convert_block_number(num).to_rpc_result()
-                        }
-                    })
-                    .transpose()?
-                    .flatten();
-                let to = match to_block {
-                    Some(num) => {
-                        let Some(bar) = self.flashblocks_state.get_rpc_block(num) else {
-                            // to block is not in the flashblock cache, delegate to canonical filter
-                            return EthFilterApiServer::logs(&self.eth_filter, filter).await;
-                        };
-                        Some(bar.block.number())
-                    }
+                let pending_height = self.flashblocks_state.get_pending_height();
+                let confirm_height = self.flashblocks_state.get_confirm_height();
+                if confirm_height == 0 || pending_height == 0 {
+                    // Cache not initialized, delegate to canonical filter
+                    return self.eth_filter.logs(filter).await;
+                }
+
+                let from = match from_block {
+                    Some(tag) => match resolve_fb_bound(tag, confirm_height, pending_height) {
+                        Some(n) => Some(n),
+                        None => return self.eth_filter.logs(filter).await,
+                    },
                     None => None,
                 };
-                let start_block = self.flashblocks_state.get_confirm_height();
-                let end_block = self.flashblocks_state.get_pending_height();
-                if end_block == 0 || start_block == 0 {
-                    return EthFilterApiServer::logs(&self.eth_filter, filter).await;
-                }
+                let to = match to_block {
+                    Some(tag) => match resolve_fb_bound(tag, confirm_height, pending_height) {
+                        Some(n) => Some(n),
+                        None => return self.eth_filter.logs(filter).await,
+                    },
+                    None => None,
+                };
+
+                let default_start_block = confirm_height;
+                let default_end_block = pending_height;
 
                 // Return error if fromBlock exceeds current tip
                 if let Some(f) = from
-                    && f > end_block
+                    && f > pending_height
                 {
                     return Err(EthFilterError::BlockRangeExceedsHead.into());
                 }
                 // Return error if fromBlock exceeds current head
                 if let Some(f) = from
-                    && f > start_block
+                    && f > confirm_height
                 {
                     // start block higher than local head, can return empty
                     return Ok(Vec::new());
                 }
 
                 let (from_block_number, to_block_number) =
-                    get_filter_block_range(from, to, start_block, end_block)
+                    get_filter_block_range(from, to, default_start_block, default_end_block)
                         .map_err(EthFilterError::from)?;
 
                 // Query filter limit check
@@ -165,7 +161,8 @@ where
                     return Err(EthFilterError::QueryExceedsMaxBlocks(max_blocks_per_filter).into());
                 }
 
-                // Get block logs from flashblocks state
+                // Get block logs from flashblocks state. Note that we cannot assume that flashblocks
+                // state has not advanced since the last retrieval of pending and confirmed heights.
                 let mut fb_logs: Vec<Vec<Log>> = Vec::new();
                 let mut canonical_end = None;
                 for num in (from_block_number..=to_block_number).rev() {
@@ -238,22 +235,20 @@ where
 fn get_filter_block_range(
     from_block: Option<u64>,
     to_block: Option<u64>,
-    start_block: u64,
-    end_block: u64,
+    default_start_block: u64,
+    default_end_block: u64,
 ) -> Result<(u64, u64), FilterBlockRangeError> {
-    let from_block_number = from_block.unwrap_or(start_block);
-    let to_block_number = to_block.unwrap_or(end_block);
+    let from_block_number = from_block.unwrap_or(default_start_block);
+    let to_block_number = to_block.unwrap_or(default_end_block);
 
     // from > to is an invalid range
     if from_block_number > to_block_number {
         return Err(FilterBlockRangeError::InvalidBlockRange);
     }
-
     // we cannot query blocks that don't exist yet
-    if to_block_number > end_block {
+    if to_block_number > default_end_block {
         return Err(FilterBlockRangeError::BlockRangeExceedsHead);
     }
-
     Ok((from_block_number, to_block_number))
 }
 
@@ -269,4 +264,19 @@ fn get_matching_logs_from_bar(bar: &BlockAndReceipts<OpPrimitives>, filter: &Fil
         tx_hashes_and_receipts,
         false,
     )
+}
+
+/// Resolves a [`BlockNumberOrTag`] to an absolute block number using the flashblocks
+/// cache heights.
+fn resolve_fb_bound(
+    tag: BlockNumberOrTag,
+    confirm_height: u64,
+    pending_height: u64,
+) -> Option<u64> {
+    match tag {
+        BlockNumberOrTag::Pending => Some(pending_height),
+        BlockNumberOrTag::Latest => Some(confirm_height),
+        BlockNumberOrTag::Number(n) => Some(n),
+        BlockNumberOrTag::Earliest | BlockNumberOrTag::Safe | BlockNumberOrTag::Finalized => None,
+    }
 }
