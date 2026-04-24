@@ -134,18 +134,16 @@ where
                 let default_start_block = confirm_height;
                 let default_end_block = pending_height;
 
-                // Return error if fromBlock exceeds current tip
+                // Return error if range exceeds current tip (pending)
+                if let Some(t) = to
+                    && t > pending_height
+                {
+                    return Err(EthFilterError::BlockRangeExceedsHead.into());
+                }
                 if let Some(f) = from
                     && f > pending_height
                 {
                     return Err(EthFilterError::BlockRangeExceedsHead.into());
-                }
-                // Return error if fromBlock exceeds current head
-                if let Some(f) = from
-                    && f > confirm_height
-                {
-                    // start block higher than local head, can return empty
-                    return Ok(Vec::new());
                 }
 
                 let (from_block_number, to_block_number) =
