@@ -219,9 +219,6 @@ where
             withdrawals: Some(args.withdrawals),
         };
 
-        // TODO: Extract the BAL once flashblocks BAL is supported
-        let bal = None;
-
         let overlay_factory = calculate_state_root.then(|| {
             // Create lazy overlay from ancestors - this doesn't block, allowing execution to start
             // before the trie data is ready. The overlay will be computed on first access.
@@ -245,7 +242,7 @@ where
             provider_builder,
             overlay_factory.clone(),
             strategy,
-            bal,
+            args.access_list.map(Arc::new),
         )?;
 
         // Use cached state provider before executing, used in execution after prewarming threads

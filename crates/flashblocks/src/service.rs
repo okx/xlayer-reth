@@ -35,6 +35,8 @@ pub struct FlashblocksRpcCtx<N: NodePrimitives> {
     pub canon_state_rx: CanonStateNotificationStream<N>,
     /// Flashblocks RPC debug mode to enable state comparison.
     pub debug_state_comparison: bool,
+    /// Flag to disable EIP-7928 flashblocks access lists.
+    pub disable_access_list: bool,
 }
 
 /// Context for handling flashblocks persistence and relaying.
@@ -153,7 +155,7 @@ where
         V: Send + Sync + 'static,
     {
         debug!(target: "flashblocks", "Initializing flashblocks rpc");
-        let raw_cache = Arc::new(RawFlashblocksCache::new());
+        let raw_cache = Arc::new(RawFlashblocksCache::new(self.rpc_ctx.disable_access_list));
 
         // Spawn incoming raw flashblocks handle.
         let received_tx = self.received_flashblocks_tx.clone();

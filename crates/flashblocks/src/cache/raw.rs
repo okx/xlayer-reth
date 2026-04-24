@@ -3,10 +3,12 @@ use parking_lot::RwLock;
 use ringbuffer::{AllocRingBuffer, RingBuffer};
 use std::{collections::BTreeMap, sync::Arc};
 
+use alloy_eip7928::{AccountChanges, BlockAccessList};
 use alloy_eips::{eip2718::WithEncoded, eip4895::Withdrawal};
 use alloy_rpc_types_engine::PayloadId;
 use op_alloy_rpc_types_engine::{OpFlashblockPayload, OpFlashblockPayloadBase};
 use reth_primitives_traits::{Recovered, SignedTransaction};
+use std::collections::HashMap;
 
 use xlayer_builder::broadcast::{XLayerFlashblockMessage, XLayerFlashblockPayload};
 
@@ -27,8 +29,8 @@ pub struct RawFlashblocksCache<T: SignedTransaction> {
 }
 
 impl<T: SignedTransaction> RawFlashblocksCache<T> {
-    pub fn new() -> Self {
-        let inner = Arc::new(RwLock::new(RawFlashblocksCacheInner::new()));
+    pub fn new(disable_access_list: bool) -> Self {
+        let inner = Arc::new(RwLock::new(RawFlashblocksCacheInner::new(disable_access_list)));
         Self { inner }
     }
 
@@ -59,11 +61,16 @@ impl<T: SignedTransaction> RawFlashblocksCache<T> {
 pub struct RawFlashblocksCacheInner<T: SignedTransaction> {
     cache: AllocRingBuffer<RawFlashblocksEntry<T>>,
     canon_height: u64,
+    disable_access_list: bool,
 }
 
 impl<T: SignedTransaction> RawFlashblocksCacheInner<T> {
-    fn new() -> Self {
-        Self { cache: AllocRingBuffer::new(MAX_RAW_CACHE_SIZE), canon_height: 0 }
+    fn new(disable_access_list: bool) -> Self {
+        Self {
+            cache: AllocRingBuffer::new(MAX_RAW_CACHE_SIZE),
+            canon_height: 0,
+            disable_access_list,
+        }
     }
 
     pub fn handle_canonical_height(&mut self, height: u64) {
@@ -124,7 +131,7 @@ impl<T: SignedTransaction> RawFlashblocksCacheInner<T> {
             .iter()
             .rev()
             .find(|entry| entry.block_number() == Some(height))
-            .and_then(|entry| entry.try_to_buildable_args())
+            .and_then(|entry| entry.try_to_buildable_args(self.disable_access_list))
     }
 }
 
@@ -242,12 +249,51 @@ impl<T: SignedTransaction> RawFlashblocksEntry<T> {
             .collect()
     }
 
-    fn try_to_buildable_args(&self) -> Option<BuildArgs<Vec<WithEncoded<Recovered<T>>>>> {
+    fn access_list_up_to(&self, up_to: u64) -> Option<BlockAccessList> {
+        let mut merged = HashMap::new();
+        for (_, payload) in self.payloads.range(..=up_to) {
+            let Some(access_list) = payload.metadata.access_list.as_ref() else { continue };
+            for changes in access_list {
+                merged
+                    .entry(changes.address)
+                    .and_modify(|existing: &mut AccountChanges| {
+                        // tx indices across flashblocks are disjoint, so concatenating
+                        // preserves ordering semantics for each per-field change vector.
+                        existing.storage_changes.extend(changes.storage_changes.iter().cloned());
+                        existing.storage_reads.extend(changes.storage_reads.iter().cloned());
+                        existing.balance_changes.extend(changes.balance_changes.iter().cloned());
+                        existing.nonce_changes.extend(changes.nonce_changes.iter().cloned());
+                        existing.code_changes.extend(changes.code_changes.iter().cloned());
+                    })
+                    .or_insert_with(|| changes.clone());
+            }
+        }
+        if merged.is_empty() {
+            return None;
+        }
+        for ac in merged.values_mut() {
+            ac.storage_reads.sort_unstable();
+            ac.storage_reads.dedup();
+        }
+        let mut result: Vec<_> = merged.into_values().collect();
+        result.sort_unstable_by_key(|ac| ac.address);
+        Some(result)
+    }
+
+    fn try_to_buildable_args(
+        &self,
+        disable_access_list: bool,
+    ) -> Option<BuildArgs<Vec<WithEncoded<Recovered<T>>>>> {
         let best_revision = self.try_get_best_revision()?;
         Some(BuildArgs {
             base: self.base()?.clone(),
             payload_id: self.payload_id()?,
             transactions: self.transactions_up_to(best_revision),
+            access_list: if !disable_access_list {
+                self.access_list_up_to(best_revision)
+            } else {
+                None
+            },
             withdrawals: self.withdrawals_at(best_revision),
             last_flashblock_index: best_revision,
             target_index: self.target_index,
@@ -280,7 +326,7 @@ mod tests {
         // Arrange
         let factory = TestFlashBlockFactory::new();
         let fb0 = factory.flashblock_at(0).build();
-        let mut cache = TestRawCache::new();
+        let mut cache = TestRawCache::new(false);
 
         // Act
         let result = cache.handle_flashblock(wrap(fb0));
@@ -295,7 +341,7 @@ mod tests {
         let factory = TestFlashBlockFactory::new();
         let fb0 = factory.flashblock_at(0).build();
         let fb0_dup = factory.flashblock_at(0).build();
-        let mut cache = TestRawCache::new();
+        let mut cache = TestRawCache::new(false);
 
         cache.handle_flashblock(wrap(fb0)).expect("first flashblock should succeed");
         let result = cache.handle_flashblock(wrap(fb0_dup));
@@ -307,7 +353,7 @@ mod tests {
         let factory = TestFlashBlockFactory::new();
         let fb0 = factory.flashblock_at(0).build();
         let payload_id = fb0.payload_id;
-        let mut cache = TestRawCache::new();
+        let mut cache = TestRawCache::new(false);
 
         cache.handle_flashblock(wrap(fb0)).expect("first flashblock should succeed");
         let fb_wrong_block = factory
@@ -327,7 +373,7 @@ mod tests {
         let fb0 = factory.flashblock_at(0).build();
         let payload_id = fb0.payload_id;
         let fb2 = factory.builder().index(2).block_number(100).payload_id(payload_id).build();
-        let mut cache = TestRawCache::new();
+        let mut cache = TestRawCache::new(false);
 
         cache.handle_flashblock(wrap(fb0)).expect("fb0 insert");
         let result = cache.handle_flashblock(wrap(fb2));
@@ -338,7 +384,7 @@ mod tests {
     fn test_raw_entry_get_best_revision_returns_none_without_base() {
         let factory = TestFlashBlockFactory::new();
         let fb1 = factory.builder().index(1).block_number(100).build();
-        let mut cache = TestRawCache::new();
+        let mut cache = TestRawCache::new(false);
 
         cache.handle_flashblock(wrap(fb1)).expect("fb1 insert");
         let entry = cache.cache.iter().next().expect("entry should exist");
@@ -351,7 +397,7 @@ mod tests {
         let factory = TestFlashBlockFactory::new();
         let fb0 = factory.flashblock_at(0).build();
 
-        let mut cache = TestRawCache::new();
+        let mut cache = TestRawCache::new(false);
         cache.handle_flashblock(wrap(fb0)).expect("fb0 insert");
         let entry = cache.cache.iter().next().expect("entry should exist");
         let best = entry.try_get_best_revision();
@@ -365,7 +411,7 @@ mod tests {
         let fb1 = factory.flashblock_after(&fb0).build();
         let fb2 = factory.flashblock_after(&fb1).build();
         let fb3 = factory.flashblock_after(&fb2).build();
-        let mut cache = TestRawCache::new();
+        let mut cache = TestRawCache::new(false);
 
         cache.handle_flashblock(wrap(fb0)).expect("fb0");
         cache.handle_flashblock(wrap(fb1)).expect("fb1");
@@ -383,7 +429,7 @@ mod tests {
         let payload_id = fb0.payload_id;
         let fb1 = factory.flashblock_after(&fb0).build();
         let fb3 = factory.builder().index(3).block_number(100).payload_id(payload_id).build();
-        let mut cache = TestRawCache::new();
+        let mut cache = TestRawCache::new(false);
 
         cache.handle_flashblock(wrap(fb0)).expect("fb0");
         cache.handle_flashblock(wrap(fb1)).expect("fb1");
@@ -398,7 +444,7 @@ mod tests {
         let factory = TestFlashBlockFactory::new();
         let fb100 = factory.flashblock_at(0).build();
         let fb101 = factory.flashblock_for_next_block(&fb100).build();
-        let mut cache = TestRawCache::new();
+        let mut cache = TestRawCache::new(false);
 
         cache.handle_flashblock(wrap(fb100)).expect("fb100");
         cache.handle_flashblock(wrap(fb101)).expect("fb101");
@@ -416,7 +462,7 @@ mod tests {
         let fb100 = factory.flashblock_at(0).build();
         let fb101 = factory.flashblock_for_next_block(&fb100).build();
         let fb102 = factory.flashblock_for_next_block(&fb101).build();
-        let mut cache = TestRawCache::new();
+        let mut cache = TestRawCache::new(false);
 
         cache.handle_flashblock(wrap(fb100)).expect("fb100");
         cache.handle_flashblock(wrap(fb101)).expect("fb101");
@@ -431,7 +477,7 @@ mod tests {
         let factory = TestFlashBlockFactory::new();
         let fb100 = factory.flashblock_at(0).build();
         let fb101 = factory.flashblock_for_next_block(&fb100).build();
-        let mut cache = TestRawCache::new();
+        let mut cache = TestRawCache::new(false);
 
         cache.handle_flashblock(wrap(fb100)).expect("fb100");
         cache.handle_flashblock(wrap(fb101)).expect("fb101");
@@ -443,7 +489,7 @@ mod tests {
     fn test_raw_cache_rejects_flashblock_at_or_below_canonical_height() {
         let factory = TestFlashBlockFactory::new();
         let fb100 = factory.flashblock_at(0).build();
-        let mut cache = TestRawCache::new();
+        let mut cache = TestRawCache::new(false);
 
         cache.handle_canonical_height(100);
         let result = cache.handle_flashblock(wrap(fb100));
@@ -456,7 +502,7 @@ mod tests {
         let factory = TestFlashBlockFactory::new();
         let fb0_seq1 = factory.flashblock_at(0).build();
         let fb0_seq2 = factory.flashblock_for_next_block(&fb0_seq1).build();
-        let mut cache = TestRawCache::new();
+        let mut cache = TestRawCache::new(false);
 
         cache.handle_flashblock(wrap(fb0_seq1.clone())).expect("seq1 fb0");
         cache.handle_flashblock(wrap(fb0_seq2.clone())).expect("seq2 fb0");
@@ -471,7 +517,7 @@ mod tests {
         let factory = TestFlashBlockFactory::new();
         let mut prev_fb = factory.flashblock_at(0).build();
         let first_block_num = prev_fb.metadata.block_number;
-        let mut cache = TestRawCache::new();
+        let mut cache = TestRawCache::new(false);
         cache.handle_flashblock(wrap(prev_fb.clone())).expect("first fb");
 
         // Fill up to MAX_RAW_CACHE_SIZE (10) unique sequences
@@ -507,7 +553,7 @@ mod tests {
         let factory = TestFlashBlockFactory::new();
         let fb0 = factory.flashblock_at(0).build();
         let expected_block = fb0.metadata.block_number;
-        let mut cache = TestRawCache::new();
+        let mut cache = TestRawCache::new(false);
 
         cache.handle_flashblock(wrap(fb0)).expect("fb0 insert");
         let entry = cache.cache.iter().next().expect("entry should exist");
@@ -518,7 +564,7 @@ mod tests {
     fn test_raw_entry_transaction_count_is_zero_on_empty_flashblock() {
         let factory = TestFlashBlockFactory::new();
         let fb0 = factory.flashblock_at(0).build(); // no transactions set
-        let mut cache = TestRawCache::new();
+        let mut cache = TestRawCache::new(false);
 
         cache.handle_flashblock(wrap(fb0)).expect("fb0 insert");
         let entry = cache.cache.iter().next().expect("entry should exist");
@@ -529,7 +575,7 @@ mod tests {
     fn test_raw_entry_has_base_set_after_inserting_index_zero() {
         let factory = TestFlashBlockFactory::new();
         let fb0 = factory.flashblock_at(0).build();
-        let mut cache = TestRawCache::new();
+        let mut cache = TestRawCache::new(false);
 
         cache.handle_flashblock(wrap(fb0)).expect("fb0 insert");
         let entry = cache.cache.iter().next().expect("entry should exist");
@@ -540,7 +586,7 @@ mod tests {
     fn test_raw_entry_has_base_not_set_when_only_non_zero_index_inserted() {
         let factory = TestFlashBlockFactory::new();
         let fb1 = factory.builder().index(1).block_number(100).build();
-        let mut cache = TestRawCache::new();
+        let mut cache = TestRawCache::new(false);
 
         cache.handle_flashblock(wrap(fb1)).expect("fb1 insert");
         let entry = cache.cache.iter().next().expect("entry should exist");
@@ -551,7 +597,7 @@ mod tests {
     fn test_raw_flashblocks_cache_handle_flashblock_inserts_via_arc_rwlock() {
         let factory = TestFlashBlockFactory::new();
         let fb0 = factory.flashblock_at(0).build();
-        let cache = RawFlashblocksCache::<OpTransactionSigned>::new();
+        let cache = RawFlashblocksCache::<OpTransactionSigned>::new(false);
 
         let result =
             cache.handle_message(XLayerFlashblockMessage::from_flashblock_payload(wrap(fb0)));
@@ -563,7 +609,7 @@ mod tests {
         let factory = TestFlashBlockFactory::new();
         let fb1 = factory.builder().index(1).block_number(100).build();
 
-        let mut cache = TestRawCache::new();
+        let mut cache = TestRawCache::new(false);
         cache.handle_flashblock(wrap(fb1)).expect("fb1 insert");
         let entry = cache.cache.iter().next().expect("entry should exist");
         let best = entry.try_get_best_revision();
@@ -580,7 +626,7 @@ mod tests {
         let block_number = fb0.metadata.block_number;
         let fb2 =
             factory.builder().index(2).block_number(block_number).payload_id(payload_id).build();
-        let mut cache = TestRawCache::new();
+        let mut cache = TestRawCache::new(false);
 
         cache.handle_flashblock(wrap(fb0)).expect("fb0");
         cache.handle_flashblock(wrap(fb2)).expect("fb2");
@@ -600,7 +646,7 @@ mod tests {
         let different_payload_id = alloy_rpc_types_engine::PayloadId::new([
             0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
         ]);
-        let mut cache = TestRawCache::new();
+        let mut cache = TestRawCache::new(false);
 
         cache.handle_flashblock(wrap(fb0.clone())).expect("fb0 insert");
         let fb_diff = factory
@@ -626,7 +672,7 @@ mod tests {
         let fb1 = factory.flashblock_after(&fb0).build();
         let fb2 = factory.flashblock_after(&fb1).build();
         let fb3 = factory.flashblock_after(&fb2).build();
-        let mut cache = TestRawCache::new();
+        let mut cache = TestRawCache::new(false);
 
         cache.handle_flashblock(wrap(fb0)).expect("fb0");
         cache.handle_flashblock(wrap(fb1)).expect("fb1");
@@ -648,7 +694,7 @@ mod tests {
         let fb0 = factory.flashblock_at(0).build();
         let payload_id = fb0.payload_id;
         let expected_block = fb0.metadata.block_number;
-        let mut cache = TestRawCache::new();
+        let mut cache = TestRawCache::new(false);
 
         cache.handle_flashblock(wrap(fb0)).expect("fb0 insert");
         let block_number = cache.handle_end_sequence(payload_id).expect("should succeed");
@@ -660,7 +706,7 @@ mod tests {
 
     #[test]
     fn test_handle_end_sequence_errors_for_unknown_payload_id() {
-        let mut cache = TestRawCache::new();
+        let mut cache = TestRawCache::new(false);
         let result = cache.handle_end_sequence(PayloadId::new([0xAA; 8]));
         assert!(result.is_err());
     }
@@ -671,7 +717,7 @@ mod tests {
         let fb0 = factory.flashblock_at(0).build();
         let payload_id = fb0.payload_id;
         let block_number = fb0.metadata.block_number;
-        let mut cache = TestRawCache::new();
+        let mut cache = TestRawCache::new(false);
 
         cache.handle_flashblock(wrap(fb0)).expect("fb0 insert");
         let args_before = cache.try_get_buildable_args(block_number).expect("should be buildable");
@@ -688,7 +734,7 @@ mod tests {
         let fb0 = factory.flashblock_at(0).build();
         let payload_id = fb0.payload_id;
         let expected_block = fb0.metadata.block_number;
-        let cache = RawFlashblocksCache::<OpTransactionSigned>::new();
+        let cache = RawFlashblocksCache::<OpTransactionSigned>::new(false);
 
         cache
             .handle_message(XLayerFlashblockMessage::from_flashblock_payload(wrap(fb0)))
@@ -893,5 +939,146 @@ mod tests {
         let roundtrip: OpFlashblockPayload = serde_json::from_str(&serialized).expect("roundtrip");
 
         assert_eq!(flashblock, roundtrip);
+    }
+
+    // ========================================================================
+    // Tests for `access_list_up_to` and `try_to_buildable_args` access-list flow
+    // ========================================================================
+
+    use alloy_eip7928::{AccountChanges, BalanceChange};
+    use alloy_primitives::{address, Address, U256};
+
+    /// Helper: minimal `AccountChanges` with balance changes and storage reads.
+    fn make_account_changes(
+        addr: Address,
+        balance_changes: Vec<(u64, u64)>,
+        storage_reads: Vec<u64>,
+    ) -> AccountChanges {
+        AccountChanges {
+            address: addr,
+            balance_changes: balance_changes
+                .into_iter()
+                .map(|(tx_idx, bal)| BalanceChange {
+                    block_access_index: tx_idx,
+                    post_balance: U256::from(bal),
+                })
+                .collect(),
+            storage_reads: storage_reads.into_iter().map(U256::from).collect(),
+            ..Default::default()
+        }
+    }
+
+    const ADDR_A: Address = address!("0000000000000000000000000000000000000001");
+    const ADDR_B: Address = address!("0000000000000000000000000000000000000002");
+
+    #[test]
+    fn test_access_list_up_to_merges_across_flashblocks() {
+        // Covers: same-address merge with disjoint tx indices preserved, and
+        // separate entry for a distinct address in a later flashblock.
+        let factory = TestFlashBlockFactory::new();
+        let ac0_a = make_account_changes(ADDR_A, vec![(0, 100)], vec![]);
+        let ac1_a = make_account_changes(ADDR_A, vec![(5, 200)], vec![]);
+        let ac1_b = make_account_changes(ADDR_B, vec![(6, 300)], vec![]);
+        let fb0 = factory.flashblock_at(0).access_list(Some(vec![ac0_a])).build();
+        let fb1 = factory.flashblock_after(&fb0).access_list(Some(vec![ac1_a, ac1_b])).build();
+
+        let mut cache = TestRawCache::new(false);
+        cache.handle_flashblock(wrap(fb0)).expect("fb0 insert");
+        cache.handle_flashblock(wrap(fb1)).expect("fb1 insert");
+
+        let args = cache.try_get_buildable_args(100).expect("should be buildable");
+        let al = args.access_list.expect("access list present");
+        assert_eq!(al.len(), 2, "ADDR_A merged into one entry, ADDR_B separate");
+        // Output sorted by address ascending.
+        assert_eq!(al[0].address, ADDR_A);
+        assert_eq!(al[1].address, ADDR_B);
+
+        // ADDR_A carries both flashblocks' balance changes with exact values preserved.
+        assert_eq!(al[0].balance_changes.len(), 2);
+        let a_changes: Vec<(u64, U256)> =
+            al[0].balance_changes.iter().map(|c| (c.block_access_index, c.post_balance)).collect();
+        assert!(a_changes.contains(&(0, U256::from(100))));
+        assert!(a_changes.contains(&(5, U256::from(200))));
+
+        // ADDR_B carries only fb1's single change.
+        assert_eq!(al[1].balance_changes.len(), 1);
+        assert_eq!(al[1].balance_changes[0].block_access_index, 6);
+        assert_eq!(al[1].balance_changes[0].post_balance, U256::from(300));
+    }
+
+    #[test]
+    fn test_access_list_up_to_dedupes_storage_reads() {
+        // Same slot read in two flashblocks — must appear once in storage_reads.
+        let factory = TestFlashBlockFactory::new();
+        let ac0 = make_account_changes(ADDR_A, vec![], vec![1, 2]);
+        let ac1 = make_account_changes(ADDR_A, vec![], vec![1, 3]);
+        let fb0 = factory.flashblock_at(0).access_list(Some(vec![ac0])).build();
+        let fb1 = factory.flashblock_after(&fb0).access_list(Some(vec![ac1])).build();
+
+        let mut cache = TestRawCache::new(false);
+        cache.handle_flashblock(wrap(fb0)).expect("fb0 insert");
+        cache.handle_flashblock(wrap(fb1)).expect("fb1 insert");
+
+        let args = cache.try_get_buildable_args(100).expect("should be buildable");
+        let entry = &args.access_list.expect("present")[0];
+        // Exact dedup + sort: slot 1 once, 2 and 3 retained, ascending order.
+        assert_eq!(entry.storage_reads, vec![U256::from(1), U256::from(2), U256::from(3)]);
+    }
+
+    #[test]
+    fn test_access_list_up_to_skips_missing_and_returns_none_when_all_missing() {
+        // Covers two behaviors: a missing middle flashblock is skipped (not
+        // treated as an abort), and if ALL flashblocks lack access list data
+        // the aggregated output is `None`.
+        let factory = TestFlashBlockFactory::new();
+        let ac0 = make_account_changes(ADDR_A, vec![(0, 100)], vec![]);
+        let fb0 = factory.flashblock_at(0).access_list(Some(vec![ac0])).build();
+        let fb1 = factory.flashblock_after(&fb0).access_list(None).build();
+
+        let mut cache = TestRawCache::new(false);
+        cache.handle_flashblock(wrap(fb0)).expect("fb0 insert");
+        cache.handle_flashblock(wrap(fb1)).expect("fb1 insert");
+
+        // Partial data preserved with exact value survived fb1's absence.
+        let args = cache.try_get_buildable_args(100).expect("should be buildable");
+        let al = args.access_list.expect("fb0 data preserved despite fb1 having None");
+        assert_eq!(al.len(), 1);
+        assert_eq!(al[0].address, ADDR_A);
+        assert_eq!(al[0].balance_changes.len(), 1);
+        assert_eq!(al[0].balance_changes[0].block_access_index, 0);
+        assert_eq!(al[0].balance_changes[0].post_balance, U256::from(100));
+
+        // Swap in a cache where both flashblocks lack access list data.
+        let fb0_empty = factory.flashblock_at(0).access_list(None).build();
+        let fb1_empty = factory.flashblock_after(&fb0_empty).access_list(None).build();
+        let mut empty_cache = TestRawCache::new(false);
+        empty_cache.handle_flashblock(wrap(fb0_empty)).expect("fb0 insert");
+        empty_cache.handle_flashblock(wrap(fb1_empty)).expect("fb1 insert");
+        let args = empty_cache.try_get_buildable_args(100).expect("should be buildable");
+        assert!(args.access_list.is_none(), "no data at all → None");
+    }
+
+    #[test]
+    fn test_buildable_args_disable_flag_strips_access_list() {
+        // With the disable flag set, even a flashblock carrying access list data
+        // must produce `BuildArgs.access_list == None`.
+        let factory = TestFlashBlockFactory::new();
+        let ac = make_account_changes(ADDR_A, vec![(0, 100)], vec![]);
+        let fb0 = factory.flashblock_at(0).access_list(Some(vec![ac])).build();
+
+        let mut cache_enabled = TestRawCache::new(false);
+        cache_enabled.handle_flashblock(wrap(fb0.clone())).expect("fb0 insert");
+        let args = cache_enabled.try_get_buildable_args(100).expect("should be buildable");
+        let al = args.access_list.expect("flag off + data → access list surfaced");
+        assert_eq!(al.len(), 1);
+        assert_eq!(al[0].address, ADDR_A);
+        assert_eq!(al[0].balance_changes.len(), 1);
+        assert_eq!(al[0].balance_changes[0].block_access_index, 0);
+        assert_eq!(al[0].balance_changes[0].post_balance, U256::from(100));
+
+        let mut cache_disabled = TestRawCache::new(true);
+        cache_disabled.handle_flashblock(wrap(fb0)).expect("fb0 insert");
+        let args = cache_disabled.try_get_buildable_args(100).expect("should be buildable");
+        assert!(args.access_list.is_none(), "flag on → access list stripped");
     }
 }

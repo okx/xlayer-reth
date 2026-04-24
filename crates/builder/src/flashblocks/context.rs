@@ -1,4 +1,5 @@
 use crate::{
+    access_lists::FBALBuilderDb,
     flashblocks::utils::execution::{ExecutionInfo, TxnExecutionResult},
     metrics::BuilderMetrics,
     signer::Signer,
@@ -266,7 +267,10 @@ impl FlashblocksBuilderCtx {
     ) -> Result<ExecutionInfo, PayloadBuilderError> {
         let mut info = ExecutionInfo::with_capacity(self.attributes().transactions.len());
 
-        let mut evm = self.evm_config.evm_with_env(&mut *db, self.evm_env.clone());
+        let min_tx_index = info.executed_transactions.len() as u64;
+        let mut fbal_db = FBALBuilderDb::new(&mut *db, info.access_list_builder.clone());
+        fbal_db.set_index(min_tx_index);
+        let mut evm = self.evm_config.evm_with_env(&mut fbal_db, self.evm_env.clone());
 
         for sequencer_tx in &self.attributes().transactions {
             // A sequencer's block should never contain blob transactions.
@@ -292,6 +296,7 @@ impl FlashblocksBuilderCtx {
             let depositor_nonce = (self.is_regolith_active() && sequencer_tx.is_deposit())
                 .then(|| {
                     evm.db_mut()
+                        .db_mut()
                         .load_cache_account(sequencer_tx.signer())
                         .map(|acc| acc.account_info().unwrap_or_default().nonce)
                 })
@@ -338,8 +343,10 @@ impl FlashblocksBuilderCtx {
             evm.db_mut().commit(state);
 
             // append sender and transaction to the respective lists
+            // and increment the next txn index for the access list
             info.executed_senders.push(sequencer_tx.signer());
             info.executed_transactions.push(sequencer_tx.into_inner());
+            evm.db_mut().inc_index();
         }
 
         let da_footprint_gas_scalar = self
@@ -378,7 +385,10 @@ impl FlashblocksBuilderCtx {
             block_gas_limit = ?block_gas_limit,
         );
 
-        let mut evm = self.evm_config.evm_with_env(&mut *db, self.evm_env.clone());
+        let min_tx_index = info.executed_transactions.len() as u64;
+        let mut fbal_db = FBALBuilderDb::new(&mut *db, info.access_list_builder.clone());
+        fbal_db.set_index(min_tx_index);
+        let mut evm = self.evm_config.evm_with_env(&mut fbal_db, self.evm_env.clone());
         for with_encoded_tx in cached_txs {
             let (encoded_bytes, recovered_tx) = with_encoded_tx.split();
             let sender = recovered_tx.signer();
@@ -454,8 +464,10 @@ impl FlashblocksBuilderCtx {
             info.total_fees += U256::from(miner_fee) * U256::from(gas_used);
 
             // Append sender and transaction to the respective lists
+            // and increment the next txn index for the access list
             info.executed_senders.push(sender);
             info.executed_transactions.push(recovered_tx.into_inner());
+            evm.db_mut().inc_index();
         }
 
         Ok(())
@@ -482,7 +494,10 @@ impl FlashblocksBuilderCtx {
         let base_fee = self.base_fee();
 
         let tx_da_limit = self.da_config.max_da_tx_size();
-        let mut evm = self.evm_config.evm_with_env(&mut *db, self.evm_env.clone());
+        let min_tx_index = info.executed_transactions.len() as u64;
+        let mut fbal_db = FBALBuilderDb::new(&mut *db, info.access_list_builder.clone());
+        fbal_db.set_index(min_tx_index);
+        let mut evm = self.evm_config.evm_with_env(&mut fbal_db, self.evm_env.clone());
 
         debug!(
             target: "payload_builder",
@@ -658,8 +673,10 @@ impl FlashblocksBuilderCtx {
             info.total_fees += U256::from(miner_fee) * U256::from(gas_used);
 
             // append sender and transaction to the respective lists
+            // and increment the next txn index for the access list
             info.executed_senders.push(tx.signer());
             info.executed_transactions.push(tx.into_inner());
+            evm.db_mut().inc_index();
         }
 
         let payload_transaction_simulation_time = execute_txs_start_time.elapsed();
