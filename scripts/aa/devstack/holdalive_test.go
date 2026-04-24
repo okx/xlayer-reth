@@ -15,6 +15,9 @@ import (
 	"github.com/ethereum-optimism/optimism/op-devstack/presets"
 	"github.com/ethereum-optimism/optimism/op-devstack/sysgo"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
+	"github.com/ethereum-optimism/optimism/op-service/log/logfilter"
+	"github.com/ethereum-optimism/optimism/op-service/logmods"
+	gethlog "github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
@@ -40,6 +43,12 @@ func init() {
 // xlayer-reth-node binary.
 func TestXLayerAAHoldAlive(gt *testing.T) {
 	t := devtest.SerialT(gt)
+
+	// Suppress INFO logs from the devstack framework so only the fmt.Printf banner
+	// (and any warnings/errors) reaches the terminal.
+	if h, ok := logmods.FindHandler[logfilter.FilterHandler](t.Logger().Handler()); ok {
+		h.Set(logfilter.DefaultMute(logfilter.Level(gethlog.LevelError).Show()))
+	}
 
 	if os.Getenv("OP_DEVSTACK_PROOF_SEQUENCER_EL") == "" {
 		os.Setenv("OP_DEVSTACK_PROOF_SEQUENCER_EL", "op-reth")

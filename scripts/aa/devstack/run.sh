@@ -54,5 +54,11 @@ if [[ ! -f go.sum ]]; then
 	go mod tidy
 fi
 
-# -v streams logs; -count=1 disables Go test cache; -timeout=0 never kills.
-exec go test -v -count=1 -timeout=0 -run TestXLayerAAHoldAlive .
+LOG_FILE="${LOG_FILE:-$SCRIPT_DIR/devnet.log}"
+echo "==> Full logs: $LOG_FILE"
+
+# -v streams output immediately (required for fmt.Printf banner to appear — without
+# -v the test runner buffers and discards all stdout on success).
+# logfilter in holdalive_test.go already drops INFO; only WARN/ERROR + the banner show.
+# Full output saved to LOG_FILE for post-mortem.
+go test -v -count=1 -timeout=0 -run TestXLayerAAHoldAlive . 2>&1 | tee "$LOG_FILE"
