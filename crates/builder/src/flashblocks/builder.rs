@@ -1180,12 +1180,12 @@ where
         std::mem::take(&mut *info.access_list_builder.lock().expect("access list mutex poisoned"));
     let access_list = fal_builder.build(min_tx_index, max_tx_index);
 
-    let metadata = OpFlashblockPayloadMetadata {
-        block_number: ctx.parent().number + 1,
-        new_account_balances: None,
-        receipts: None,
-        access_list: Some(access_list.account_changes),
-    };
+    let metadata = OpFlashblockPayloadMetadata::new(
+        ctx.parent().number + 1,
+        None,
+        None,
+        Some(access_list.account_changes),
+    );
 
     let (_, blob_gas_used) = ctx.blob_fields(info);
 

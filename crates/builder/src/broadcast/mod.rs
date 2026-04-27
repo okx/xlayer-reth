@@ -1,4 +1,6 @@
 mod behaviour;
+pub mod compress;
+pub mod frame;
 mod outgoing;
 pub(crate) mod payload;
 pub mod peer_status;
@@ -6,6 +8,7 @@ pub(crate) mod types;
 pub(crate) mod wspub;
 
 use behaviour::Behaviour;
+pub use frame::{decode, encode, BroadcastFrame};
 pub use libp2p::{Multiaddr, StreamProtocol};
 pub use payload::{XLayerFlashblockEnd, XLayerFlashblockMessage, XLayerFlashblockPayload};
 pub use peer_status::PeerStatusTracker;
@@ -234,6 +237,17 @@ impl Node {
                     let protocol = message.protocol();
                     debug!(target: "payload_builder::broadcast", "received message to broadcast on protocol {protocol}");
 
+                    // Encode once (serde_json + brotli). The resulting bytes are reused by
+                    // both the P2P broadcast path and the local WS publish path below —
+                    // avoiding the prior pattern of encoding the same message twice.
+                    let bytes = match frame::encode(&message) {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            warn!(target: "payload_builder::broadcast", "failed to encode outgoing message on protocol {protocol}: {e:?}");
+                            continue;
+                        }
+                    };
+
                     // NOTE on broadcast ordering and failure semantics:
                     // `broadcast_message` sends to all connected peers concurrently and
                     // awaits until every peer's TCP send completes (or fails). This is a
@@ -249,7 +263,7 @@ impl Node {
                     // for lower latency - since failures/switches in builder are very small.
                     // The less strict (no ack of message deliveries) allow a lower latency
                     // in the gossiping of new flashblock payloads to websocket subscribers.
-                    match outgoing_streams_handler.broadcast_message(message.clone()).await {
+                    match outgoing_streams_handler.broadcast_message(protocol.clone(), bytes.clone()).await {
                         Ok(failed_peers) => {
                             peer_status.on_broadcast_result(&failed_peers);
                             for &peer_id in &failed_peers {
@@ -267,7 +281,7 @@ impl Node {
                         }
                     }
                     if let Message::OpFlashblockPayload(ref fb_payload) = message {
-                        match ws_pub.publish(fb_payload) {
+                        match ws_pub.publish(bytes, fb_payload) {
                             Ok(flashblock_byte_size) => {
                                 metrics.flashblock_byte_size_histogram.record(flashblock_byte_size as f64);
                             }
@@ -324,7 +338,7 @@ impl Node {
 pub struct NodeBuildResult {
     pub node: Node,
     pub outgoing_message_tx: mpsc::Sender<Message>,
-    pub incoming_message_rxs: HashMap<StreamProtocol, mpsc::Receiver<Message>>,
+    pub incoming_message_rxs: HashMap<StreamProtocol, mpsc::Receiver<BroadcastFrame>>,
     /// Shared peer status tracker — clone into the RPC layer for
     /// `eth_flashblocksPeerStatus`.
     pub peer_status: PeerStatusTracker,
@@ -521,7 +535,7 @@ impl NodeBuilder {
 struct IncomingStreamsHandler {
     protocol: StreamProtocol,
     incoming: IncomingStreams,
-    tx: mpsc::Sender<Message>,
+    tx: mpsc::Sender<BroadcastFrame>,
     cancellation_token: CancellationToken,
 }
 
@@ -530,7 +544,7 @@ impl IncomingStreamsHandler {
         protocol: StreamProtocol,
         incoming: IncomingStreams,
         cancellation_token: CancellationToken,
-    ) -> (Self, mpsc::Receiver<Message>) {
+    ) -> (Self, mpsc::Receiver<BroadcastFrame>) {
         const CHANNEL_SIZE: usize = 100;
         let (tx, rx) = mpsc::channel(CHANNEL_SIZE);
         (Self { protocol, incoming, tx, cancellation_token }, rx)
@@ -573,24 +587,25 @@ impl IncomingStreamsHandler {
 async fn handle_incoming_stream(
     peer_id: PeerId,
     stream: Stream,
-    payload_tx: mpsc::Sender<Message>,
+    payload_tx: mpsc::Sender<BroadcastFrame>,
 ) -> eyre::Result<PeerId> {
     use futures::StreamExt as _;
     use tokio_util::{
-        codec::{FramedRead, LinesCodec},
+        codec::{FramedRead, LengthDelimitedCodec},
         compat::FuturesAsyncReadCompatExt as _,
     };
 
-    let codec = LinesCodec::new();
+    let codec = LengthDelimitedCodec::new();
     let mut reader = FramedRead::new(stream.compat(), codec);
 
     while let Some(res) = reader.next().await {
         match res {
-            Ok(str) => {
-                let payload = serde_json::from_str::<Message>(&str)
+            Ok(raw_frame) => {
+                let bytes = alloy_primitives::Bytes::from(raw_frame.freeze());
+                let frame = BroadcastFrame::from_bytes(bytes)
                     .wrap_err("failed to decode stream message")?;
-                debug!(target: "payload_builder::broadcast", "got message from peer {peer_id}: {payload:?}");
-                let _ = payload_tx.send(payload).await;
+                debug!(target: "payload_builder::broadcast", "got message from peer {peer_id}: {:?}", frame.decoded);
+                let _ = payload_tx.send(frame).await;
             }
             Err(e) => {
                 return Err(e).wrap_err(format!("failed to read from stream of peer {peer_id}"));
@@ -696,7 +711,7 @@ mod test {
             XLayerFlashblockMessage::from_flashblock_payload(XLayerFlashblockPayload::default()),
         );
         let mut rx = rx1.remove(&types::FLASHBLOCKS_STREAM_PROTOCOL).unwrap();
-        let recv_message = tokio::time::timeout(Duration::from_secs(10), async {
+        let recv_frame = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 // Use try_send to avoid panicking if the channel is full
                 // (e.g. connection not yet established and messages are buffered).
@@ -710,7 +725,7 @@ mod test {
         })
         .await
         .expect("message receive timed out");
-        assert_eq!(recv_message, message);
+        assert_eq!(*recv_frame.decoded, message);
     }
 
     /// Creates two minimal libp2p swarms (using only `libp2p_stream::Behaviour`),
@@ -822,7 +837,11 @@ mod test {
         let msg = Message::from_flashblock_payload(
             XLayerFlashblockMessage::from_flashblock_payload(XLayerFlashblockPayload::default()),
         );
-        let failed = handler.broadcast_message(msg).await.expect("serialization must not fail");
+        let bytes = frame::encode(&msg).expect("encode must not fail");
+        let failed = handler
+            .broadcast_message(msg.protocol(), bytes)
+            .await
+            .expect("broadcast must not fail");
 
         assert_eq!(failed, vec![peer_a], "peer_a must be returned as a failed peer");
         assert!(!handler.has_peer(&peer_a), "peer_a must be evicted from the handler");
@@ -860,7 +879,11 @@ mod test {
         let msg = Message::from_flashblock_payload(
             XLayerFlashblockMessage::from_flashblock_payload(XLayerFlashblockPayload::default()),
         );
-        let failed = handler.broadcast_message(msg).await.expect("serialization must not fail");
+        let bytes = frame::encode(&msg).expect("encode must not fail");
+        let failed = handler
+            .broadcast_message(msg.protocol(), bytes)
+            .await
+            .expect("broadcast must not fail");
 
         assert!(failed.is_empty(), "no peers should fail on a healthy stream");
         assert!(

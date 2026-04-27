@@ -1,4 +1,4 @@
-use crate::ws::FlashBlockDecoder;
+use crate::ws::WsFrame;
 use futures_util::{
     stream::{SplitSink, SplitStream},
     FutureExt, Sink, Stream, StreamExt,
@@ -18,8 +18,6 @@ use tokio_tungstenite::{
 use tracing::debug;
 use url::Url;
 
-use xlayer_builder::broadcast::XLayerFlashblockMessage;
-
 /// An asynchronous stream of [`XLayerFlashblockMessage`] from a websocket connection.
 ///
 /// The stream attempts to connect to a websocket URL and then decode each received item.
@@ -30,7 +28,6 @@ pub struct WsFlashBlockStream<Stream, Sink, Connector> {
     ws_url: Url,
     state: State,
     connector: Connector,
-    decoder: Box<dyn FlashBlockDecoder>,
     connect: ConnectFuture<Sink, Stream>,
     stream: Option<Stream>,
     sink: Option<Sink>,
@@ -43,16 +40,10 @@ impl WsFlashBlockStream<WsStream, WsSink, WsConnector> {
             ws_url,
             state: State::default(),
             connector: WsConnector,
-            decoder: Box::new(()),
             connect: Box::pin(async move { Err(Error::ConnectionClosed)? }),
             stream: None,
             sink: None,
         }
-    }
-
-    /// Sets the [`XLayerFlashblockMessage`] decoder for the websocket stream.
-    pub fn with_decoder(self, decoder: Box<dyn FlashBlockDecoder>) -> Self {
-        Self { decoder, ..self }
     }
 }
 
@@ -62,7 +53,6 @@ impl<Stream, S, C> WsFlashBlockStream<Stream, S, C> {
         Self {
             ws_url,
             state: State::default(),
-            decoder: Box::new(()),
             connector,
             connect: Box::pin(async move { Err(Error::ConnectionClosed)? }),
             stream: None,
@@ -77,7 +67,7 @@ where
     S: Sink<Message> + Send + Unpin,
     C: WsConnect<Stream = Str, Sink = S> + Clone + Send + 'static + Unpin,
 {
-    type Item = eyre::Result<XLayerFlashblockMessage>;
+    type Item = eyre::Result<WsFrame>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -121,10 +111,18 @@ where
 
                 match msg {
                     Ok(Message::Binary(bytes)) => {
-                        return Poll::Ready(Some(this.decoder.decode(bytes)));
+                        let bytes = alloy_primitives::Bytes::from(bytes);
+                        return Poll::Ready(Some(
+                            WsFrame::from_bytes(bytes)
+                                .map_err(|e| eyre::eyre!("failed to decode WS frame: {e}")),
+                        ));
                     }
                     Ok(Message::Text(bytes)) => {
-                        return Poll::Ready(Some(this.decoder.decode(bytes.into())));
+                        let bytes = alloy_primitives::Bytes::copy_from_slice(bytes.as_bytes());
+                        return Poll::Ready(Some(
+                            WsFrame::from_bytes(bytes)
+                                .map_err(|e| eyre::eyre!("failed to decode WS frame: {e}")),
+                        ));
                     }
                     Ok(Message::Ping(bytes)) => this.ping(bytes),
                     Ok(Message::Close(frame)) => this.close(frame),
@@ -252,6 +250,7 @@ mod tests {
         protocol::frame::{coding::CloseCode, Frame},
         Error,
     };
+    
 
     /// A `FakeConnector` creates [`FakeStream`].
     ///
@@ -425,6 +424,15 @@ mod tests {
         }
     }
 
+    /// Wraps a flashblock payload as `XLayerFlashblockMessage::Payload` for the wire format.
+    fn wrap_msg(block: &OpFlashblockPayload) -> xlayer_builder::broadcast::Message {
+        xlayer_builder::broadcast::Message::from_flashblock_payload(
+            xlayer_builder::broadcast::XLayerFlashblockMessage::from_flashblock_payload(
+                xlayer_builder::broadcast::XLayerFlashblockPayload::new(block.clone(), 0),
+            ),
+        )
+    }
+
     fn to_json_message<B: TryFrom<Bytes, Error: Debug>, F: Fn(B) -> Message>(
         wrapper_f: F,
     ) -> impl Fn(&OpFlashblockPayload) -> Result<Message, Error> + use<F, B> {
@@ -439,11 +447,13 @@ mod tests {
         block: &OpFlashblockPayload,
         wrapper_f: F,
     ) -> Result<Message, Error> {
-        Ok(wrapper_f(B::try_from(Bytes::from(serde_json::to_vec(block).unwrap())).unwrap()))
+        Ok(wrapper_f(
+            B::try_from(Bytes::from(serde_json::to_vec(&wrap_msg(block)).unwrap())).unwrap(),
+        ))
     }
 
     fn to_brotli_message(block: &OpFlashblockPayload) -> Result<Message, Error> {
-        let json = serde_json::to_vec(block).unwrap();
+        let json = serde_json::to_vec(&wrap_msg(block)).unwrap();
         let mut compressed = Vec::new();
         brotli::BrotliCompress(
             &mut json.as_slice(),
@@ -470,10 +480,10 @@ mod tests {
         let ws_url = "http://localhost".parse().unwrap();
         let stream = WsFlashBlockStream::with_connector(ws_url, connector);
 
-        let actual_messages: Vec<_> = stream.take(1).map(Result::unwrap).collect().await;
+        let actual_frames: Vec<_> = stream.take(1).map(Result::unwrap).collect().await;
         let expected_messages = flashblocks.to_vec();
         let actual_messages: Vec<_> =
-            actual_messages.iter().map(|m| &m.as_payload().unwrap().inner).collect();
+            actual_frames.iter().map(|frame| &frame.decoded.as_payload().unwrap().inner).collect();
         let expected_messages: Vec<_> = expected_messages.iter().collect();
         assert_eq!(actual_messages, expected_messages);
     }
@@ -488,10 +498,10 @@ mod tests {
         let mut stream = WsFlashBlockStream::with_connector(ws_url, connector);
 
         let expected_message = flashblock;
-        let actual_message =
+        let actual_frame =
             stream.next().await.expect("Binary message should not be ignored").unwrap();
 
-        assert_eq!(actual_message.as_payload().unwrap().inner, expected_message)
+        assert_eq!(actual_frame.decoded.as_payload().unwrap().inner, expected_message)
     }
 
     #[tokio::test]

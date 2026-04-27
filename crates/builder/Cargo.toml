@@ -103,6 +103,7 @@ multiaddr = { workspace = true }
 
 # misc
 anyhow = "1"
+brotli = { workspace = true, features = ["std"] }
 clap.workspace = true
 dashmap.workspace = true
 derive_more.workspace = true

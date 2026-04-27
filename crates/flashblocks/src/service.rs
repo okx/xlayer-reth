@@ -3,7 +3,7 @@ use crate::{
     execution::{FlashblockReceipt, OverlayProviderFactory},
     persist::{handle_persistence, handle_relay_flashblocks},
     state::{handle_canonical_stream, handle_execution_tasks, handle_incoming_flashblocks},
-    ReceivedFlashblocksRx, XLayerEngineValidator,
+    ReceivedFlashblocksRx, WsFrame, XLayerEngineValidator,
 };
 use futures_util::Stream;
 use std::{net::SocketAddr, sync::Arc};
@@ -25,7 +25,7 @@ use reth_tasks::TaskExecutor;
 
 use xlayer_builder::{
     args::FlashblocksArgs,
-    broadcast::{WebSocketPublisher, XLayerFlashblockMessage},
+    broadcast::WebSocketPublisher,
     metrics::{tokio::FlashblocksTaskMetrics, BuilderMetrics},
 };
 
@@ -60,7 +60,7 @@ where
     /// Task executor.
     task_executor: TaskExecutor,
     /// Broadcast channel to forward received flashblocks from the subscription.
-    received_flashblocks_tx: Sender<Arc<XLayerFlashblockMessage>>,
+    received_flashblocks_tx: Sender<Arc<WsFrame>>,
 }
 
 impl<N> FlashblocksRpcService<N>
@@ -135,7 +135,7 @@ where
         engine_validator: XLayerEngineValidator<Provider, EvmConfig, V, N, ChainSpec>,
         incoming_rx: S,
     ) where
-        S: Stream<Item = eyre::Result<XLayerFlashblockMessage>> + Unpin + Send + 'static,
+        S: Stream<Item = eyre::Result<WsFrame>> + Unpin + Send + 'static,
         EvmConfig: ConfigureEvm<
                 Primitives = N,
                 NextBlockEnvCtx: From<OpFlashblockPayloadBase> + Unpin + Send,
