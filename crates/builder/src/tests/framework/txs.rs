@@ -10,7 +10,7 @@ use moka::future::Cache;
 use op_alloy_consensus::{OpTxEnvelope, OpTypedTransaction};
 use op_alloy_network::Optimism;
 use reth_optimism_txpool::OpPooledTransaction;
-use reth_primitives::Recovered;
+use reth_primitives_traits::Recovered;
 use reth_transaction_pool::{AllTransactionsEvents, FullTransactionEvent, TransactionEvent};
 use std::{collections::VecDeque, sync::Arc};
 use tokio::sync::watch;

@@ -28,7 +28,7 @@ use reth_evm::{
 use reth_node_api::PayloadBuilderError;
 use reth_optimism_evm::OpTx;
 use reth_optimism_primitives::OpTransactionSigned;
-use reth_primitives::Recovered;
+use reth_primitives_traits::Recovered;
 use reth_provider::{ProviderError, StateProvider};
 use reth_revm::{database::StateProviderDatabase, State};
 use reth_rpc_api::eth::EthTxEnvError;
@@ -466,7 +466,12 @@ impl FlashblocksBuilderTx {
         evm: &mut OpEvm<impl Database, NoOpInspector, PrecompilesMap, OpTx>,
     ) -> Result<u64, BuilderTransactionError> {
         let evm_env = alloy_evm::EvmEnv::from((evm.cfg.clone(), evm.block.clone()));
-        let tx_env: OpTx = tx.try_into_tx_env(&evm_env)?;
+        let base: revm::context::TxEnv = tx.as_ref().clone().try_into_tx_env(&evm_env)?;
+        let tx_env = OpTx(op_revm::OpTransaction {
+            base,
+            enveloped_tx: Some(Bytes::new()),
+            deposit: Default::default(),
+        });
         let to = tx_env.0.base.kind.into_to().unwrap_or_default();
 
         let ResultAndState { result, .. } = match evm.transact(tx_env) {
@@ -481,7 +486,8 @@ impl FlashblocksBuilderTx {
         };
 
         match result {
-            ExecutionResult::Success { output, gas_used, logs, .. } => {
+            ExecutionResult::Success { output, gas, logs, .. } => {
+                let gas_used = gas.used();
                 let topics: HashSet<B256> =
                     logs.into_iter().flat_map(|log| log.topics().to_vec()).collect();
                 if !expected_logs.iter().all(|expected_topic| topics.contains(expected_topic)) {

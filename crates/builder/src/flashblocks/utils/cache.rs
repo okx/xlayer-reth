@@ -225,8 +225,9 @@ mod tests {
             diff: OpFlashblockPayloadDelta::default(),
             metadata: OpFlashblockPayloadMetadata {
                 block_number,
-                new_account_balances: BTreeMap::new(),
-                receipts: BTreeMap::new(),
+                new_account_balances: Some(BTreeMap::new()),
+                receipts: Some(BTreeMap::new()),
+                access_list: None,
             },
         }
     }

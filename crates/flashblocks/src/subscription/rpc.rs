@@ -30,7 +30,7 @@ use reth_rpc_eth_api::{EthApiTypes, RpcNodeCore, RpcReceipt, RpcTransaction};
 use reth_rpc_eth_types::utils::calculate_gas_used_and_next_log_index;
 use reth_rpc_server_types::result::{internal_rpc_err, invalid_params_rpc_err};
 use reth_storage_api::BlockNumReader;
-use reth_tasks::TaskSpawner;
+use reth_tasks::TaskExecutor;
 use reth_tracing::tracing::{trace, warn};
 
 const MAX_TXHASH_CACHE_SIZE: u64 = 10_000;
@@ -93,7 +93,7 @@ where
     pub fn new(
         eth_pubsub: EthPubSub<Eth>,
         pending_block_rx: PendingSequenceRx<N>,
-        subscription_task_spawner: Box<dyn TaskSpawner>,
+        subscription_task_spawner: TaskExecutor,
         tx_converter: Eth::RpcConvert,
         max_subscribed_addresses: usize,
     ) -> Self {
@@ -200,7 +200,7 @@ pub struct FlashblocksPubSubInner<Eth: EthApiTypes, N: NodePrimitives> {
     /// Pending block receiver from flashblocks, if available
     pub(crate) pending_block_rx: PendingSequenceRx<N>,
     /// The type that's used to spawn subscription tasks.
-    pub(crate) subscription_task_spawner: Box<dyn TaskSpawner>,
+    pub(crate) subscription_task_spawner: TaskExecutor,
     /// RPC transaction converter.
     pub(crate) tx_converter: Eth::RpcConvert,
     /// Maximum number of subscribed addresses.

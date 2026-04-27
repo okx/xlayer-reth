@@ -14595,6 +14595,7 @@ dependencies = [
  "reth-provider",
  "reth-static-file-types",
  "reth-storage-api",
+ "reth-tasks",
  "reth-tracing",
  "serde_json",
  "tokio",

@@ -46,6 +46,7 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> ImportCommand<C> {
     pub async fn execute<N, Comp>(
         self,
         components: impl FnOnce(Arc<N::ChainSpec>) -> Comp,
+        runtime: reth_tasks::Runtime,
     ) -> Result<()>
     where
         N: CliNodeTypes<ChainSpec = C::ChainSpec>,
@@ -54,7 +55,8 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> ImportCommand<C> {
         info!(target: "reth::cli", "{} ({}) starting", version_metadata().name_client, version_metadata().short_version);
         info!(target: "reth::cli", "Importing blockchain from file: {}", self.path.display());
 
-        let Environment { provider_factory, config, .. } = self.env.init::<N>(AccessRights::RW)?;
+        let Environment { provider_factory, config, .. } =
+            self.env.init::<N>(AccessRights::RW, runtime.clone())?;
 
         let components = components(provider_factory.chain_spec());
 
@@ -74,6 +76,7 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> ImportCommand<C> {
             &config,
             executor,
             consensus,
+            runtime,
         )
         .await?;
 

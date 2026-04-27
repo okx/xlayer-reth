@@ -16,10 +16,7 @@ use eyre::{bail, WrapErr as _};
 use op_alloy_rpc_types_engine::OpFlashblockPayload;
 use op_revm::L1BlockInfo;
 
-use reth::{
-    revm::{database::StateProviderDatabase, State},
-    tasks::TaskSpawner,
-};
+use reth::revm::{database::StateProviderDatabase, State};
 use reth_basic_payload_builder::PayloadConfig;
 use reth_node_builder::Events;
 use reth_optimism_chainspec::OpChainSpec;
@@ -29,14 +26,14 @@ use reth_optimism_forks::OpHardforks;
 use reth_optimism_node::{OpEngineTypes, OpPayloadBuilderAttributes};
 use reth_optimism_payload_builder::OpBuiltPayload;
 use reth_optimism_primitives::OpReceipt;
-use reth_payload_builder::EthPayloadBuilderAttributes;
 use reth_primitives_traits::SealedHeader;
+use reth_tasks::TaskExecutor;
 
 /// Handles newly built or received flashblock payloads.
 ///
 /// In the case of a payload built by this node, it is broadcast to peers and an event is sent to the payload builder.
 /// In the case of a payload received from a peer, it is executed and if successful, an event is sent to the payload builder.
-pub(crate) struct FlashblocksPayloadHandler<Client, Tasks> {
+pub(crate) struct FlashblocksPayloadHandler<Client> {
     // handler context for external flashblock execution
     ctx: FlashblockHandlerContext,
     // receives new flashblock payloads built by this builder.
@@ -56,16 +53,15 @@ pub(crate) struct FlashblocksPayloadHandler<Client, Tasks> {
     // chain client
     client: Client,
     // task executor
-    task_executor: Tasks,
+    task_executor: TaskExecutor,
     cancel: tokio_util::sync::CancellationToken,
     p2p_send_full_payload_flag: bool,
     p2p_process_full_payload_flag: bool,
 }
 
-impl<Client, Tasks> FlashblocksPayloadHandler<Client, Tasks>
+impl<Client> FlashblocksPayloadHandler<Client>
 where
     Client: ClientBounds + 'static,
-    Tasks: TaskSpawner + Clone + Unpin + 'static,
 {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -78,7 +74,7 @@ where
         p2p_cache: FlashblockPayloadsCache,
         ws_pub: Arc<WebSocketPublisher>,
         client: Client,
-        task_executor: Tasks,
+        task_executor: TaskExecutor,
         cancel: tokio_util::sync::CancellationToken,
         p2p_send_full_payload_flag: bool,
         p2p_process_full_payload_flag: bool,
@@ -210,7 +206,6 @@ where
     Client: ClientBounds,
 {
     use alloy_consensus::BlockHeader as _;
-    use reth::primitives::SealedHeader;
     use reth_evm::{execute::BlockBuilder as _, ConfigureEvm as _};
 
     let start = tokio::time::Instant::now();
@@ -294,23 +289,22 @@ where
         (None, None)
     };
 
-    let payload_config = PayloadConfig::new(
-        Arc::new(SealedHeader::new(parent_header.clone(), parent_hash)),
-        OpPayloadBuilderAttributes {
+    let payload_config = PayloadConfig {
+        parent_header: Arc::new(SealedHeader::new(parent_header.clone(), parent_hash)),
+        attributes: OpPayloadBuilderAttributes {
+            id: payload.id(),    // unused
+            parent: parent_hash, // unused
+            suggested_fee_recipient: payload.block().sealed_header().beneficiary,
+            withdrawals: payload.block().body().withdrawals.clone().unwrap_or_default(),
+            parent_beacon_block_root: payload.block().sealed_header().parent_beacon_block_root,
+            timestamp,
+            prev_randao: payload.block().sealed_header().mix_hash,
             eip_1559_params: eip_1559_parameters,
             min_base_fee,
-            payload_attributes: EthPayloadBuilderAttributes {
-                id: payload.id(),    // unused
-                parent: parent_hash, // unused
-                suggested_fee_recipient: payload.block().sealed_header().beneficiary,
-                withdrawals: payload.block().body().withdrawals.clone().unwrap_or_default(),
-                parent_beacon_block_root: payload.block().sealed_header().parent_beacon_block_root,
-                timestamp,
-                prev_randao: payload.block().sealed_header().mix_hash,
-            },
             ..Default::default()
         },
-    );
+        payload_id: payload.id(),
+    };
 
     execute_transactions(
         &ctx,
