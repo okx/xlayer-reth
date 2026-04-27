@@ -250,7 +250,6 @@ mod tests {
         protocol::frame::{coding::CloseCode, Frame},
         Error,
     };
-    
 
     /// A `FakeConnector` creates [`FakeStream`].
     ///
