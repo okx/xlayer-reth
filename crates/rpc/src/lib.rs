@@ -3,11 +3,13 @@
 
 pub mod default;
 pub mod eth;
+pub mod eth_innertx;
 pub mod filter;
 pub mod helper;
 
 pub use default::{DefaultRpcExt, DefaultRpcExtApiServer, SequencerClientProvider};
 pub use eth::{FlashblocksEthApiExt, FlashblocksEthApiOverrideServer};
+pub use eth_innertx::{FlashblocksInnerTxApiServer, FlashblocksInnerTxExt};
 pub use filter::{FlashblocksEthFilterExt, FlashblocksFilterOverrideServer};
 
 use reth_optimism_rpc::{OpEthApi, SequencerClient};

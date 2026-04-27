@@ -5,6 +5,8 @@ mod payload;
 
 use payload::XLayerPayloadServiceBuilder;
 
+use std::path::Path;
+
 use args::XLayerArgs;
 use clap::Parser;
 use either::Either;
@@ -30,8 +32,14 @@ use xlayer_flashblocks::{
     FlashblockSequenceValidator, FlashblockStateCache, FlashblocksPersistCtx, FlashblocksPubSub,
     FlashblocksRpcCtx, FlashblocksRpcService, WsFlashBlockStream, XLayerEngineValidatorBuilder,
 };
+use xlayer_innertx::{
+    cache::FlashblocksInnerTxCache, db_utils::initialize_inner_tx_db,
+    subscriber_utils::initialize_innertx_replay,
+};
 use xlayer_legacy_rpc::{layer::LegacyRpcRouterLayer, LegacyRpcRouterConfig};
 use xlayer_monitor::{start_monitor_handle, RpcMonitorLayer, XLayerMonitor};
+use xlayer_rpc::FlashblocksInnerTxApiServer;
+use xlayer_rpc::FlashblocksInnerTxExt;
 use xlayer_rpc::{
     DefaultRpcExt, DefaultRpcExtApiServer, FlashblocksEthApiExt, FlashblocksEthApiOverrideServer,
     FlashblocksEthFilterExt, FlashblocksFilterOverrideServer,
@@ -84,7 +92,27 @@ fn main() {
                 info!(target: "xlayer::monitor", "Global tracer initialized with output path: {}", args.xlayer_args.monitor.output_path);
             }
 
+            // Log XLayer feature status
+            info!(
+                inner_tx_enabled = args.xlayer_args.enable_inner_tx,
+                "XLayer features configuration"
+            );
+
             let op_node = OpNode::new(args.rollup_args.clone());
+
+            let data_dir = builder.config().datadir();
+            let mut inner_tx_enabled = args.xlayer_args.enable_inner_tx;
+            if inner_tx_enabled {
+                let db = data_dir.db();
+                let db_path = db.parent().unwrap_or_else(|| Path::new("/")).to_str().unwrap();
+                match initialize_inner_tx_db(db_path) {
+                    Ok(_) => info!(target: "reth::cli", "xlayer db initialize_inner_tx_db"),
+                    Err(e) => {
+                        tracing::error!(target: "reth::cli", "xlayer db failed to initialize_inner_tx_db, disabling innertx: {e:#}");
+                        inner_tx_enabled = false;
+                    }
+                }
+            }
 
             let genesis_block = builder.config().chain.genesis().number.unwrap_or_default();
             info!("X Layer genesis block = {}", genesis_block);
@@ -169,6 +197,7 @@ fn main() {
                 .extend_rpc_modules(move |ctx| {
                     let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
 
+
                     let flashblocks_state = if let Some(flashblock_url) =
                         args.xlayer_args.flashblocks_rpc.flashblock_url
                     {
@@ -183,6 +212,16 @@ fn main() {
                             engine_validator.get_changeset_cache(),
                         );
 
+                        // Initialize innertx if enabled
+                        let innertx_cache = if inner_tx_enabled {
+                            let innertx_cache = FlashblocksInnerTxCache::new();
+                            initialize_innertx_replay(ctx.node(), Some(innertx_cache.clone()));
+                            info!(target: "reth::cli", "xlayer inner tx replay initialized (canonical_state_stream mode)");
+                            Some(innertx_cache)
+                        } else {
+                            None
+                        };
+
                         // Initialize the flashblocks validator
                         engine_validator.set_flashblocks(
                             FlashblockSequenceValidator::new(
@@ -193,6 +232,7 @@ fn main() {
                                 engine_validator.get_payload_processor(),
                                 ctx.node().task_executor.clone(),
                                 tree_config,
+                                innertx_cache.clone(),
                             ),
                             flashblocks_state.clone(),
                         );
@@ -234,6 +274,7 @@ fn main() {
                                 args.xlayer_args
                                     .flashblocks_rpc
                                     .flashblocks_subscription_max_addresses,
+                                innertx_cache.clone(),
                             );
                             ctx.modules.add_or_replace_if_module_configured(
                                 RethRpcModule::Eth,
@@ -264,10 +305,28 @@ fn main() {
                             FlashblocksFilterOverrideServer::into_rpc(flashblocks_filter),
                         )?;
                         info!(target: "reth::cli", "xlayer flashblocks filter overrides initialized");
-                        Some(flashblocks_state)
+                        Some((flashblocks_state, innertx_cache))
                     } else {
                         None
                     };
+
+                    let (flashblocks_state, innertx_cache) = match flashblocks_state {
+                        Some((state, cache)) => (Some(state), cache),
+                        None => (None, None),
+                    };
+
+                    // Register innertx RPC with flashblocks cache overlay
+                    if inner_tx_enabled {
+                        let innertx_rpc = FlashblocksInnerTxExt::new(
+                            ctx.registry.eth_api().clone(),
+                            innertx_cache.clone(),
+                            flashblocks_state.clone(),
+                        );
+                        ctx.modules.merge_configured(
+                            FlashblocksInnerTxApiServer::into_rpc(innertx_rpc),
+                        )?;
+                        info!(target: "reth::cli", "xlayer innertx rpc enabled");
+                    }
 
                     // Register X Layer RPC
                     let peer_status = fb_p2p_status.get().cloned();

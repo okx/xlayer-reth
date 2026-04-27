@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 xlayer-builder.workspace = true
+xlayer-innertx.workspace = true
 
 # reth
 reth-chain-state = { workspace = true, features = ["serde"] }
@@ -59,6 +60,9 @@ alloy-json-rpc.workspace = true
 alloy-primitives = { workspace = true, features = ["serde"] }
 alloy-rpc-types-engine = { workspace = true, features = ["serde"] }
 alloy-rpc-types-eth.workspace = true
+
+# revm
+revm-database.workspace = true
 
 # op
 op-alloy-rpc-types-engine = { workspace = true, features = ["k256"] }

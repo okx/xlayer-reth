@@ -32,6 +32,7 @@ use reth_rpc_server_types::result::{internal_rpc_err, invalid_params_rpc_err};
 use reth_storage_api::BlockNumReader;
 use reth_tasks::TaskSpawner;
 use reth_tracing::tracing::{trace, warn};
+use xlayer_innertx::cache::FlashblocksInnerTxCache;
 
 const MAX_TXHASH_CACHE_SIZE: u64 = 10_000;
 
@@ -96,12 +97,14 @@ where
         subscription_task_spawner: Box<dyn TaskSpawner>,
         tx_converter: Eth::RpcConvert,
         max_subscribed_addresses: usize,
+        innertx_cache: Option<FlashblocksInnerTxCache>,
     ) -> Self {
         let inner = FlashblocksPubSubInner {
             pending_block_rx,
             subscription_task_spawner,
             tx_converter,
             max_subscribed_addresses,
+            innertx_cache,
         };
         Self { eth_pubsub, inner: Arc::new(inner) }
     }
@@ -205,6 +208,8 @@ pub struct FlashblocksPubSubInner<Eth: EthApiTypes, N: NodePrimitives> {
     pub(crate) tx_converter: Eth::RpcConvert,
     /// Maximum number of subscribed addresses.
     pub(crate) max_subscribed_addresses: usize,
+    /// Shared innertx cache for enriching flashblock subscription events.
+    pub(crate) innertx_cache: Option<FlashblocksInnerTxCache>,
 }
 
 impl<Eth: EthApiTypes, N: NodePrimitives> FlashblocksPubSubInner<Eth, N>
@@ -222,26 +227,43 @@ where
             .eviction_policy(EvictionPolicy::lru())
             .build();
 
+        let innertx_cache = self.innertx_cache.clone();
         WatchStream::new(self.pending_block_rx.clone())
             .filter_map(move |pending_block_opt| {
                 ready(pending_block_opt.map(|pending_block| {
+                    // Read pre-computed innertx from the shared cache (populated
+                    // by the innertx compute task when enabled).
+                    let block_innertx = if filter.sub_tx_filter.tx_inner_tx {
+                        innertx_cache
+                            .as_ref()
+                            .and_then(|c| c.get_raw_block_traces_by_hash(&pending_block.block_hash))
+                    } else {
+                        None
+                    };
+
                     futures::stream::iter(Self::flashblock_to_stream_events(
                         &pending_block,
                         &filter,
                         &tx_converter,
                         &txhash_cache,
+                        block_innertx.as_deref(),
                     ))
                 }))
             })
             .flatten()
     }
 
-    /// Convert a flashblock into a stream of events (header + transaction messages)
+    /// Convert a flashblock into a stream of events (header + transaction messages).
+    ///
+    /// `block_innertx` is an optional slice of per-transaction internal traces,
+    /// pre-computed by the innertx enricher worker. When present, each entry
+    /// corresponds positionally to the transaction at the same index in the block.
     fn flashblock_to_stream_events(
         pending_block: &PendingSequence<N>,
         filter: &FlashblocksFilter,
         tx_converter: &Eth::RpcConvert,
         txhash_cache: &Cache<TxHash, ()>,
+        block_innertx: Option<&[Vec<xlayer_innertx::innertx_inspector::InternalTransaction>]>,
     ) -> Vec<FlashblockItem<N, Eth::RpcConvert>> {
         let block = pending_block.block();
         let receipts = pending_block.receipts.as_ref();
@@ -269,6 +291,7 @@ where
                 tx_converter,
                 sealed_block,
                 txhash_cache,
+                block_innertx,
             )
             .into_iter()
             .map(|transaction| FlashblockStreamEvent::Transaction { block_number, transaction }),
@@ -284,6 +307,7 @@ where
         tx_converter: &Eth::RpcConvert,
         sealed_block: &SealedBlock<N::Block>,
         txhash_cache: &Cache<TxHash, ()>,
+        block_innertx: Option<&[Vec<xlayer_innertx::innertx_inspector::InternalTransaction>]>,
     ) -> Vec<EnrichedTxItem<Eth::RpcConvert>> {
         block
             .transactions_with_sender()
@@ -324,7 +348,17 @@ where
                 let tx_data = Self::enrich_transaction_data(filter, &ctx);
                 let tx_receipt = Self::enrich_receipt(filter, receipt, receipts, &ctx);
 
-                Some(EnrichedTransaction { tx_hash, tx_data, receipt: tx_receipt })
+                // Look up innertx traces for this transaction index.
+                let innertx = if filter.sub_tx_filter.tx_inner_tx {
+                    block_innertx
+                        .and_then(|traces| traces.get(idx))
+                        .filter(|traces| !traces.is_empty())
+                        .cloned()
+                } else {
+                    None
+                };
+
+                Some(EnrichedTransaction { tx_hash, tx_data, receipt: tx_receipt, innertx })
             })
             .collect()
     }
