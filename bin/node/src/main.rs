@@ -259,7 +259,6 @@ fn main() {
 
                         // Register flashblocks filter override (eth_getLogs)
                         let flashblocks_filter = FlashblocksEthFilterExt::new(
-                            ctx.registry.eth_api().clone(),
                             ctx.registry.eth_handlers().filter.clone(),
                             flashblocks_state.clone(),
                             ctx.config().rpc.eth_config().filter_config(),

@@ -145,6 +145,8 @@ where
         N::SignedTx: Encodable2718,
         N::Block: From<alloy_consensus::Block<N::SignedTx>>,
     {
+        let validation_start = Instant::now();
+
         // Pre-validate incoming flashblocks sequence
         let pending_sequence = self.prevalidate_incoming_sequence(&args)?;
 
@@ -486,12 +488,16 @@ where
             calculate_state_root,
         )?;
 
+        let elapsed = validation_start.elapsed();
         info!(
             target: "flashblocks",
             execution_height,
             last_index,
             target_index,
             ?block_hash,
+            full_sequence = calculate_state_root,
+            state_root_strategy = ?calculate_state_root.then_some(strategy),
+            ?elapsed,
             "Executed and validated flashblocks sequence",
         );
         Ok(())

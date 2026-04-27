@@ -537,7 +537,7 @@ pub async fn wait_for_tx_mined(endpoint_url: &str, tx_hash: &str) -> Result<serd
                     return Err(eyre!("tx execution failed with status: {}", status));
                 }
             }
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await

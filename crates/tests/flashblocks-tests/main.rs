@@ -23,6 +23,40 @@ use xlayer_e2e_test::operations;
 const ITERATIONS: usize = 11;
 const TX_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(10);
 const WEB_SOCKET_TIMEOUT: Duration = Duration::from_secs(30);
+/// Approximate L2 block time used to wait for the next block to mint before a test
+/// starts sending transactions, avoiding block-boundary races during pending-state reads.
+const BLOCK_TIME: Duration = Duration::from_secs(1);
+
+/// Sleeps for approximately one L2 block time so the next block has a chance to mint
+/// before the test sends any transactions.
+async fn sleep_one_blocktime() {
+    tokio::time::sleep(BLOCK_TIME).await;
+}
+
+/// Reads an ERC20 token balance for `account` on the flashblocks `Pending` tag
+/// by calling `balanceOf(account)` via `eth_call`. Builds calldata manually to
+/// avoid `sol!` macro name collisions with per-test `balanceOf` definitions.
+async fn erc20_balance_of_pending(
+    client: &operations::HttpClient,
+    erc20: Address,
+    account: &str,
+) -> U256 {
+    // ERC20 balanceOf(address) selector = 0x70a08231
+    let addr = Address::from_str(account).expect("Invalid address");
+    let mut calldata = Vec::with_capacity(36);
+    calldata.extend_from_slice(&[0x70, 0xa0, 0x82, 0x31]);
+    calldata.extend_from_slice(&[0u8; 12]);
+    calldata.extend_from_slice(addr.as_slice());
+    let args = json!({
+        "to": erc20,
+        "data": format!("0x{}", hex::encode(&calldata)),
+    });
+    let result = operations::eth_call(client, Some(args), Some(operations::BlockId::Pending))
+        .await
+        .expect("eth_call balanceOf(pending) failed");
+    U256::from_str_radix(result.trim_start_matches("0x"), 16)
+        .expect("Failed to parse balanceOf result")
+}
 
 // ========================================================================
 // Flashblocks enabled/disabled tests
@@ -177,6 +211,7 @@ async fn fb_low_latency_pending_visibility_test() {
 /// Block-level RPC queries using the pending tag on the flashblocks node.
 #[tokio::test]
 async fn fb_pending_block_queries_test() {
+    sleep_one_blocktime().await;
     operations::settle_pending_transactions(operations::DEFAULT_L2_NETWORK_URL_FB)
         .await
         .expect("Failed to settle pending transactions");
@@ -255,9 +290,63 @@ async fn fb_pending_block_queries_test() {
     assert!(!raw_tx.is_null(), "Raw transaction at index 0 should not be null");
 }
 
+/// Header-level RPC queries on the flashblocks node.
+#[tokio::test]
+async fn fb_pending_header_queries_test() {
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+
+    // eth_getHeaderByNumber(Pending) returns a non-null header with essential fields.
+    // Note: pending hash is ephemeral (changes as the sequence advances), so we only
+    // validate field presence here — no by-hash re-query against the pending hash.
+    let pending_header =
+        operations::eth_get_header_by_number(&fb_client, operations::BlockId::Pending)
+            .await
+            .expect("eth_getHeaderByNumber(pending) failed");
+    assert!(!pending_header.is_null(), "Pending header should not be null");
+    assert!(pending_header["number"].is_string(), "Header should have a number field");
+    assert!(pending_header["hash"].is_string(), "Header should have a hash field");
+    assert!(pending_header["parentHash"].is_string(), "Header should have a parentHash field");
+    assert!(pending_header["stateRoot"].is_string(), "Header should have a stateRoot field");
+
+    // Use confirmed height for by-number and by-hash assertions — its hash is stable
+    let block_number =
+        operations::eth_block_number(&fb_client).await.expect("Failed to get block number");
+
+    let header_by_number =
+        operations::eth_get_header_by_number(&fb_client, operations::BlockId::Number(block_number))
+            .await
+            .expect("eth_getHeaderByNumber by confirmed number failed");
+    assert!(!header_by_number.is_null(), "Header by confirmed number should not be null");
+
+    // Header should match the block from eth_getBlockByNumber
+    let block = operations::eth_get_block_by_number_or_hash(
+        &fb_client,
+        operations::BlockId::Number(block_number),
+        false,
+    )
+    .await
+    .expect("eth_getBlockByNumber failed");
+    assert_eq!(header_by_number["hash"], block["hash"], "Header hash should match block hash");
+    assert_eq!(
+        header_by_number["stateRoot"], block["stateRoot"],
+        "Header stateRoot should match block stateRoot"
+    );
+
+    // eth_getHeaderByHash returns the same header (safe — confirmed hash is stable)
+    let block_hash = header_by_number["hash"].as_str().expect("Header should have a hash");
+    let header_by_hash = operations::eth_get_header_by_hash(&fb_client, block_hash)
+        .await
+        .expect("eth_getHeaderByHash failed");
+    assert_eq!(
+        header_by_number, header_by_hash,
+        "eth_getHeaderByNumber and eth_getHeaderByHash should return identical headers"
+    );
+}
+
 /// Transaction-level RPC queries on the flashblocks node.
 #[tokio::test]
 async fn fb_pending_tx_queries_test() {
+    sleep_one_blocktime().await;
     operations::settle_pending_transactions(operations::DEFAULT_L2_NETWORK_URL_FB)
         .await
         .expect("Failed to settle pending transactions");
@@ -301,6 +390,7 @@ async fn fb_pending_tx_queries_test() {
 /// State-reading RPC queries using the pending tag on the flashblocks node.
 #[tokio::test]
 async fn fb_pending_state_queries_test() {
+    sleep_one_blocktime().await;
     let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
     let sender_address = operations::DEFAULT_RICH_ADDRESS;
     let test_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
@@ -383,6 +473,7 @@ async fn fb_pending_state_queries_test() {
 /// results in non-empty bytecode at the deployed address when queried with the pending tag.
 #[tokio::test]
 async fn fb_pending_create2_deploy_test() {
+    sleep_one_blocktime().await;
     operations::settle_pending_transactions(operations::DEFAULT_L2_NETWORK_URL_FB)
         .await
         .expect("Failed to settle pending transactions");
@@ -436,6 +527,7 @@ async fn fb_pending_create2_deploy_test() {
 /// Verifies that the CREATE2 `computeAddress` result matches the actual deployed address.
 #[tokio::test]
 async fn fb_pending_create2_address_determinism_test() {
+    sleep_one_blocktime().await;
     operations::settle_pending_transactions(operations::DEFAULT_L2_NETWORK_URL_FB)
         .await
         .expect("Failed to settle pending transactions");
@@ -510,6 +602,7 @@ async fn fb_pending_create2_address_determinism_test() {
 /// separate transaction (EIP-6780 behavior).
 #[tokio::test]
 async fn fb_pending_selfdestruct_code_persists_test() {
+    sleep_one_blocktime().await;
     operations::settle_pending_transactions(operations::DEFAULT_L2_NETWORK_URL_FB)
         .await
         .expect("Failed to settle pending transactions");
@@ -619,6 +712,7 @@ async fn fb_pending_precompile_call_test() {
 /// balance correctly through the flashblocks pending state.
 #[tokio::test]
 async fn fb_pending_transfer_to_precompile_test() {
+    sleep_one_blocktime().await;
     operations::settle_pending_transactions(operations::DEFAULT_L2_NETWORK_URL_FB)
         .await
         .expect("Failed to settle pending transactions");
@@ -664,9 +758,12 @@ async fn fb_pending_transfer_to_precompile_test() {
 }
 
 /// Verifies that `eth_getLogs` returns Transfer event logs from an ERC20 token
-/// transfer when queried with the transaction's block range.
+/// transfer immediately after confirmation, served from the flashblocks confirm
+/// cache ahead of the canonical chain. The test queries using the `Pending` tag
+/// to exercise the flashblocks state cache overlay.
 #[tokio::test]
 async fn fb_pending_get_logs_test() {
+    sleep_one_blocktime().await;
     operations::settle_pending_transactions(operations::DEFAULT_L2_NETWORK_URL_FB)
         .await
         .expect("Failed to settle pending transactions");
@@ -674,6 +771,11 @@ async fn fb_pending_get_logs_test() {
     let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
     let contracts = operations::try_deploy_contracts().await.expect("Failed to deploy contracts");
     let test_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
+
+    // Snapshot the canonical tip so we can prove the query range spans blocks
+    // that are ahead of canonical (i.e., served from the flashblocks cache).
+    let canonical_before =
+        operations::eth_block_number(&fb_client).await.expect("Failed to read canonical height");
 
     // Send an ERC20 transfer
     let tx_hash = operations::erc20_balance_transfer(
@@ -691,38 +793,35 @@ async fn fb_pending_get_logs_test() {
         .await
         .expect("ERC20 transfer tx not mined");
 
-    // Use the exact block from the receipt for a tight query range
     let tx_block = receipt["blockNumber"]
         .as_str()
         .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
         .expect("Failed to parse block number from receipt");
+    assert!(
+        tx_block > canonical_before,
+        "Expected tx_block ({tx_block}) to be ahead of the canonical tip observed before send ({canonical_before}) so the log is served from the flashblocks cache"
+    );
 
-    // Wait for canonical chain to reach the tx block so eth_getLogs can serve it
-    operations::wait_for_canonical_block(operations::DEFAULT_L2_NETWORK_URL_FB, tx_block)
-        .await
-        .expect("Canonical chain did not reach tx block");
-
-    // Query logs from the ERC20 contract address
-    // Transfer event topic: keccak256("Transfer(address,address,uint256)")
+    // Query logs across the confirm cache up to pending — this must hit the
+    // flashblocks state cache, not the canonical chain.
     let transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
     let logs = operations::eth_get_logs(
         &fb_client,
         Some(operations::BlockId::Number(tx_block)),
-        Some(operations::BlockId::Number(tx_block)),
+        Some(operations::BlockId::Pending),
         Some(&format!("{:#x}", contracts.erc20)),
         Some(vec![transfer_topic.to_string()]),
     )
     .await
-    .expect("eth_getLogs failed");
+    .expect("eth_getLogs(pending) failed");
 
     let logs_arr = logs.as_array().expect("Logs should be an array");
-    assert!(!logs_arr.is_empty(), "Should have at least one Transfer log");
+    assert!(!logs_arr.is_empty(), "Should have at least one Transfer log on pending");
 
-    // Find the log from our specific transaction
     let our_log = logs_arr
         .iter()
         .find(|log| log["transactionHash"].as_str() == Some(tx_hash.as_str()))
-        .expect("Should find a Transfer log from our transaction");
+        .expect("Should find a Transfer log from our transaction on pending");
 
     assert_eq!(
         our_log["address"].as_str().unwrap().to_lowercase(),
@@ -735,6 +834,7 @@ async fn fb_pending_get_logs_test() {
 /// `triggerCall`) works correctly through the flashblocks node.
 #[tokio::test]
 async fn fb_pending_contract_to_contract_call_test() {
+    sleep_one_blocktime().await;
     operations::settle_pending_transactions(operations::DEFAULT_L2_NETWORK_URL_FB)
         .await
         .expect("Failed to settle pending transactions");
@@ -796,6 +896,7 @@ async fn fb_pending_contract_to_contract_call_test() {
 /// after a transfer.
 #[tokio::test]
 async fn fb_pending_state_transition_across_blocks_test() {
+    sleep_one_blocktime().await;
     operations::settle_pending_transactions(operations::DEFAULT_L2_NETWORK_URL_FB)
         .await
         .expect("Failed to settle pending transactions");
@@ -860,6 +961,157 @@ async fn fb_pending_state_transition_across_blocks_test() {
     assert_eq!(
         balance_at_n, balance_at_n_again,
         "Historical balance at block {block_n} should be immutable"
+    );
+}
+
+/// Verifies that immediately after a native ETH transfer, the pending state
+/// reflects the exact balance deltas on both sender and recipient, and the
+/// sender's pending nonce has incremented by 1.
+#[tokio::test]
+async fn fb_pending_native_balance_delta_test() {
+    sleep_one_blocktime().await;
+    operations::settle_pending_transactions(operations::DEFAULT_L2_NETWORK_URL_FB)
+        .await
+        .expect("Failed to settle pending transactions");
+
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+    let sender_address = operations::DEFAULT_RICH_ADDRESS;
+    let recipient_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
+    let transfer_amount = U256::from(operations::GWEI);
+
+    // Snapshot pending state before the transfer
+    let sender_balance_before =
+        operations::get_balance(&fb_client, sender_address, Some(operations::BlockId::Pending))
+            .await
+            .expect("Failed to read sender balance on pending");
+    let recipient_balance_before =
+        operations::get_balance(&fb_client, recipient_address, Some(operations::BlockId::Pending))
+            .await
+            .expect("Failed to read recipient balance on pending");
+    let sender_nonce_before = operations::eth_get_transaction_count(
+        &fb_client,
+        sender_address,
+        Some(operations::BlockId::Pending),
+    )
+    .await
+    .expect("Failed to read sender nonce on pending");
+
+    // Send the native transfer and wait for confirmation so the receipt is available
+    let tx_hash = operations::native_balance_transfer(
+        operations::DEFAULT_L2_NETWORK_URL_FB,
+        transfer_amount,
+        recipient_address,
+        None,
+        true,
+    )
+    .await
+    .expect("Native transfer failed");
+
+    // Extract gasUsed and effectiveGasPrice from the receipt to compute the sender's cost
+    let receipt = operations::eth_get_transaction_receipt(&fb_client, &tx_hash)
+        .await
+        .expect("Failed to fetch receipt");
+    let gas_used = U256::from_str_radix(
+        receipt["gasUsed"].as_str().expect("Receipt missing gasUsed").trim_start_matches("0x"),
+        16,
+    )
+    .expect("Failed to parse gasUsed");
+    let effective_gas_price = U256::from_str_radix(
+        receipt["effectiveGasPrice"]
+            .as_str()
+            .expect("Receipt missing effectiveGasPrice")
+            .trim_start_matches("0x"),
+        16,
+    )
+    .expect("Failed to parse effectiveGasPrice");
+    let gas_cost = gas_used * effective_gas_price;
+
+    // Read pending state again immediately after the transfer confirms
+    let sender_balance_after =
+        operations::get_balance(&fb_client, sender_address, Some(operations::BlockId::Pending))
+            .await
+            .expect("Failed to read sender balance on pending after");
+    let recipient_balance_after =
+        operations::get_balance(&fb_client, recipient_address, Some(operations::BlockId::Pending))
+            .await
+            .expect("Failed to read recipient balance on pending after");
+    let sender_nonce_after = operations::eth_get_transaction_count(
+        &fb_client,
+        sender_address,
+        Some(operations::BlockId::Pending),
+    )
+    .await
+    .expect("Failed to read sender nonce on pending after");
+
+    assert_eq!(
+        recipient_balance_after,
+        recipient_balance_before + transfer_amount,
+        "Recipient pending balance should increase by exactly the transfer amount"
+    );
+    assert_eq!(
+        sender_balance_after,
+        sender_balance_before - transfer_amount - gas_cost,
+        "Sender pending balance should decrease by transfer amount + gas cost"
+    );
+    assert_eq!(
+        sender_nonce_after,
+        sender_nonce_before + 1,
+        "Sender pending nonce should increment by 1"
+    );
+}
+
+/// Verifies that immediately after an ERC20 transfer, the pending state reflects
+/// the exact token balance deltas on both sender and recipient when queried via
+/// `eth_call(balanceOf, Pending)`.
+#[tokio::test]
+async fn fb_pending_erc20_balance_delta_test() {
+    sleep_one_blocktime().await;
+    operations::settle_pending_transactions(operations::DEFAULT_L2_NETWORK_URL_FB)
+        .await
+        .expect("Failed to settle pending transactions");
+
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+    let contracts = operations::try_deploy_contracts().await.expect("Failed to deploy contracts");
+    let sender_address = operations::DEFAULT_RICH_ADDRESS;
+    let recipient_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
+    let transfer_amount = U256::from(operations::GWEI);
+
+    // Snapshot ERC20 balances on pending before the transfer
+    let sender_erc20_before =
+        erc20_balance_of_pending(&fb_client, contracts.erc20, sender_address).await;
+    let recipient_erc20_before =
+        erc20_balance_of_pending(&fb_client, contracts.erc20, recipient_address).await;
+
+    // Send the ERC20 transfer and wait for it to be mined
+    let tx_hash = operations::erc20_balance_transfer(
+        operations::DEFAULT_L2_NETWORK_URL_FB,
+        transfer_amount,
+        None,
+        recipient_address,
+        contracts.erc20,
+        None,
+    )
+    .await
+    .expect("ERC20 transfer failed");
+    operations::wait_for_tx_mined(operations::DEFAULT_L2_NETWORK_URL_FB, &tx_hash)
+        .await
+        .expect("ERC20 transfer tx not mined");
+
+    // Re-read ERC20 balances on pending immediately
+    let sender_erc20_after =
+        erc20_balance_of_pending(&fb_client, contracts.erc20, sender_address).await;
+    let recipient_erc20_after =
+        erc20_balance_of_pending(&fb_client, contracts.erc20, recipient_address).await;
+
+    assert_eq!(
+        recipient_erc20_after,
+        recipient_erc20_before + transfer_amount,
+        "Recipient pending ERC20 balance should increase by exactly the transfer amount"
+    );
+    assert_eq!(
+        sender_erc20_after,
+        sender_erc20_before - transfer_amount,
+        "Sender pending ERC20 balance should decrease by exactly the transfer amount"
     );
 }
 
@@ -1237,6 +1489,48 @@ async fn fb_compare_get_block_by_hash() {
                 .await
                 .expect("Failed to get block from non-fb client");
         assert_eq!(fb_block, non_fb_block, "eth_getBlockByHash not identical");
+    }
+}
+
+#[ignore = "Requires a second non-flashblock RPC node to be running"]
+#[tokio::test]
+async fn fb_compare_get_header() {
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+    let non_fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_NO_FB);
+
+    let latest = operations::eth_block_number(&non_fb_client)
+        .await
+        .expect("Failed to get latest block number");
+
+    for i in 0..10 {
+        let block_id = operations::BlockId::Number(latest - i);
+
+        // By number
+        let fb_header = operations::eth_get_header_by_number(&fb_client, block_id.clone())
+            .await
+            .expect("Failed to get header from fb client");
+        let non_fb_header = operations::eth_get_header_by_number(&non_fb_client, block_id)
+            .await
+            .expect("Failed to get header from non-fb client");
+        assert_eq!(
+            fb_header,
+            non_fb_header,
+            "eth_getHeaderByNumber not identical at block {}",
+            latest - i
+        );
+
+        // By hash
+        let block_hash = fb_header["hash"].as_str().expect("Header should have hash");
+        let fb_header_by_hash = operations::eth_get_header_by_hash(&fb_client, block_hash)
+            .await
+            .expect("Failed to get header by hash from fb client");
+        let non_fb_header_by_hash = operations::eth_get_header_by_hash(&non_fb_client, block_hash)
+            .await
+            .expect("Failed to get header by hash from non-fb client");
+        assert_eq!(
+            fb_header_by_hash, non_fb_header_by_hash,
+            "eth_getHeaderByHash not identical for hash {block_hash}"
+        );
     }
 }
 
@@ -1862,6 +2156,7 @@ async fn fb_compare_get_storage_at() {
 /// Verifies `eth_sendRawTransactionSync` returns inclusion data synchronously.
 #[tokio::test]
 async fn fb_send_raw_transaction_sync_test() {
+    sleep_one_blocktime().await;
     operations::settle_pending_transactions(operations::DEFAULT_L2_NETWORK_URL_FB)
         .await
         .expect("Failed to settle pending transactions");
@@ -1948,12 +2243,30 @@ async fn fb_negative_test() {
         operations::eth_call(&fb_client, Some(call_args), Some(operations::BlockId::Pending)).await;
     assert!(result.is_err(), "eth_call with invalid selector should revert, got: {result:?}");
 
-    // eth_getRawTransactionByBlockNumberAndIndex with out-of-range index returns null
-    let result =
-        operations::eth_get_raw_transaction_by_block_number_and_index(&fb_client, "0x1", "0xFFFF")
-            .await
-            .expect("eth_getRawTransactionByBlockNumberAndIndex should not error for bad index");
+    // eth_getRawTransactionByBlockNumberAndIndex with out-of-range index returns null.
+    // Use an actual block that exists (latest), then query a tx index that doesn't exist.
+    let current_block =
+        operations::eth_block_number(&fb_client).await.expect("Failed to get block number");
+    let block_hex = format!("0x{current_block:x}");
+    let result = operations::eth_get_raw_transaction_by_block_number_and_index(
+        &fb_client, &block_hex, "0xFFFF",
+    )
+    .await
+    .expect("eth_getRawTransactionByBlockNumberAndIndex should not error for bad index");
     assert!(result.is_null(), "Out-of-range tx index should return null, got: {result}");
+
+    // Non-existent header by number returns null
+    let header =
+        operations::eth_get_header_by_number(&fb_client, operations::BlockId::Number(0xFFFFFFFF))
+            .await
+            .expect("eth_getHeaderByNumber should not error for non-existent block");
+    assert!(header.is_null(), "Non-existent block header should return null, got: {header}");
+
+    // Non-existent header by hash returns null
+    let header = operations::eth_get_header_by_hash(&fb_client, fake_hash)
+        .await
+        .expect("eth_getHeaderByHash should not error for non-existent hash");
+    assert!(header.is_null(), "Non-existent hash header should return null, got: {header}");
 }
 
 /// Verifies that `eth_getLogs` returns logs from a flashblock when queried
@@ -2097,6 +2410,7 @@ async fn fb_get_logs_by_block_hash_test() {
 /// flashblock-cached blocks returns logs in ascending order.
 #[tokio::test]
 async fn fb_get_logs_cross_boundary_range_test() {
+    sleep_one_blocktime().await;
     operations::settle_pending_transactions(operations::DEFAULT_L2_NETWORK_URL_FB)
         .await
         .expect("Failed to settle pending transactions");
@@ -2105,8 +2419,9 @@ async fn fb_get_logs_cross_boundary_range_test() {
     let contracts = operations::try_deploy_contracts().await.expect("Failed to deploy contracts");
     let test_address = operations::DEFAULT_L2_NEW_ACC1_ADDRESS;
 
-    // Get the current canonical height
-    let canonical_height =
+    // Snapshot canonical tip before sending — this is the fromBlock anchor for
+    // the range query and the reference used to prove the tx lands ahead of canonical.
+    let canonical_before =
         operations::eth_block_number(&fb_client).await.expect("Failed to get block number");
 
     // Send a transfer so a flashblock ahead of canonical has a log
@@ -2129,15 +2444,15 @@ async fn fb_get_logs_cross_boundary_range_test() {
         .as_str()
         .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
         .expect("Failed to parse block number from receipt");
+    assert!(
+        tx_block_number > canonical_before,
+        "Expected tx_block_number ({tx_block_number}) to be ahead of canonical_before ({canonical_before}) so the range genuinely crosses the canonical → flashblock boundary"
+    );
 
-    // Wait for canonical chain to reach the tx block so eth_getLogs can serve it
-    operations::wait_for_canonical_block(operations::DEFAULT_L2_NETWORK_URL_FB, tx_block_number)
-        .await
-        .expect("Canonical chain did not reach tx block");
-
-    // Query a range that starts a few blocks before canonical height and goes
-    // to latest, ensuring we cross the canonical → flashblock boundary.
-    let from_block = canonical_height.saturating_sub(2);
+    // Query a range from a few blocks before the pre-send canonical tip up to
+    // Pending — this must span canonical blocks and flashblock cache blocks,
+    // exercising the cross-boundary log serving path.
+    let from_block = canonical_before.saturating_sub(2);
     let transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
     let logs = operations::eth_get_logs(
         &fb_client,
