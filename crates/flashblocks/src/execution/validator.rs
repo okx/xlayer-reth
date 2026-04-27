@@ -492,8 +492,6 @@ where
         )?;
 
         let elapsed = validation_start.elapsed();
-        // `strategy` is a placeholder when SR is skipped; only surface it when SR actually ran.
-        let logged_strategy = calculate_state_root.then_some(strategy);
         info!(
             target: "flashblocks",
             execution_height,
@@ -501,7 +499,7 @@ where
             target_index,
             ?block_hash,
             full_sequence = calculate_state_root,
-            state_root_strategy = ?logged_strategy,
+            state_root_strategy = ?calculate_state_root.then_some(strategy),
             ?elapsed,
             "Executed and validated flashblocks sequence",
         );
