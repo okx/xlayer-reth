@@ -143,6 +143,8 @@ struct RawFlashblocksEntry<T: SignedTransaction> {
     payloads: BTreeMap<u64, OpFlashblockPayload>,
     /// Tracks the recovered transactions by index
     recovered_transactions_by_index: BTreeMap<u64, Vec<WithEncoded<Recovered<T>>>>,
+    /// Tracks the decoded EIP-7928 [`BlockAccessList`] by index
+    block_access_lists: BTreeMap<u64, BlockAccessList>,
     /// Tracks if the accumulated sequence has received the first base flashblock
     has_base: bool,
     /// The sequencer's target flashblock index. Zero if unset.
@@ -156,6 +158,7 @@ impl<T: SignedTransaction> RawFlashblocksEntry<T> {
         Self {
             payloads: BTreeMap::new(),
             recovered_transactions_by_index: BTreeMap::new(),
+            block_access_lists: BTreeMap::new(),
             has_base: false,
             target_index: 0,
             sequence_end: false,
@@ -186,6 +189,23 @@ impl<T: SignedTransaction> RawFlashblocksEntry<T> {
         }
         let flashblock_index = flashblock.index;
         let recovered_txs = flashblock.recover_transactions().collect::<Result<Vec<_>, _>>()?;
+
+        match flashblock.metadata.block_access_list() {
+            None => {}
+            Some(Ok(list)) => {
+                self.block_access_lists.insert(flashblock_index, list);
+            }
+            Some(Err(e)) => {
+                tracing::warn!(
+                    target: "flashblocks",
+                    flashblock_index,
+                    block_number = flashblock.metadata.block_number,
+                    error = %e,
+                    "Failed to decode RLP access list at insert, flashblock retained without it",
+                );
+            }
+        }
+
         self.payloads.insert(flashblock_index, flashblock);
         self.recovered_transactions_by_index.insert(flashblock_index, recovered_txs);
         Ok(())
@@ -251,8 +271,7 @@ impl<T: SignedTransaction> RawFlashblocksEntry<T> {
 
     fn access_list_up_to(&self, up_to: u64) -> Option<BlockAccessList> {
         let mut merged = HashMap::new();
-        for (_, payload) in self.payloads.range(..=up_to) {
-            let Some(access_list) = payload.metadata.access_list.as_ref() else { continue };
+        for (_, access_list) in self.block_access_lists.range(..=up_to) {
             for changes in access_list {
                 merged
                     .entry(changes.address)

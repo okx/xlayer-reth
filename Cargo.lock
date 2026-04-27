@@ -14031,6 +14031,7 @@ dependencies = [
  "alloy-sol-types",
  "anyhow",
  "async-trait",
+ "brotli",
  "chrono",
  "clap",
  "ctor",

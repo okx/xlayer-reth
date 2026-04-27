@@ -222,12 +222,12 @@ mod tests {
                 ..Default::default()
             }),
             diff: OpFlashblockPayloadDelta::default(),
-            metadata: OpFlashblockPayloadMetadata {
+            metadata: OpFlashblockPayloadMetadata::new(
                 block_number,
-                new_account_balances: Some(Default::default()),
-                receipts: Some(Default::default()),
-                access_list: Some(vec![]),
-            },
+                Some(Default::default()),
+                Some(Default::default()),
+                Some(vec![]),
+            ),
         }
     }
 

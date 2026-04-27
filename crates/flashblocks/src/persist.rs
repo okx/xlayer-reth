@@ -21,8 +21,8 @@ pub async fn handle_persistence(mut rx: ReceivedFlashblocksRx, datadir: ChainPat
         tokio::select! {
             result = rx.recv() => {
                 match result {
-                    Ok(fb_payload) => {
-                        if let XLayerFlashblockMessage::Payload(payload) = &*fb_payload {
+                    Ok(frame) => {
+                        if let XLayerFlashblockMessage::Payload(payload) = frame.decoded.as_ref() {
                             cache.add_flashblock_payload(payload.inner.clone());
                         }
                         dirty = true;
@@ -65,8 +65,8 @@ pub async fn handle_relay_flashblocks(
 
     loop {
         match rx.recv().await {
-            Ok(flashblock) => {
-                if let Err(e) = ws_pub.publish(&flashblock) {
+            Ok(frame) => {
+                if let Err(e) = ws_pub.publish(frame.bytes.clone(), &frame.decoded) {
                     warn!(
                         target: "flashblocks",
                         "Failed to relay flashblock to websocket subscribers: {:?}", e

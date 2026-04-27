@@ -1,5 +1,4 @@
-use super::types;
-use eyre::Context;
+use alloy_primitives::Bytes;
 use futures::stream::FuturesUnordered;
 use libp2p::{swarm::Stream, PeerId, StreamProtocol};
 use std::collections::HashMap;
@@ -33,16 +32,14 @@ impl StreamsHandler {
 
     pub(crate) async fn broadcast_message(
         &mut self,
-        message: types::Message,
+        protocol: StreamProtocol,
+        bytes: Bytes,
     ) -> eyre::Result<Vec<PeerId>> {
         use futures::{SinkExt as _, StreamExt as _};
         use tokio_util::{
-            codec::{FramedWrite, LinesCodec},
+            codec::{FramedWrite, LengthDelimitedCodec},
             compat::FuturesAsyncReadCompatExt as _,
         };
-
-        let protocol = message.protocol();
-        let payload = serde_json::to_string(&message).wrap_err("failed to serialize payload")?;
 
         let peers = self.peers_to_stream.keys().cloned().collect::<Vec<_>>();
         let mut futures = FuturesUnordered::new();
@@ -54,10 +51,10 @@ impl StreamsHandler {
                 continue;
             };
             let stream = stream.compat();
-            let payload = payload.clone();
+            let bytes = bytes.clone();
             let fut = async move {
-                let mut writer = FramedWrite::new(stream, LinesCodec::new());
-                match writer.send(payload).await {
+                let mut writer = FramedWrite::new(stream, LengthDelimitedCodec::new());
+                match writer.send(bytes.into()).await {
                     Ok(()) => Ok((peer, writer.into_inner().into_inner())),
                     Err(e) => Err((peer, eyre::eyre!(e))),
                 }
