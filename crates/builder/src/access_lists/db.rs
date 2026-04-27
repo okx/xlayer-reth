@@ -54,13 +54,12 @@ where
         self.index += 1;
     }
 
-    /// Attempts to commit the changes to the underlying database
-    /// as well as applies account/storage changes to the access list builder
-    fn try_commit(
+    /// Attempts to apply account/storage changes to the account list builder
+    fn update_access_list(
         &mut self,
-        changes: HashMap<Address, Account>,
+        changes: &HashMap<Address, Account>,
     ) -> Result<(), <DB as Database>::Error> {
-        for (address, account) in &changes {
+        for (address, account) in changes {
             let mut access_list = self.access_list.lock().expect("access list mutex poisoned");
             let account_changes = access_list.changes.entry(*address).or_default();
 
@@ -117,7 +116,6 @@ where
             }
         }
 
-        self.db.commit(changes);
         Ok(())
     }
 }
@@ -168,8 +166,9 @@ where
     DB: DatabaseCommit + Database,
 {
     fn commit(&mut self, changes: HashMap<Address, Account>) {
-        if let Err(e) = self.try_commit(changes) {
-            error!(target: "payload_builder", error = ?e, "Failed to commit changes via FBALBuilderDb");
+        if let Err(e) = self.update_access_list(&changes) {
+            error!(target: "payload_builder", error = ?e, "Failed to update FBAL access list");
         }
+        self.db.commit(changes);
     }
 }

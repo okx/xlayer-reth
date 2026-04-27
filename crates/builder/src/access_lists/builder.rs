@@ -47,20 +47,6 @@ pub struct AccountChangesBuilder {
 }
 
 impl AccountChangesBuilder {
-    /// Merges another [`AccountChangesBuilder`] with this one
-    pub fn merge(&mut self, other: Self) {
-        for (slot, sc) in other.storage_changes {
-            self.storage_changes
-                .entry(slot)
-                .and_modify(|prev| prev.extend(sc.clone()))
-                .or_insert(sc);
-        }
-        self.storage_reads.extend(other.storage_reads);
-        self.balance_changes.extend(other.balance_changes);
-        self.nonce_changes.extend(other.nonce_changes);
-        self.code_changes.extend(other.code_changes);
-    }
-
     /// Consumes the builder and produces [`AccountChanges`]
     pub fn build(mut self, address: Address) -> AccountChanges {
         AccountChanges {
