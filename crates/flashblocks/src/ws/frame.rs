@@ -4,7 +4,7 @@
 //! bytes and the decoded [`XLayerFlashblockMessage`]. Internal consumers
 //! (validator pipeline, persistence) read `decoded`; the relay-to-downstream
 //! WS subscribers path passes `bytes` straight through to
-//! [`xlayer_builder::broadcast::WebSocketPublisher::publish_raw`] without
+//! [`xlayer_builder::broadcast::WebSocketPublisher::publish`] without
 //! re-encoding.
 
 use std::{io, sync::Arc};
