@@ -6,6 +6,7 @@ reth-chainspec = { path = "RETH_PATH_PLACEHOLDER/crates/chainspec" }
 reth-cli = { path = "RETH_PATH_PLACEHOLDER/crates/cli/cli" }
 reth-cli-commands = { path = "RETH_PATH_PLACEHOLDER/crates/cli/commands" }
 reth-cli-util = { path = "RETH_PATH_PLACEHOLDER/crates/cli/util" }
+reth-codecs = { path = "RETH_PATH_PLACEHOLDER/crates/storage/codecs" }
 reth-db = { path = "RETH_PATH_PLACEHOLDER/crates/storage/db" }
 reth-db-common = { path = "RETH_PATH_PLACEHOLDER/crates/storage/db-common" }
 reth-errors = { path = "RETH_PATH_PLACEHOLDER/crates/errors" }
@@ -41,6 +42,7 @@ reth-payload-util = { path = "RETH_PATH_PLACEHOLDER/crates/payload/util" }
 reth-primitives = { path = "RETH_PATH_PLACEHOLDER/crates/primitives" }
 reth-primitives-traits = { path = "RETH_PATH_PLACEHOLDER/crates/primitives-traits" }
 reth-provider = { path = "RETH_PATH_PLACEHOLDER/crates/storage/provider" }
+reth-prune-types = { path = "RETH_PATH_PLACEHOLDER/crates/prune/types" }
 reth-revm = { path = "RETH_PATH_PLACEHOLDER/crates/revm" }
 reth-rpc = { path = "RETH_PATH_PLACEHOLDER/crates/rpc/rpc" }
 reth-rpc-api = { path = "RETH_PATH_PLACEHOLDER/crates/rpc/rpc-api" }
@@ -50,6 +52,8 @@ reth-rpc-eth-api = { path = "RETH_PATH_PLACEHOLDER/crates/rpc/rpc-eth-api" }
 reth-rpc-eth-types = { path = "RETH_PATH_PLACEHOLDER/crates/rpc/rpc-eth-types" }
 reth-rpc-layer = { path = "RETH_PATH_PLACEHOLDER/crates/rpc/rpc-layer" }
 reth-rpc-server-types = { path = "RETH_PATH_PLACEHOLDER/crates/rpc/rpc-server-types" }
+reth-stages-types = { path = "RETH_PATH_PLACEHOLDER/crates/stages/types" }
+reth-static-file = { path = "RETH_PATH_PLACEHOLDER/crates/static-file/static-file" }
 reth-storage-api = { path = "RETH_PATH_PLACEHOLDER/crates/storage/storage-api" }
 reth-tasks = { path = "RETH_PATH_PLACEHOLDER/crates/tasks" }
 reth-testing-utils = { path = "RETH_PATH_PLACEHOLDER/testing/testing-utils" }
@@ -68,6 +72,7 @@ reth-chainspec = { path = "RETH_PATH_PLACEHOLDER/crates/chainspec" }
 reth-cli = { path = "RETH_PATH_PLACEHOLDER/crates/cli/cli" }
 reth-cli-commands = { path = "RETH_PATH_PLACEHOLDER/crates/cli/commands" }
 reth-cli-util = { path = "RETH_PATH_PLACEHOLDER/crates/cli/util" }
+reth-codecs = { path = "RETH_PATH_PLACEHOLDER/crates/storage/codecs" }
 reth-db = { path = "RETH_PATH_PLACEHOLDER/crates/storage/db" }
 reth-db-common = { path = "RETH_PATH_PLACEHOLDER/crates/storage/db-common" }
 reth-errors = { path = "RETH_PATH_PLACEHOLDER/crates/errors" }

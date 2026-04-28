@@ -14593,6 +14593,8 @@ dependencies = [
  "reth-optimism-node",
  "reth-primitives-traits",
  "reth-provider",
+ "reth-prune-types",
+ "reth-stages-types",
  "reth-static-file-types",
  "reth-storage-api",
  "reth-tasks",
