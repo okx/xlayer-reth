@@ -90,7 +90,7 @@ reth-chainspec = { git = "https://github.com/okx/reth", rev = "2de4f640725fb0966
 reth-cli = { git = "https://github.com/okx/reth", rev = "2de4f640725fb0966c177999dd02fad5575af7c2" }
 reth-cli-commands = { git = "https://github.com/okx/reth", rev = "2de4f640725fb0966c177999dd02fad5575af7c2" }
 reth-cli-util = { git = "https://github.com/okx/reth", rev = "2de4f640725fb0966c177999dd02fad5575af7c2" }
-reth-codecs = { git = "https://github.com/okx/reth", rev = "2de4f640725fb0966c177999dd02fad5575af7c2", default-features = false }
+reth-codecs = { version = "0.1.0", default-features = false }
 reth-db = { git = "https://github.com/okx/reth", rev = "2de4f640725fb0966c177999dd02fad5575af7c2", default-features = false }
 reth-db-api = { git = "https://github.com/okx/reth", rev = "2de4f640725fb0966c177999dd02fad5575af7c2", default-features = false }
 reth-db-models = { git = "https://github.com/okx/reth", rev = "2de4f640725fb0966c177999dd02fad5575af7c2", default-features = false }

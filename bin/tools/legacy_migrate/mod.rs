@@ -1,257 +1,431 @@
-mod migrate;
-mod progress;
+//! `legacy-migrate` command for migrating v1 storage layout to v2.
+//!
+//! Ported from upstream reth's `db migrate-v2` command
+//! (`crates/cli/commands/src/db/migrate_v2.rs`). Adapted for XLayer:
+//!   * wrapped in our CLI command shape (`EnvironmentArgs<OpChainSpec>`)
+//!   * supports a non-zero genesis block (XLayer mainnet does not start at 0)
+//!
+//! The migration:
+//!   1. Migrates changesets + receipts from MDBX to static files
+//!   2. Flips `StorageSettings` to v2
+//!   3. Clears recomputable MDBX tables + resets stage checkpoints
+//!   4. Compacts MDBX (with atomic backup-and-swap)
+//!
+//! After this completes the node must be restarted so the pipeline can rebuild
+//! the cleared tables.
 
-use std::time::Instant;
-
+use alloy_primitives::Address;
 use clap::Parser;
 use eyre::Result;
-use tracing::{info, warn};
-
 use reth_chainspec::ChainSpecProvider;
 use reth_cli::chainspec::ChainSpecParser;
 use reth_cli_commands::common::{AccessRights, CliNodeTypes, Environment, EnvironmentArgs};
-use reth_db::{tables, DatabaseEnv};
+use reth_db::{
+    mdbx::{self, ffi},
+    models::StorageBeforeTx,
+    DatabaseEnv,
+};
+use reth_db_api::{
+    cursor::DbCursorRO,
+    database::Database,
+    table::Table,
+    tables,
+    transaction::{DbTx, DbTxMut},
+};
+use reth_node_builder::NodeTypesWithDBAdapter;
 use reth_optimism_chainspec::OpChainSpec;
-use reth_provider::{MetadataWriter, ProviderFactory, StaticFileProviderFactory};
+use reth_provider::{
+    providers::ProviderNodeTypes, DBProvider, DatabaseProviderFactory, MetadataProvider,
+    MetadataWriter, ProviderFactory, PruneCheckpointReader, StageCheckpointWriter,
+    StaticFileProviderFactory, StaticFileWriter, StorageSettings,
+};
+use reth_prune_types::PruneSegment;
+use reth_stages_types::{StageCheckpoint, StageId};
 use reth_static_file_types::StaticFileSegment;
-use reth_storage_api::{BlockNumReader, DBProvider};
+use reth_storage_api::StageCheckpointReader;
+use tracing::info;
 
-use migrate::{migrate_to_rocksdb, migrate_to_static_files};
-
-/// Migrate from legacy MDBX storage to new RocksDB + static files.
+/// Migrate from legacy v1 storage layout to v2 (changesets + receipts → static files).
 #[derive(Debug, Parser)]
 pub struct LegacyMigrateCommand<C: ChainSpecParser> {
     #[command(flatten)]
     env: EnvironmentArgs<C>,
-
-    /// Block batch size for processing.
-    #[arg(long, default_value = "10000", value_parser = clap::value_parser!(u64).range(1..))]
-    batch_size: u64,
-
-    /// Skip static file migration.
-    #[arg(long)]
-    skip_static_files: bool,
-
-    /// Skip RocksDB migration.
-    #[arg(long)]
-    skip_rocksdb: bool,
-
-    /// Keep migrated MDBX tables (don't drop them after migration).
-    #[arg(long)]
-    keep_mdbx: bool,
 }
 
 impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> LegacyMigrateCommand<C> {
-    /// Execute the migration.
+    /// Execute the full v1 → v2 migration.
     pub async fn execute<N>(&self, runtime: reth_tasks::Runtime) -> Result<()>
     where
         N: CliNodeTypes<ChainSpec = C::ChainSpec>,
+        N::Primitives: reth_primitives_traits::NodePrimitives<
+            Receipt: reth_db_api::table::Value + reth_codecs::Compact,
+        >,
     {
         let Environment { provider_factory, .. } = self.env.init::<N>(AccessRights::RW, runtime)?;
 
-        // Get genesis block number from chain spec
+        // === Phase 0: Preflight ===
+        info!(target: "reth::cli", "Starting v1 → v2 storage migration");
+
+        let provider = provider_factory.provider()?;
+        let current_settings = provider.storage_settings()?;
+
+        if current_settings.is_some_and(|s| s.is_v2()) {
+            info!(target: "reth::cli", "Storage is already v2, nothing to do");
+            return Ok(());
+        }
+
+        let tip =
+            provider.get_stage_checkpoint(StageId::Execution)?.map(|c| c.block_number).unwrap_or(0);
+
+        // XLayer-specific: chain may have a non-zero genesis block. We must never
+        // scan or attempt to write static-file entries below it. The static-file
+        // provider itself is already genesis-aware (see `EnvironmentArgs::init`
+        // calling `with_genesis_block_number`); this floor only avoids walking
+        // empty MDBX keys below genesis.
         let genesis_block = provider_factory.chain_spec().genesis_header().number;
 
-        let provider = provider_factory.provider()?.disable_long_read_transaction_safety();
-        let to_block = provider.best_block_number()?;
-        let prune_modes = provider.prune_modes_ref().clone();
-        drop(provider);
+        info!(target: "reth::cli", tip, genesis_block, "Chain tip block number");
 
-        // Validate chain state
-        if to_block < genesis_block {
+        if tip < genesis_block {
             eyre::bail!(
-                "Invalid chain state: best block {} is before genesis block {}",
-                to_block,
-                genesis_block
+                "Invalid chain state: execution checkpoint {} is before genesis block {}",
+                tip,
+                genesis_block,
             );
         }
 
-        info!(
-            target: "reth::cli",
-            genesis_block,
-            to_block,
-            batch_size = self.batch_size,
-            "Migration parameters"
-        );
+        let sf_provider = provider_factory.static_file_provider();
 
-        // Check if receipts can be migrated (no general or contract log pruning).
-        // Both fields must be unset: `receipts` covers general pruning (e.g. by distance),
-        // `receipts_log_filter` covers per-contract log pruning.  If either is active the
-        // MDBX receipt table may be incomplete and migration would produce gaps.
-        let can_migrate_receipts =
-            prune_modes.receipts.is_none() && prune_modes.receipts_log_filter.is_empty();
-        if !can_migrate_receipts {
-            warn!(target: "reth::cli", "Receipts will NOT be migrated due to active receipt pruning");
+        for segment in [StaticFileSegment::AccountChangeSets, StaticFileSegment::StorageChangeSets]
+        {
+            if sf_provider.get_highest_static_file_block(segment).is_some() {
+                eyre::bail!(
+                    "Static file segment {segment:?} already contains data. \
+                     Cannot migrate — target must be empty."
+                );
+            }
         }
 
-        // Start tracking time
-        let start_time = Instant::now();
+        drop(provider);
 
-        // Run static files and RocksDB migrations in parallel
-        std::thread::scope(|s| {
-            let static_files_handle = if !self.skip_static_files {
-                Some(s.spawn(|| {
-                    info!(target: "reth::cli", "Starting static files migration");
-                    migrate_to_static_files::<N>(
-                        &provider_factory,
-                        genesis_block,
-                        to_block,
-                        can_migrate_receipts,
-                    )
-                }))
-            } else {
-                None
-            };
+        // === Phase 1: Migrate changesets → static files ===
+        Self::migrate_account_changesets(&provider_factory, tip, genesis_block)?;
+        Self::migrate_storage_changesets(&provider_factory, tip, genesis_block)?;
 
-            let rocksdb_handle = if !self.skip_rocksdb {
-                Some(s.spawn(|| {
-                    info!(target: "reth::cli", "Starting RocksDB migration");
-                    migrate_to_rocksdb::<N>(&provider_factory, self.batch_size)
-                }))
-            } else {
-                None
-            };
+        // === Phase 2: Migrate receipts → static files ===
+        Self::migrate_receipts::<NodeTypesWithDBAdapter<N, DatabaseEnv>>(
+            &provider_factory,
+            tip,
+            genesis_block,
+        )?;
 
-            // Wait for static files migration
-            if let Some(handle) = static_files_handle {
-                handle.join().expect("static files thread panicked")?;
-            }
+        // === Phase 3: Flip metadata to v2 ===
+        info!(target: "reth::cli", "Writing StorageSettings v2 metadata");
+        {
+            let provider_rw = provider_factory.database_provider_rw()?;
+            provider_rw.write_storage_settings(StorageSettings::v2())?;
+            provider_rw.commit()?;
+        }
+        info!(target: "reth::cli", "Storage settings updated to v2");
 
-            if let Some(handle) = rocksdb_handle {
-                handle.join().expect("rocksdb thread panicked")?;
-            }
+        // === Phase 4: Clear recomputable tables ===
+        Self::clear_recomputable_tables(&provider_factory)?;
 
-            Ok::<_, eyre::Error>(())
-        })?;
+        // === Phase 5: Compact MDBX (before pipeline, so it runs on a smaller DB) ===
+        let db_path = provider_factory.db_ref().path().to_path_buf();
+        Self::compact_mdbx(provider_factory.db_ref())?;
 
-        // Finalize: update storage settings and optionally drop migrated MDBX tables
-        info!(target: "reth::cli", "Finalizing migration");
-        self.finalize::<N>(&provider_factory, can_migrate_receipts)?;
+        // Drop to release DB handle for swap.
+        drop(provider_factory);
 
-        let elapsed = start_time.elapsed();
+        let compact_path = db_path.with_file_name("db_compact");
+        Self::swap_compacted_db(&db_path, &compact_path)?;
+
         info!(
             target: "reth::cli",
-            elapsed_secs = elapsed.as_secs(),
-            "Migration completed"
+            "Migration complete. Restart the node and let it run the pipeline to rebuild the remaining data."
         );
-
         Ok(())
     }
 
-    fn finalize<N: CliNodeTypes>(
-        &self,
-        provider_factory: &ProviderFactory<
-            reth_node_builder::NodeTypesWithDBAdapter<N, DatabaseEnv>,
-        >,
-        can_migrate_receipts: bool,
+    fn migrate_account_changesets<N: ProviderNodeTypes>(
+        factory: &ProviderFactory<N>,
+        tip: u64,
+        genesis_block: u64,
     ) -> Result<()> {
-        use reth_db_api::transaction::DbTxMut;
-        use reth_provider::StorageSettings;
+        info!(target: "reth::cli", "Migrating AccountChangeSets → static files");
+        let provider = factory.provider()?.disable_long_read_transaction_safety();
+        let sf_provider = factory.static_file_provider();
 
-        let mut provider = provider_factory.provider_rw()?;
+        let mut cursor = provider.tx_ref().cursor_read::<tables::AccountChangeSets>()?;
 
-        // Check if TransactionSenders actually has data in static files
-        // If not, log a warning (v2 storage assumes all segments are present)
-        let static_file_provider = provider_factory.static_file_provider();
-        let senders_have_data = static_file_provider
-            .get_highest_static_file_tx(StaticFileSegment::TransactionSenders)
-            .is_some();
+        // Floor at max(prune_checkpoint + 1, genesis_block). Pruning tells us how
+        // much MDBX has been pruned away; genesis tells us where the chain even
+        // starts. Scanning below either is wasted work.
+        let first_block = provider
+            .get_prune_checkpoint(PruneSegment::AccountHistory)?
+            .and_then(|cp| cp.block_number)
+            .map_or(0, |b| b + 1)
+            .max(genesis_block);
 
-        if !senders_have_data {
-            warn!(
-                target: "reth::cli",
-                "TransactionSenders has no data in static files"
-            );
+        let mut writer = sf_provider.latest_writer(StaticFileSegment::AccountChangeSets)?;
+        // Fill the leading gap [genesis, first_block) with empty entries (only
+        // when there's actually a gap from pruning). For non-zero genesis
+        // chains we must first bridge the writer to genesis because its
+        // `next_block_number` starts at genesis, not 0 — and upstream's
+        // `ensure_at_block` opens with `increment_block(0)` for fresh writers.
+        if first_block > genesis_block {
+            if genesis_block > 0 && writer.current_block_number().is_none() {
+                writer.increment_block(genesis_block)?;
+            }
+            writer.ensure_at_block(first_block - 1)?;
         }
 
-        if !can_migrate_receipts {
-            warn!(
-                target: "reth::cli",
-                "Receipts were not migrated due to contract log pruning"
-            );
-        }
+        let mut count = 0u64;
+        let mut walker = cursor.walk(Some(first_block))?.peekable();
 
-        // Only write v2 storage settings when both migrations have completed AND all segments
-        // were successfully migrated (including receipts).  If receipts were skipped due to
-        // pruning, v2 routing would direct receipt queries to static files that contain no
-        // receipt data.  Since StorageSettings::v2() is all-or-nothing, we must keep v1
-        // settings and preserve the MDBX tables so the node can still serve all queries.
-        if self.skip_static_files || self.skip_rocksdb || !can_migrate_receipts {
-            warn!(
-                target: "reth::cli",
-                skip_static_files = self.skip_static_files,
-                skip_rocksdb = self.skip_rocksdb,
-                can_migrate_receipts,
-                "Skipping storage settings update: all migrations — including receipts — must \
-                 complete before switching to v2 storage layout. Re-run on a node without receipt \
-                 pruning, or pass --keep-mdbx and re-run after resolving the pruning configuration."
-            );
-        } else {
-            // Enable v2 storage layout (static files + RocksDB routing)
-            let new_settings = StorageSettings::v2();
-            info!(target: "reth::cli", ?new_settings, "Writing storage settings");
-            provider.write_storage_settings(new_settings)?;
-        }
+        for block in first_block..=tip {
+            let mut entries = Vec::new();
 
-        // Drop migrated MDBX tables unless --keep-mdbx is set
-        if !self.keep_mdbx {
-            warn!(
-                target: "reth::cli",
-                "Clearing MDBX tables. This may take a long time (potentially hours) for large databases. Use --keep-mdbx to skip this step."
-            );
-
-            let tx = provider.tx_mut();
-
-            // Only clear MDBX static-file tables when v2 settings were written.  If receipts
-            // could not be migrated we kept v1 settings, so the node still reads all of these
-            // tables via MDBX — clearing them here would make that data permanently inaccessible.
-            if !self.skip_static_files && can_migrate_receipts {
-                info!(target: "reth::cli", "Dropping migrated static file tables from MDBX");
-
-                info!(target: "reth::cli", "Clearing TransactionSenders table...");
-                tx.clear::<tables::TransactionSenders>()?;
-                info!(target: "reth::cli", "TransactionSenders table cleared");
-
-                info!(target: "reth::cli", "Clearing AccountChangeSets table...");
-                tx.clear::<tables::AccountChangeSets>()?;
-                info!(target: "reth::cli", "AccountChangeSets table cleared");
-
-                info!(target: "reth::cli", "Clearing StorageChangeSets table...");
-                tx.clear::<tables::StorageChangeSets>()?;
-                info!(target: "reth::cli", "StorageChangeSets table cleared");
-
-                info!(target: "reth::cli", "Clearing Receipts table...");
-                tx.clear::<tables::Receipts<<<N as reth_node_builder::NodeTypes>::Primitives as reth_primitives_traits::NodePrimitives>::Receipt>>()?;
-                info!(target: "reth::cli", "Receipts table cleared");
-            } else if !self.skip_static_files {
-                info!(
-                    target: "reth::cli",
-                    "Keeping MDBX static-file tables: receipts were not migrated so v2 settings \
-                     were not written; node will continue reading these tables via v1 routing."
-                );
+            while let Some(Ok((block_number, _))) = walker.peek() {
+                if *block_number != block {
+                    break;
+                }
+                let (_, entry) = walker.next().expect("peeked")?;
+                entries.push(entry);
             }
 
-            if !self.skip_rocksdb {
-                info!(target: "reth::cli", "Dropping migrated RocksDB tables from MDBX");
-
-                info!(target: "reth::cli", "Clearing TransactionHashNumbers table...");
-                tx.clear::<tables::TransactionHashNumbers>()?;
-                info!(target: "reth::cli", "TransactionHashNumbers table cleared");
-
-                info!(target: "reth::cli", "Clearing AccountsHistory table...");
-                tx.clear::<tables::AccountsHistory>()?;
-                info!(target: "reth::cli", "AccountsHistory table cleared");
-
-                info!(target: "reth::cli", "Clearing StoragesHistory table...");
-                tx.clear::<tables::StoragesHistory>()?;
-                info!(target: "reth::cli", "StoragesHistory table cleared");
-            }
-        } else {
-            info!(target: "reth::cli", "Keeping MDBX tables (--keep-mdbx)");
+            count += entries.len() as u64;
+            writer.append_account_changeset(entries, block)?;
         }
 
-        provider.commit()?;
+        writer.commit()?;
 
+        info!(target: "reth::cli", count, "AccountChangeSets migrated");
+        Ok(())
+    }
+
+    fn migrate_storage_changesets<N: ProviderNodeTypes>(
+        factory: &ProviderFactory<N>,
+        tip: u64,
+        genesis_block: u64,
+    ) -> Result<()> {
+        info!(target: "reth::cli", "Migrating StorageChangeSets → static files");
+        let provider = factory.provider()?.disable_long_read_transaction_safety();
+        let sf_provider = factory.static_file_provider();
+
+        let mut cursor = provider.tx_ref().cursor_read::<tables::StorageChangeSets>()?;
+
+        let first_block = provider
+            .get_prune_checkpoint(PruneSegment::StorageHistory)?
+            .and_then(|cp| cp.block_number)
+            .map_or(0, |b| b + 1)
+            .max(genesis_block);
+
+        let mut writer = sf_provider.latest_writer(StaticFileSegment::StorageChangeSets)?;
+        if first_block > genesis_block {
+            if genesis_block > 0 && writer.current_block_number().is_none() {
+                writer.increment_block(genesis_block)?;
+            }
+            writer.ensure_at_block(first_block - 1)?;
+        }
+
+        let mut count = 0u64;
+        let mut walker = cursor.walk(Some((first_block, Address::ZERO).into()))?.peekable();
+
+        for block in first_block..=tip {
+            let mut entries = Vec::new();
+
+            while let Some(Ok((key, _))) = walker.peek() {
+                if key.block_number() != block {
+                    break;
+                }
+                let (key, entry) = walker.next().expect("peeked")?;
+                entries.push(StorageBeforeTx {
+                    address: key.address(),
+                    key: entry.key,
+                    value: entry.value,
+                });
+            }
+
+            count += entries.len() as u64;
+            writer.append_storage_changeset(entries, block)?;
+        }
+
+        writer.commit()?;
+
+        info!(target: "reth::cli", count, "StorageChangeSets migrated");
+        Ok(())
+    }
+
+    fn migrate_receipts<N: ProviderNodeTypes>(
+        factory: &ProviderFactory<N>,
+        tip: u64,
+        genesis_block: u64,
+    ) -> Result<()>
+    where
+        N::Primitives: reth_primitives_traits::NodePrimitives<
+            Receipt: reth_db_api::table::Value + reth_codecs::Compact,
+        >,
+    {
+        let provider = factory.provider()?;
+        if !provider.prune_modes_ref().receipts_log_filter.is_empty() {
+            info!(
+                target: "reth::cli",
+                "Receipt log filter pruning is enabled, keeping receipts in MDBX"
+            );
+            return Ok(());
+        }
+        drop(provider);
+
+        let sf_provider = factory.static_file_provider();
+        let existing = sf_provider.get_highest_static_file_block(StaticFileSegment::Receipts);
+
+        if existing.is_some_and(|b| b >= tip) {
+            info!(target: "reth::cli", "Receipts already in static files, skipping");
+            return Ok(());
+        }
+
+        info!(target: "reth::cli", "Migrating Receipts → static files");
+
+        let provider = factory.provider()?.disable_long_read_transaction_safety();
+        let prune_start = provider
+            .get_prune_checkpoint(PruneSegment::Receipts)?
+            .and_then(|cp| cp.block_number)
+            .map_or(0, |b| b + 1);
+        let first_block = prune_start.max(existing.map_or(0, |b| b + 1)).max(genesis_block);
+
+        if first_block > genesis_block {
+            let mut writer = sf_provider.latest_writer(StaticFileSegment::Receipts)?;
+            if genesis_block > 0 && writer.current_block_number().is_none() {
+                writer.increment_block(genesis_block)?;
+            }
+            writer.ensure_at_block(first_block - 1)?;
+            writer.commit()?;
+        }
+
+        let before = sf_provider
+            .get_highest_static_file_tx(StaticFileSegment::Receipts)
+            .map_or(0, |tx| tx + 1);
+
+        let block_range = first_block..=tip;
+
+        let segment = reth_static_file::segments::Receipts;
+        reth_static_file::segments::Segment::copy_to_static_files(&segment, provider, block_range)?;
+
+        sf_provider.commit()?;
+
+        let after = sf_provider
+            .get_highest_static_file_tx(StaticFileSegment::Receipts)
+            .map_or(0, |tx| tx + 1);
+        let count = after - before;
+        info!(target: "reth::cli", count, "Receipts migrated");
+        Ok(())
+    }
+
+    /// Clears tables that can be recomputed by the pipeline and resets their
+    /// stage checkpoints.
+    fn clear_recomputable_tables<N: ProviderNodeTypes>(factory: &ProviderFactory<N>) -> Result<()> {
+        info!(target: "reth::cli", "Clearing recomputable MDBX tables");
+        let db = factory.db_ref();
+
+        macro_rules! clear_table {
+            ($table:ty) => {{
+                let tx = db.tx_mut()?;
+                tx.clear::<$table>()?;
+                tx.commit()?;
+                info!(target: "reth::cli", table = <$table as Table>::NAME, "Cleared");
+            }};
+        }
+
+        // Migrated changeset tables (now in static files)
+        clear_table!(tables::AccountChangeSets);
+        clear_table!(tables::StorageChangeSets);
+
+        // Senders — rebuilt by SenderRecovery
+        clear_table!(tables::TransactionSenders);
+
+        // Indices — rebuilt by TransactionLookup / IndexAccountHistory / IndexStorageHistory
+        clear_table!(tables::TransactionHashNumbers);
+        clear_table!(tables::AccountsHistory);
+        clear_table!(tables::StoragesHistory);
+
+        // Plain state — superseded by hashed state in v2
+        clear_table!(tables::PlainAccountState);
+        clear_table!(tables::PlainStorageState);
+
+        // Trie — rebuilt by MerkleExecute
+        clear_table!(tables::AccountsTrie);
+        clear_table!(tables::StoragesTrie);
+
+        // Reset stage checkpoints so the pipeline rebuilds everything
+        info!(target: "reth::cli", "Resetting stage checkpoints");
+        let provider_rw = factory.database_provider_rw()?;
+        for stage in [
+            StageId::SenderRecovery,
+            StageId::TransactionLookup,
+            StageId::IndexAccountHistory,
+            StageId::IndexStorageHistory,
+            StageId::MerkleExecute,
+            StageId::MerkleUnwind,
+        ] {
+            provider_rw.save_stage_checkpoint(stage, StageCheckpoint::new(0))?;
+            info!(target: "reth::cli", %stage, "Checkpoint reset to 0");
+        }
+        provider_rw.save_stage_checkpoint_progress(StageId::MerkleExecute, vec![])?;
+        provider_rw.commit()?;
+
+        info!(target: "reth::cli", "Recomputable tables cleared");
+        Ok(())
+    }
+
+    /// Creates a compacted copy of the MDBX database next to the original.
+    fn compact_mdbx(db: &mdbx::DatabaseEnv) -> Result<()> {
+        let db_path = db.path();
+        let compact_path = db_path.with_file_name("db_compact");
+
+        std::fs::create_dir_all(&compact_path)?;
+
+        info!(target: "reth::cli", ?db_path, ?compact_path, "Compacting MDBX database");
+
+        let compact_dest = compact_path.join("mdbx.dat");
+        let dest_cstr = std::ffi::CString::new(
+            compact_dest.to_str().ok_or_else(|| eyre::eyre!("compact path must be valid UTF-8"))?,
+        )?;
+
+        let flags = ffi::MDBX_CP_COMPACT | ffi::MDBX_CP_FORCE_DYNAMIC_SIZE;
+
+        let rc = db.with_raw_env_ptr(|env_ptr| unsafe {
+            ffi::mdbx_env_copy(env_ptr, dest_cstr.as_ptr(), flags)
+        });
+
+        if rc != 0 {
+            eyre::bail!("mdbx_env_copy failed with error code {rc}: {}", unsafe {
+                std::ffi::CStr::from_ptr(ffi::mdbx_strerror(rc)).to_string_lossy()
+            });
+        }
+
+        info!(target: "reth::cli", "MDBX compaction complete");
+        Ok(())
+    }
+
+    /// Atomically swaps the original MDBX database with the compacted copy.
+    fn swap_compacted_db(db_path: &std::path::Path, compact_path: &std::path::Path) -> Result<()> {
+        let backup_path = db_path.with_file_name("db_pre_compact");
+
+        info!(target: "reth::cli", ?db_path, ?compact_path, "Swapping compacted database");
+
+        std::fs::rename(db_path, &backup_path)?;
+
+        if let Err(e) = std::fs::rename(compact_path, db_path) {
+            // Best-effort rollback; if even this fails the original DB is at backup_path.
+            let _ = std::fs::rename(&backup_path, db_path);
+            return Err(e.into());
+        }
+
+        std::fs::remove_dir_all(&backup_path)?;
+
+        info!(target: "reth::cli", "Database compaction swap complete");
         Ok(())
     }
 }
