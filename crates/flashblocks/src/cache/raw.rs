@@ -1100,4 +1100,240 @@ mod tests {
         let args = cache_disabled.try_get_buildable_args(100).expect("should be buildable");
         assert!(args.access_list.is_none(), "flag on → access list stripped");
     }
+
+    // ========================================================================
+    // Verification tests for `access_list_up_to` against reth's
+    // `bal_to_hashed_post_state` consumer contract:
+    //   * per-tx-index vectors: `.last()` returns the entry with the largest
+    //     `block_access_index`.
+    //   * per-slot final value: linear iter + insert keyed by slot
+    //     (last-iteration-wins) yields the actual final post-state.
+    // ========================================================================
+
+    use alloy_eip7928::{NonceChange, SlotChanges, StorageChange};
+    use std::collections::HashMap;
+
+    /// Slot/value list per slot used by [`make_account_changes_full`].
+    type SlotChangeSpec = (U256, Vec<(u64, U256)>);
+
+    /// Richer counterpart to [`make_account_changes`] — accepts nonce and
+    /// storage in addition to balance. Per-tx-index vectors are emitted
+    /// already sorted ascending by `block_access_index` to mirror what the
+    /// builder produces on the wire post `f699366`.
+    fn make_account_changes_full(
+        addr: Address,
+        balance_changes: Vec<(u64, U256)>,
+        nonce_changes: Vec<(u64, u64)>,
+        storage_changes: Vec<SlotChangeSpec>,
+    ) -> AccountChanges {
+        let mut bc: Vec<BalanceChange> = balance_changes
+            .into_iter()
+            .map(|(tx_idx, val)| BalanceChange { block_access_index: tx_idx, post_balance: val })
+            .collect();
+        bc.sort_unstable_by_key(|c| c.block_access_index);
+
+        let mut nc: Vec<NonceChange> = nonce_changes
+            .into_iter()
+            .map(|(tx_idx, val)| NonceChange { block_access_index: tx_idx, new_nonce: val })
+            .collect();
+        nc.sort_unstable_by_key(|c| c.block_access_index);
+
+        let storage_changes: Vec<SlotChanges> = storage_changes
+            .into_iter()
+            .map(|(slot, changes)| {
+                let mut changes: Vec<StorageChange> = changes
+                    .into_iter()
+                    .map(|(tx_idx, val)| StorageChange {
+                        block_access_index: tx_idx,
+                        new_value: val,
+                    })
+                    .collect();
+                changes.sort_unstable_by_key(|c| c.block_access_index);
+                SlotChanges { slot, changes }
+            })
+            .collect();
+
+        AccountChanges {
+            address: addr,
+            balance_changes: bc,
+            nonce_changes: nc,
+            storage_changes,
+            ..Default::default()
+        }
+    }
+
+    /// Mimics reth's `bal_to_hashed_post_state` per-slot extraction: iterate
+    /// outer `storage_changes` linearly, insert keyed by slot, last wins.
+    fn extract_final_storage(ac: &AccountChanges) -> HashMap<U256, U256> {
+        let mut out = HashMap::new();
+        for sc in &ac.storage_changes {
+            if let Some(last) = sc.changes.last() {
+                out.insert(sc.slot, last.new_value);
+            }
+        }
+        out
+    }
+
+    fn aggregate_for(addr: Address, fbs: Vec<OpFlashblockPayload>) -> AccountChanges {
+        let mut cache = TestRawCache::new(false);
+        for fb in fbs {
+            cache.handle_flashblock(wrap(fb)).expect("flashblock insert");
+        }
+        cache
+            .try_get_buildable_args(100)
+            .expect("buildable")
+            .access_list
+            .expect("access list present")
+            .into_iter()
+            .find(|ac| ac.address == addr)
+            .expect("address present in aggregated access list")
+    }
+
+    #[test]
+    fn last_balance_change_resolves_across_three_flashblocks() {
+        let factory = TestFlashBlockFactory::new();
+        let mk = |bal: Vec<(u64, U256)>| make_account_changes_full(ADDR_A, bal, vec![], vec![]);
+        let fb0 = factory
+            .flashblock_at(0)
+            .access_list(Some(vec![mk(vec![(2, U256::from(20)), (5, U256::from(50))])]))
+            .build();
+        let fb1 = factory
+            .flashblock_after(&fb0)
+            .access_list(Some(vec![mk(vec![(8, U256::from(80)), (11, U256::from(110))])]))
+            .build();
+        let fb2 = factory
+            .flashblock_after(&fb1)
+            .access_list(Some(vec![mk(vec![(15, U256::from(150)), (20, U256::from(200))])]))
+            .build();
+
+        let merged = aggregate_for(ADDR_A, vec![fb0, fb1, fb2]);
+
+        // .last() must return tx_idx 20's value (the global max).
+        assert_eq!(merged.balance_changes.last().unwrap().post_balance, U256::from(200));
+    }
+
+    #[test]
+    fn last_nonce_change_resolves_across_three_flashblocks() {
+        let factory = TestFlashBlockFactory::new();
+        let mk = |n: Vec<(u64, u64)>| make_account_changes_full(ADDR_A, vec![], n, vec![]);
+        let fb0 =
+            factory.flashblock_at(0).access_list(Some(vec![mk(vec![(1, 1), (3, 2)])])).build();
+        let fb1 = factory
+            .flashblock_after(&fb0)
+            .access_list(Some(vec![mk(vec![(7, 3), (9, 4)])]))
+            .build();
+        let fb2 = factory
+            .flashblock_after(&fb1)
+            .access_list(Some(vec![mk(vec![(12, 5), (18, 6)])]))
+            .build();
+
+        let merged = aggregate_for(ADDR_A, vec![fb0, fb1, fb2]);
+
+        assert_eq!(merged.nonce_changes.last().unwrap().new_nonce, 6);
+    }
+
+    #[test]
+    fn same_slot_modified_in_every_flashblock_resolves_to_latest_write() {
+        // Same slot in every FB → outer vec carries 3 SlotChanges entries
+        // for that slot. Last-iteration-wins must converge to FB2's tx 20.
+        let factory = TestFlashBlockFactory::new();
+        let slot = U256::from(0x1);
+        let mk = |c: Vec<(u64, U256)>| {
+            make_account_changes_full(ADDR_A, vec![], vec![], vec![(slot, c)])
+        };
+        let fb0 = factory
+            .flashblock_at(0)
+            .access_list(Some(vec![mk(vec![(2, U256::from(200)), (4, U256::from(400))])]))
+            .build();
+        let fb1 = factory
+            .flashblock_after(&fb0)
+            .access_list(Some(vec![mk(vec![(8, U256::from(800)), (10, U256::from(1000))])]))
+            .build();
+        let fb2 = factory
+            .flashblock_after(&fb1)
+            .access_list(Some(vec![mk(vec![(15, U256::from(1500)), (20, U256::from(2000))])]))
+            .build();
+
+        let merged = aggregate_for(ADDR_A, vec![fb0, fb1, fb2]);
+
+        assert_eq!(merged.storage_changes.len(), 3, "one SlotChanges per FB that touched the slot");
+        assert_eq!(extract_final_storage(&merged).get(&slot).copied(), Some(U256::from(2000)));
+    }
+
+    #[test]
+    fn slot_modified_with_gap_resolves_to_latest_touching_flashblock() {
+        // Slot in FB0 and FB2 only; FB1 touches the address via balance.
+        let factory = TestFlashBlockFactory::new();
+        let slot = U256::from(0x1);
+        let fb0 = factory
+            .flashblock_at(0)
+            .access_list(Some(vec![make_account_changes_full(
+                ADDR_A,
+                vec![],
+                vec![],
+                vec![(slot, vec![(3, U256::from(100))])],
+            )]))
+            .build();
+        let fb1 = factory
+            .flashblock_after(&fb0)
+            .access_list(Some(vec![make_account_changes_full(
+                ADDR_A,
+                vec![(7, U256::from(7777))],
+                vec![],
+                vec![],
+            )]))
+            .build();
+        let fb2 = factory
+            .flashblock_after(&fb1)
+            .access_list(Some(vec![make_account_changes_full(
+                ADDR_A,
+                vec![],
+                vec![],
+                vec![(slot, vec![(13, U256::from(999))])],
+            )]))
+            .build();
+
+        let merged = aggregate_for(ADDR_A, vec![fb0, fb1, fb2]);
+
+        // FB2 (tx 13) wins for storage; FB1 (tx 7) wins for balance.
+        assert_eq!(extract_final_storage(&merged).get(&slot).copied(), Some(U256::from(999)));
+        assert_eq!(merged.balance_changes.last().unwrap().post_balance, U256::from(7777));
+    }
+
+    #[test]
+    fn multi_slot_each_resolves_independently_across_flashblocks() {
+        // s1: FB0(tx2) + FB2(tx14)              → FB2 wins
+        // s2: FB1 only (tx6, tx8)               → FB1 tx8 wins
+        // s3: FB0(tx4) + FB1(tx7) + FB2(tx12)   → FB2 wins
+        let factory = TestFlashBlockFactory::new();
+        let (s1, s2, s3) = (U256::from(0x1), U256::from(0x2), U256::from(0x3));
+        let mk = |c: Vec<SlotChangeSpec>| make_account_changes_full(ADDR_A, vec![], vec![], c);
+        let fb0 = factory
+            .flashblock_at(0)
+            .access_list(Some(vec![mk(vec![
+                (s1, vec![(2, U256::from(11))]),
+                (s3, vec![(4, U256::from(33))]),
+            ])]))
+            .build();
+        let fb1 = factory
+            .flashblock_after(&fb0)
+            .access_list(Some(vec![mk(vec![
+                (s2, vec![(6, U256::from(60)), (8, U256::from(80))]),
+                (s3, vec![(7, U256::from(70))]),
+            ])]))
+            .build();
+        let fb2 = factory
+            .flashblock_after(&fb1)
+            .access_list(Some(vec![mk(vec![
+                (s1, vec![(14, U256::from(140))]),
+                (s3, vec![(12, U256::from(120))]),
+            ])]))
+            .build();
+
+        let storage = extract_final_storage(&aggregate_for(ADDR_A, vec![fb0, fb1, fb2]));
+
+        assert_eq!(storage.get(&s1).copied(), Some(U256::from(140)));
+        assert_eq!(storage.get(&s2).copied(), Some(U256::from(80)));
+        assert_eq!(storage.get(&s3).copied(), Some(U256::from(120)));
+    }
 }

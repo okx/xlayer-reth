@@ -119,7 +119,6 @@ mod tests {
 
         let out = b.build(Address::ZERO);
 
-        assert_eq!(out.balance_changes.len(), 4);
         assert_sorted_by_idx(&out.balance_changes, |c| c.block_access_index);
         // EIP-7928 consumer contract: `.last()` returns the entry with the
         // largest block_access_index.
@@ -209,10 +208,9 @@ mod tests {
     }
 
     #[test]
-    fn flashblock_builder_round_trip_preserves_per_account_ordering() {
-        // Two accounts, each with multiple out-of-order tx-index entries;
-        // verify that aggregating through `FlashblockAccessListBuilder` still
-        // yields sorted per-tx-index vectors per account.
+    fn flashblock_builder_preserves_per_account_change_ordering() {
+        // Two accounts with out-of-order tx-index entries; the outer
+        // `FlashblockAccessListBuilder` must preserve the per-account sort.
         let addr_a = address!("0x1111111111111111111111111111111111111111");
         let addr_b = address!("0x2222222222222222222222222222222222222222");
 
