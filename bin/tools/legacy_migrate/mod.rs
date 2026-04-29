@@ -129,7 +129,7 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> LegacyMigrateCommand<C> {
         info!(target: "reth::cli", "Storage settings updated to v2");
 
         // === Phase 4: Clear recomputable tables ===
-        Self::clear_recomputable_tables(&provider_factory)?;
+        Self::clear_recomputable_tables(&provider_factory, genesis_block)?;
 
         // === Phase 5: Compact MDBX (before pipeline, so it runs on a smaller DB) ===
         let db_path = provider_factory.db_ref().path().to_path_buf();
@@ -325,7 +325,10 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> LegacyMigrateCommand<C> {
 
     /// Clears tables that can be recomputed by the pipeline and resets their
     /// stage checkpoints.
-    fn clear_recomputable_tables<N: ProviderNodeTypes>(factory: &ProviderFactory<N>) -> Result<()> {
+    fn clear_recomputable_tables<N: ProviderNodeTypes>(
+        factory: &ProviderFactory<N>,
+        genesis_block: u64,
+    ) -> Result<()> {
         info!(target: "reth::cli", "Clearing recomputable MDBX tables");
         let db = factory.db_ref();
 
@@ -358,8 +361,16 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> LegacyMigrateCommand<C> {
         clear_table!(tables::AccountsTrie);
         clear_table!(tables::StoragesTrie);
 
-        // Reset stage checkpoints so the pipeline rebuilds everything
-        info!(target: "reth::cli", "Resetting stage checkpoints");
+        // Reset stage checkpoints so the pipeline rebuilds everything.
+        // For non-zero genesis chains, set checkpoint to `genesis_block - 1`
+        // so the next block the stage processes is `genesis_block` — the
+        // first block with actual data. Resetting to 0 makes stages start
+        // at block 1 and they fail with "append at block 0 but expected
+        // block <genesis>" because the cleared tables' append invariant is
+        // anchored to the genesis block. `saturating_sub(1)` keeps zero-genesis
+        // chains at checkpoint 0 (backward compatible).
+        let reset_to = genesis_block.saturating_sub(1);
+        info!(target: "reth::cli", reset_to, "Resetting stage checkpoints");
         let provider_rw = factory.database_provider_rw()?;
         for stage in [
             StageId::SenderRecovery,
@@ -369,8 +380,8 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> LegacyMigrateCommand<C> {
             StageId::MerkleExecute,
             StageId::MerkleUnwind,
         ] {
-            provider_rw.save_stage_checkpoint(stage, StageCheckpoint::new(0))?;
-            info!(target: "reth::cli", %stage, "Checkpoint reset to 0");
+            provider_rw.save_stage_checkpoint(stage, StageCheckpoint::new(reset_to))?;
+            info!(target: "reth::cli", %stage, reset_to, "Checkpoint reset");
         }
         provider_rw.save_stage_checkpoint_progress(StageId::MerkleExecute, vec![])?;
         provider_rw.commit()?;
