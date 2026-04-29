@@ -386,25 +386,28 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> LegacyMigrateCommand<C> {
         provider_rw.save_stage_checkpoint_progress(StageId::MerkleExecute, vec![])?;
         provider_rw.commit()?;
 
-        // Bridge the TransactionSenders static file segment to `genesis_block - 1`
+        // Bridge the TransactionSenders static file segment to `genesis_block`
         // for non-zero genesis chains. After clearing the table, the segment is
         // empty (highest_static_file_block = None) but the stage checkpoint is
         // at `genesis_block - 1`. On startup, `check_consistency` sees the gap,
         // computes `unwind_target = 0`, and panics ("would trigger an unwind to
         // block 0") because unwinding below genesis is invalid. Pre-positioning
-        // the writer at `genesis_block - 1` makes the segment's tip line up
-        // with the checkpoint so SenderRecovery can append at `genesis_block`
-        // on its next run.
+        // the writer at `genesis_block` matches the pattern used for healing
+        // other segments (sf_tip = genesis_block, checkpoint = genesis_block - 1)
+        // — the consistency check then bridges the 1-block gap rather than
+        // unwinding. The writer's `next_block_number` is anchored at
+        // `genesis_block` for non-zero genesis chains, so this is the smallest
+        // value `increment_block` will accept.
         if genesis_block > 0 {
             info!(
                 target: "reth::cli",
-                bridge_to = reset_to,
+                bridge_to = genesis_block,
                 "Bridging TransactionSenders static file to genesis"
             );
             let sf_provider = factory.static_file_provider();
             let mut writer = sf_provider.latest_writer(StaticFileSegment::TransactionSenders)?;
             if writer.current_block_number().is_none() {
-                writer.increment_block(reset_to)?;
+                writer.increment_block(genesis_block)?;
                 writer.commit()?;
             }
         }
