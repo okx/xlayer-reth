@@ -1,5 +1,4 @@
 use crate::{
-    access_lists::FBALBuilderDb,
     flashblocks::utils::execution::{ExecutionInfo, TxnExecutionResult},
     metrics::BuilderMetrics,
     signer::Signer,
@@ -263,13 +262,16 @@ impl FlashblocksBuilderCtx {
     /// Executes all sequencer transactions that are included in the payload attributes.
     pub(super) fn execute_sequencer_transactions(
         &self,
-        info: &mut ExecutionInfo,
         db: &mut State<impl Database>,
-    ) -> Result<(), PayloadBuilderError> {
-        let min_tx_index = info.executed_transactions.len() as u64;
-        let mut fbal_db = FBALBuilderDb::new(&mut *db, info.access_list_builder.clone());
-        fbal_db.set_index(min_tx_index);
-        let mut evm = self.evm_config.evm_with_env(&mut fbal_db, self.evm_env.clone());
+    ) -> Result<ExecutionInfo, PayloadBuilderError> {
+        let mut info = ExecutionInfo::with_capacity(self.attributes().transactions.len());
+
+        // EIP-7928: tx K (zero-indexed in the block) records at `bal_index = K + 1`
+        // (pre-exec occupies index 0). Compute the index for the first tx in this
+        // batch from the running tx count.
+        let next_bal_index = info.executed_transactions.len() as u64 + 1;
+        db.set_bal_index(next_bal_index);
+        let mut evm = self.evm_config.evm_with_env(&mut *db, self.evm_env.clone());
 
         for sequencer_tx in &self.attributes().transactions {
             // A sequencer's block should never contain blob transactions.
@@ -295,7 +297,6 @@ impl FlashblocksBuilderCtx {
             let depositor_nonce = (self.is_regolith_active() && sequencer_tx.is_deposit())
                 .then(|| {
                     evm.db_mut()
-                        .db_mut()
                         .load_cache_account(sequencer_tx.signer())
                         .map(|acc| acc.account_info().unwrap_or_default().nonce)
                 })
@@ -345,7 +346,7 @@ impl FlashblocksBuilderCtx {
             // and increment the next txn index for the access list
             info.executed_senders.push(sequencer_tx.signer());
             info.executed_transactions.push(sequencer_tx.into_inner());
-            evm.db_mut().inc_index();
+            evm.db_mut().bump_bal_index();
         }
 
         let da_footprint_gas_scalar = self
@@ -358,7 +359,7 @@ impl FlashblocksBuilderCtx {
 
         info.da_footprint_scalar = da_footprint_gas_scalar;
 
-        Ok(())
+        Ok(info)
     }
 
     /// Executes cached transactions received via P2P, used to replay previously sequenced flashblock
@@ -384,10 +385,13 @@ impl FlashblocksBuilderCtx {
             block_gas_limit = ?block_gas_limit,
         );
 
-        let min_tx_index = info.executed_transactions.len() as u64;
-        let mut fbal_db = FBALBuilderDb::new(&mut *db, info.access_list_builder.clone());
-        fbal_db.set_index(min_tx_index);
-        let mut evm = self.evm_config.evm_with_env(&mut fbal_db, self.evm_env.clone());
+        // EIP-7928: tx K (zero-indexed in the block) records at `bal_index = K + 1`
+        // (pre-exec occupies index 0). Compute the index for the first tx in this
+        // batch from the running tx count.
+        let next_bal_index = info.executed_transactions.len() as u64 + 1;
+        db.set_bal_index(next_bal_index);
+        let mut evm = self.evm_config.evm_with_env(&mut *db, self.evm_env.clone());
+
         for with_encoded_tx in cached_txs {
             let (encoded_bytes, recovered_tx) = with_encoded_tx.split();
             let sender = recovered_tx.signer();
@@ -466,7 +470,7 @@ impl FlashblocksBuilderCtx {
             // and increment the next txn index for the access list
             info.executed_senders.push(sender);
             info.executed_transactions.push(recovered_tx.into_inner());
-            evm.db_mut().inc_index();
+            evm.db_mut().bump_bal_index();
         }
 
         Ok(())
@@ -493,10 +497,12 @@ impl FlashblocksBuilderCtx {
         let base_fee = self.base_fee();
 
         let tx_da_limit = self.da_config.max_da_tx_size();
-        let min_tx_index = info.executed_transactions.len() as u64;
-        let mut fbal_db = FBALBuilderDb::new(&mut *db, info.access_list_builder.clone());
-        fbal_db.set_index(min_tx_index);
-        let mut evm = self.evm_config.evm_with_env(&mut fbal_db, self.evm_env.clone());
+        // EIP-7928: tx K (zero-indexed in the block) records at `bal_index = K + 1`
+        // (pre-exec occupies index 0). Compute the index for the first tx in this
+        // batch from the running tx count.
+        let next_bal_index = info.executed_transactions.len() as u64 + 1;
+        db.set_bal_index(next_bal_index);
+        let mut evm = self.evm_config.evm_with_env(&mut *db, self.evm_env.clone());
 
         debug!(
             target: "payload_builder",
@@ -675,7 +681,7 @@ impl FlashblocksBuilderCtx {
             // and increment the next txn index for the access list
             info.executed_senders.push(tx.signer());
             info.executed_transactions.push(tx.into_inner());
-            evm.db_mut().inc_index();
+            evm.db_mut().bump_bal_index();
         }
 
         let payload_transaction_simulation_time = execute_txs_start_time.elapsed();

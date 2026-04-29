@@ -45,6 +45,7 @@ use reth_provider::{
 use reth_revm::{
     database::StateProviderDatabase,
     db::{states::bundle_state::BundleRetention, BundleState},
+    state::bal::Bal,
     State,
 };
 use reth_transaction_pool::TransactionPool;
@@ -345,8 +346,11 @@ where
         let db = StateProviderDatabase::new(&state_provider);
         // 1. execute the pre steps and seal an early block with that
         let sequencer_tx_start_time = Instant::now();
-        let mut state =
-            State::builder().with_database(cached_reads.as_db_mut(db)).with_bundle_update().build();
+        let mut state = State::builder()
+            .with_database(cached_reads.as_db_mut(db))
+            .with_bundle_update()
+            .with_bal_builder()
+            .build();
 
         let mut info = execute_pre_steps(&mut state, &ctx)?;
         let sequencer_tx_time = sequencer_tx_start_time.elapsed();
@@ -944,15 +948,11 @@ where
         .map_err(PayloadBuilderError::other)?
         .apply_pre_execution_changes()?;
 
-    // 2. capture the pre-execution state transitions into the fbal builder
-    let mut info = ExecutionInfo::with_capacity(ctx.attributes().transactions.len());
-    info.access_list_builder
-        .lock()
-        .expect("access list mutex poisoned")
-        .record_transitions(state.transition_state.as_ref(), 0);
+    // 2. bump fbal index after pre-execution state (index 0)
+    state.bump_bal_index();
 
     // 3. execute sequencer transactions
-    ctx.execute_sequencer_transactions(&mut info, state)?;
+    let info = ctx.execute_sequencer_transactions(state)?;
 
     Ok(info)
 }
@@ -1181,18 +1181,11 @@ where
     }
     // Build EIP-7928 access list for this flashblock's transaction range.
     // Takes the accumulated builder (resets it for the next flashblock).
-    let min_tx_index = last_idx as u64;
-    let max_tx_index = min_tx_index + new_transactions.len() as u64;
-    let fal_builder =
-        std::mem::take(&mut *info.access_list_builder.lock().expect("access list mutex poisoned"));
-    let access_list = fal_builder.build(min_tx_index, max_tx_index);
+    let access_list = state.take_built_alloy_bal();
+    state.bal_state.bal_builder = Some(Bal::new());
 
-    let metadata = OpFlashblockPayloadMetadata::new(
-        ctx.parent().number + 1,
-        None,
-        None,
-        Some(access_list.account_changes),
-    );
+    let metadata =
+        OpFlashblockPayloadMetadata::new(ctx.parent().number + 1, None, None, access_list);
 
     let (_, blob_gas_used) = ctx.blob_fields(info);
 

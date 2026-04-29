@@ -3,12 +3,12 @@ use parking_lot::RwLock;
 use ringbuffer::{AllocRingBuffer, RingBuffer};
 use std::{collections::BTreeMap, sync::Arc};
 
-use alloy_eip7928::{AccountChanges, BlockAccessList};
+use alloy_eip7928::BlockAccessList;
 use alloy_eips::{eip2718::WithEncoded, eip4895::Withdrawal};
 use alloy_rpc_types_engine::PayloadId;
 use op_alloy_rpc_types_engine::{OpFlashblockPayload, OpFlashblockPayloadBase};
 use reth_primitives_traits::{Recovered, SignedTransaction};
-use std::collections::HashMap;
+use reth_revm::state::bal::{AccountBal, Bal};
 
 use xlayer_builder::broadcast::{XLayerFlashblockMessage, XLayerFlashblockPayload};
 
@@ -269,34 +269,38 @@ impl<T: SignedTransaction> RawFlashblocksEntry<T> {
             .collect()
     }
 
+    /// Aggregates per-flashblock BALs into a single block-wide [`BlockAccessList`]
+    /// covering flashblocks `[0..=up_to]`.
     fn access_list_up_to(&self, up_to: u64) -> Option<BlockAccessList> {
-        let mut merged = HashMap::new();
+        let mut merged = Bal::new();
         for (_, access_list) in self.block_access_lists.range(..=up_to) {
-            for changes in access_list {
-                merged
-                    .entry(changes.address)
-                    .and_modify(|existing: &mut AccountChanges| {
-                        // tx indices across flashblocks are disjoint, so concatenating
-                        // preserves ordering semantics for each per-field change vector.
-                        existing.storage_changes.extend(changes.storage_changes.iter().cloned());
-                        existing.storage_reads.extend(changes.storage_reads.iter().cloned());
-                        existing.balance_changes.extend(changes.balance_changes.iter().cloned());
-                        existing.nonce_changes.extend(changes.nonce_changes.iter().cloned());
-                        existing.code_changes.extend(changes.code_changes.iter().cloned());
-                    })
-                    .or_insert_with(|| changes.clone());
+            for alloy_account in access_list {
+                let (addr, incoming) = match AccountBal::try_from_alloy(alloy_account.clone()) {
+                    Ok(pair) => pair,
+                    Err(err) => {
+                        tracing::warn!(
+                            target: "flashblocks",
+                            address = ?alloy_account.address,
+                            ?err,
+                            "BAL account decode failed, skipping",
+                        );
+                        continue;
+                    }
+                };
+
+                if let Some(existing) = merged.accounts.get_mut(&addr) {
+                    existing.account_info.extend(incoming.account_info);
+                    existing.storage.extend(incoming.storage);
+                } else {
+                    merged.accounts.insert(addr, incoming);
+                }
             }
         }
-        if merged.is_empty() {
+
+        if merged.accounts.is_empty() {
             return None;
         }
-        for ac in merged.values_mut() {
-            ac.storage_reads.sort_unstable();
-            ac.storage_reads.dedup();
-        }
-        let mut result: Vec<_> = merged.into_values().collect();
-        result.sort_unstable_by_key(|ac| ac.address);
-        Some(result)
+        Some(merged.into_alloy_bal())
     }
 
     fn try_to_buildable_args(
@@ -1110,7 +1114,8 @@ mod tests {
     //     (last-iteration-wins) yields the actual final post-state.
     // ========================================================================
 
-    use alloy_eip7928::{NonceChange, SlotChanges, StorageChange};
+    use alloy_eip7928::{CodeChange, NonceChange, SlotChanges, StorageChange};
+    use alloy_primitives::Bytes;
     use std::collections::HashMap;
 
     /// Slot/value list per slot used by [`make_account_changes_full`].
@@ -1256,7 +1261,15 @@ mod tests {
 
         let merged = aggregate_for(ADDR_A, vec![fb0, fb1, fb2]);
 
-        assert_eq!(merged.storage_changes.len(), 3, "one SlotChanges per FB that touched the slot");
+        // Upstream `StorageBal::extend` is `BTreeMap`-backed and merges per-slot
+        // writes — one `SlotChanges` entry per slot, regardless of how many
+        // flashblocks touched it.
+        assert_eq!(merged.storage_changes.len(), 1, "duplicate slots are deduped on aggregation");
+        let sc = &merged.storage_changes[0];
+        assert_eq!(sc.slot, slot);
+        // All 6 writes (2 per FB across 3 FBs) are flattened into one sorted vec.
+        assert_eq!(sc.changes.len(), 6);
+        assert_eq!(sc.changes.last().unwrap().new_value, U256::from(2000));
         assert_eq!(extract_final_storage(&merged).get(&slot).copied(), Some(U256::from(2000)));
     }
 
@@ -1335,5 +1348,103 @@ mod tests {
         assert_eq!(storage.get(&s1).copied(), Some(U256::from(140)));
         assert_eq!(storage.get(&s2).copied(), Some(U256::from(80)));
         assert_eq!(storage.get(&s3).copied(), Some(U256::from(120)));
+    }
+
+    #[test]
+    fn aggregator_storage_read_then_write_across_flashblocks_promotes_to_changes() {
+        // FB0 reads `slot` (no writes); FB1 writes `slot` at tx 5.
+        // Aggregated output: `slot` lives in storage_changes, not storage_reads.
+        let factory = TestFlashBlockFactory::new();
+        let slot = U256::from(0x42);
+        let fb0 = factory
+            .flashblock_at(0)
+            .access_list(Some(vec![make_account_changes(ADDR_A, vec![], vec![0x42])]))
+            .build();
+        let fb1 = factory
+            .flashblock_after(&fb0)
+            .access_list(Some(vec![make_account_changes_full(
+                ADDR_A,
+                vec![],
+                vec![],
+                vec![(slot, vec![(5, U256::from(100))])],
+            )]))
+            .build();
+
+        let merged = aggregate_for(ADDR_A, vec![fb0, fb1]);
+
+        assert!(
+            merged.storage_reads.is_empty(),
+            "later write must promote slot out of storage_reads"
+        );
+        assert_eq!(merged.storage_changes.len(), 1, "exactly one slot in storage_changes");
+        let sc = &merged.storage_changes[0];
+        assert_eq!(sc.slot, slot);
+        assert_eq!(sc.changes.len(), 1, "single write at tx 5 survives");
+        assert_eq!(sc.changes[0].block_access_index, 5);
+        assert_eq!(sc.changes[0].new_value, U256::from(100));
+    }
+
+    #[test]
+    fn aggregator_storage_write_then_read_across_flashblocks_stays_as_changes() {
+        // FB0 writes `slot` at tx 3; FB1 reads `slot` (no writes).
+        // The later read must NOT demote the earlier write.
+        let factory = TestFlashBlockFactory::new();
+        let slot = U256::from(0x99);
+        let fb0 = factory
+            .flashblock_at(0)
+            .access_list(Some(vec![make_account_changes_full(
+                ADDR_A,
+                vec![],
+                vec![],
+                vec![(slot, vec![(3, U256::from(777))])],
+            )]))
+            .build();
+        let fb1 = factory
+            .flashblock_after(&fb0)
+            .access_list(Some(vec![make_account_changes(ADDR_A, vec![], vec![0x99])]))
+            .build();
+
+        let merged = aggregate_for(ADDR_A, vec![fb0, fb1]);
+
+        assert!(
+            merged.storage_reads.is_empty(),
+            "slot already has writes — must not appear as a bare read",
+        );
+        assert_eq!(merged.storage_changes.len(), 1);
+        let sc = &merged.storage_changes[0];
+        assert_eq!(sc.slot, slot);
+        assert_eq!(sc.changes.len(), 1, "the FB0 write must survive across the FB1 read");
+        assert_eq!(sc.changes[0].block_access_index, 3);
+        assert_eq!(sc.changes[0].new_value, U256::from(777));
+    }
+
+    #[test]
+    fn aggregator_code_changes_merge_across_flashblocks_with_last_extraction() {
+        // FB0 deploys code at tx 2; FB1 redeploys at tx 8 (e.g. CREATE2 reuse).
+        // After aggregation, code_changes contains both entries, ordered with
+        // FB0's write first and FB1's last — matching `.last()` semantics that
+        // reth's BAL→hashed-state consumer relies on.
+        let factory = TestFlashBlockFactory::new();
+        let code_v1 = Bytes::from(vec![0x60, 0x00]);
+        let code_v2 = Bytes::from(vec![0x61, 0xff, 0xff]);
+
+        let mk = |bai: u64, code: Bytes| AccountChanges {
+            address: ADDR_A,
+            code_changes: vec![CodeChange { block_access_index: bai, new_code: code }],
+            ..Default::default()
+        };
+
+        let fb0 = factory.flashblock_at(0).access_list(Some(vec![mk(2, code_v1.clone())])).build();
+        let fb1 =
+            factory.flashblock_after(&fb0).access_list(Some(vec![mk(8, code_v2.clone())])).build();
+
+        let merged = aggregate_for(ADDR_A, vec![fb0, fb1]);
+
+        assert_eq!(merged.code_changes.len(), 2, "both flashblocks' code writes survive merge");
+        assert_eq!(merged.code_changes[0].block_access_index, 2);
+        assert_eq!(merged.code_changes[0].new_code, code_v1);
+        let last = merged.code_changes.last().expect("non-empty");
+        assert_eq!(last.block_access_index, 8, ".last() must yield the higher index");
+        assert_eq!(last.new_code, code_v2);
     }
 }
