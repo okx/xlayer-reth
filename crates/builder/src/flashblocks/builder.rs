@@ -944,8 +944,15 @@ where
         .map_err(PayloadBuilderError::other)?
         .apply_pre_execution_changes()?;
 
-    // 2. execute sequencer transactions
-    let info = ctx.execute_sequencer_transactions(state)?;
+    // 2. capture the pre-execution state transitions into the fbal builder
+    let mut info = ExecutionInfo::with_capacity(ctx.attributes().transactions.len());
+    info.access_list_builder
+        .lock()
+        .expect("access list mutex poisoned")
+        .record_transitions(state.transition_state.as_ref(), 0);
+
+    // 3. execute sequencer transactions
+    ctx.execute_sequencer_transactions(&mut info, state)?;
 
     Ok(info)
 }

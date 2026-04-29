@@ -263,10 +263,9 @@ impl FlashblocksBuilderCtx {
     /// Executes all sequencer transactions that are included in the payload attributes.
     pub(super) fn execute_sequencer_transactions(
         &self,
+        info: &mut ExecutionInfo,
         db: &mut State<impl Database>,
-    ) -> Result<ExecutionInfo, PayloadBuilderError> {
-        let mut info = ExecutionInfo::with_capacity(self.attributes().transactions.len());
-
+    ) -> Result<(), PayloadBuilderError> {
         let min_tx_index = info.executed_transactions.len() as u64;
         let mut fbal_db = FBALBuilderDb::new(&mut *db, info.access_list_builder.clone());
         fbal_db.set_index(min_tx_index);
@@ -359,7 +358,7 @@ impl FlashblocksBuilderCtx {
 
         info.da_footprint_scalar = da_footprint_gas_scalar;
 
-        Ok(info)
+        Ok(())
     }
 
     /// Executes cached transactions received via P2P, used to replay previously sequenced flashblock
