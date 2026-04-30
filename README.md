@@ -6,7 +6,7 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Rust](https://img.shields.io/badge/Rust-1.94+-orange.svg)](https://www.rust-lang.org/)
 [![GitHub release](https://img.shields.io/github/v/release/okx/xlayer-reth)](https://github.com/okx/xlayer-reth/releases)
-[![Reth](https://img.shields.io/badge/reth-v2.0.0-purple.svg)](https://github.com/paradigmxyz/reth/releases/tag/v2.0.0)
+[![Reth](https://img.shields.io/badge/reth-v2.1.0-purple.svg)](https://github.com/paradigmxyz/reth/releases/tag/v2.1.0)
 
 # XLayer Reth
 

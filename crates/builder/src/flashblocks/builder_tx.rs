@@ -396,7 +396,7 @@ impl FlashblocksBuilderTx {
             }
 
             // Add gas used by the transaction to cumulative gas used, before creating the receipt
-            let gas_used = result.gas_used();
+            let gas_used = result.tx_gas_used();
             info.cumulative_gas_used += gas_used;
             info.cumulative_da_bytes_used += builder_tx.da_size;
 
@@ -487,7 +487,7 @@ impl FlashblocksBuilderTx {
 
         match result {
             ExecutionResult::Success { output, gas, logs, .. } => {
-                let gas_used = gas.used();
+                let gas_used = gas.tx_gas_used();
                 let topics: HashSet<B256> =
                     logs.into_iter().flat_map(|log| log.topics().to_vec()).collect();
                 if !expected_logs.iter().all(|expected_topic| topics.contains(expected_topic)) {

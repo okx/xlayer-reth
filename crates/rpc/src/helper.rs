@@ -40,6 +40,7 @@ pub(crate) fn build_tx_info(
         block_hash: Some(bar.block.hash()),
         block_number: Some(bar.block.number()),
         base_fee: bar.block.base_fee_per_gas(),
+        ..Default::default()
     }
 }
 
