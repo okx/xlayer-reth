@@ -13,18 +13,22 @@ use crate::{
     metrics::BuilderMetrics,
     traits::{ClientBounds, PoolBounds},
 };
+use eyre::WrapErr as _;
+use std::{collections::BTreeMap, sync::Arc, time::Instant};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, warn};
+
 use alloy_consensus::{
     constants::EMPTY_WITHDRAWALS, proofs, BlockBody, Header, TxReceipt, EMPTY_OMMER_ROOT_HASH,
 };
 use alloy_eips::{eip7685::EMPTY_REQUESTS_HASH, merge::BEACON_NONCE, Encodable2718};
 use alloy_evm::block::BlockExecutionResult;
 use alloy_primitives::{Address, BlockHash, B256, U256};
-use eyre::WrapErr as _;
 use op_alloy_rpc_types_engine::{
     OpFlashblockPayload, OpFlashblockPayloadBase, OpFlashblockPayloadDelta,
     OpFlashblockPayloadMetadata,
 };
-use reth::{payload::PayloadBuilderAttributes, tasks::TaskSpawner};
 use reth_basic_payload_builder::BuildOutcome;
 use reth_chainspec::EthChainSpec;
 use reth_evm::{execute::BlockBuilder, ConfigureEvm};
@@ -47,13 +51,10 @@ use reth_revm::{
     db::{states::bundle_state::BundleRetention, BundleState},
     State,
 };
+use reth_tasks::TaskExecutor;
 use reth_transaction_pool::TransactionPool;
 use reth_trie::{updates::TrieUpdates, HashedPostState, TrieInput};
 use revm::Database;
-use std::{collections::BTreeMap, sync::Arc, time::Instant};
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
 
 /// Converts a reth OpReceipt to an op-alloy OpReceipt
 /// TODO: remove this once reth updates to use the op-alloy defined type as well.
@@ -70,6 +71,7 @@ fn convert_receipt(receipt: &OpReceipt) -> op_alloy_consensus::OpReceipt {
                 deposit_receipt_version: r.deposit_receipt_version,
             })
         }
+        OpReceipt::PostExec(r) => op_alloy_consensus::OpReceipt::PostExec(r.clone()),
     }
 }
 
@@ -183,7 +185,7 @@ impl FlashblocksState {
 
 /// Optimism's payload builder
 #[derive(Debug, Clone)]
-pub(super) struct FlashblocksBuilder<Pool, Client, Tasks> {
+pub(super) struct FlashblocksBuilder<Pool, Client> {
     /// The type responsible for creating the evm.
     pub evm_config: OpEvmConfig,
     /// The transaction pool
@@ -191,7 +193,7 @@ pub(super) struct FlashblocksBuilder<Pool, Client, Tasks> {
     /// Node client
     pub client: Client,
     /// Task executor
-    pub task_executor: Tasks,
+    pub task_executor: TaskExecutor,
     /// Sender for sending built flashblock payloads to [`PayloadHandler`],
     /// which broadcasts outgoing flashblock payloads via p2p.
     pub built_fb_payload_tx: mpsc::Sender<XLayerFlashblockMessage>,
@@ -212,14 +214,14 @@ pub(super) struct FlashblocksBuilder<Pool, Client, Tasks> {
     pub bridge_intercept_config: xlayer_bridge_intercept::BridgeInterceptConfig,
 }
 
-impl<Pool, Client, Tasks> FlashblocksBuilder<Pool, Client, Tasks> {
+impl<Pool, Client> FlashblocksBuilder<Pool, Client> {
     /// `FlashblocksBuilder` constructor.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         evm_config: OpEvmConfig,
         pool: Pool,
         client: Client,
-        task_executor: Tasks,
+        task_executor: TaskExecutor,
         config: BuilderConfig,
         builder_tx: FlashblocksBuilderTx,
         built_fb_payload_tx: mpsc::Sender<XLayerFlashblockMessage>,
@@ -245,12 +247,10 @@ impl<Pool, Client, Tasks> FlashblocksBuilder<Pool, Client, Tasks> {
     }
 }
 
-impl<Pool, Client, Tasks> reth_basic_payload_builder::PayloadBuilder
-    for FlashblocksBuilder<Pool, Client, Tasks>
+impl<Pool, Client> reth_basic_payload_builder::PayloadBuilder for FlashblocksBuilder<Pool, Client>
 where
     Pool: Clone + Send + Sync,
     Client: Clone + Send + Sync,
-    Tasks: Clone + Send + Sync,
 {
     type Attributes = OpPayloadBuilderAttributes<OpTransactionSigned>;
     type BuiltPayload = OpBuiltPayload;
@@ -273,11 +273,10 @@ where
     }
 }
 
-impl<Pool, Client, Tasks> FlashblocksBuilder<Pool, Client, Tasks>
+impl<Pool, Client> FlashblocksBuilder<Pool, Client>
 where
     Pool: PoolBounds,
     Client: ClientBounds,
-    Tasks: TaskSpawner + Clone + Unpin + 'static,
 {
     fn get_flashblocks_payload_builder_ctx(
         &self,
@@ -308,7 +307,7 @@ where
             suggested_fee_recipient: config.attributes.suggested_fee_recipient(),
             prev_randao: config.attributes.prev_randao(),
             gas_limit: config.attributes.gas_limit.unwrap_or(config.parent_header.gas_limit),
-            parent_beacon_block_root: config.attributes.payload_attributes.parent_beacon_block_root,
+            parent_beacon_block_root: config.attributes.parent_beacon_block_root,
             extra_data,
         };
 
@@ -931,11 +930,10 @@ where
 }
 
 #[async_trait::async_trait]
-impl<Pool, Client, Tasks> PayloadBuilder for FlashblocksBuilder<Pool, Client, Tasks>
+impl<Pool, Client> PayloadBuilder for FlashblocksBuilder<Pool, Client>
 where
     Pool: PoolBounds,
     Client: ClientBounds,
-    Tasks: TaskSpawner + Clone + Unpin + 'static,
 {
     type Attributes = OpPayloadBuilderAttributes<OpTransactionSigned>;
     type BuiltPayload = OpBuiltPayload;
@@ -1129,8 +1127,8 @@ where
         receipts_root,
         withdrawals_root,
         logs_bloom,
-        timestamp: ctx.attributes().payload_attributes.timestamp,
-        mix_hash: ctx.attributes().payload_attributes.prev_randao,
+        timestamp: ctx.attributes().timestamp,
+        mix_hash: ctx.attributes().prev_randao,
         nonce: BEACON_NONCE.into(),
         base_fee_per_gas: Some(ctx.base_fee()),
         number: ctx.parent().number + 1,
@@ -1138,10 +1136,12 @@ where
         difficulty: U256::ZERO,
         gas_used: info.cumulative_gas_used,
         extra_data,
-        parent_beacon_block_root: ctx.attributes().payload_attributes.parent_beacon_block_root,
+        parent_beacon_block_root: ctx.attributes().parent_beacon_block_root,
         blob_gas_used,
         excess_blob_gas,
         requests_hash,
+        block_access_list_hash: None,
+        slot_number: None,
     };
 
     // seal the block
@@ -1205,9 +1205,10 @@ where
         .map(|(tx, receipt)| (tx.tx_hash(), convert_receipt(receipt)))
         .collect::<BTreeMap<B256, op_alloy_consensus::OpReceipt>>();
     let metadata = OpFlashblockPayloadMetadata {
-        receipts: receipts_with_hash,
-        new_account_balances,
+        receipts: Some(receipts_with_hash),
+        new_account_balances: Some(new_account_balances),
         block_number: ctx.parent().number + 1,
+        access_list: None,
     };
 
     let (_, blob_gas_used) = ctx.blob_fields(info);
@@ -1217,21 +1218,19 @@ where
         payload_id: ctx.payload_id(),
         index: 0,
         base: Some(OpFlashblockPayloadBase {
-            parent_beacon_block_root: ctx
-                .attributes()
-                .payload_attributes
-                .parent_beacon_block_root
-                .ok_or_else(|| {
+            parent_beacon_block_root: ctx.attributes().parent_beacon_block_root.ok_or_else(
+                || {
                     PayloadBuilderError::Other(
                         eyre::eyre!("parent beacon block root not found").into(),
                     )
-                })?,
+                },
+            )?,
             parent_hash: ctx.parent().hash(),
             fee_recipient: ctx.attributes().suggested_fee_recipient(),
-            prev_randao: ctx.attributes().payload_attributes.prev_randao,
+            prev_randao: ctx.attributes().prev_randao,
             block_number: ctx.parent().number + 1,
             gas_limit: ctx.block_gas_limit(),
-            timestamp: ctx.attributes().payload_attributes.timestamp,
+            timestamp: ctx.attributes().timestamp,
             extra_data: ctx.extra_data()?,
             base_fee_per_gas: U256::from(ctx.base_fee()),
         }),

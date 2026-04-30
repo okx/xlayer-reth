@@ -9,6 +9,7 @@ use op_alloy_consensus::{OpTypedTransaction, TxDeposit};
 use op_alloy_network::Optimism;
 use op_alloy_rpc_types::Transaction;
 use reth_optimism_node::OpPayloadAttributes;
+use reth_optimism_payload_builder::OpPayloadAttrs;
 
 use super::{EngineApi, Ipc, LocalInstance, TransactionBuilder};
 use crate::{
@@ -318,7 +319,10 @@ impl<RpcProtocol: Protocol> ChainDriver<RpcProtocol> {
 impl<RpcProtocol: Protocol> ChainDriver<RpcProtocol> {
     async fn fcu(&self, attribs: OpPayloadAttributes) -> eyre::Result<ForkchoiceUpdated> {
         let latest = self.latest().await?.header.hash;
-        let response = self.engine_api.update_forkchoice(latest, latest, Some(attribs)).await?;
+        let response = self
+            .engine_api
+            .update_forkchoice(latest, latest, Some(OpPayloadAttrs::from(attribs)))
+            .await?;
 
         Ok(response)
     }

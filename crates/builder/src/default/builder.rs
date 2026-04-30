@@ -6,24 +6,31 @@
 //! and the payload is returned as `Freeze` (deterministic, no re-building).
 
 use crate::flashblocks::utils::cache::FlashblockPayloadsCache;
+use std::sync::Arc;
+use tracing::{info, warn};
 
 use alloy_consensus::{transaction::TxHashRef, Transaction, Typed2718};
 use alloy_eips::eip2718::WithEncoded;
 use alloy_evm::Evm as _;
 use alloy_primitives::U256;
 use op_alloy_consensus::OpTransaction;
+use op_revm::constants::L1_BLOCK_CONTRACT;
+
 use reth_basic_payload_builder::*;
 use reth_chainspec::ChainSpecProvider;
 use reth_evm::{
     execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutionError},
-    op_revm::constants::L1_BLOCK_CONTRACT,
     ConfigureEvm,
 };
 use reth_execution_types::BlockExecutionOutput;
 use reth_optimism_forks::OpHardforks;
+use reth_optimism_node::OpPayloadBuilderAttributes;
 use reth_optimism_payload_builder::{
-    builder::OpPayloadBuilderCtx, builder::OpPayloadTransactions, error::OpPayloadBuilderError,
-    payload::OpBuiltPayload, OpAttributes, OpPayloadPrimitives,
+    builder::OpPayloadBuilderCtx,
+    builder::OpPayloadTransactions,
+    error::OpPayloadBuilderError,
+    payload::{OpBuiltPayload, OpPayloadAttrs},
+    OpPayloadPrimitives,
 };
 use reth_optimism_txpool::OpPooledTx;
 use reth_payload_builder_primitives::PayloadBuilderError;
@@ -32,8 +39,6 @@ use reth_revm::{database::StateProviderDatabase, db::State};
 use reth_storage_api::StateProviderFactory;
 use reth_transaction_pool::TransactionPool;
 use revm::context::Block as _;
-use std::sync::Arc;
-use tracing::{info, warn};
 
 /// The default optimism payload builder that wraps the additional builder p2p node
 /// with flashblocks cache replay support. This is for flashblocks reorg protection
@@ -67,20 +72,23 @@ impl<Pool: Clone, Client: Clone, Evm: ConfigureEvm + Clone, Txs: Clone, Attrs> C
     }
 }
 
-impl<Pool, Client, Evm, N, Txs, Attrs> PayloadBuilder
-    for DefaultPayloadBuilder<Pool, Client, Evm, Txs, Attrs>
+impl<Pool, Client, Evm, N, Txs> PayloadBuilder
+    for DefaultPayloadBuilder<Pool, Client, Evm, Txs, OpPayloadBuilderAttributes<N::SignedTx>>
 where
     N: OpPayloadPrimitives,
     Client: StateProviderFactory + ChainSpecProvider<ChainSpec: OpHardforks> + Clone,
     Pool: TransactionPool<Transaction: OpPooledTx<Consensus = N::SignedTx>>,
     Evm: ConfigureEvm<
         Primitives = N,
-        NextBlockEnvCtx: BuildNextEnv<Attrs, N::BlockHeader, Client::ChainSpec>,
+        NextBlockEnvCtx: BuildNextEnv<
+            OpPayloadBuilderAttributes<N::SignedTx>,
+            N::BlockHeader,
+            Client::ChainSpec,
+        >,
     >,
     Txs: OpPayloadTransactions<Pool::Transaction>,
-    Attrs: OpAttributes<Transaction = N::SignedTx>,
 {
-    type Attributes = Attrs;
+    type Attributes = OpPayloadAttrs;
     type BuiltPayload = OpBuiltPayload<N>;
 
     fn try_build(
@@ -123,17 +131,21 @@ where
     }
 }
 
-impl<Pool, Client, Evm, N, Txs, Attrs> DefaultPayloadBuilder<Pool, Client, Evm, Txs, Attrs>
+impl<Pool, Client, Evm, N, Txs>
+    DefaultPayloadBuilder<Pool, Client, Evm, Txs, OpPayloadBuilderAttributes<N::SignedTx>>
 where
     N: OpPayloadPrimitives,
     Client: StateProviderFactory + ChainSpecProvider<ChainSpec: OpHardforks> + Clone,
     Pool: TransactionPool<Transaction: OpPooledTx<Consensus = N::SignedTx>>,
     Evm: ConfigureEvm<
         Primitives = N,
-        NextBlockEnvCtx: BuildNextEnv<Attrs, N::BlockHeader, Client::ChainSpec>,
+        NextBlockEnvCtx: BuildNextEnv<
+            OpPayloadBuilderAttributes<N::SignedTx>,
+            N::BlockHeader,
+            Client::ChainSpec,
+        >,
     >,
     Txs: OpPayloadTransactions<Pool::Transaction>,
-    Attrs: OpAttributes<Transaction = N::SignedTx>,
 {
     /// Builds a payload by replaying cached flashblocks transactions.
     ///
@@ -141,10 +153,25 @@ where
     /// with direct cached transaction execution via [`BlockBuilder::execute_transaction`].
     fn build_with_cached_txs(
         &self,
-        args: BuildArguments<Attrs, OpBuiltPayload<N>>,
+        args: BuildArguments<OpPayloadAttrs, OpBuiltPayload<N>>,
         cached_txs: Vec<WithEncoded<alloy_consensus::transaction::Recovered<N::SignedTx>>>,
     ) -> Result<BuildOutcome<OpBuiltPayload<N>>, PayloadBuilderError> {
-        let BuildArguments { mut cached_reads, config, cancel, best_payload } = args;
+        let BuildArguments { mut cached_reads, config, cancel, best_payload, .. } = args;
+
+        // Convert engine API attrs to internal builder attrs, decoding sequencer txs.
+        let parent_hash = config.parent_header.hash();
+        let payload_id = config.payload_id;
+        let builder_attrs = OpPayloadBuilderAttributes::from_rpc_attrs(
+            parent_hash,
+            payload_id,
+            config.attributes.0,
+        )
+        .map_err(PayloadBuilderError::other)?;
+        let config = PayloadConfig {
+            parent_header: config.parent_header,
+            attributes: builder_attrs,
+            payload_id,
+        };
 
         let ctx = OpPayloadBuilderCtx {
             evm_config: self.inner.evm_config.clone(),
@@ -207,7 +234,7 @@ where
 
         // 4. Finish: compute state root, transaction root, receipt root
         let BlockBuilderOutcome { execution_result, hashed_state, trie_updates, block } =
-            builder.finish(&state_provider)?;
+            builder.finish(&state_provider, None)?;
 
         let sealed_block = Arc::new(block.sealed_block().clone());
 

@@ -1,6 +1,6 @@
-use alloy_primitives::B256;
 use futures_util::{Future, FutureExt};
 use std::{
+    fmt::Debug,
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -11,21 +11,25 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use reth::{
-    providers::{BlockReaderIdExt, StateProviderFactory},
-    tasks::TaskSpawner,
-};
+use alloy_primitives::B256;
+use alloy_rpc_types_engine::PayloadId;
+
+use reth::providers::{BlockReaderIdExt, StateProviderFactory};
 use reth_basic_payload_builder::{
     BasicPayloadJobGeneratorConfig, HeaderForPayload, PayloadConfig, PrecachedState,
 };
-use reth_node_api::{NodePrimitives, PayloadBuilderAttributes, PayloadKind};
+use reth_node_api::{NodePrimitives, PayloadKind};
+use reth_optimism_node::OpPayloadBuilderAttributes;
+use reth_optimism_payload_builder::OpPayloadAttrs;
+use reth_optimism_primitives::OpTransactionSigned;
 use reth_payload_builder::{
-    KeepPayloadJobAlive, PayloadBuilderError, PayloadJob, PayloadJobGenerator,
+    BuildNewPayload, KeepPayloadJobAlive, PayloadBuilderError, PayloadJob, PayloadJobGenerator,
 };
 use reth_payload_primitives::BuiltPayload;
 use reth_primitives_traits::HeaderTy;
 use reth_provider::CanonStateNotification;
 use reth_revm::cached::CachedReads;
+use reth_tasks::TaskExecutor;
 
 /// A trait for building payloads that encapsulate Ethereum transactions.
 ///
@@ -38,7 +42,7 @@ use reth_revm::cached::CachedReads;
 #[async_trait::async_trait]
 pub(super) trait PayloadBuilder: Send + Sync + Clone {
     /// The payload attributes type to accept for building.
-    type Attributes: PayloadBuilderAttributes;
+    type Attributes: Clone + Debug + Unpin + Send + Sync + 'static;
     /// The type of the built payload.
     type BuiltPayload: BuiltPayload;
 
@@ -63,11 +67,11 @@ pub(super) trait PayloadBuilder: Send + Sync + Clone {
 
 /// The generator type that creates new jobs that builds empty blocks.
 #[derive(Debug)]
-pub(super) struct BlockPayloadJobGenerator<Client, Tasks, Builder> {
+pub(super) struct BlockPayloadJobGenerator<Client, Builder> {
     /// The client that can interact with the chain.
     client: Client,
     /// How to spawn building tasks
-    executor: Tasks,
+    executor: TaskExecutor,
     /// The configuration for the job generator.
     _config: BasicPayloadJobGeneratorConfig,
     /// The type responsible for building payloads.
@@ -86,12 +90,12 @@ pub(super) struct BlockPayloadJobGenerator<Client, Tasks, Builder> {
 
 // === impl EmptyBlockPayloadJobGenerator ===
 
-impl<Client, Tasks, Builder> BlockPayloadJobGenerator<Client, Tasks, Builder> {
+impl<Client, Builder> BlockPayloadJobGenerator<Client, Builder> {
     /// Creates a new [EmptyBlockPayloadJobGenerator] with the given config and custom
     /// [PayloadBuilder]
     pub(super) fn with_builder(
         client: Client,
-        executor: Tasks,
+        executor: TaskExecutor,
         config: BasicPayloadJobGeneratorConfig,
         builder: Builder,
         ensure_only_one_payload: bool,
@@ -116,26 +120,26 @@ impl<Client, Tasks, Builder> BlockPayloadJobGenerator<Client, Tasks, Builder> {
     }
 }
 
-impl<Client, Tasks, Builder> PayloadJobGenerator
-    for BlockPayloadJobGenerator<Client, Tasks, Builder>
+impl<Client, Builder> PayloadJobGenerator for BlockPayloadJobGenerator<Client, Builder>
 where
     Client: StateProviderFactory
         + BlockReaderIdExt<Header = HeaderForPayload<Builder::BuiltPayload>>
         + Clone
         + Unpin
         + 'static,
-    Tasks: TaskSpawner + Clone + Unpin + 'static,
-    Builder: PayloadBuilder + Unpin + 'static,
-    Builder::Attributes: Unpin + Clone,
+    Builder: PayloadBuilder<Attributes = OpPayloadBuilderAttributes<OpTransactionSigned>>
+        + Unpin
+        + 'static,
     Builder::BuiltPayload: Unpin + Clone,
 {
-    type Job = BlockPayloadJob<Tasks, Builder>;
+    type Job = BlockPayloadJob<Builder>;
 
     /// This is invoked when the node receives payload attributes from the beacon node via
     /// `engine_forkchoiceUpdatedVX`
     fn new_payload_job(
         &self,
-        attributes: <Builder as PayloadBuilder>::Attributes,
+        input: BuildNewPayload<OpPayloadAttrs>,
+        id: PayloadId,
     ) -> Result<Self::Job, PayloadBuilderError> {
         let cancel_token = if self.ensure_only_one_payload {
             // Cancel existing payload
@@ -155,16 +159,22 @@ where
             CancellationToken::new()
         };
 
-        let parent_header = if attributes.parent().is_zero() {
+        let parent_header = if input.parent_hash.is_zero() {
             // use latest block if parent is zero: genesis block
             self.client
                 .latest_header()?
-                .ok_or_else(|| PayloadBuilderError::MissingParentBlock(attributes.parent()))?
+                .ok_or_else(|| PayloadBuilderError::MissingParentBlock(input.parent_hash))?
         } else {
             self.client
-                .sealed_header_by_hash(attributes.parent())?
-                .ok_or_else(|| PayloadBuilderError::MissingParentBlock(attributes.parent()))?
+                .sealed_header_by_hash(input.parent_hash)?
+                .ok_or_else(|| PayloadBuilderError::MissingParentBlock(input.parent_hash))?
         };
+
+        // Convert engine API attrs to internal builder attrs.
+        let engine_attrs = input.attributes.clone();
+        let builder_attrs =
+            OpPayloadBuilderAttributes::from_rpc_attrs(input.parent_hash, id, input.attributes.0)
+                .map_err(PayloadBuilderError::other)?;
 
         info!("Spawn block building job");
 
@@ -184,15 +194,20 @@ where
         // "remember" the payloads long enough to accommodate this corner-case
         // (without it we are losing blocks). Postponing the deadline for 5s
         // (not just 0.5s) because of that.
-        let deadline = job_deadline(attributes.timestamp()) + self.extra_block_deadline;
+        let deadline = job_deadline(builder_attrs.timestamp) + self.extra_block_deadline;
 
         let deadline = Box::pin(tokio::time::sleep(deadline));
-        let config = PayloadConfig::new(Arc::new(parent_header.clone()), attributes);
+        let config = PayloadConfig {
+            parent_header: Arc::new(parent_header.clone()),
+            attributes: builder_attrs,
+            payload_id: id,
+        };
 
         let mut job = BlockPayloadJob {
             executor: self.executor.clone(),
             builder: self.builder.clone(),
             config,
+            engine_attrs,
             cell: BlockCell::new(),
             cancel: cancel_token,
             deadline,
@@ -231,14 +246,16 @@ use std::{
 };
 
 /// A [PayloadJob] that builds empty blocks.
-pub(super) struct BlockPayloadJob<Tasks, Builder>
+pub(super) struct BlockPayloadJob<Builder>
 where
     Builder: PayloadBuilder,
 {
     /// The configuration for how the payload will be created.
     pub(super) config: PayloadConfig<Builder::Attributes, HeaderForPayload<Builder::BuiltPayload>>,
+    /// Engine API attributes preserved for the [`PayloadJob::payload_attributes`] trait method.
+    pub(super) engine_attrs: OpPayloadAttrs,
     /// How to spawn building tasks
-    pub(super) executor: Tasks,
+    pub(super) executor: TaskExecutor,
     /// The type responsible for building payloads.
     ///
     /// See [PayloadBuilder]
@@ -256,14 +273,14 @@ where
     pub(super) cached_reads: Option<CachedReads>,
 }
 
-impl<Tasks, Builder> PayloadJob for BlockPayloadJob<Tasks, Builder>
+impl<Builder> PayloadJob for BlockPayloadJob<Builder>
 where
-    Tasks: TaskSpawner + Clone + 'static,
-    Builder: PayloadBuilder + Unpin + 'static,
-    Builder::Attributes: Unpin + Clone,
+    Builder: PayloadBuilder<Attributes = OpPayloadBuilderAttributes<OpTransactionSigned>>
+        + Unpin
+        + 'static,
     Builder::BuiltPayload: Unpin + Clone,
 {
-    type PayloadAttributes = Builder::Attributes;
+    type PayloadAttributes = OpPayloadAttrs;
     type ResolvePayloadFuture = ResolvePayload<Self::BuiltPayload>;
     type BuiltPayload = Builder::BuiltPayload;
 
@@ -272,7 +289,7 @@ where
     }
 
     fn payload_attributes(&self) -> Result<Self::PayloadAttributes, PayloadBuilderError> {
-        Ok(self.config.attributes.clone())
+        Ok(self.engine_attrs.clone())
     }
 
     fn resolve_kind(
@@ -299,9 +316,8 @@ pub(super) struct BuildArguments<Attributes, Payload: BuiltPayload> {
 }
 
 /// A [PayloadJob] is a future that's being polled by the `PayloadBuilderService`
-impl<Tasks, Builder> BlockPayloadJob<Tasks, Builder>
+impl<Builder> BlockPayloadJob<Builder>
 where
-    Tasks: TaskSpawner + Clone + 'static,
     Builder: PayloadBuilder + Unpin + 'static,
     Builder::Attributes: Unpin + Clone,
     Builder::BuiltPayload: Unpin + Clone,
@@ -325,9 +341,8 @@ where
 }
 
 /// A [PayloadJob] is a a future that's being polled by the `PayloadBuilderService`
-impl<Tasks, Builder> Future for BlockPayloadJob<Tasks, Builder>
+impl<Builder> Future for BlockPayloadJob<Builder>
 where
-    Tasks: TaskSpawner + Clone + 'static,
     Builder: PayloadBuilder + Unpin + 'static,
     Builder::Attributes: Unpin + Clone,
     Builder::BuiltPayload: Unpin + Clone,
@@ -450,14 +465,15 @@ mod tests {
     use super::*;
     use alloy_eips::eip7685::Requests;
     use alloy_primitives::U256;
+    use op_alloy_rpc_types_engine::OpPayloadAttributes;
     use rand::rng;
-    use reth::tasks::TokioTaskExecutor;
     use reth_node_api::NodePrimitives;
-    use reth_optimism_payload_builder::{payload::OpPayloadBuilderAttributes, OpPayloadPrimitives};
+    use reth_optimism_payload_builder::OpPayloadPrimitives;
     use reth_optimism_primitives::OpPrimitives;
     use reth_payload_primitives::BuiltPayloadExecutedBlock;
-    use reth_primitives::SealedBlock;
+    use reth_primitives_traits::SealedBlock;
     use reth_provider::test_utils::MockEthProvider;
+    use reth_tasks::Runtime;
     use reth_testing_utils::generators::{random_block_range, BlockRangeParams};
     use tokio::{
         task,
@@ -639,7 +655,7 @@ mod tests {
         let mut rng = rng();
 
         let client = MockEthProvider::default();
-        let executor = TokioTaskExecutor::default();
+        let executor = Runtime::test();
         let config = BasicPayloadJobGeneratorConfig::default();
         let builder = MockBuilder::<OpPrimitives>::new();
 
@@ -661,12 +677,19 @@ mod tests {
             std::time::Duration::from_secs(1),
         );
 
-        // this is not nice but necessary
-        let mut attr = OpPayloadBuilderAttributes::default();
-        attr.payload_attributes.parent = client.latest_header()?.unwrap().hash();
+        // Build a minimal engine API attribute referencing the latest block as parent.
+        let parent_hash = client.latest_header()?.unwrap().hash();
+        let engine_attrs = OpPayloadAttrs::from(OpPayloadAttributes::default());
+        let id = PayloadId::default();
 
         {
-            let job = generator.new_payload_job(attr.clone())?;
+            let input = BuildNewPayload {
+                attributes: engine_attrs.clone(),
+                parent_hash,
+                cache: None,
+                trie_handle: None,
+            };
+            let job = generator.new_payload_job(input, id)?;
             let _ = job.await;
 
             // you need to give one second for the job to be dropped and cancelled the internal job
@@ -678,7 +701,13 @@ mod tests {
 
         {
             // job resolve triggers cancellations from the build task
-            let mut job = generator.new_payload_job(attr.clone())?;
+            let input = BuildNewPayload {
+                attributes: engine_attrs.clone(),
+                parent_hash,
+                cache: None,
+                trie_handle: None,
+            };
+            let mut job = generator.new_payload_job(input, id)?;
             let _ = job.resolve();
             let _ = job.await;
 

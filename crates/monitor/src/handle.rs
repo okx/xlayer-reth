@@ -9,9 +9,10 @@ use alloy_eips::BlockNumHash;
 use reth_engine_primitives::ConsensusEngineEvent;
 use reth_payload_builder::PayloadBuilderHandle;
 use reth_payload_builder_primitives::Events;
-use reth_payload_primitives::{BuiltPayload, PayloadBuilderAttributes, PayloadTypes};
+use reth_payload_primitives::{BuiltPayload, PayloadTypes};
 use reth_primitives_traits::BlockBody as _;
 use reth_provider::BlockNumReader;
+use reth_tasks::TaskExecutor;
 
 /// Monitor handle logic for handling consensus engine events and payload building events.
 ///
@@ -23,7 +24,7 @@ use reth_provider::BlockNumReader;
 /// - Attributes event from engine_forkchoiceUpdated
 /// - BuiltPayload events from engine_getPayload
 pub fn start_monitor_handle<N, T, Provider>(
-    task_executor: &dyn reth_tasks::TaskSpawner,
+    task_executor: &TaskExecutor,
     monitor: Arc<XLayerMonitor>,
     provider: Provider,
     payload_builder: PayloadBuilderHandle<T>,
@@ -33,7 +34,6 @@ pub fn start_monitor_handle<N, T, Provider>(
     N::SignedTx: TxHashRef,
     T: PayloadTypes + 'static,
     T::BuiltPayload: BuiltPayload,
-    T::PayloadBuilderAttributes: PayloadBuilderAttributes,
     Provider: BlockNumReader + Clone + Send + Sync + 'static,
 {
     // Check if monitor is enabled, if not, return early
@@ -78,10 +78,9 @@ pub fn start_monitor_handle<N, T, Provider>(
                 payload_event = built_payload_stream.next() => {
                     let Some(payload_event) = payload_event else { break };
                     match payload_event {
-                        Ok(Events::Attributes(attributes)) => {
-                            if let Ok(Some(parent_number)) = provider.block_number(attributes.parent()) {
-                                let block_number = parent_number + 1;
-                                monitor.on_block_build_start(block_number);
+                        Ok(Events::Attributes(_)) => {
+                            if let Ok(latest) = provider.last_block_number() {
+                                monitor.on_block_build_start(latest + 1);
                             }
                         }
                         Ok(Events::BuiltPayload(payload)) => {

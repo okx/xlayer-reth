@@ -13,8 +13,10 @@ use op_alloy_rpc_types_engine::OpFlashblockPayloadBase;
 use reth_chain_state::ExecutedBlock;
 use reth_engine_primitives::{ExecutionPayload, PayloadValidator};
 use reth_engine_tree::tree::{
+    payload_processor::multiproof::StateRootHandle,
     payload_validator::{TreeCtx, ValidationOutcome},
-    BasicEngineValidator, EngineValidator, PayloadProcessor,
+    BasicEngineValidator, CacheWaitDurations, EngineApiTreeState, EngineValidator,
+    PayloadProcessor, SavedCache, WaitForCaches,
 };
 use reth_evm::{ConfigureEngineEvm, ConfigureEvm};
 use reth_node_api::{
@@ -160,7 +162,7 @@ where
         let mut guard = self.inner.blocking_lock();
 
         if let Some(executed_block) = guard.try_flashblocks_cache_hit(&num_hash) {
-            return Ok(executed_block);
+            return Ok((executed_block, None));
         }
 
         debug!(
@@ -169,9 +171,9 @@ where
             block_hash = %num_hash.hash,
             "Flashblocks cache miss, engine validating payload",
         );
-        let executed_block = guard.engine_validator.validate_payload(payload, ctx)?;
+        let (executed_block, timing) = guard.engine_validator.validate_payload(payload, ctx)?;
         guard.try_advance_flashblocks_state(&executed_block);
-        Ok(executed_block)
+        Ok((executed_block, timing))
     }
 
     fn validate_block(
@@ -185,7 +187,7 @@ where
         let mut guard = self.inner.blocking_lock();
 
         if let Some(executed_block) = guard.try_flashblocks_cache_hit(&num_hash) {
-            return Ok(executed_block);
+            return Ok((executed_block, None));
         }
 
         // If flashblocks is enabled and engine validator is validating this new block,
@@ -202,15 +204,47 @@ where
             block_hash = %num_hash.hash,
             "Flashblocks cache miss, engine validating block",
         );
-        let executed_block = guard.engine_validator.validate_block(block, ctx)?;
+        let (executed_block, timing) = guard.engine_validator.validate_block(block, ctx)?;
         guard.try_advance_flashblocks_state(&executed_block);
-        Ok(executed_block)
+        Ok((executed_block, timing))
     }
 
     fn on_inserted_executed_block(&self, block: ExecutedBlock<N>) {
         // SAFETY: Called from the engine tree's dedicated OS thread. See comment in
         // `validate_payload` above for details.
         self.inner.blocking_lock().engine_validator.on_inserted_executed_block(block);
+    }
+
+    fn cache_for(&self, block_hash: alloy_primitives::B256) -> Option<SavedCache> {
+        // SAFETY: Called from the engine tree's dedicated OS thread.
+        self.inner.blocking_lock().engine_validator.cache_for(block_hash)
+    }
+
+    fn sparse_trie_handle_for(
+        &self,
+        parent_hash: alloy_primitives::B256,
+        parent_state_root: alloy_primitives::B256,
+        state: &EngineApiTreeState<N>,
+    ) -> Option<StateRootHandle> {
+        // SAFETY: Called from the engine tree's dedicated OS thread.
+        self.inner.blocking_lock().engine_validator.sparse_trie_handle_for(
+            parent_hash,
+            parent_state_root,
+            state,
+        )
+    }
+}
+
+impl<Provider, Evm, V, N, ChainSpec> WaitForCaches
+    for XLayerEngineValidator<Provider, Evm, V, N, ChainSpec>
+where
+    Evm: ConfigureEvm,
+    N: NodePrimitives,
+    ChainSpec: OpHardforks,
+{
+    fn wait_for_caches(&self) -> CacheWaitDurations {
+        // SAFETY: Called from the engine tree's dedicated OS thread.
+        self.inner.blocking_lock().engine_validator.wait_for_caches()
     }
 }
 
