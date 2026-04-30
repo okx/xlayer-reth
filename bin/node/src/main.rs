@@ -233,7 +233,7 @@ fn main() {
                             let flashblocks_pubsub = FlashblocksPubSub::new(
                                 ctx.registry.eth_handlers().pubsub.clone(),
                                 flashblocks_state.subscribe_pending_sequence(),
-                                Box::new(ctx.node().task_executor.clone()),
+                                ctx.node().task_executor.clone(),
                                 new_op_eth_api.converter().clone(),
                                 args.xlayer_args
                                     .flashblocks_rpc

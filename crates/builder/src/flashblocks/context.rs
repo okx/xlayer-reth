@@ -17,14 +17,12 @@ use alloy_primitives::{BlockHash, Bytes, U256};
 use alloy_rpc_types_eth::Withdrawals;
 use core::fmt::Debug;
 use op_alloy_consensus::{OpDepositReceipt, OpTxType};
-use op_revm::OpSpecId;
+use op_revm::{L1BlockInfo, OpSpecId};
 
-use reth::payload::PayloadBuilderAttributes;
 use reth_basic_payload_builder::PayloadConfig;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_evm::{
-    eth::receipt_builder::ReceiptBuilderCtx, op_revm::L1BlockInfo, ConfigureEvm, Evm, EvmEnv,
-    EvmError, InvalidTxError,
+    eth::receipt_builder::ReceiptBuilderCtx, ConfigureEvm, Evm, EvmEnv, EvmError, InvalidTxError,
 };
 use reth_node_api::PayloadBuilderError;
 use reth_optimism_chainspec::OpChainSpec;
@@ -42,8 +40,7 @@ use reth_optimism_txpool::{
     interop::{is_valid_interop, MaybeInteropTransaction},
 };
 use reth_payload_builder::PayloadId;
-use reth_primitives::SealedHeader;
-use reth_primitives_traits::{InMemorySize, SignedTransaction};
+use reth_primitives_traits::{InMemorySize, SealedHeader, SignedTransaction};
 use reth_revm::{context::Block, State};
 use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction};
 use revm::{context::result::ResultAndState, interpreter::as_u64_saturated, DatabaseCommit};
@@ -106,7 +103,7 @@ impl FlashblocksBuilderCtx {
     pub fn withdrawals(&self) -> Option<&Withdrawals> {
         self.chain_spec
             .is_shanghai_active_at_timestamp(self.attributes().timestamp())
-            .then(|| &self.attributes().payload_attributes.withdrawals)
+            .then(|| &self.attributes().withdrawals)
     }
 
     /// Returns the block gas limit to target.
@@ -162,17 +159,13 @@ impl FlashblocksBuilderCtx {
         if self.is_jovian_active() {
             self.attributes()
                 .get_jovian_extra_data(
-                    self.chain_spec.base_fee_params_at_timestamp(
-                        self.attributes().payload_attributes.timestamp,
-                    ),
+                    self.chain_spec.base_fee_params_at_timestamp(self.attributes().timestamp),
                 )
                 .map_err(PayloadBuilderError::other)
         } else if self.is_holocene_active() {
             self.attributes()
                 .get_holocene_extra_data(
-                    self.chain_spec.base_fee_params_at_timestamp(
-                        self.attributes().payload_attributes.timestamp,
-                    ),
+                    self.chain_spec.base_fee_params_at_timestamp(self.attributes().timestamp),
                 )
                 .map_err(PayloadBuilderError::other)
         } else {
@@ -320,7 +313,7 @@ impl FlashblocksBuilderCtx {
             };
 
             // add gas used by the transaction to cumulative gas used, before creating the receipt
-            let gas_used = result.gas_used();
+            let gas_used = result.tx_gas_used();
             info.cumulative_gas_used += gas_used;
 
             if !sequencer_tx.is_deposit() {
@@ -442,7 +435,7 @@ impl FlashblocksBuilderCtx {
             };
 
             // Add gas used by the transaction to cumulative gas used
-            let gas_used = result.gas_used();
+            let gas_used = result.tx_gas_used();
             info.cumulative_gas_used += gas_used;
             // Record tx da size
             info.cumulative_da_bytes_used += tx_da_size;
@@ -618,7 +611,7 @@ impl FlashblocksBuilderCtx {
             self.metrics.tx_byte_size.record(tx.inner().size() as f64);
             num_txs_simulated += 1;
 
-            let gas_used = result.gas_used();
+            let gas_used = result.tx_gas_used();
 
             if result.is_success() {
                 log_txn(TxnExecutionResult::Success);

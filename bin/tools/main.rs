@@ -5,6 +5,7 @@ use reth_optimism_chainspec::OpChainSpec;
 use reth_optimism_consensus::OpBeaconConsensus;
 use reth_optimism_evm::OpExecutorProvider;
 use reth_optimism_node::OpNode;
+use reth_tasks::{RuntimeBuilder, RuntimeConfig, TokioConfig};
 use reth_tracing::{RethTracer, Tracer};
 use std::{process::ExitCode, sync::Arc};
 use tracing::{error, info};
@@ -60,6 +61,12 @@ async fn main() -> ExitCode {
     let _guard = RethTracer::new().init().expect("Failed to initialize tracing");
 
     let cli = Cli::parse();
+    let runtime = RuntimeBuilder::new(
+        RuntimeConfig::default()
+            .with_tokio(TokioConfig::existing_handle(tokio::runtime::Handle::current())),
+    )
+    .build()
+    .expect("Failed to build runtime");
 
     match cli.command {
         Commands::Import(cmd) => {
@@ -70,7 +77,7 @@ async fn main() -> ExitCode {
                 (OpExecutorProvider::optimism(spec.clone()), Arc::new(OpBeaconConsensus::new(spec)))
             };
 
-            match cmd.execute::<OpNode, _>(components).await {
+            match cmd.execute::<OpNode, _>(components, runtime).await {
                 Ok(_) => ExitCode::SUCCESS,
                 Err(e) => {
                     error!(target: "xlayer::import", "Error: {:#?}", e);
@@ -81,7 +88,7 @@ async fn main() -> ExitCode {
         Commands::Export(cmd) => {
             info!(target: "xlayer::export", "XLayer Reth Export starting");
 
-            match cmd.execute::<OpNode>().await {
+            match cmd.execute::<OpNode>(runtime).await {
                 Ok(_) => ExitCode::SUCCESS,
                 Err(e) => {
                     error!(target: "xlayer::export", "Error: {:#?}", e);
@@ -92,7 +99,7 @@ async fn main() -> ExitCode {
         Commands::GenGenesis(cmd) => {
             info!(target: "xlayer::gen_genesis", "XLayer Reth Genesis Generation starting");
 
-            match cmd.execute::<OpNode>().await {
+            match cmd.execute::<OpNode>(runtime).await {
                 Ok(_) => ExitCode::SUCCESS,
                 Err(e) => {
                     error!(target: "xlayer::gen_genesis", "Error: {:#?}", e);
@@ -103,7 +110,7 @@ async fn main() -> ExitCode {
         Commands::LegacyMigrate(cmd) => {
             info!(target: "xlayer::legacy_migrate", "XLayer Reth Legacy Migration starting");
 
-            match cmd.execute::<OpNode>().await {
+            match cmd.execute::<OpNode>(runtime).await {
                 Ok(_) => ExitCode::SUCCESS,
                 Err(e) => {
                     error!(target: "xlayer::legacy_migrate", "Error: {:#?}", e);

@@ -1,7 +1,7 @@
 [workspace.package]
 version = "0.0.6"
 edition = "2024"
-rust-version = "1.93.0"
+rust-version = "1.94.0"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/okx/xlayer-reth.git"
 repository = "https://github.com/okx/xlayer-reth.git"
@@ -79,63 +79,62 @@ xlayer-version = { path = "crates/version" }
 xlayer-trace-monitor = { git = "https://github.com/okx/xlayer-toolkit", rev = "d6af8edac7cf179241af1688f7741e260ba48b79" }
 
 # ==============================================================================
-# Reth Base Dependencies (paradigmxyz/reth v1.11.3)
+# Reth Base Dependencies (paradigmxyz/reth v2.1.0)
 # These are chain-agnostic crates from the base reth framework.
-# https://github.com/paradigmxyz/reth/tree/v1.11.3
+# https://github.com/okx/reth/tree/upstream/dev-v2.1.0
 # ==============================================================================
-reth = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-basic-payload-builder = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-chain-state = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-chainspec = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422", default-features = false }
-reth-cli = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-cli-commands = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-cli-util = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-db = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422", default-features = false }
-reth-db-api = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422", default-features = false }
-reth-db-models = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422", default-features = false }
-reth-engine-primitives = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422", default-features = false }
-reth-engine-tree = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-errors = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-ethereum-forks = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422", default-features = false }
-reth-evm = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422", default-features = false }
-reth-exex = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-execution-types = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422", default-features = false }
-reth-ipc = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-metrics = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-network-peers = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422", default-features = false }
-reth-node-api = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-node-builder = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-node-core = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-node-types = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-payload-builder = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-payload-builder-primitives = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-payload-primitives = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-payload-util = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-primitives = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-primitives-traits = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422", default-features = false }
-reth-provider = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-revm = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422", default-features = false }
-reth-rpc = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-rpc-api = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-rpc-convert = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-rpc-engine-api = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-rpc-eth-api = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-rpc-eth-types = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422", default-features = false }
-reth-rpc-layer = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-rpc-builder = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-rpc-server-types = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-static-file-types = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422", default-features = false }
-reth-storage-api = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422", default-features = false }
-reth-tasks = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-testing-utils = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-tokio-util = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-tracing = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422", default-features = false }
-reth-tracing-otlp = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-transaction-pool = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-trie = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-trie-common = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422", default-features = false }
-reth-trie-db = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
-reth-trie-parallel = { git = "https://github.com/okx/reth", rev = "997bf9a59ee7330e434eab1706b5cb12af120422" }
+reth = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-basic-payload-builder = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-chain-state = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-chainspec = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597", default-features = false }
+reth-cli = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-cli-commands = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-cli-util = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-db = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597", default-features = false }
+reth-db-api = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597", default-features = false }
+reth-db-models = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597", default-features = false }
+reth-engine-primitives = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597", default-features = false }
+reth-engine-tree = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-errors = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-ethereum-forks = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597", default-features = false }
+reth-evm = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597", default-features = false }
+reth-exex = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-execution-types = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597", default-features = false }
+reth-ipc = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-metrics = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-network-peers = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597", default-features = false }
+reth-node-api = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-node-builder = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-node-core = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-node-types = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-payload-builder = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-payload-builder-primitives = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-payload-primitives = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-payload-util = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-primitives-traits = { version = "0.3.0", default-features = false }
+reth-provider = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-revm = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597", default-features = false }
+reth-rpc = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-rpc-api = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-rpc-convert = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-rpc-engine-api = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-rpc-eth-api = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-rpc-eth-types = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597", default-features = false }
+reth-rpc-layer = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-rpc-builder = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-rpc-server-types = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-static-file-types = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597", default-features = false }
+reth-storage-api = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597", default-features = false }
+reth-tasks = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-testing-utils = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-tokio-util = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-tracing = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597", default-features = false }
+reth-tracing-otlp = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-transaction-pool = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-trie = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-trie-common = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597", default-features = false }
+reth-trie-db = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-trie-parallel = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
 
 # ==============================================================================
 # Reth Optimism Dependencies (from local optimism/rust op-reth)
@@ -155,71 +154,73 @@ reth-optimism-storage = { path = "deps/optimism/rust/op-reth/crates/storage/" }
 reth-optimism-txpool = { path = "deps/optimism/rust/op-reth/crates/txpool/" }
 
 # ==============================================================================
-# Revm Dependencies (follows upstream reth)
+# Revm Dependencies (aligned with reth v2.1.0)
 # ==============================================================================
-revm = { version = "34.0.0", features = [
+revm = { version = "38.0.0", features = [
     "std",
     "secp256k1",
     "optional_balance_check",
 ], default-features = false }
-op-revm = { version = "15.0.0", default-features = false }
+
+# op-revm (from local optimism/rust, with version for compat)
+op-revm = { version = "19.0.0", path = "deps/optimism/rust/op-revm/", default-features = false }
 
 # ==============================================================================
-# Alloy Dependencies (versions pinned to ~1.6 to match paradigm reth v1.11.3)
-# Using ~1.6 to prevent Cargo from upgrading to 1.7.x which has
-# incompatible secp256k1 version requirements.
+# Alloy Dependencies (pinned to exact versions used by reth v2.1.0)
+# Note: reth v2.1.0 still pins alloy-primitives + alloy-sol-types to 1.5.6 even
+# though the higher-level alloy crates moved to 2.0.0.
 # ==============================================================================
-alloy-chains = { version = "0.2.30", default-features = false }
-alloy-contract = { version = "~1.6" }
-alloy-consensus = { version = "~1.6", default-features = false }
-alloy-eips = { version = "~1.6", default-features = false }
+alloy-chains = { version = "0.2.33", default-features = false }
+alloy-contract = { version = "2.0.0" }
+alloy-consensus = { version = "2.0.0", default-features = false }
+alloy-eips = { version = "2.0.0", default-features = false }
 alloy-eip7928 = { version = "0.3.0", default-features = false }
-alloy-evm = { version = "~0.27", default-features = false }
-alloy-genesis = { version = "~1.6", default-features = false }
-alloy-json-rpc = { version = "~1.6" }
-alloy-network = { version = "~1.6", default-features = false }
-alloy-primitives = { version = "~1.5", default-features = false, features = [
+alloy-evm = { version = "0.33.0", default-features = false }
+alloy-genesis = { version = "2.0.0", default-features = false }
+alloy-json-rpc = { version = "2.0.0" }
+alloy-network = { version = "2.0.0", default-features = false }
+alloy-primitives = { version = "1.5.6", default-features = false, features = [
     "map-foldhash",
-] } # pinned to ~1.5 (not ~1.6) to avoid secp256k1 version conflict introduced in alloy-primitives 1.6
-alloy-provider = { version = "~1.6" }
-alloy-rlp = { version = "~0.3", default-features = false, features = [
+] }
+alloy-provider = { version = "2.0.0" }
+alloy-rlp = { version = "0.3.13", default-features = false, features = [
     "core-net",
 ] }
-alloy-rpc-client = { version = "~1.6" }
-alloy-rpc-types-beacon = { version = "~1.6", features = ["ssz"] }
-alloy-rpc-types-engine = { version = "~1.6", default-features = false }
-alloy-rpc-types-eth = { version = "~1.6" }
-alloy-serde = { version = "~1.6" }
-alloy-signer-local = { version = "~1.6", default-features = false }
-alloy-sol-types = { version = "~1.5", default-features = false }
-alloy-transport-http = { version = "~1.6", features = [
+alloy-rpc-client = { version = "2.0.0" }
+alloy-rpc-types-beacon = { version = "2.0.0", features = ["ssz"] }
+alloy-rpc-types-engine = { version = "2.0.0", default-features = false }
+alloy-rpc-types-eth = { version = "2.0.0" }
+alloy-serde = { version = "2.0.0" }
+alloy-signer-local = { version = "2.0.0", default-features = false }
+alloy-sol-types = { version = "1.5.6", default-features = false }
+alloy-transport-http = { version = "2.0.0", features = [
     "reqwest-rustls-tls",
 ], default-features = false }
-alloy-transport = { version = "~1.6" }
-alloy-hardforks = { version = "~0.4", default-features = false }
+alloy-transport = { version = "2.0.0" }
+alloy-hardforks = { version = "0.4.7", default-features = false }
 
 # op-alloy (from local optimism/rust, with version for compat)
-alloy-op-evm = { version = "0.26.3", path = "deps/optimism/rust/alloy-op-evm/", default-features = false }
+alloy-op-evm = { version = "0.31.0", path = "deps/optimism/rust/alloy-op-evm/", default-features = false }
 alloy-op-hardforks = { version = "0.4.7", path = "deps/optimism/rust/alloy-op-hardforks/", default-features = false }
-op-alloy-consensus = { version = "0.23.1", path = "deps/optimism/rust/op-alloy/crates/consensus", default-features = false }
+op-alloy-consensus = { version = "0.24.0", path = "deps/optimism/rust/op-alloy/crates/consensus", default-features = false }
 op-alloy-flz = { version = "0.13.1", default-features = false }
-op-alloy-network = { version = "0.23.1", path = "deps/optimism/rust/op-alloy/crates/network", default-features = false }
-op-alloy-rpc-types = { version = "0.23.1", path = "deps/optimism/rust/op-alloy/crates/rpc-types", default-features = false }
-op-alloy-rpc-types-engine = { version = "0.23.1", path = "deps/optimism/rust/op-alloy/crates/rpc-types-engine", default-features = false }
+op-alloy-network = { version = "0.24.0", path = "deps/optimism/rust/op-alloy/crates/network", default-features = false }
+op-alloy-rpc-types = { version = "0.24.0", path = "deps/optimism/rust/op-alloy/crates/rpc-types", default-features = false }
+op-alloy-rpc-types-engine = { version = "0.24.0", path = "deps/optimism/rust/op-alloy/crates/rpc-types-engine", default-features = false }
 
 # ==============================================================================
 # Support Dependencies
 # ==============================================================================
-tokio = { version = "1.44.2", features = ["full"] }
+tokio = { version = "1.51.1", features = ["full"] }
 tokio-metrics = { version = "0.4.7" }
 tokio-stream = "0.1.11"
-tokio-tungstenite = { version = "0.26.2", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.28.0", features = ["native-tls"] }
 tokio-util = { version = "0.7.4", features = ["codec"] }
 
 # async
 futures = "0.3"
 futures-util = "0.3"
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
 tower = "0.5"
 async-trait = "0.1.89"
 
@@ -236,7 +237,7 @@ dashmap = "6.1"
 either = { version = "1.15.0", default-features = false }
 eyre = { version = "0.6.12" }
 hex = "0.4"
-metrics = "0.24.1"
+metrics = "0.24.0"
 moka = { version = "0.12.11", features = ["sync"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 once_cell = "1.19"
@@ -260,30 +261,80 @@ multiaddr = "0.18"
 
 # ==============================================================================
 # Patch Section
-# Required because paradigm reth v1.11.3 (git) transitively depends on
-# op-alloy crates from crates.io. We redirect them to the local optimism
-# workspace versions to avoid duplicate/conflicting types.
-#
-# Duplicated by (from reth git):
-#   op-alloy-consensus:        reth-codecs, reth-db-api, reth-primitives-traits, reth-rpc-convert
-#   op-alloy-rpc-types-engine: reth-payload-primitives, reth-engine-local
-#   op-alloy-network:          reth-rpc-convert
-#   op-alloy-rpc-types:        reth-rpc-convert
-# Duplicated by (from crates.io):
-#   alloy-op-hardforks:        alloy-evm
 # ==============================================================================
+[patch."https://github.com/paradigmxyz/reth"]
+# Redirect every paradigmxyz/reth dep pulled in by the deps/optimism/rust path
+# crates to the same okx/reth rev pinned above, so the workspace resolves to a
+# single reth source. Bump together with the rev in [workspace.dependencies].
+reth = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-basic-payload-builder = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-chain-state = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-chainspec = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-cli = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-cli-commands = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-cli-runner = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-cli-util = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-consensus = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-consensus-common = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-db = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-db-api = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-db-common = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-downloaders = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-engine-local = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-engine-primitives = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-errors = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-eth-wire = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-eth-wire-types = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-ethereum-cli = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-ethereum-consensus = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-ethereum-forks = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-ethereum-primitives = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-evm = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-evm-ethereum = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-exex = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-execution-errors = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-execution-types = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-fs-util = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-metrics = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-network = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-network-api = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-network-peers = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-node-api = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-node-builder = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-node-core = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-node-ethereum = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-node-events = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-node-metrics = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-payload-builder = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-payload-builder-primitives = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-payload-primitives = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-payload-util = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-payload-validator = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-provider = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-prune = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-prune-types = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-revm = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-rpc = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-rpc-api = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-rpc-builder = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-rpc-engine-api = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-rpc-eth-api = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-rpc-eth-types = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-rpc-server-types = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-stages = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-stages-types = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-static-file = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-static-file-types = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-storage-api = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-storage-errors = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-tasks = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-tracing = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-transaction-pool = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-trie = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-trie-common = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+reth-trie-db = { git = "https://github.com/okx/reth", rev = "044b17395db726cf9088baa46e8c824beb252597" }
+
 [patch.crates-io]
-op-alloy-consensus = { path = "deps/optimism/rust/op-alloy/crates/consensus" }
-op-alloy-rpc-types-engine = { path = "deps/optimism/rust/op-alloy/crates/rpc-types-engine" }
-op-alloy-network = { path = "deps/optimism/rust/op-alloy/crates/network" }
-op-alloy-rpc-types = { path = "deps/optimism/rust/op-alloy/crates/rpc-types" }
-alloy-op-hardforks = { path = "deps/optimism/rust/alloy-op-hardforks/" }
-alloy-op-evm = { path = "deps/optimism/rust/alloy-op-evm/" }
-op-alloy = { path = "deps/optimism/rust/op-alloy/crates/op-alloy" }
-# Security patch: upgrade jsonwebtoken to 10.3.0 (CVE-2026-25537)
-# alloy-rpc-types-engine 1.6.3 requires jsonwebtoken ^9.3.0 (^9 semver),
-# which does not include 10.x. This local fork pins jsonwebtoken to 10.3.0.
-alloy-rpc-types-engine = { path = "deps/alloy-rpc-types-engine" }
 # Security patch: remove yamux 0.12.x (CVE-2026-32314) from libp2p-yamux 0.47.0.
 # libp2p-yamux 0.47.0 depends on both yamux 0.12.x (legacy) and 0.13.x (default).
 # This local fork drops yamux012 and uses only yamux 0.13.x (already patched).

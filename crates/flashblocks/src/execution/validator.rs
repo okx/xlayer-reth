@@ -28,7 +28,6 @@ use reth_engine_tree::tree::{
         receipt_root_task::{IndexedReceipt, ReceiptRootTaskHandle},
         ExecutionEnv, PayloadProcessor,
     },
-    sparse_trie::StateRootComputeOutcome,
     CachedStateProvider, PayloadHandle, StateProviderBuilder,
 };
 use reth_errors::BlockExecutionError;
@@ -44,8 +43,7 @@ use reth_primitives_traits::{
 };
 use reth_provider::{
     providers::OverlayStateProviderFactory, BlockReader, DatabaseProviderROFactory,
-    HashedPostStateProvider, HeaderProvider, ProviderError, StateProvider, StateProviderFactory,
-    StateReader,
+    HashedPostStateProvider, HeaderProvider, StateProvider, StateProviderFactory, StateReader,
 };
 use reth_revm::{
     cached::CachedReads,
@@ -60,8 +58,11 @@ use reth_revm::{
 };
 use reth_rpc_eth_types::PendingBlock;
 use reth_tasks::Runtime;
-use reth_trie::{updates::TrieUpdates, HashedPostState, StateRoot};
-use reth_trie_parallel::root::{ParallelStateRoot, ParallelStateRootError};
+use reth_trie::{trie_cursor::TrieCursorFactory, updates::TrieUpdates, HashedPostState, StateRoot};
+use reth_trie_parallel::{
+    root::{ParallelStateRoot, ParallelStateRootError},
+    state_root_task::StateRootComputeOutcome,
+};
 
 /// Builds [`PendingSequence`]s from the accumulated flashblock transaction sequences.
 /// Commits results directly to [`FlashblockStateCache`] via `handle_pending_sequence()`.
@@ -218,6 +219,7 @@ where
             parent_hash,
             parent_state_root: parent_header.state_root(),
             transaction_count: transactions.len(),
+            gas_used: 0,
             withdrawals: Some(args.withdrawals),
         };
 
@@ -293,7 +295,7 @@ where
 
         // Spawn async tx root computation
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        self.payload_processor.executor().spawn_blocking(move || {
+        self.payload_processor.executor().spawn_blocking_named("payload-tx-root", move || {
             let txs: Vec<_> = block_transactions.iter().map(|tx| &tx.1).collect();
             let _ = result_tx.send(calculate_transaction_root(&txs));
         });
@@ -382,7 +384,7 @@ where
                                 ?elapsed,
                                 "Parallel state root computation finished"
                             );
-                            maybe_state_root = Some((result.0, result.1));
+                            maybe_state_root = Some((result.0, Arc::new(result.1)));
                         }
                         Err(error) => {
                             debug!(
@@ -412,10 +414,10 @@ where
                 );
                 let (state_root, trie_output) =
                     Self::compute_state_root_serial(overlay_factory.clone(), &hashed_state)?;
-                (state_root, trie_output, hashed_state)
+                (state_root, Arc::new(trie_output), hashed_state)
             }
         } else {
-            (B256::ZERO, TrieUpdates::default(), HashedPostState::default())
+            (B256::ZERO, Arc::default(), HashedPostState::default())
         };
 
         // Capture execution metrics before `output` is moved into the deferred trie task.
@@ -442,14 +444,20 @@ where
         let block = RecoveredBlock::new_unhashed(block, senders);
 
         let executed_block = if calculate_state_root {
+            // Create the overlay provider NOW, while we're on the engine loop thread and trie changeset
+            // eviction cannot race with us. If we deferred this to the background task, persistence
+            // could advance and evict changeset cache entries between factory creation and the task
+            // actually running, causing expensive DB fallback computations when building the overlay.
+            let changeset_provider = overlay_factory
+                .expect("overlay factory must exist when calculate_state_root is set")
+                .database_provider_ro()?;
             self.spawn_deferred_trie_task(
                 block,
                 output,
                 hashed_state,
                 trie_output,
                 overlay_data,
-                overlay_factory
-                    .expect("overlay factory must exist when calculate_state_root is set"),
+                changeset_provider,
             )
         } else {
             ExecutedBlock::new(
@@ -457,7 +465,7 @@ where
                 output,
                 ComputedTrieData::without_trie_input(
                     Arc::new(hashed_state.into_sorted()),
-                    Arc::new(trie_output.into_sorted()),
+                    Arc::new(trie_output.clone_into_sorted()),
                 ),
             )
         };
@@ -645,13 +653,6 @@ where
         }
         let mut db = state_builder.build();
 
-        // For incremental builds, the only pre-execution effect we need is set_state_clear_flag,
-        // which configures EVM empty-account handling (OP Stack chains activate Spurious Dragon
-        // at genesis, so this is always true).
-        if !state_root_task && pending_sequence.is_some() {
-            db.set_state_clear_flag(true);
-        }
-
         let evm = self.evm_config.evm_with_env(&mut db, evm_env);
         let execution_ctx = self
             .evm_config
@@ -670,10 +671,16 @@ where
         let (receipt_tx, receipt_rx) = crossbeam_channel::unbounded();
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         let task_handle = ReceiptRootTaskHandle::new(receipt_rx, result_tx);
-        self.payload_processor.executor().spawn_blocking(move || task_handle.run(receipts_len));
+        self.payload_processor
+            .executor()
+            .spawn_blocking_named("receipt-root", move || task_handle.run(receipts_len));
 
         let transaction_count = transactions.len();
-        let mut executor = executor.with_state_hook(Some(Box::new(handle.state_hook())));
+        let mut executor = executor.with_state_hook(
+            handle
+                .state_hook()
+                .map(|hook| Box::new(hook) as Box<dyn alloy_evm::block::OnStateHook>),
+        );
 
         // Apply pre-execution changes for fresh builds
         if state_root_task || pending_sequence.is_none() {
@@ -915,7 +922,7 @@ where
 
                 // Bridge the original task receiver into the unified channel.
                 let task_race_tx = race_tx.clone();
-                self.payload_processor.executor().spawn_blocking(move || {
+                self.payload_processor.executor().spawn_blocking_named("task-race", move || {
                     if let Ok(result) = task_rx.recv() {
                         debug!(
                             target: "flashblocks::validator",
@@ -929,7 +936,7 @@ where
                 // Spawn the sequential fallback.
                 let seq_overlay = overlay_factory;
                 let seq_hashed_state = hashed_state.clone();
-                self.payload_processor.executor().spawn_blocking(move || {
+                self.payload_processor.executor().spawn_blocking_named("serial-root", move || {
                     let result = Self::compute_state_root_serial(seq_overlay, &seq_hashed_state);
                     debug!(
                         target: "flashblocks::validator",
@@ -937,9 +944,10 @@ where
                         "State root timeout race won"
                     );
                     let _ = race_tx.send(match result {
-                        Ok((state_root, trie_updates)) => {
-                            Ok(Ok(StateRootComputeOutcome { state_root, trie_updates }))
-                        }
+                        Ok((state_root, trie_updates)) => Ok(Ok(StateRootComputeOutcome {
+                            state_root,
+                            trie_updates: Arc::new(trie_updates),
+                        })),
                         Err(e) => Err(e),
                     });
                 });
@@ -1116,9 +1124,9 @@ where
         block: RecoveredBlock<N::Block>,
         execution_outcome: Arc<BlockExecutionOutput<N::Receipt>>,
         hashed_state: HashedPostState,
-        trie_output: TrieUpdates,
+        trie_output: Arc<TrieUpdates>,
         overlay_data: Option<(Vec<ExecutedBlock<N>>, B256)>,
-        overlay_factory: OverlayStateProviderFactory<Provider>,
+        changeset_provider: impl TrieCursorFactory + Send + 'static,
     ) -> ExecutedBlock<N> {
         // Capture parent hash and ancestor overlays for deferred trie input construction.
         let (overlay_blocks, anchor_hash) =
@@ -1130,18 +1138,19 @@ where
             overlay_blocks.iter().rev().map(|b| b.trie_data_handle()).collect();
 
         // Create deferred handle with fallback inputs in case the background task hasn't completed.
-        let deferred_trie_data = DeferredTrieData::pending(
-            Arc::new(hashed_state),
-            Arc::new(trie_output),
-            anchor_hash,
-            ancestors,
-        );
+        let deferred_trie_data =
+            DeferredTrieData::pending(Arc::new(hashed_state), trie_output, anchor_hash, ancestors);
         let deferred_handle_task = deferred_trie_data.clone();
 
         // Capture block info and cache handle for changeset computation
         let block_hash = block.hash();
         let block_number = block.number();
+
+        // Register a pending changeset entry so that concurrent readers will wait for
+        // this computation to finish rather than falling back to the expensive DB path.
+        // The guard ensures the pending entry is cancelled if the task panics.
         let changeset_cache = self.flashblocks_state.get_changeset_cache();
+        let pending_changeset_guard = changeset_cache.register_pending(block_hash);
 
         // Spawn background task to compute trie data. Calling `wait_cloned` will compute from
         // the stored inputs and cache the result, so subsequent calls return immediately.
@@ -1158,12 +1167,10 @@ where
             // Compute and cache changesets using the computed trie_updates.
             // Get a provider from the overlay factory for trie cursor access.
             let changeset_start = Instant::now();
-            let changeset_result = overlay_factory.database_provider_ro().and_then(|provider| {
-                reth_trie::changesets::compute_trie_changesets(&provider, &computed.trie_updates)
-                    .map_err(ProviderError::Database)
-            });
-
-            match changeset_result {
+            match reth_trie::changesets::compute_trie_changesets(
+                &changeset_provider,
+                &computed.trie_updates,
+            ) {
                 Ok(changesets) => {
                     debug!(
                         target: "flashblocks::changeset",
@@ -1171,7 +1178,7 @@ where
                         elapsed = ?changeset_start.elapsed(),
                         "Computed and caching changesets"
                     );
-                    changeset_cache.insert(block_hash, block_number, Arc::new(changesets));
+                    pending_changeset_guard.resolve(block_number, Arc::new(changesets));
                 }
                 Err(e) => {
                     warn!(
@@ -1185,7 +1192,9 @@ where
         };
 
         // Spawn task that computes trie data asynchronously.
-        self.payload_processor.executor().spawn_blocking(compute_trie_input_task);
+        self.payload_processor
+            .executor()
+            .spawn_blocking_named("trie-input", compute_trie_input_task);
 
         ExecutedBlock::with_deferred_trie_data(
             Arc::new(block),
@@ -1199,8 +1208,8 @@ where
         transactions: Vec<WithEncoded<Recovered<T>>>,
     ) -> (
         Vec<WithEncoded<Recovered<T>>>,
-        fn(WithEncoded<Recovered<T>>) -> Result<Recovered<T>, Infallible>,
+        fn(WithEncoded<Recovered<T>>) -> Result<WithEncoded<Recovered<T>>, Infallible>,
     ) {
-        (transactions, |tx| Ok(tx.1))
+        (transactions, |tx| Ok(tx))
     }
 }

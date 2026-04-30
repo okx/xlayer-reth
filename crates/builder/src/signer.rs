@@ -1,12 +1,13 @@
+use secp256k1::{Message, PublicKey, SecretKey, SECP256K1};
+use sha3::{Digest, Keccak256};
 use std::str::FromStr;
 
 use alloy_consensus::SignableTransaction;
 use alloy_primitives::{Address, Signature, B256, U256};
 use op_alloy_consensus::OpTypedTransaction;
+
 use reth_optimism_primitives::OpTransactionSigned;
-use reth_primitives::Recovered;
-use secp256k1::{Message, PublicKey, SecretKey, SECP256K1};
-use sha3::{Digest, Keccak256};
+use reth_primitives_traits::Recovered;
 
 /// Simple struct to sign txs/messages.
 /// Mainly used to sign payout txs from the builder and to create test data.
@@ -48,7 +49,8 @@ impl Signer {
             OpTypedTransaction::Eip2930(tx) => tx.signature_hash(),
             OpTypedTransaction::Eip1559(tx) => tx.signature_hash(),
             OpTypedTransaction::Eip7702(tx) => tx.signature_hash(),
-            OpTypedTransaction::Deposit(_) => B256::ZERO,
+            // System transactions (Deposit, PostExec) are not user-signed.
+            OpTypedTransaction::Deposit(_) | OpTypedTransaction::PostExec(_) => B256::ZERO,
         };
         let signature = self.sign_message(signature_hash)?;
         let signed = OpTransactionSigned::new_unhashed(tx, signature);

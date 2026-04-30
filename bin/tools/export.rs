@@ -56,14 +56,14 @@ pub struct ExportCommand<C: ChainSpecParser> {
 
 impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> ExportCommand<C> {
     /// Execute `export` command
-    pub async fn execute<N>(self) -> Result<()>
+    pub async fn execute<N>(self, runtime: reth_tasks::Runtime) -> Result<()>
     where
         N: reth_cli_commands::common::CliNodeTypes<ChainSpec = C::ChainSpec>,
     {
         info!(target: "reth::cli", "{} ({}) starting", version_metadata().name_client, version_metadata().short_version);
         info!(target: "reth::cli", "Exporting blockchain to file: {}", self.output_path.display());
 
-        let Environment { provider_factory, .. } = self.env.init::<N>(AccessRights::RO)?;
+        let Environment { provider_factory, .. } = self.env.init::<N>(AccessRights::RO, runtime)?;
 
         // Get the latest block number from the database
         let provider = provider_factory.provider()?;

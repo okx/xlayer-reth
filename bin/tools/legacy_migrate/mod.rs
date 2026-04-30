@@ -43,11 +43,11 @@ pub struct LegacyMigrateCommand<C: ChainSpecParser> {
 
 impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> LegacyMigrateCommand<C> {
     /// Execute the migration.
-    pub async fn execute<N>(&self) -> Result<()>
+    pub async fn execute<N>(&self, runtime: reth_tasks::Runtime) -> Result<()>
     where
         N: CliNodeTypes<ChainSpec = C::ChainSpec>,
     {
-        let Environment { provider_factory, .. } = self.env.init::<N>(AccessRights::RW)?;
+        let Environment { provider_factory, .. } = self.env.init::<N>(AccessRights::RW, runtime)?;
 
         // Get genesis block number from chain spec
         let genesis_block = provider_factory.chain_spec().genesis_header().number;

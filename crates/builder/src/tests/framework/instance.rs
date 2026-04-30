@@ -7,7 +7,6 @@ use crate::{
         TransactionPoolObserver,
     },
 };
-use alloy_provider::{Identity, ProviderBuilder, RootProvider};
 use clap::Parser;
 use core::{
     any::Any,
@@ -20,14 +19,25 @@ use core::{
 use futures::{FutureExt, StreamExt};
 use moka::future::Cache;
 use nanoid::nanoid;
+use parking_lot::Mutex;
+use std::{
+    sync::{Arc, LazyLock},
+    time::Instant,
+};
+use tokio::{sync::oneshot, task::JoinHandle};
+use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_util::sync::CancellationToken;
+
+use alloy_primitives::B256;
+use alloy_provider::{Identity, ProviderBuilder, RootProvider};
 use op_alloy_network::Optimism;
 use op_alloy_rpc_types_engine::OpFlashblockPayload;
-use parking_lot::Mutex;
 use reth::{
     args::{DatadirArgs, NetworkArgs, RpcServerArgs},
     core::exit::NodeExitFuture,
     tasks::Runtime,
 };
+
 use reth_node_builder::{NodeBuilder, NodeConfig};
 use reth_optimism_chainspec::OpChainSpec;
 use reth_optimism_cli::commands::Commands;
@@ -39,13 +49,6 @@ use reth_optimism_node::{
 use reth_optimism_rpc::OpEthApiBuilder;
 use reth_optimism_txpool::OpPooledTransaction;
 use reth_transaction_pool::{AllTransactionsEvents, TransactionPool};
-use std::{
-    sync::{Arc, LazyLock},
-    time::Instant,
-};
-use tokio::{sync::oneshot, task::JoinHandle};
-use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tokio_util::sync::CancellationToken;
 
 /// Represents a type that emulates a local in-process instance of the OP builder node.
 /// This node uses IPC as the communication channel for the RPC server Engine API.
@@ -287,7 +290,9 @@ fn chain_spec() -> Arc<OpChainSpec> {
 }
 
 fn runtime() -> Runtime {
-    Runtime::test_with_handle(tokio::runtime::Handle::current())
+    // `Runtime::test()` attaches to the current tokio handle (when called from
+    // `#[tokio::test]`) which is what the previous `test_with_handle(...)` API did.
+    Runtime::test()
 }
 
 fn pool_component(rollup_args: &RollupArgs) -> OpPoolBuilder {
@@ -385,6 +390,26 @@ impl FlashblocksListener {
             .iter()
             .find(|tf| tf.payload.index == index)
             .map(|tf| tf.payload.clone())
+    }
+
+    /// Check if any flashblock contains the given transaction hash
+    pub fn contains_transaction(&self, tx_hash: &B256) -> bool {
+        // `metadata.receipts` is now `Option<BTreeMap<...>>` upstream.
+        self.flashblocks.lock().iter().any(|fb| {
+            fb.payload.metadata.receipts.as_ref().is_some_and(|r| r.contains_key(tx_hash))
+        })
+    }
+
+    /// Find which flashblock index contains the given transaction hash
+    pub fn find_transaction_flashblock(&self, tx_hash: &B256) -> Option<u64> {
+        self.flashblocks.lock().iter().find_map(|fb| {
+            fb.payload
+                .metadata
+                .receipts
+                .as_ref()
+                .is_some_and(|r| r.contains_key(tx_hash))
+                .then_some(fb.payload.index)
+        })
     }
 
     /// Stop the listener and wait for it to complete
