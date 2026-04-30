@@ -1,3 +1,0 @@
-[submodule "deps/optimism"]
-	path = deps/optimism
-	url = https://github.com/okx/optimism

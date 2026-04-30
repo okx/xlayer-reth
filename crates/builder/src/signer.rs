@@ -44,13 +44,31 @@ impl Signer {
         &self,
         tx: OpTypedTransaction,
     ) -> Result<Recovered<OpTransactionSigned>, secp256k1::Error> {
+        // EIP-8130 AA transactions arrive pre-authenticated via inner
+        // sender_auth/payer_auth blobs and are NEVER routed through the
+        // builder's local signer. If we hit this path it means a caller
+        // upstream is mis-routing a user tx into builder construction —
+        // the resulting `Recovered` would stamp the wrong signer (the
+        // builder key, not the AA sender). Fail fast in debug builds.
+        debug_assert!(
+            !matches!(&tx, OpTypedTransaction::Eip8130(_)),
+            "sign_tx must not be called with EIP-8130 transactions; \
+             AA txs are pre-signed via auth blobs and arrive from the mempool",
+        );
         let signature_hash = match &tx {
             OpTypedTransaction::Legacy(tx) => tx.signature_hash(),
             OpTypedTransaction::Eip2930(tx) => tx.signature_hash(),
             OpTypedTransaction::Eip1559(tx) => tx.signature_hash(),
             OpTypedTransaction::Eip7702(tx) => tx.signature_hash(),
-            // System transactions (Deposit, PostExec) are not user-signed.
-            OpTypedTransaction::Deposit(_) | OpTypedTransaction::PostExec(_) => B256::ZERO,
+            // Sealed variants without an outer ECDSA signature: deposit and
+            // post-exec are system-emitted; EIP-8130 AA txs authenticate via
+            // their inner sender_auth/payer_auth blobs. The downstream
+            // `into_signed` ignores the signature for all three (mirrors
+            // op-alloy's `OpTypedTransaction → TransactionRequest`
+            // convention at base/crates/common/consensus/src/transaction/typed.rs).
+            OpTypedTransaction::Deposit(_)
+            | OpTypedTransaction::PostExec(_)
+            | OpTypedTransaction::Eip8130(_) => B256::ZERO,
         };
         let signature = self.sign_message(signature_hash)?;
         let signed = OpTransactionSigned::new_unhashed(tx, signature);

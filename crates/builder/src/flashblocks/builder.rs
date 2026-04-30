@@ -72,6 +72,11 @@ fn convert_receipt(receipt: &OpReceipt) -> op_alloy_consensus::OpReceipt {
             })
         }
         OpReceipt::PostExec(r) => op_alloy_consensus::OpReceipt::PostExec(r.clone()),
+        // Eip8130 receipts wrap the same `Receipt<Log>` shape on both sides
+        // (no chain-specific fields like deposit_nonce), so the conversion
+        // is a direct passthrough — unlike Deposit which needs the
+        // structural copy above.
+        OpReceipt::Eip8130(r) => op_alloy_consensus::OpReceipt::Eip8130(r.clone()),
     }
 }
 

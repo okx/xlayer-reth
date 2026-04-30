@@ -470,7 +470,12 @@ impl FlashblocksBuilderTx {
         let tx_env = OpTx(op_revm::OpTransaction {
             base,
             enveloped_tx: Some(Bytes::new()),
+            // Both `deposit` and `eip8130` carry chain-specific tx parts that
+            // are only consumed by the EVM when executing the corresponding
+            // tx type. This helper simulates an Eip1559 builder tx, so neither
+            // field is read — `Default::default()` is the correct fill.
             deposit: Default::default(),
+            eip8130: Default::default(),
         });
         let to = tx_env.0.base.kind.into_to().unwrap_or_default();
 
