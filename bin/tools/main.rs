@@ -5,6 +5,7 @@ use reth_optimism_chainspec::OpChainSpec;
 use reth_optimism_consensus::OpBeaconConsensus;
 use reth_optimism_evm::OpExecutorProvider;
 use reth_optimism_node::OpNode;
+use reth_tasks::{RuntimeBuilder, RuntimeConfig, TokioConfig};
 use reth_tracing::{RethTracer, Tracer};
 use std::{process::ExitCode, sync::Arc};
 use tracing::{error, info};
@@ -60,7 +61,12 @@ async fn main() -> ExitCode {
     let _guard = RethTracer::new().init().expect("Failed to initialize tracing");
 
     let cli = Cli::parse();
-    let runtime = reth_tasks::Runtime::test();
+    let runtime = RuntimeBuilder::new(
+        RuntimeConfig::default()
+            .with_tokio(TokioConfig::existing_handle(tokio::runtime::Handle::current())),
+    )
+    .build()
+    .expect("Failed to build runtime");
 
     match cli.command {
         Commands::Import(cmd) => {
