@@ -263,11 +263,10 @@ multiaddr = "0.18"
 # ==============================================================================
 # Patch Section
 # ==============================================================================
-[patch.crates-io]
+[patch."https://github.com/paradigmxyz/reth"]
 # Redirect every paradigmxyz/reth dep pulled in by the deps/optimism/rust path
 # crates to the same okx/reth rev pinned above, so the workspace resolves to a
 # single reth source. Bump together with the rev in [workspace.dependencies].
-[patch."https://github.com/paradigmxyz/reth"]
 reth = { git = "https://github.com/okx/reth", rev = "ccbef3f85dcdc2b5ceb03b8f21c1209f308a5e4d" }
 reth-basic-payload-builder = { git = "https://github.com/okx/reth", rev = "ccbef3f85dcdc2b5ceb03b8f21c1209f308a5e4d" }
 reth-chain-state = { git = "https://github.com/okx/reth", rev = "ccbef3f85dcdc2b5ceb03b8f21c1209f308a5e4d" }
@@ -335,6 +334,13 @@ reth-transaction-pool = { git = "https://github.com/okx/reth", rev = "ccbef3f85d
 reth-trie = { git = "https://github.com/okx/reth", rev = "ccbef3f85dcdc2b5ceb03b8f21c1209f308a5e4d" }
 reth-trie-common = { git = "https://github.com/okx/reth", rev = "ccbef3f85dcdc2b5ceb03b8f21c1209f308a5e4d" }
 reth-trie-db = { git = "https://github.com/okx/reth", rev = "ccbef3f85dcdc2b5ceb03b8f21c1209f308a5e4d" }
+
+[patch.crates-io]
+# Security patch: upgrade jsonwebtoken to 10.3.0 (CVE-2026-25537)
+# alloy-rpc-types-engine 1.8.3 requires jsonwebtoken ^9.3.0 (^9 semver),
+# which does not include 10.x. This local fork pins jsonwebtoken to 10.3.0
+# with the rust_crypto backend.
+alloy-rpc-types-engine = { path = "deps/alloy-rpc-types-engine" }
 
 # Security patch: remove yamux 0.12.x (CVE-2026-32314) from libp2p-yamux 0.47.0.
 # libp2p-yamux 0.47.0 depends on both yamux 0.12.x (legacy) and 0.13.x (default).
