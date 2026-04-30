@@ -308,7 +308,7 @@ impl FlashblocksBuilderCtx {
             };
 
             // add gas used by the transaction to cumulative gas used, before creating the receipt
-            let gas_used = result.gas_used();
+            let gas_used = result.tx_gas_used();
             info.cumulative_gas_used += gas_used;
 
             if !sequencer_tx.is_deposit() {
@@ -422,7 +422,7 @@ impl FlashblocksBuilderCtx {
             };
 
             // Add gas used by the transaction to cumulative gas used
-            let gas_used = result.gas_used();
+            let gas_used = result.tx_gas_used();
             info.cumulative_gas_used += gas_used;
             // Record tx da size
             info.cumulative_da_bytes_used += tx_da_size;
@@ -591,7 +591,7 @@ impl FlashblocksBuilderCtx {
             self.metrics.tx_byte_size.record(tx.inner().size() as f64);
             num_txs_simulated += 1;
 
-            let gas_used = result.gas_used();
+            let gas_used = result.tx_gas_used();
 
             if result.is_success() {
                 log_txn(TxnExecutionResult::Success);

@@ -350,6 +350,7 @@ where
                     block_hash: Some(ctx.sealed_block.hash()),
                     block_number: Some(ctx.sealed_block.header().number()),
                     base_fee: ctx.sealed_block.header().base_fee_per_gas(),
+                    ..Default::default()
                 },
             )
             .ok()?;

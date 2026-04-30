@@ -11,7 +11,7 @@ use std::{collections::HashMap, str::FromStr, sync::OnceLock};
 use tokio::time::{sleep, Duration};
 
 use alloy_eips::eip2718::Encodable2718;
-use alloy_network::{EthereumWallet, TransactionBuilder};
+use alloy_network::{EthereumWallet, NetworkTransactionBuilder, TransactionBuilder};
 use alloy_primitives::{hex, Address, Bytes, U256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::TransactionRequest;
