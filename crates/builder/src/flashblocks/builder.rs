@@ -1097,6 +1097,13 @@ where
         },
     };
 
+    // Take the current flashblock incremental bal and merge it into the accumulator
+    // on the `ExecutionInfo`, and reset the bal builder for the next flashblock.
+    let flashblock_bal = state.take_built_bal();
+    state.bal_state.bal_builder = Some(Bal::new());
+    let fbal = flashblock_bal.clone().map(|bal| bal.into_alloy_bal());
+    info.merge_access_list(flashblock_bal);
+
     let header = Header {
         parent_hash: ctx.parent().hash(),
         ommers_hash: EMPTY_OMMER_ROOT_HASH,
@@ -1177,13 +1184,8 @@ where
         }
         fb.set_last_flashblock_tx_index(info.executed_transactions.len());
     }
-    // Build EIP-7928 access list for this flashblock's transaction range.
-    // Takes the accumulated builder (resets it for the next flashblock).
-    let access_list = state.take_built_alloy_bal();
-    state.bal_state.bal_builder = Some(Bal::new());
 
-    let metadata =
-        OpFlashblockPayloadMetadata::new(ctx.parent().number + 1, None, None, access_list);
+    let metadata = OpFlashblockPayloadMetadata::new(ctx.parent().number + 1, None, None, fbal);
 
     let (_, blob_gas_used) = ctx.blob_fields(info);
 

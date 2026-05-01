@@ -868,7 +868,28 @@ where
                     provider_builder,
                     overlay_factory.expect("overlay factory must exist for StateRootTask strategy"),
                     &self.tree_config,
-                    bal,
+                    // TODO: BAL is intentionally NOT fed into the StateRootTask pipeline — pass `None`
+                    // until upstream BAL+sparse-trie integration stabilizes.
+                    //
+                    // Why: combining BAL with the sparse-trie task is still WIP upstream and the
+                    // currently-released path (reth v2.1.0 / PRs #23393 + #23423) regresses on small
+                    // and large blocks:
+                    // - Empty/small blocks below `SMALL_BLOCK_TX_THRESHOLD`: PR #23393 disables the
+                    //   per-tx state hook whenever BAL is present, but the prewarm task only emits
+                    //   `FinishedStateUpdates` on the BAL-prewarm branch. Small blocks take the
+                    //   skip-prewarm fallback → no terminator is sent → sparse trie hits the 1s
+                    //   timeout. Fixed upstream by PR #23833 (gates state-hook removal on whether
+                    //   BAL prewarm actually runs).
+                    // - Heavy blocks: PR #23423's `par_iter().for_each_init(...)` streaming sends
+                    //   one `HashedStateUpdate` per `AccountChanges`, fragmenting the channel and
+                    //   under-utilizing proof workers via the chunk-size=5 dispatch path.
+                    //
+                    // The tx-based prewarm path (BAL=None) is the well-tested upstream flow and is
+                    // what we run in production today. Re-enable BAL here once the upstream WIP
+                    // lands and we verify both modes on devnet stress runs.
+                    //
+                    // Upstream WIP branch: https://github.com/paradigmxyz/reth/tree/bal-devnet-3
+                    None,
                 ))
             }
             StateRootStrategy::Parallel | StateRootStrategy::Synchronous => Ok(self

@@ -144,7 +144,7 @@ struct RawFlashblocksEntry<T: SignedTransaction> {
     /// Tracks the recovered transactions by index
     recovered_transactions_by_index: BTreeMap<u64, Vec<WithEncoded<Recovered<T>>>>,
     /// Tracks the decoded EIP-7928 [`BlockAccessList`] by index
-    block_access_lists: BTreeMap<u64, BlockAccessList>,
+    block_access_lists: BTreeMap<u64, Bal>,
     /// Tracks if the accumulated sequence has received the first base flashblock
     has_base: bool,
     /// The sequencer's target flashblock index. Zero if unset.
@@ -193,7 +193,31 @@ impl<T: SignedTransaction> RawFlashblocksEntry<T> {
         match flashblock.metadata.block_access_list() {
             None => {}
             Some(Ok(list)) => {
-                self.block_access_lists.insert(flashblock_index, list);
+                let mut bal = Bal::new();
+                for alloy_account in list {
+                    let address = alloy_account.address;
+                    match AccountBal::try_from_alloy(alloy_account) {
+                        Ok((addr, incoming)) => match bal.accounts.get_mut(&addr) {
+                            Some(existing) => {
+                                existing.account_info.extend(incoming.account_info);
+                                existing.storage.extend(incoming.storage);
+                            }
+                            None => {
+                                bal.accounts.insert(addr, incoming);
+                            }
+                        },
+                        Err(err) => tracing::warn!(
+                            target: "flashblocks",
+                            flashblock_index,
+                            ?address,
+                            ?err,
+                            "BAL account decode failed at insert, account skipped",
+                        ),
+                    }
+                }
+                if !bal.accounts.is_empty() {
+                    self.block_access_lists.insert(flashblock_index, bal);
+                }
             }
             Some(Err(e)) => {
                 tracing::warn!(
@@ -273,26 +297,16 @@ impl<T: SignedTransaction> RawFlashblocksEntry<T> {
     /// covering flashblocks `[0..=up_to]`.
     fn access_list_up_to(&self, up_to: u64) -> Option<BlockAccessList> {
         let mut merged = Bal::new();
-        for (_, access_list) in self.block_access_lists.range(..=up_to) {
-            for alloy_account in access_list {
-                let (addr, incoming) = match AccountBal::try_from_alloy(alloy_account.clone()) {
-                    Ok(pair) => pair,
-                    Err(err) => {
-                        tracing::warn!(
-                            target: "flashblocks",
-                            address = ?alloy_account.address,
-                            ?err,
-                            "BAL account decode failed, skipping",
-                        );
-                        continue;
+        for (_, bal) in self.block_access_lists.range(..=up_to) {
+            for (addr, incoming) in &bal.accounts {
+                match merged.accounts.get_mut(addr) {
+                    Some(existing) => {
+                        existing.account_info.extend(incoming.account_info.clone());
+                        existing.storage.extend(incoming.storage.clone());
                     }
-                };
-
-                if let Some(existing) = merged.accounts.get_mut(&addr) {
-                    existing.account_info.extend(incoming.account_info);
-                    existing.storage.extend(incoming.storage);
-                } else {
-                    merged.accounts.insert(addr, incoming);
+                    None => {
+                        merged.accounts.insert(*addr, incoming.clone());
+                    }
                 }
             }
         }
