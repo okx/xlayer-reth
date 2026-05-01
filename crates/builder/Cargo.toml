@@ -54,16 +54,18 @@ reth-tasks.workspace = true
 reth-ipc = { workspace = true, optional = true }
 
 # alloy
+alloy-eip7928 = { workspace = true, features = ["serde", "rlp"] }
 alloy-primitives.workspace = true
-alloy-consensus.workspace = true
+alloy-consensus = { workspace = true, features = ["std"] }
 alloy-contract.workspace = true
 alloy-eips.workspace = true
 alloy-evm.workspace = true
+alloy-rlp = { workspace = true, features = ["derive", "std"] }
 alloy-rpc-types-engine.workspace = true
 alloy-rpc-types-eth.workspace = true
 alloy-network.workspace = true
 alloy-provider.workspace = true
-alloy-sol-types = { workspace = true, features = ["json"] }
+alloy-sol-types = { workspace = true, features = ["std", "json"] }
 
 # op
 alloy-op-evm.workspace = true
@@ -100,6 +102,7 @@ multiaddr = { workspace = true }
 
 # misc
 anyhow = "1"
+brotli = { workspace = true, features = ["std"] }
 clap.workspace = true
 dashmap.workspace = true
 derive_more.workspace = true

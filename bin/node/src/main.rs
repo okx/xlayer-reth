@@ -208,6 +208,10 @@ fn main() {
                                     .xlayer_args
                                     .flashblocks_rpc
                                     .flashblocks_debug_state_comparison,
+                                disable_access_list: args
+                                    .xlayer_args
+                                    .flashblocks_rpc
+                                    .flashblocks_disable_access_list,
                             },
                             FlashblocksPersistCtx {
                                 datadir,

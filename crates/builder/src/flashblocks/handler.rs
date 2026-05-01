@@ -1,5 +1,5 @@
 use crate::{
-    broadcast::{Message, WebSocketPublisher, XLayerFlashblockMessage},
+    broadcast::{BroadcastFrame, Message, WebSocketPublisher, XLayerFlashblockMessage},
     flashblocks::{
         handler_ctx::FlashblockHandlerContext,
         utils::{cache::FlashblockPayloadsCache, execution::ExecutionInfo},
@@ -41,7 +41,7 @@ pub(crate) struct FlashblocksPayloadHandler<Client> {
     // receives new full block payloads built by this builder.
     built_payload_rx: mpsc::Receiver<OpBuiltPayload>,
     // receives incoming p2p messages from peers.
-    p2p_rx: mpsc::Receiver<Message>,
+    p2p_rx: mpsc::Receiver<BroadcastFrame>,
     // outgoing p2p channel to broadcast new payloads to peers.
     p2p_tx: mpsc::Sender<Message>,
     // sends a `Events::BuiltPayload` to the reth payload builder when a new payload is received.
@@ -68,7 +68,7 @@ where
         ctx: FlashblockHandlerContext,
         built_fb_payload_rx: mpsc::Receiver<XLayerFlashblockMessage>,
         built_payload_rx: mpsc::Receiver<OpBuiltPayload>,
-        p2p_rx: mpsc::Receiver<Message>,
+        p2p_rx: mpsc::Receiver<BroadcastFrame>,
         p2p_tx: mpsc::Sender<Message>,
         payload_events_handle: tokio::sync::broadcast::Sender<Events<OpEngineTypes>>,
         p2p_cache: FlashblockPayloadsCache,
@@ -131,14 +131,14 @@ where
                         let _ = p2p_tx.send(Message::from_built_payload(payload)).await;
                     }
                 }
-                Some(message) = p2p_rx.recv() => {
-                    match message {
+                Some(frame) = p2p_rx.recv() => {
+                    match frame.decoded.as_ref() {
                         Message::OpBuiltPayload(payload) => {
                             if !p2p_process_full_payload_flag {
                                 continue;
                             }
 
-                            let payload: OpBuiltPayload = (*payload).into();
+                            let payload: OpBuiltPayload = (**payload).clone().into();
                             let block_hash = payload.block().hash();
                             // Check if this block is already the pending block in canonical state
                             if let Ok(Some(pending)) = client.pending_block()
@@ -181,10 +181,10 @@ where
                             }));
                         }
                         Message::OpFlashblockPayload(fb_payload) => {
-                            if let XLayerFlashblockMessage::Payload(payload) = &fb_payload {
+                            if let XLayerFlashblockMessage::Payload(payload) = fb_payload {
                                 p2p_cache.add_flashblock_payload(payload.inner.clone());
                             }
-                            if let Err(e) = ws_pub.publish(&fb_payload) {
+                            if let Err(e) = ws_pub.publish(frame.bytes.clone(), fb_payload) {
                                 warn!(target: "payload_builder", e = ?e, "failed to publish flashblock to websocket publisher");
                             }
                         }
