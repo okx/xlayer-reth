@@ -1202,3 +1202,22 @@ where
         (transactions, |tx| Ok(tx))
     }
 }
+
+impl<N, EvmConfig, Provider, ChainSpec>
+    FlashblockSequenceValidator<N, EvmConfig, Provider, ChainSpec>
+where
+    N: NodePrimitives,
+    EvmConfig: ConfigureEvm,
+    ChainSpec: OpHardforks,
+{
+    /// Drops the in-flight state root task handle, releasing the [`PayloadProcessor`]'s
+    /// preserved sparse trie back to its slot.
+    pub fn drop_state_root_handle(&mut self) {
+        self.state_root_handle = None;
+    }
+
+    /// Returns the [`Runtime`] held by the validator.
+    pub const fn runtime(&self) -> &Runtime {
+        &self.runtime
+    }
+}

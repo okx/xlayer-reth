@@ -1,11 +1,18 @@
-use crate::{cache::CachedTxInfo, execution::PrefixExecutionMeta};
+use crate::{
+    cache::CachedTxInfo,
+    execution::{BuildArgs, PrefixExecutionMeta},
+};
 use derive_more::Deref;
 use std::collections::HashMap;
 
 use alloy_consensus::BlockHeader;
-use alloy_primitives::{TxHash, B256};
-use reth_primitives_traits::NodePrimitives;
-use reth_primitives_traits::SealedHeader;
+use alloy_eips::eip2718::{Encodable2718, WithEncoded};
+use alloy_primitives::{TxHash, B256, U256};
+use op_alloy_rpc_types_engine::OpFlashblockPayloadBase;
+use reth_primitives_traits::{
+    transaction::{signed::SignedTransaction, TxHashRef},
+    Block as BlockTrait, BlockBody, NodePrimitives, Recovered, SealedBlock, SealedHeader,
+};
 use reth_rpc_eth_types::{block::BlockAndReceipts, PendingBlock};
 
 /// The pending flashblocks sequence built with all received `OpFlashblockPayload`
@@ -53,6 +60,185 @@ impl<N: NodePrimitives> PendingSequence<N> {
 
     pub fn is_sequence_end(&self) -> bool {
         self.sequence_end
+    }
+
+    /// Validates the incoming default payload with the pending sequence and generates the
+    /// build args with sequence end for flashblocks sequence validation on existing warm
+    /// caches if the incoming payload matches.
+    ///
+    /// Used on the engine validator's cache-miss path: when the default CL/EL sync arrives
+    /// before flashblock sequence end message, we try to validate the incoming default
+    /// payload through the warm flashblocks sequence validator pipeline instead of dropping
+    /// and re-validating from cold + re-executing already validated txs.
+    ///
+    /// Validation steps:
+    /// 1. Every field of the [`OpFlashblockPayloadBase`] derived from the incoming
+    ///    payload's header must equal the base this sequence was built against —
+    ///    `parent_hash`, `fee_recipient`, `prev_randao`, `block_number`, `gas_limit`,
+    ///    `timestamp`, `extra_data`, `base_fee_per_gas`, `parent_beacon_block_root`. Any
+    ///    field divergence means a sequencer switch / chain reorg / different attribute
+    ///    set, and the caller must fall back to default engine validation.
+    /// 2. Every prefix tx hash must match this sequence's already-executed prefix txs.
+    #[expect(clippy::type_complexity)]
+    pub fn try_insert_default_payload(
+        &self,
+        incoming: SealedBlock<N::Block>,
+    ) -> eyre::Result<BuildArgs<Vec<WithEncoded<Recovered<N::SignedTx>>>>>
+    where
+        N::SignedTx: SignedTransaction + Encodable2718,
+        <<N::Block as BlockTrait>::Body as BlockBody>::Transaction: TxHashRef,
+    {
+        // 1. Validate incoming block header against the FB-built pending header.
+        let incoming_header = incoming.header().clone();
+        self.validate_incoming_header(&incoming_header)?;
+
+        // 2. Prefix tx hash check
+        self.validate_prefix_transactions(incoming.body().transactions())?;
+
+        // Get build args
+        let withdrawals =
+            incoming.body().withdrawals().map(|w| w.iter().cloned().collect()).unwrap_or_default();
+        let recovered_block = incoming
+            .try_recover()
+            .map_err(|_| eyre::eyre!("failed to recover senders for canonical payload"))?;
+        let transactions = recovered_block
+            .clone_transactions_recovered()
+            .map(|tx| {
+                let encoded = tx.encoded_2718();
+                WithEncoded::new(encoded.into(), tx)
+            })
+            .collect();
+
+        // 5. Synthesize a sequence-end BuildArgs identical in shape to what an End
+        //    message would produce. `payload_id` matches the pending sequence so
+        //    `prevalidate_incoming_sequence` accepts this as an incremental build;
+        //    `sequence_end=true` triggers full SR computation + confirm-cache promotion.
+        Ok(BuildArgs {
+            payload_id: self.prefix_execution_meta.payload_id,
+            base: OpFlashblockPayloadBase {
+                parent_beacon_block_root: incoming_header
+                    .parent_beacon_block_root()
+                    .unwrap_or_default(),
+                parent_hash: incoming_header.parent_hash(),
+                fee_recipient: incoming_header.beneficiary(),
+                prev_randao: incoming_header.mix_hash().unwrap_or_default(),
+                block_number: incoming_header.number(),
+                gas_limit: incoming_header.gas_limit(),
+                timestamp: incoming_header.timestamp(),
+                extra_data: incoming_header.extra_data().clone(),
+                base_fee_per_gas: U256::from(
+                    incoming_header.base_fee_per_gas().unwrap_or_default(),
+                ),
+            },
+            transactions,
+            withdrawals,
+            last_flashblock_index: self.prefix_execution_meta.last_flashblock_index,
+            target_index: self.prefix_execution_meta.last_flashblock_index,
+            sequence_end: true,
+        })
+    }
+
+    /// Validates the incoming block header against this pending sequence.
+    fn validate_incoming_header(&self, incoming: &N::BlockHeader) -> eyre::Result<()> {
+        let expected = self.pending.executed_block.recovered_block.header();
+        if expected.parent_hash() != incoming.parent_hash() {
+            return Err(eyre::eyre!(
+                "parent_hash mismatch: expected={}, incoming={}",
+                expected.parent_hash(),
+                incoming.parent_hash(),
+            ));
+        }
+        if expected.beneficiary() != incoming.beneficiary() {
+            return Err(eyre::eyre!(
+                "fee_recipient mismatch: expected={}, incoming={}",
+                expected.beneficiary(),
+                incoming.beneficiary(),
+            ));
+        }
+        if expected.mix_hash() != incoming.mix_hash() {
+            return Err(eyre::eyre!(
+                "prev_randao mismatch: expected={:?}, incoming={:?}",
+                expected.mix_hash(),
+                incoming.mix_hash(),
+            ));
+        }
+        if expected.number() != incoming.number() {
+            return Err(eyre::eyre!(
+                "block_number mismatch: expected={}, incoming={}",
+                expected.number(),
+                incoming.number(),
+            ));
+        }
+        if expected.gas_limit() != incoming.gas_limit() {
+            return Err(eyre::eyre!(
+                "gas_limit mismatch: expected={}, incoming={}",
+                expected.gas_limit(),
+                incoming.gas_limit(),
+            ));
+        }
+        if expected.timestamp() != incoming.timestamp() {
+            return Err(eyre::eyre!(
+                "timestamp mismatch: expected={}, incoming={}",
+                expected.timestamp(),
+                incoming.timestamp(),
+            ));
+        }
+        if expected.extra_data() != incoming.extra_data() {
+            return Err(eyre::eyre!(
+                "extra_data mismatch: expected={:?}, incoming={:?}",
+                expected.extra_data(),
+                incoming.extra_data(),
+            ));
+        }
+        if expected.base_fee_per_gas() != incoming.base_fee_per_gas() {
+            return Err(eyre::eyre!(
+                "base_fee_per_gas mismatch: expected={:?}, incoming={:?}",
+                expected.base_fee_per_gas(),
+                incoming.base_fee_per_gas(),
+            ));
+        }
+        if expected.parent_beacon_block_root() != incoming.parent_beacon_block_root() {
+            return Err(eyre::eyre!(
+                "parent_beacon_block_root mismatch: expected={:?}, incoming={:?}",
+                expected.parent_beacon_block_root(),
+                incoming.parent_beacon_block_root(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validates that the canonical payload's first `cached_tx_count` transactions
+    /// match this pending sequence's already-executed prefix by `tx_hash`.
+    fn validate_prefix_transactions(
+        &self,
+        canonical_txs: &[<<N::Block as BlockTrait>::Body as BlockBody>::Transaction],
+    ) -> eyre::Result<()>
+    where
+        <<N::Block as BlockTrait>::Body as BlockBody>::Transaction: TxHashRef,
+    {
+        let prefix_count = self.prefix_execution_meta.cached_tx_count;
+        if canonical_txs.len() < prefix_count {
+            return Err(eyre::eyre!(
+                "canonical block has {} txs but pending prefix expects {prefix_count}",
+                canonical_txs.len(),
+            ));
+        }
+        let pending_block = &self.pending.executed_block.recovered_block;
+        for (i, (canon, pend)) in canonical_txs
+            .iter()
+            .zip(pending_block.transactions_recovered())
+            .take(prefix_count)
+            .enumerate()
+        {
+            let canon_hash = *canon.tx_hash();
+            let pending_hash = *pend.tx_hash();
+            if canon_hash != pending_hash {
+                return Err(eyre::eyre!(
+                    "prefix tx mismatch at index {i}: canon={canon_hash}, pending={pending_hash}",
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
