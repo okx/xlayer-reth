@@ -178,11 +178,11 @@ where
             return Ok((executed_block, None));
         }
 
-        debug!(
+        info!(
             target: "flashblocks::engine_validator",
             block_number = num_hash.number,
             block_hash = %num_hash.hash,
-            "Flashblocks cache miss, engine validating payload",
+            "Failed to build with flashblocks pending sequence, defaulting to engine validation",
         );
 
         // Drop any in-flight flashblocks sparse-trie task so the `PayloadProcessor`'s
@@ -227,7 +227,7 @@ where
             target: "flashblocks::engine_validator",
             block_number = num_hash.number,
             block_hash = %num_hash.hash,
-            "Flashblocks cache miss, engine validating block",
+            "Failed to build with flashblocks pending sequence, defaulting to engine validation",
         );
 
         // Drop any in-flight flashblocks sparse-trie task so the `PayloadProcessor`'s
@@ -422,10 +422,10 @@ where
         let fb_validator = self.fb_validator.as_mut()?;
         let runtime = fb_validator.runtime().handle().clone();
         if let Err(e) = runtime.block_on(fb_validator.execute_sequence(args)) {
-            debug!(
+            info!(
                 target: "flashblocks::engine_validator",
                 %e,
-                "Takeover failed: execute_sequence error",
+                "execute_sequence failed on incremental building from engine default payload",
             );
             return None;
         }
