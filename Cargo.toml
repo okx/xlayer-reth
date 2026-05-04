@@ -1,7 +1,7 @@
 [workspace.package]
 version = "0.0.6"
 edition = "2024"
-rust-version = "1.94.0"
+rust-version = "1.94"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/okx/xlayer-reth.git"
 repository = "https://github.com/okx/xlayer-reth.git"
@@ -145,18 +145,18 @@ reth-trie-parallel = { git = "https://github.com/okx/reth", rev = "22f21c1008865
 # Reth Optimism Dependencies (from local optimism/rust op-reth)
 # These are OP-chain-specific crates, sourced from the optimism monorepo.
 # ==============================================================================
-reth-optimism-chainspec = { git = "https://github.com/okx/optimism", rev = "1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad", default-features = false }
-reth-optimism-cli = { git = "https://github.com/okx/optimism", rev = "1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad", default-features = false }
-reth-optimism-consensus = { git = "https://github.com/okx/optimism", rev = "1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad", default-features = false }
-reth-optimism-evm = { git = "https://github.com/okx/optimism", rev = "1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad", default-features = false, features = ["rpc"] }
-reth-optimism-flashblocks = { git = "https://github.com/okx/optimism", rev = "1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad" }
-reth-optimism-forks = { git = "https://github.com/okx/optimism", rev = "1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad", default-features = false }
-reth-optimism-node = { git = "https://github.com/okx/optimism", rev = "1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad" }
-reth-optimism-payload-builder = { git = "https://github.com/okx/optimism", rev = "1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad" }
-reth-optimism-primitives = { git = "https://github.com/okx/optimism", rev = "1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad", default-features = false }
-reth-optimism-rpc = { git = "https://github.com/okx/optimism", rev = "1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad" }
-reth-optimism-storage = { git = "https://github.com/okx/optimism", rev = "1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad" }
-reth-optimism-txpool = { git = "https://github.com/okx/optimism", rev = "1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad" }
+reth-optimism-chainspec = { git = "https://github.com/okx/optimism", rev = "8cabdd41d036f298c0be556a55ebb6080607c789", default-features = false }
+reth-optimism-cli = { git = "https://github.com/okx/optimism", rev = "8cabdd41d036f298c0be556a55ebb6080607c789", default-features = false }
+reth-optimism-consensus = { git = "https://github.com/okx/optimism", rev = "8cabdd41d036f298c0be556a55ebb6080607c789", default-features = false }
+reth-optimism-evm = { git = "https://github.com/okx/optimism", rev = "8cabdd41d036f298c0be556a55ebb6080607c789", default-features = false, features = ["rpc"] }
+reth-optimism-flashblocks = { git = "https://github.com/okx/optimism", rev = "8cabdd41d036f298c0be556a55ebb6080607c789" }
+reth-optimism-forks = { git = "https://github.com/okx/optimism", rev = "8cabdd41d036f298c0be556a55ebb6080607c789", default-features = false }
+reth-optimism-node = { git = "https://github.com/okx/optimism", rev = "8cabdd41d036f298c0be556a55ebb6080607c789" }
+reth-optimism-payload-builder = { git = "https://github.com/okx/optimism", rev = "8cabdd41d036f298c0be556a55ebb6080607c789" }
+reth-optimism-primitives = { git = "https://github.com/okx/optimism", rev = "8cabdd41d036f298c0be556a55ebb6080607c789", default-features = false }
+reth-optimism-rpc = { git = "https://github.com/okx/optimism", rev = "8cabdd41d036f298c0be556a55ebb6080607c789" }
+reth-optimism-storage = { git = "https://github.com/okx/optimism", rev = "8cabdd41d036f298c0be556a55ebb6080607c789" }
+reth-optimism-txpool = { git = "https://github.com/okx/optimism", rev = "8cabdd41d036f298c0be556a55ebb6080607c789" }
 
 # ==============================================================================
 # Revm Dependencies (aligned with reth v2.1.0)
@@ -168,7 +168,7 @@ revm = { version = "38.0.0", features = [
 ], default-features = false }
 
 # op-revm (from local optimism/rust, with version for compat)
-op-revm = { version = "19.0.0", git = "https://github.com/okx/optimism", rev = "1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad", default-features = false }
+op-revm = { version = "19.0.0", git = "https://github.com/okx/optimism", rev = "8cabdd41d036f298c0be556a55ebb6080607c789", default-features = false }
 
 # ==============================================================================
 # Alloy Dependencies (pinned to exact versions used by reth v2.1.0)
@@ -205,13 +205,13 @@ alloy-transport = { version = "2.0.0" }
 alloy-hardforks = { version = "0.4.7", default-features = false }
 
 # op-alloy (from local optimism/rust, with version for compat)
-alloy-op-evm = { version = "0.31.0", git = "https://github.com/okx/optimism", rev = "1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad", default-features = false }
-alloy-op-hardforks = { version = "0.4.7", git = "https://github.com/okx/optimism", rev = "1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad", default-features = false }
-op-alloy-consensus = { version = "0.24.0", git = "https://github.com/okx/optimism", rev = "1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad", default-features = false }
+alloy-op-evm = { version = "0.31.0", git = "https://github.com/okx/optimism", rev = "8cabdd41d036f298c0be556a55ebb6080607c789", default-features = false }
+alloy-op-hardforks = { version = "0.4.7", git = "https://github.com/okx/optimism", rev = "8cabdd41d036f298c0be556a55ebb6080607c789", default-features = false }
+op-alloy-consensus = { version = "0.24.0", git = "https://github.com/okx/optimism", rev = "8cabdd41d036f298c0be556a55ebb6080607c789", default-features = false }
 op-alloy-flz = { version = "0.13.1", default-features = false }
-op-alloy-network = { version = "0.24.0", git = "https://github.com/okx/optimism", rev = "1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad", default-features = false }
-op-alloy-rpc-types = { version = "0.24.0", git = "https://github.com/okx/optimism", rev = "1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad", default-features = false }
-op-alloy-rpc-types-engine = { version = "0.24.0", git = "https://github.com/okx/optimism", rev = "1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad", default-features = false }
+op-alloy-network = { version = "0.24.0", git = "https://github.com/okx/optimism", rev = "8cabdd41d036f298c0be556a55ebb6080607c789", default-features = false }
+op-alloy-rpc-types = { version = "0.24.0", git = "https://github.com/okx/optimism", rev = "8cabdd41d036f298c0be556a55ebb6080607c789", default-features = false }
+op-alloy-rpc-types-engine = { version = "0.24.0", git = "https://github.com/okx/optimism", rev = "8cabdd41d036f298c0be556a55ebb6080607c789", default-features = false }
 
 # ==============================================================================
 # Support Dependencies

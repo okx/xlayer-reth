@@ -418,7 +418,7 @@ dependencies = [
 [[package]]
 name = "alloy-op-evm"
 version = "0.31.0"
-source = "git+https://github.com/okx/optimism?rev=1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad#1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad"
+source = "git+https://github.com/okx/optimism?rev=8cabdd41d036f298c0be556a55ebb6080607c789#8cabdd41d036f298c0be556a55ebb6080607c789"
 dependencies = [
  "alloy-consensus",
  "alloy-eips 2.0.4",
@@ -435,7 +435,7 @@ dependencies = [
 [[package]]
 name = "alloy-op-hardforks"
 version = "0.4.7"
-source = "git+https://github.com/okx/optimism?rev=1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad#1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad"
+source = "git+https://github.com/okx/optimism?rev=8cabdd41d036f298c0be556a55ebb6080607c789#8cabdd41d036f298c0be556a55ebb6080607c789"
 dependencies = [
  "alloy-chains",
  "alloy-hardforks",
@@ -6526,7 +6526,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "op-alloy"
 version = "0.24.0"
-source = "git+https://github.com/okx/optimism?rev=1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad#1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad"
+source = "git+https://github.com/okx/optimism?rev=8cabdd41d036f298c0be556a55ebb6080607c789#8cabdd41d036f298c0be556a55ebb6080607c789"
 dependencies = [
  "op-alloy-consensus",
  "op-alloy-network",
@@ -6538,7 +6538,7 @@ dependencies = [
 [[package]]
 name = "op-alloy-consensus"
 version = "0.24.0"
-source = "git+https://github.com/okx/optimism?rev=1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad#1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad"
+source = "git+https://github.com/okx/optimism?rev=8cabdd41d036f298c0be556a55ebb6080607c789#8cabdd41d036f298c0be556a55ebb6080607c789"
 dependencies = [
  "alloy-consensus",
  "alloy-eips 2.0.4",
@@ -6573,7 +6573,7 @@ checksum = "a79f352fc3893dcd670172e615afef993a41798a1d3fc0db88a3e60ef2e70ecc"
 [[package]]
 name = "op-alloy-network"
 version = "0.24.0"
-source = "git+https://github.com/okx/optimism?rev=1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad#1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad"
+source = "git+https://github.com/okx/optimism?rev=8cabdd41d036f298c0be556a55ebb6080607c789#8cabdd41d036f298c0be556a55ebb6080607c789"
 dependencies = [
  "alloy-consensus",
  "alloy-network",
@@ -6586,7 +6586,7 @@ dependencies = [
 [[package]]
 name = "op-alloy-provider"
 version = "0.24.0"
-source = "git+https://github.com/okx/optimism?rev=1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad#1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad"
+source = "git+https://github.com/okx/optimism?rev=8cabdd41d036f298c0be556a55ebb6080607c789#8cabdd41d036f298c0be556a55ebb6080607c789"
 dependencies = [
  "alloy-network",
  "alloy-primitives",
@@ -6600,7 +6600,7 @@ dependencies = [
 [[package]]
 name = "op-alloy-rpc-jsonrpsee"
 version = "0.24.0"
-source = "git+https://github.com/okx/optimism?rev=1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad#1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad"
+source = "git+https://github.com/okx/optimism?rev=8cabdd41d036f298c0be556a55ebb6080607c789#8cabdd41d036f298c0be556a55ebb6080607c789"
 dependencies = [
  "alloy-primitives",
  "jsonrpsee",
@@ -6609,7 +6609,7 @@ dependencies = [
 [[package]]
 name = "op-alloy-rpc-types"
 version = "0.24.0"
-source = "git+https://github.com/okx/optimism?rev=1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad#1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad"
+source = "git+https://github.com/okx/optimism?rev=8cabdd41d036f298c0be556a55ebb6080607c789#8cabdd41d036f298c0be556a55ebb6080607c789"
 dependencies = [
  "alloy-consensus",
  "alloy-eips 2.0.4",
@@ -6630,7 +6630,7 @@ dependencies = [
 [[package]]
 name = "op-alloy-rpc-types-engine"
 version = "0.24.0"
-source = "git+https://github.com/okx/optimism?rev=1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad#1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad"
+source = "git+https://github.com/okx/optimism?rev=8cabdd41d036f298c0be556a55ebb6080607c789#8cabdd41d036f298c0be556a55ebb6080607c789"
 dependencies = [
  "alloy-consensus",
  "alloy-eip7928",
@@ -6652,7 +6652,7 @@ dependencies = [
 [[package]]
 name = "op-revm"
 version = "19.0.0"
-source = "git+https://github.com/okx/optimism?rev=1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad#1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad"
+source = "git+https://github.com/okx/optimism?rev=8cabdd41d036f298c0be556a55ebb6080607c789#8cabdd41d036f298c0be556a55ebb6080607c789"
 dependencies = [
  "auto_impl",
  "revm",
@@ -9511,7 +9511,7 @@ dependencies = [
 [[package]]
 name = "reth-optimism-chainspec"
 version = "1.11.3"
-source = "git+https://github.com/okx/optimism?rev=1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad#1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad"
+source = "git+https://github.com/okx/optimism?rev=8cabdd41d036f298c0be556a55ebb6080607c789#8cabdd41d036f298c0be556a55ebb6080607c789"
 dependencies = [
  "alloy-chains",
  "alloy-consensus",
@@ -9539,7 +9539,7 @@ dependencies = [
 [[package]]
 name = "reth-optimism-cli"
 version = "1.11.3"
-source = "git+https://github.com/okx/optimism?rev=1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad#1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad"
+source = "git+https://github.com/okx/optimism?rev=8cabdd41d036f298c0be556a55ebb6080607c789#8cabdd41d036f298c0be556a55ebb6080607c789"
 dependencies = [
  "alloy-consensus",
  "alloy-eips 2.0.4",
@@ -9589,7 +9589,7 @@ dependencies = [
 [[package]]
 name = "reth-optimism-consensus"
 version = "1.11.3"
-source = "git+https://github.com/okx/optimism?rev=1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad#1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad"
+source = "git+https://github.com/okx/optimism?rev=8cabdd41d036f298c0be556a55ebb6080607c789#8cabdd41d036f298c0be556a55ebb6080607c789"
 dependencies = [
  "alloy-consensus",
  "alloy-eips 2.0.4",
@@ -9614,7 +9614,7 @@ dependencies = [
 [[package]]
 name = "reth-optimism-evm"
 version = "1.11.3"
-source = "git+https://github.com/okx/optimism?rev=1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad#1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad"
+source = "git+https://github.com/okx/optimism?rev=8cabdd41d036f298c0be556a55ebb6080607c789#8cabdd41d036f298c0be556a55ebb6080607c789"
 dependencies = [
  "alloy-consensus",
  "alloy-eips 2.0.4",
@@ -9643,7 +9643,7 @@ dependencies = [
 [[package]]
 name = "reth-optimism-exex"
 version = "1.11.3"
-source = "git+https://github.com/okx/optimism?rev=1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad#1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad"
+source = "git+https://github.com/okx/optimism?rev=8cabdd41d036f298c0be556a55ebb6080607c789#8cabdd41d036f298c0be556a55ebb6080607c789"
 dependencies = [
  "alloy-consensus",
  "alloy-eips 2.0.4",
@@ -9662,7 +9662,7 @@ dependencies = [
 [[package]]
 name = "reth-optimism-flashblocks"
 version = "1.11.3"
-source = "git+https://github.com/okx/optimism?rev=1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad#1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad"
+source = "git+https://github.com/okx/optimism?rev=8cabdd41d036f298c0be556a55ebb6080607c789#8cabdd41d036f298c0be556a55ebb6080607c789"
 dependencies = [
  "alloy-consensus",
  "alloy-eips 2.0.4",
@@ -9700,7 +9700,7 @@ dependencies = [
 [[package]]
 name = "reth-optimism-forks"
 version = "1.11.3"
-source = "git+https://github.com/okx/optimism?rev=1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad#1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad"
+source = "git+https://github.com/okx/optimism?rev=8cabdd41d036f298c0be556a55ebb6080607c789#8cabdd41d036f298c0be556a55ebb6080607c789"
 dependencies = [
  "alloy-op-hardforks",
  "alloy-primitives",
@@ -9711,7 +9711,7 @@ dependencies = [
 [[package]]
 name = "reth-optimism-node"
 version = "1.11.3"
-source = "git+https://github.com/okx/optimism?rev=1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad#1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad"
+source = "git+https://github.com/okx/optimism?rev=8cabdd41d036f298c0be556a55ebb6080607c789#8cabdd41d036f298c0be556a55ebb6080607c789"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
@@ -9765,7 +9765,7 @@ dependencies = [
 [[package]]
 name = "reth-optimism-payload-builder"
 version = "1.11.3"
-source = "git+https://github.com/okx/optimism?rev=1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad#1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad"
+source = "git+https://github.com/okx/optimism?rev=8cabdd41d036f298c0be556a55ebb6080607c789#8cabdd41d036f298c0be556a55ebb6080607c789"
 dependencies = [
  "alloy-consensus",
  "alloy-eips 2.0.4",
@@ -9805,7 +9805,7 @@ dependencies = [
 [[package]]
 name = "reth-optimism-primitives"
 version = "1.11.3"
-source = "git+https://github.com/okx/optimism?rev=1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad#1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad"
+source = "git+https://github.com/okx/optimism?rev=8cabdd41d036f298c0be556a55ebb6080607c789#8cabdd41d036f298c0be556a55ebb6080607c789"
 dependencies = [
  "alloy-consensus",
  "alloy-eips 2.0.4",
@@ -9820,7 +9820,7 @@ dependencies = [
 [[package]]
 name = "reth-optimism-rpc"
 version = "1.11.3"
-source = "git+https://github.com/okx/optimism?rev=1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad#1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad"
+source = "git+https://github.com/okx/optimism?rev=8cabdd41d036f298c0be556a55ebb6080607c789#8cabdd41d036f298c0be556a55ebb6080607c789"
 dependencies = [
  "alloy-consensus",
  "alloy-eips 2.0.4",
@@ -9891,7 +9891,7 @@ dependencies = [
 [[package]]
 name = "reth-optimism-storage"
 version = "1.11.3"
-source = "git+https://github.com/okx/optimism?rev=1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad#1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad"
+source = "git+https://github.com/okx/optimism?rev=8cabdd41d036f298c0be556a55ebb6080607c789#8cabdd41d036f298c0be556a55ebb6080607c789"
 dependencies = [
  "alloy-consensus",
  "reth-optimism-primitives",
@@ -9901,7 +9901,7 @@ dependencies = [
 [[package]]
 name = "reth-optimism-trie"
 version = "1.11.3"
-source = "git+https://github.com/okx/optimism?rev=1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad#1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad"
+source = "git+https://github.com/okx/optimism?rev=8cabdd41d036f298c0be556a55ebb6080607c789#8cabdd41d036f298c0be556a55ebb6080607c789"
 dependencies = [
  "alloy-eips 2.0.4",
  "alloy-primitives",
@@ -9934,7 +9934,7 @@ dependencies = [
 [[package]]
 name = "reth-optimism-txpool"
 version = "1.11.3"
-source = "git+https://github.com/okx/optimism?rev=1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad#1bf7c64ee481fa5dd6d7f1bd07d923ed9f58e7ad"
+source = "git+https://github.com/okx/optimism?rev=8cabdd41d036f298c0be556a55ebb6080607c789#8cabdd41d036f298c0be556a55ebb6080607c789"
 dependencies = [
  "alloy-consensus",
  "alloy-eips 2.0.4",
