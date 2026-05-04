@@ -14677,11 +14677,11 @@ dependencies = [
 
 [[package]]
 name = "xlayer-trace-monitor"
-version = "0.1.0"
-source = "git+https://github.com/okx/xlayer-toolkit?rev=d6af8edac7cf179241af1688f7741e260ba48b79#d6af8edac7cf179241af1688f7741e260ba48b79"
+version = "0.0.6"
 dependencies = [
  "crossbeam-channel",
  "hex",
+ "tempfile",
  "tracing",
 ]
 

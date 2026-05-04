@@ -22,6 +22,7 @@ members = [
     "crates/monitor",
     "crates/rpc",
     "crates/tests",
+    "crates/trace-monitor",
     "crates/version",
     "crates/builder/src/tests/framework/macros",
 
@@ -76,7 +77,7 @@ xlayer-rpc = { path = "crates/rpc" }
 xlayer-version = { path = "crates/version" }
 
 # For X Layer
-xlayer-trace-monitor = { git = "https://github.com/okx/xlayer-toolkit", rev = "d6af8edac7cf179241af1688f7741e260ba48b79" }
+xlayer-trace-monitor = { path = "crates/trace-monitor" }
 
 # ==============================================================================
 # Reth Base Dependencies (paradigmxyz/reth v2.1.0)

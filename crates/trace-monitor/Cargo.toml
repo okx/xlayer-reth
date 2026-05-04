@@ -1,0 +1,16 @@
+[package]
+name = "xlayer-trace-monitor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+crossbeam-channel = "0.5"
+hex.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
