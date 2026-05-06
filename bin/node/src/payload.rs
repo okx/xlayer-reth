@@ -15,6 +15,20 @@ use xlayer_builder::{
     traits::{NodeBounds, PoolBounds},
 };
 
+#[cfg(feature = "jit")]
+use reth_optimism_evm::{
+    OpBlockAssembler, OpBlockExecutorFactory, OpEvmFactory, OpRethReceiptBuilder,
+};
+#[cfg(feature = "jit")]
+use xlayer_builder::evm_jit::JitEvmFactory;
+
+/// Type alias for the JIT-enabled EVM configuration.
+#[cfg(feature = "jit")]
+type JitOpEvmConfig<
+    C = reth_optimism_chainspec::OpChainSpec,
+    N = reth_optimism_primitives::OpPrimitives,
+> = OpEvmConfig<C, N, OpRethReceiptBuilder, JitEvmFactory>;
+
 /// Payload builder strategy for X Layer.
 enum XLayerPayloadServiceBuilderInner {
     /// Uses [`FlashblocksServiceBuilder`] for sequencer nodes producing flashblocks.
@@ -125,6 +139,62 @@ where
                 default_builder.spawn_payload_builder_service(ctx, pool, evm_config).await
             }
             XLayerPayloadServiceBuilderInner::Default(basic_builder) => {
+                basic_builder.spawn_payload_builder_service(ctx, pool, evm_config).await
+            }
+        }
+    }
+}
+
+// ── JIT-enabled payload service ──────────────────────────────────────────────
+//
+// When `--features jit` is active, the executor produces `OpEvmConfig<..., JitEvmFactory>`
+// instead of the default `OpEvmFactory`. The flashblocks/default-p2p builders only know
+// how to use the standard `OpEvmConfig` (default factory), so we substitute it where
+// needed. The basic (non-flashblocks RPC) path is generic and works with the JIT config.
+#[cfg(feature = "jit")]
+impl<Node, Pool> PayloadServiceBuilder<Node, Pool, JitOpEvmConfig> for XLayerPayloadServiceBuilder
+where
+    Node: NodeBounds,
+    Pool: PoolBounds,
+{
+    async fn spawn_payload_builder_service(
+        self,
+        ctx: &BuilderContext<Node>,
+        pool: Pool,
+        evm_config: JitOpEvmConfig,
+    ) -> eyre::Result<reth_payload_builder::PayloadBuilderHandle<<Node::Types as NodeTypes>::Payload>>
+    {
+        match self.builder {
+            XLayerPayloadServiceBuilderInner::Flashblocks(flashblocks_builder) => {
+                // Flashblocks payload builder is hardcoded to OpEvmFactory; substitute.
+                let chain_spec = ctx.chain_spec();
+                let std_config = OpEvmConfig {
+                    executor_factory: OpBlockExecutorFactory::new(
+                        OpRethReceiptBuilder::default(),
+                        chain_spec.clone(),
+                        OpEvmFactory::default(),
+                    ),
+                    block_assembler: OpBlockAssembler::new(chain_spec),
+                    _pd: core::marker::PhantomData,
+                };
+                flashblocks_builder.spawn_payload_builder_service(ctx, pool, std_config).await
+            }
+            XLayerPayloadServiceBuilderInner::DefaultWithP2P(default_builder) => {
+                // Same substitution rationale as above.
+                let chain_spec = ctx.chain_spec();
+                let std_config = OpEvmConfig {
+                    executor_factory: OpBlockExecutorFactory::new(
+                        OpRethReceiptBuilder::default(),
+                        chain_spec.clone(),
+                        OpEvmFactory::default(),
+                    ),
+                    block_assembler: OpBlockAssembler::new(chain_spec),
+                    _pd: core::marker::PhantomData,
+                };
+                default_builder.spawn_payload_builder_service(ctx, pool, std_config).await
+            }
+            XLayerPayloadServiceBuilderInner::Default(basic_builder) => {
+                // BasicPayloadServiceBuilder is generic — works with JIT config directly.
                 basic_builder.spawn_payload_builder_service(ctx, pool, evm_config).await
             }
         }

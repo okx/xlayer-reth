@@ -3,6 +3,9 @@
 mod args;
 mod payload;
 
+#[cfg(feature = "jit")]
+use xlayer_builder::evm_jit::JitExecutorBuilder;
+
 use payload::XLayerPayloadServiceBuilder;
 
 use args::XLayerArgs;
@@ -107,10 +110,17 @@ fn main() {
                 xlayer_args.sequencer_mode,
             );
 
-            let add_ons = op_node.add_ons().with_rpc_middleware((
+            let rpc_middleware = (
                 RpcMonitorLayer::new(monitor.clone()),    // Execute first
                 LegacyRpcRouterLayer::new(legacy_config), // Execute second
-            ));
+            );
+            // When JIT is active, components change the executor type. Use OpAddOns::default()
+            // instead of op_node.add_ons() so the compiler can infer the correct N from context.
+            #[cfg(feature = "jit")]
+            let add_ons =
+                reth_optimism_node::OpAddOns::default().with_rpc_middleware(rpc_middleware);
+            #[cfg(not(feature = "jit"))]
+            let add_ons = op_node.add_ons().with_rpc_middleware(rpc_middleware);
 
             // Parse and validate bridge intercept configuration
             let bridge_config = args
@@ -162,9 +172,16 @@ fn main() {
             );
             let add_ons = add_ons.with_engine_validator(engine_builder);
 
+            // Build component set — with JIT executor when `--features jit` is active.
+            #[cfg(feature = "jit")]
+            let components =
+                op_node.components().executor(JitExecutorBuilder).payload(payload_builder);
+            #[cfg(not(feature = "jit"))]
+            let components = op_node.components().payload(payload_builder);
+
             let NodeHandle { node, node_exit_future } = builder
                 .with_types_and_provider::<OpNode, BlockchainProvider<_>>()
-                .with_components(op_node.components().payload(payload_builder))
+                .with_components(components)
                 .with_add_ons(add_ons)
                 .extend_rpc_modules(move |ctx| {
                     let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
@@ -183,10 +200,34 @@ fn main() {
                             engine_validator.get_changeset_cache(),
                         );
 
-                        // Initialize the flashblocks validator
+                        // Initialize the flashblocks validator.
+                        // When JIT is active the engine pipeline propagates JitEvmFactory
+                        // through the type system; build a matching OpEvmConfig for the
+                        // validator. Validation correctness is independent of which factory
+                        // is used (JIT is purely an execution-speed optimization).
+                        #[cfg(feature = "jit")]
+                        let validator_evm_config = {
+                            use reth_optimism_evm::{
+                                OpBlockAssembler, OpBlockExecutorFactory,
+                                OpRethReceiptBuilder,
+                            };
+                            use xlayer_builder::evm_jit::JitEvmFactory;
+                            let chain_spec = ctx.provider().chain_spec();
+                            OpEvmConfig {
+                                executor_factory: OpBlockExecutorFactory::new(
+                                    OpRethReceiptBuilder::default(),
+                                    chain_spec.clone(),
+                                    JitEvmFactory::default(),
+                                ),
+                                block_assembler: OpBlockAssembler::new(chain_spec),
+                                _pd: core::marker::PhantomData,
+                            }
+                        };
+                        #[cfg(not(feature = "jit"))]
+                        let validator_evm_config = OpEvmConfig::optimism(ctx.provider().chain_spec());
                         engine_validator.set_flashblocks(
                             FlashblockSequenceValidator::new(
-                                OpEvmConfig::optimism(ctx.provider().chain_spec()),
+                                validator_evm_config,
                                 ctx.provider().clone(),
                                 ctx.provider().chain_spec(),
                                 flashblocks_state.clone(),

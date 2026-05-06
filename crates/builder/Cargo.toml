@@ -133,6 +133,11 @@ sha3 = "0.10"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "json"] }
 testcontainers = "0.27.2"
 
+# revmc JIT (optional; enable with feature "jit"). 100% upstream paradigmxyz/revmc.
+revmc          = { workspace = true, optional = true, features = ["llvm"] }
+revmc-runtime  = { workspace = true, optional = true, features = ["llvm"] }
+revmc-context  = { workspace = true, optional = true }
+
 [dev-dependencies]
 alloy-provider = { workspace = true, default-features = true, features = [
     "txpool-api",
@@ -164,3 +169,5 @@ testing = [
 ]
 
 interop = []
+
+jit = ["dep:revmc", "dep:revmc-runtime", "dep:revmc-context"]
