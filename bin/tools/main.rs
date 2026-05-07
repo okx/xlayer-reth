@@ -14,11 +14,11 @@ use xlayer_chainspec::XLayerChainSpecParser;
 mod export;
 mod gen_genesis;
 mod import;
-mod legacy_migrate;
+mod migrate_v2;
 use export::ExportCommand;
 use gen_genesis::GenGenesisCommand;
 use import::ImportCommand;
-use legacy_migrate::LegacyMigrateCommand;
+use migrate_v2::LegacyMigrateCommand;
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
