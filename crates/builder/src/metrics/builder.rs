@@ -94,6 +94,14 @@ pub struct BuilderMetrics {
     pub flashblocks_time_drift: Histogram,
     /// Time offset we used for first flashblock
     pub first_flashblock_time_offset: Histogram,
+    /// P2P dedup cache hits (message was duplicate, dropped)
+    pub p2p_dedup_hits_total: Counter,
+    /// P2P dedup cache misses (message was new, processed)
+    pub p2p_dedup_misses_total: Counter,
+    /// P2P dedup cache current size
+    pub p2p_dedup_cache_size: Gauge,
+    /// P2P dedup lookup duration in seconds
+    pub p2p_dedup_lookup_duration: Histogram,
 }
 
 impl BuilderMetrics {

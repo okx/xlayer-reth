@@ -5,9 +5,9 @@ use crate::{
     },
     flashblocks::{
         builder::FlashblocksBuilder, builder_tx::FlashblocksBuilderTx,
-        generator::BlockPayloadJobGenerator, handler::FlashblocksPayloadHandler,
-        handler_ctx::FlashblockHandlerContext, utils::cache::FlashblockPayloadsCache,
-        BuilderConfig,
+        dedup::P2pDedupCache, generator::BlockPayloadJobGenerator,
+        handler::FlashblocksPayloadHandler, handler_ctx::FlashblockHandlerContext,
+        utils::cache::FlashblockPayloadsCache, BuilderConfig,
     },
     metrics::{tokio::FlashblocksTaskMetrics, BuilderMetrics},
     traits::{NodeBounds, PoolBounds},
@@ -164,6 +164,11 @@ impl FlashblocksServiceBuilder {
         )
         .wrap_err("failed to create flashblocks payload builder context")?;
 
+        let p2p_dedup = P2pDedupCache::new(
+            self.config.flashblocks.p2p_dedup_capacity,
+            self.config.flashblocks.p2p_dedup_enabled,
+        );
+
         let payload_handler = FlashblocksPayloadHandler::new(
             handler_ctx,
             built_fb_payload_rx,
@@ -178,6 +183,8 @@ impl FlashblocksServiceBuilder {
             cancel,
             self.config.flashblocks.p2p_send_full_payload,
             self.config.flashblocks.p2p_process_full_payload,
+            p2p_dedup,
+            metrics.clone(),
         );
 
         ctx.task_executor().spawn_critical_task(

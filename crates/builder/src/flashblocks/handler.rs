@@ -1,9 +1,11 @@
 use crate::{
     broadcast::{Message, WebSocketPublisher, XLayerFlashblockMessage},
     flashblocks::{
+        dedup::{DedupKey, P2pDedupCache},
         handler_ctx::FlashblockHandlerContext,
         utils::{cache::FlashblockPayloadsCache, execution::ExecutionInfo},
     },
+    metrics::BuilderMetrics,
     traits::ClientBounds,
 };
 use std::sync::Arc;
@@ -57,6 +59,8 @@ pub(crate) struct FlashblocksPayloadHandler<Client> {
     cancel: tokio_util::sync::CancellationToken,
     p2p_send_full_payload_flag: bool,
     p2p_process_full_payload_flag: bool,
+    p2p_dedup: P2pDedupCache,
+    metrics: Arc<BuilderMetrics>,
 }
 
 impl<Client> FlashblocksPayloadHandler<Client>
@@ -78,6 +82,8 @@ where
         cancel: tokio_util::sync::CancellationToken,
         p2p_send_full_payload_flag: bool,
         p2p_process_full_payload_flag: bool,
+        p2p_dedup: P2pDedupCache,
+        metrics: Arc<BuilderMetrics>,
     ) -> Self {
         Self {
             built_fb_payload_rx,
@@ -93,6 +99,8 @@ where
             cancel,
             p2p_send_full_payload_flag,
             p2p_process_full_payload_flag,
+            p2p_dedup,
+            metrics,
         }
     }
 
@@ -111,6 +119,8 @@ where
             cancel,
             p2p_send_full_payload_flag,
             p2p_process_full_payload_flag,
+            p2p_dedup,
+            metrics,
         } = self;
 
         tracing::info!(target: "payload_builder", "flashblocks payload handler started");
@@ -132,6 +142,40 @@ where
                     }
                 }
                 Some(message) = p2p_rx.recv() => {
+                    let dedup_key = match &message {
+                        Message::OpFlashblockPayload(fb_payload) => {
+                            if let XLayerFlashblockMessage::Payload(payload) = fb_payload {
+                                Some(DedupKey::from_flashblock(&payload.inner))
+                            } else {
+                                None
+                            }
+                        }
+                        Message::OpBuiltPayload(payload) => {
+                            Some(DedupKey::from_full_block(payload.block.hash()))
+                        }
+                    };
+
+                    if let Some(key) = dedup_key {
+                        let start = std::time::Instant::now();
+                        let is_dup = p2p_dedup.check_or_insert(key);
+                        metrics.p2p_dedup_lookup_duration.record(start.elapsed().as_secs_f64());
+                        metrics.p2p_dedup_cache_size.set(p2p_dedup.len() as f64);
+
+                        if is_dup {
+                            metrics.p2p_dedup_hits_total.increment(1);
+                            tracing::debug!(
+                                target: "payload_builder",
+                                kind = match &message {
+                                    Message::OpFlashblockPayload(_) => "flashblock",
+                                    Message::OpBuiltPayload(_) => "full_block",
+                                },
+                                "p2p dedup: dropping duplicate inbound message"
+                            );
+                            continue;
+                        }
+                        metrics.p2p_dedup_misses_total.increment(1);
+                    }
+
                     match message {
                         Message::OpBuiltPayload(payload) => {
                             if !p2p_process_full_payload_flag {
