@@ -18,7 +18,7 @@ mod migrate_v2;
 use export::ExportCommand;
 use gen_genesis::GenGenesisCommand;
 use import::ImportCommand;
-use migrate_v2::LegacyMigrateCommand;
+use migrate_v2::MigrateV2Command;
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
@@ -41,7 +41,7 @@ enum Commands {
     /// Generate a genesis file from an existing database
     GenGenesis(GenGenesisCommand<XLayerChainSpecParser>),
     /// Migrate from legacy MDBX storage to new RocksDB + static files
-    LegacyMigrate(LegacyMigrateCommand<XLayerChainSpecParser>),
+    MigrateV2(MigrateV2Command<XLayerChainSpecParser>),
 }
 
 #[tokio::main]
@@ -107,13 +107,13 @@ async fn main() -> ExitCode {
                 }
             }
         }
-        Commands::LegacyMigrate(cmd) => {
-            info!(target: "xlayer::legacy_migrate", "XLayer Reth Legacy Migration starting");
+        Commands::MigrateV2(cmd) => {
+            info!(target: "xlayer::migrate_v2", "XLayer Reth v1→v2 Migration starting");
 
             match cmd.execute::<OpNode>(runtime).await {
                 Ok(_) => ExitCode::SUCCESS,
                 Err(e) => {
-                    error!(target: "xlayer::legacy_migrate", "Error: {:#?}", e);
+                    error!(target: "xlayer::migrate_v2", "Error: {:#?}", e);
                     ExitCode::FAILURE
                 }
             }

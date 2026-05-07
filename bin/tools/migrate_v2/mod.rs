@@ -1,4 +1,4 @@
-//! `legacy-migrate` command for migrating v1 storage layout to v2.
+//! `migrate-v2` command for migrating v1 storage layout to v2.
 //!
 //! Ported from upstream reth's `db migrate-v2` command
 //! (`crates/cli/commands/src/db/migrate_v2.rs`). Adapted for XLayer:
@@ -47,12 +47,12 @@ use tracing::info;
 
 /// Migrate from legacy v1 storage layout to v2 (changesets + receipts → static files).
 #[derive(Debug, Parser)]
-pub struct LegacyMigrateCommand<C: ChainSpecParser> {
+pub struct MigrateV2Command<C: ChainSpecParser> {
     #[command(flatten)]
     env: EnvironmentArgs<C>,
 }
 
-impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> LegacyMigrateCommand<C> {
+impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> MigrateV2Command<C> {
     /// Execute the full v1 → v2 migration.
     pub async fn execute<N>(&self, runtime: reth_tasks::Runtime) -> Result<()>
     where

@@ -28,7 +28,7 @@
 - Optional `--output-chainspec` for genesis without alloc field
 - Flags: `--template-genesis`, `--output`, `--output-chainspec`, `--batch-size`
 
-### `legacy-migrate` (`legacy_migrate/`)
+### `migrate-v2` (`migrate_v2/`)
 - Migrates from MDBX to RocksDB + static files
 - **Static file segments**: TransactionSenders, AccountChangeSets, StorageChangeSets, Receipts
 - **RocksDB tables**: TransactionHashNumbers, AccountsHistory, StoragesHistory
