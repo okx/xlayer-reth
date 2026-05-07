@@ -16,6 +16,8 @@ xlayer-flashblocks.workspace = true
 
 # reth
 reth-chain-state.workspace = true
+reth-chainspec.workspace = true
+reth-optimism-forks.workspace = true
 reth-optimism-rpc.workspace = true
 reth-optimism-primitives.workspace = true
 reth-primitives-traits.workspace = true
@@ -31,6 +33,7 @@ reth-transaction-pool.workspace = true
 # alloy
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
+alloy-op-evm.workspace = true
 alloy-primitives.workspace = true
 alloy-rpc-types-eth.workspace = true
 alloy-serde.workspace = true

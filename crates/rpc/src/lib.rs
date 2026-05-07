@@ -8,7 +8,7 @@ pub mod filter;
 pub mod helper;
 
 pub use aa::{
-    verifiers::{AcceptedVerifiersImpl, AcceptedVerifiersServer},
+    verifiers::{build_response_for_spec, AcceptedVerifiersImpl, AcceptedVerifiersServer},
     TransactionCountOverrideImpl, TransactionCountOverrideServer,
 };
 pub use default::{DefaultRpcExt, DefaultRpcExtApiServer, SequencerClientProvider};

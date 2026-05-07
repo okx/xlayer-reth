@@ -270,20 +270,16 @@ fn main() {
                         None
                     };
 
-                    // Register XLayerAA verifier policy RPC (eth_getAcceptedVerifiers).
-                    // New method — no upstream conflict; `add_or_replace_if_module_configured`
-                    // is used for symmetry with the other Eth-module overrides.
-                    ctx.modules.add_or_replace_if_module_configured(
+                    // Register XLayer AA verifier policy RPC (eth_getAcceptedVerifiers).
+                    ctx.modules.merge_if_module_configured(
                         RethRpcModule::Eth,
-                        AcceptedVerifiersServer::into_rpc(AcceptedVerifiersImpl::for_xlayer_v1()),
+                        AcceptedVerifiersServer::into_rpc(AcceptedVerifiersImpl::new(
+                            ctx.provider().clone(),
+                        )),
                     )?;
                     info!(target: "reth::cli", "xlayer AA accepted-verifiers RPC initialized");
 
                     // Register XLayerAA 2D-nonce override (eth_getTransactionCount).
-                    // Replaces the upstream handler so the optional third `nonce_key`
-                    // parameter actually routes to the NonceManager predeploy storage
-                    // read; without this, jsonrpsee silently drops the extra param and
-                    // returns the standard account nonce.
                     let tx_count_override =
                         TransactionCountOverrideImpl::new(ctx.provider().clone());
                     ctx.modules.add_or_replace_if_module_configured(

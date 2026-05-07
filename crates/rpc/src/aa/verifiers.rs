@@ -23,8 +23,13 @@
 //! When a declarative acceptance-policy registry lands (per-node CLI /
 //! chainspec config), this flag becomes a real toggle.
 
+use alloy_consensus::BlockHeader;
 use alloy_primitives::{Address, U256};
-use jsonrpsee::{core::RpcResult, proc_macros::rpc};
+use jsonrpsee::{
+    core::RpcResult,
+    proc_macros::rpc,
+    types::{error::INTERNAL_ERROR_CODE, ErrorObjectOwned},
+};
 use op_revm::{
     constants::{
         DELEGATE_VERIFIER_ADDRESS, K1_VERIFIER_ADDRESS, P256_RAW_VERIFIER_ADDRESS,
@@ -33,6 +38,9 @@ use op_revm::{
     gas_params::{xlayer_gas_params, XlayerGasParams},
     OpSpecId,
 };
+use reth_chainspec::ChainSpecProvider;
+use reth_optimism_forks::OpHardforks;
+use reth_storage_api::BlockReaderIdExt;
 use serde::{Deserialize, Serialize};
 
 /// JSON-RPC response for `eth_getAcceptedVerifiers`.
@@ -84,42 +92,44 @@ pub trait AcceptedVerifiers {
     async fn get_accepted_verifiers(&self) -> RpcResult<AcceptedVerifiersResponse>;
 }
 
-/// Server implementation: snapshots the response at construction time
-/// from a fixed [`OpSpecId`] (the fork whose gas table the node should
-/// advertise — typically [`OpSpecId::XLAYER_V1`], where the AA verifier
-/// gas slots first acquire non-zero values).
+/// Server implementation: derives the active fork on each RPC call from
+/// the latest block's timestamp + chainspec, so the response tracks fork
+/// activation rather than baking in a single [`OpSpecId`]. Pre-XLAYER_V1
+/// forks return zero `maxAuthCost` values for the four AA verifier slots
+/// (gas slots aren't populated yet) but still advertise the addresses so
+/// wallets can pre-build for the upcoming fork.
 #[derive(Debug, Clone)]
-pub struct AcceptedVerifiersImpl {
-    response: AcceptedVerifiersResponse,
+pub struct AcceptedVerifiersImpl<Provider> {
+    provider: Provider,
 }
 
-impl AcceptedVerifiersImpl {
-    /// Convenience constructor: snapshot the response at the
-    /// `XLAYER_V1` fork — the only one where AA verifier gas slots are
-    /// populated. Use this when wiring the RPC into the node binary
-    /// without pulling [`OpSpecId`] in to the call site.
-    pub fn for_xlayer_v1() -> Self {
-        Self::new(OpSpecId::XLAYER_V1)
+impl<Provider> AcceptedVerifiersImpl<Provider> {
+    /// Wraps a provider for chainspec + latest-header lookups.
+    pub const fn new(provider: Provider) -> Self {
+        Self { provider }
     }
+}
 
-    /// Builds the response for a given fork. Pre-`XLAYER_V1` forks
-    /// produce zero `maxAuthCost` values for the four AA verifier
-    /// slots — they're not active yet — but the addresses are
-    /// reported regardless so wallets can pre-build for the upcoming
-    /// fork without round-tripping fork activation status.
-    pub fn new(spec: OpSpecId) -> Self {
-        let params = xlayer_gas_params(spec);
+/// Builds the verifier-policy response for a given fork.
+pub fn build_response_for_spec(spec: OpSpecId) -> AcceptedVerifiersResponse {
+    let params = xlayer_gas_params(spec);
 
-        // Worst-case Delegate budget = outer + most expensive native inner.
-        // We pick P256 WebAuthn (the most expensive native verifier) so
-        // the advertised cap covers any legal inner verifier. The handler
-        // enforces the per-call cost separately; this is purely a client
-        // hint about what the node will allow.
-        let delegate_max_auth_cost = params
-            .delegate_outer_verification_gas()
-            .saturating_add(params.p256_webauthn_verification_gas());
+    // Worst-case Delegate budget = outer + most expensive native inner.
+    // We pick P256 WebAuthn (the most expensive native verifier) so the
+    // advertised cap covers any legal inner verifier. The handler enforces
+    // the per-call cost separately; this is purely a client hint about
+    // what the node will allow.
+    let delegate_max_auth_cost = params
+        .delegate_outer_verification_gas()
+        .saturating_add(params.p256_webauthn_verification_gas());
 
-        let verifiers = vec![
+    AcceptedVerifiersResponse {
+        // Custom verifiers run via STATICCALL with the
+        // XLAYER_AA_CUSTOM_VERIFIER_GAS_CAP budget today, so they're
+        // effectively accepted. A strict-allowlist policy would flip this
+        // to `false` once node-level enforcement lands.
+        accepts_unknown_verifiers: true,
+        verifiers: vec![
             AcceptedVerifier {
                 address: K1_VERIFIER_ADDRESS,
                 native: true,
@@ -140,27 +150,37 @@ impl AcceptedVerifiersImpl {
                 native: true,
                 max_auth_cost: U256::from(delegate_max_auth_cost),
             },
-        ];
-
-        Self {
-            response: AcceptedVerifiersResponse {
-                // Custom verifiers run via STATICCALL with the
-                // XLAYER_AA_CUSTOM_VERIFIER_GAS_CAP budget today, so
-                // they're effectively accepted. A strict-allowlist
-                // policy would flip this to `false` once node-level
-                // enforcement lands.
-                accepts_unknown_verifiers: true,
-                verifiers,
-            },
-        }
+        ],
     }
 }
 
 #[async_trait::async_trait]
-impl AcceptedVerifiersServer for AcceptedVerifiersImpl {
+impl<Provider> AcceptedVerifiersServer for AcceptedVerifiersImpl<Provider>
+where
+    Provider: BlockReaderIdExt + ChainSpecProvider + Send + Sync + 'static,
+    <Provider as ChainSpecProvider>::ChainSpec: OpHardforks,
+{
     async fn get_accepted_verifiers(&self) -> RpcResult<AcceptedVerifiersResponse> {
-        Ok(self.response.clone())
+        // Pick the active spec from the latest sealed header's timestamp.
+        // Falling back to timestamp 0 (pre-Bedrock) for a missing header
+        // produces an `OpSpecId::BEDROCK` response — the one safe answer
+        // when we can't establish the chain's current fork state.
+        let timestamp = self
+            .provider
+            .latest_header()
+            .map_err(|e| rpc_internal_error(format!("latest header lookup failed: {e}")))?
+            .map(|h| h.timestamp())
+            .unwrap_or(0);
+        let spec = alloy_op_evm::spec_by_timestamp_after_bedrock(
+            &*self.provider.chain_spec(),
+            timestamp,
+        );
+        Ok(build_response_for_spec(spec))
     }
+}
+
+fn rpc_internal_error(msg: String) -> ErrorObjectOwned {
+    ErrorObjectOwned::owned(INTERNAL_ERROR_CODE, msg, None::<()>)
 }
 
 #[cfg(test)]
@@ -172,7 +192,7 @@ mod tests {
     /// in a hard-to-trace field-level RPC mismatch.
     #[test]
     fn xlayer_v1_response_matches_constants_and_gas_table() {
-        let r = AcceptedVerifiersImpl::new(OpSpecId::XLAYER_V1).response;
+        let r = build_response_for_spec(OpSpecId::XLAYER_V1);
         assert!(r.accepts_unknown_verifiers);
         assert_eq!(r.verifiers.len(), 4);
 
@@ -203,7 +223,7 @@ mod tests {
     /// of the response structs goes unnoticed until a real client breaks.
     #[test]
     fn response_serializes_with_camel_case_keys() {
-        let r = AcceptedVerifiersImpl::new(OpSpecId::XLAYER_V1).response;
+        let r = build_response_for_spec(OpSpecId::XLAYER_V1);
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("\"acceptsUnknownVerifiers\":true"));
         assert!(json.contains("\"maxAuthCost\""));
@@ -211,10 +231,16 @@ mod tests {
         assert!(!json.contains("max_auth_cost"));
     }
 
-    #[tokio::test]
-    async fn handler_returns_snapshot_unchanged() {
-        let api = AcceptedVerifiersImpl::new(OpSpecId::XLAYER_V1);
-        let response = AcceptedVerifiersServer::get_accepted_verifiers(&api).await.unwrap();
-        assert_eq!(response, api.response);
+    /// Pre-XLAYER_V1 forks return zero `maxAuthCost` values: the gas
+    /// slots aren't populated yet, but the addresses are still
+    /// advertised so wallets can pre-build for the upcoming fork.
+    #[test]
+    fn pre_xlayer_v1_returns_zero_gas_with_addresses_present() {
+        let r = build_response_for_spec(OpSpecId::BEDROCK);
+        assert_eq!(r.verifiers.len(), 4);
+        for v in &r.verifiers {
+            assert!(v.native);
+            assert_eq!(v.max_auth_cost, U256::ZERO, "{:?} should have zero gas pre-XLAYER_V1", v.address);
+        }
     }
 }
