@@ -153,6 +153,25 @@ pub struct FlashblocksArgs {
     )]
     pub ws_subscriber_limit: Option<u16>,
 
+    /// Maximum concurrent WebSocket connections per source IP.
+    /// Setting to 0 disables per-IP limiting.
+    #[arg(
+        long = "flashblocks.ws-per-ip-limit",
+        env = "FLASHBLOCK_WS_PER_IP_LIMIT",
+        default_value = "4"
+    )]
+    pub ws_per_ip_limit: Option<u16>,
+
+    /// Idle timeout in seconds for WebSocket connections.
+    /// Connections with no successful write for longer than this are swept.
+    /// Setting to 0 disables the idle sweep.
+    #[arg(
+        long = "flashblocks.ws-idle-timeout-secs",
+        env = "FLASHBLOCK_WS_IDLE_TIMEOUT_SECS",
+        default_value = "90"
+    )]
+    pub ws_idle_timeout_secs: Option<u32>,
+
     /// Enable replay from the persistence file on startup
     #[arg(
         long = "flashblocks.replay-from-persistence-file",

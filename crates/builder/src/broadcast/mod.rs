@@ -655,6 +655,8 @@ mod test {
                 metrics.clone(),
                 &task_metrics.websocket_publisher,
                 None,
+                None,
+                None,
             )
             .expect("can create test WebSocketPublisher"),
         );

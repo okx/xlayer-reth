@@ -60,6 +60,8 @@ impl FlashblocksServiceBuilder {
             metrics.clone(),
             &task_metrics.websocket_publisher,
             self.config.flashblocks.ws_subscriber_limit,
+            self.config.flashblocks.ws_per_ip_limit,
+            self.config.flashblocks.ws_idle_timeout_secs,
         )
         .wrap_err("failed to create ws publisher")?
         .into();

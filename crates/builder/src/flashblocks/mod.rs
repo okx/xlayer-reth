@@ -75,6 +75,12 @@ pub struct FlashblocksConfig {
     /// Maximum number of concurrent WebSocket subscribers
     pub ws_subscriber_limit: Option<u16>,
 
+    /// Maximum concurrent WebSocket connections per source IP (None or 0 = disabled)
+    pub ws_per_ip_limit: Option<u16>,
+
+    /// Idle timeout in seconds for WebSocket connections (None or 0 = disabled)
+    pub ws_idle_timeout_secs: Option<u32>,
+
     /// Whether to replay from the persistence file on startup
     pub replay_from_persistence_file: bool,
 }
@@ -96,6 +102,8 @@ impl Default for FlashblocksConfig {
             p2p_send_full_payload: false,
             p2p_process_full_payload: false,
             ws_subscriber_limit: None,
+            ws_per_ip_limit: Some(4),
+            ws_idle_timeout_secs: Some(90),
             replay_from_persistence_file: false,
         }
     }
@@ -215,6 +223,8 @@ impl TryFrom<BuilderArgs> for BuilderConfig {
                 p2p_send_full_payload: args.flashblocks.p2p.p2p_send_full_payload,
                 p2p_process_full_payload: args.flashblocks.p2p.p2p_process_full_payload,
                 ws_subscriber_limit: args.flashblocks.ws_subscriber_limit,
+                ws_per_ip_limit: args.flashblocks.ws_per_ip_limit,
+                ws_idle_timeout_secs: args.flashblocks.ws_idle_timeout_secs,
                 replay_from_persistence_file: args.flashblocks.replay_from_persistence_file,
             },
         })

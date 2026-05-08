@@ -113,6 +113,8 @@ where
                 metrics,
                 &task_metrics.websocket_publisher,
                 self.args.ws_subscriber_limit,
+                self.args.ws_per_ip_limit,
+                self.args.ws_idle_timeout_secs,
             )
             .map_err(|e| eyre::eyre!("Failed to create WebSocket publisher: {e}"))?,
         );
