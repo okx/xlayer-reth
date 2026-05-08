@@ -14382,6 +14382,7 @@ dependencies = [
  "reth-trie",
  "revm",
  "rlimit 0.10.2",
+ "schnellru",
  "secp256k1 0.30.0",
  "serde",
  "serde_json",

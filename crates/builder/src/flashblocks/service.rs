@@ -4,7 +4,7 @@ use crate::{
         wspub::WebSocketPublisher,
     },
     flashblocks::{
-        builder::FlashblocksBuilder, builder_tx::FlashblocksBuilderTx,
+        builder::FlashblocksBuilder, builder_tx::FlashblocksBuilderTx, dedup::P2pDedupCache,
         generator::BlockPayloadJobGenerator, handler::FlashblocksPayloadHandler,
         handler_ctx::FlashblockHandlerContext, utils::cache::FlashblockPayloadsCache,
         BuilderConfig,
@@ -164,6 +164,8 @@ impl FlashblocksServiceBuilder {
         )
         .wrap_err("failed to create flashblocks payload builder context")?;
 
+        let p2p_dedup = P2pDedupCache::new(self.config.flashblocks.p2p_dedup_capacity);
+
         let payload_handler = FlashblocksPayloadHandler::new(
             handler_ctx,
             built_fb_payload_rx,
@@ -178,6 +180,8 @@ impl FlashblocksServiceBuilder {
             cancel,
             self.config.flashblocks.p2p_send_full_payload,
             self.config.flashblocks.p2p_process_full_payload,
+            p2p_dedup,
+            self.config.flashblocks.p2p_dedup_enabled,
         );
 
         ctx.task_executor().spawn_critical_task(

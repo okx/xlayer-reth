@@ -110,6 +110,7 @@ tracing.workspace = true
 metrics.workspace = true
 moka = { workspace = true, features = ["future"] }
 parking_lot.workspace = true
+schnellru.workspace = true
 secp256k1.workspace = true
 serde.workspace = true
 serde_json.workspace = true

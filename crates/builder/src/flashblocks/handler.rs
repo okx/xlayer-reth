@@ -1,6 +1,7 @@
 use crate::{
     broadcast::{Message, WebSocketPublisher, XLayerFlashblockMessage},
     flashblocks::{
+        dedup::{DedupKey, DedupKind, P2pDedupCache},
         handler_ctx::FlashblockHandlerContext,
         utils::{cache::FlashblockPayloadsCache, execution::ExecutionInfo},
     },
@@ -57,6 +58,8 @@ pub(crate) struct FlashblocksPayloadHandler<Client> {
     cancel: tokio_util::sync::CancellationToken,
     p2p_send_full_payload_flag: bool,
     p2p_process_full_payload_flag: bool,
+    p2p_dedup: P2pDedupCache,
+    p2p_dedup_enabled: bool,
 }
 
 impl<Client> FlashblocksPayloadHandler<Client>
@@ -78,6 +81,8 @@ where
         cancel: tokio_util::sync::CancellationToken,
         p2p_send_full_payload_flag: bool,
         p2p_process_full_payload_flag: bool,
+        p2p_dedup: P2pDedupCache,
+        p2p_dedup_enabled: bool,
     ) -> Self {
         Self {
             built_fb_payload_rx,
@@ -93,6 +98,8 @@ where
             cancel,
             p2p_send_full_payload_flag,
             p2p_process_full_payload_flag,
+            p2p_dedup,
+            p2p_dedup_enabled,
         }
     }
 
@@ -111,6 +118,8 @@ where
             cancel,
             p2p_send_full_payload_flag,
             p2p_process_full_payload_flag,
+            p2p_dedup,
+            p2p_dedup_enabled,
         } = self;
 
         tracing::info!(target: "payload_builder", "flashblocks payload handler started");
@@ -140,6 +149,11 @@ where
 
                             let payload: OpBuiltPayload = (*payload).into();
                             let block_hash = payload.block().hash();
+
+                            if p2p_dedup_enabled && p2p_dedup.check_and_insert(DedupKey::from_full_block(block_hash), DedupKind::FullBlock) {
+                                tracing::debug!(target: "payload_builder", hash = %block_hash, "p2p dedup hit — dropping duplicate full block");
+                                continue;
+                            }
                             // Check if this block is already the pending block in canonical state
                             if let Ok(Some(pending)) = client.pending_block()
                                 && pending.hash() == block_hash
@@ -181,6 +195,15 @@ where
                             }));
                         }
                         Message::OpFlashblockPayload(fb_payload) => {
+                            if p2p_dedup_enabled
+                                && let XLayerFlashblockMessage::Payload(ref payload) = fb_payload
+                            {
+                                let key = DedupKey::from_flashblock(&payload.inner);
+                                if p2p_dedup.check_and_insert(key, DedupKind::Flashblock) {
+                                    tracing::debug!(target: "payload_builder", "p2p dedup hit — dropping duplicate flashblock");
+                                    continue;
+                                }
+                            }
                             if let XLayerFlashblockMessage::Payload(payload) = &fb_payload {
                                 p2p_cache.add_flashblock_payload(payload.inner.clone());
                             }

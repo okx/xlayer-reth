@@ -12,6 +12,7 @@ mod best_txs;
 mod builder;
 pub(crate) mod builder_tx;
 mod context;
+pub(crate) mod dedup;
 mod generator;
 mod handler;
 mod handler_ctx;
@@ -77,6 +78,12 @@ pub struct FlashblocksConfig {
 
     /// Whether to replay from the persistence file on startup
     pub replay_from_persistence_file: bool,
+
+    /// Enable P2P inbound message deduplication
+    pub p2p_dedup_enabled: bool,
+
+    /// Maximum entries in the P2P dedup LRU cache
+    pub p2p_dedup_capacity: u32,
 }
 
 impl Default for FlashblocksConfig {
@@ -97,6 +104,8 @@ impl Default for FlashblocksConfig {
             p2p_process_full_payload: false,
             ws_subscriber_limit: None,
             replay_from_persistence_file: false,
+            p2p_dedup_enabled: true,
+            p2p_dedup_capacity: 4096,
         }
     }
 }
@@ -216,6 +225,8 @@ impl TryFrom<BuilderArgs> for BuilderConfig {
                 p2p_process_full_payload: args.flashblocks.p2p.p2p_process_full_payload,
                 ws_subscriber_limit: args.flashblocks.ws_subscriber_limit,
                 replay_from_persistence_file: args.flashblocks.replay_from_persistence_file,
+                p2p_dedup_enabled: args.flashblocks.p2p.p2p_dedup_enabled,
+                p2p_dedup_capacity: args.flashblocks.p2p.p2p_dedup_capacity,
             },
         })
     }

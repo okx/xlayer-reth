@@ -209,4 +209,20 @@ pub struct FlashblocksP2pArgs {
         default_value = "false"
     )]
     pub p2p_process_full_payload: bool,
+
+    /// Enable P2P inbound message deduplication
+    #[arg(
+        long = "flashblocks.p2p_dedup_enabled",
+        env = "FLASHBLOCK_P2P_DEDUP_ENABLED",
+        default_value = "true"
+    )]
+    pub p2p_dedup_enabled: bool,
+
+    /// Maximum number of entries in the P2P dedup LRU cache
+    #[arg(
+        long = "flashblocks.p2p_dedup_capacity",
+        env = "FLASHBLOCK_P2P_DEDUP_CAPACITY",
+        default_value = "4096"
+    )]
+    pub p2p_dedup_capacity: u32,
 }
