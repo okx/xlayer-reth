@@ -93,3 +93,13 @@ description: "Concurrency pitfalls: mutex locking, race conditions, task schedul
 **Mechanism**: Re-keying cache to canonical hash via `on_inserted_executed_block()` is self-healing for subsequent blocks but causes transient performance loss.
 
 **Rule**: Transient cache misses after flashblock builds are expected. Performance will recover on next block.
+
+## 10. DashMap Ref Deadlock with remove_if
+
+**Symptom**: Task hangs indefinitely on DashMap access.
+
+**Root Cause**: `DashMap::get()` returns a `Ref<K, V>` that holds a read lock on the internal shard. Calling `remove_if()` (or any write method) on the same DashMap while the `Ref` is alive requires a write lock on the same shard, causing deadlock.
+
+**Mechanism**: DashMap uses sharded RwLocks. A `Ref` from `.get(&key)` holds a read-guard on shard N. A subsequent `.remove_if(&key, ...)` attempts to acquire a write-guard on shard N. Since the read-guard is already held by the same thread, the write attempt blocks forever.
+
+**Rule**: Always let the `Ref` drop (or use `.map()` to extract the value) before calling mutating methods like `remove_if`, `remove`, or `insert` on the same DashMap. Pattern: `let should_remove = map.get(&k).map(|r| check(&r)).unwrap_or(false); if should_remove { map.remove_if(...); }`
