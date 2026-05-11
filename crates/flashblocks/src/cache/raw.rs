@@ -252,6 +252,7 @@ impl<T: SignedTransaction> RawFlashblocksEntry<T> {
             last_flashblock_index: best_revision,
             target_index: self.target_index,
             sequence_end: self.sequence_end,
+            canon_hash: None,
         })
     }
 

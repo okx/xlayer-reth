@@ -89,6 +89,7 @@ impl<N: NodePrimitives> PendingSequence<N> {
         <<N::Block as BlockTrait>::Body as BlockBody>::Transaction: TxHashRef,
     {
         // 1. Validate incoming block header against the FB-built pending header.
+        let incoming_hash = incoming.hash();
         let incoming_header = incoming.header().clone();
         self.validate_incoming_header(&incoming_header)?;
 
@@ -135,6 +136,7 @@ impl<N: NodePrimitives> PendingSequence<N> {
             last_flashblock_index: self.prefix_execution_meta.last_flashblock_index,
             target_index: self.prefix_execution_meta.last_flashblock_index,
             sequence_end: true,
+            canon_hash: Some(incoming_hash),
         })
     }
 

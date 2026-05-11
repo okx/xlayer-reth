@@ -6,6 +6,7 @@ pub use engine::{XLayerEngineValidator, XLayerEngineValidatorBuilder};
 pub use validator::FlashblockSequenceValidator;
 
 use alloy_eips::eip4895::Withdrawal;
+use alloy_primitives::B256;
 use alloy_rpc_types_engine::PayloadId;
 use op_alloy_rpc_types_engine::OpFlashblockPayloadBase;
 
@@ -24,6 +25,7 @@ pub struct BuildArgs<I> {
     pub last_flashblock_index: u64,
     pub target_index: u64,
     pub sequence_end: bool,
+    pub canon_hash: Option<B256>,
 }
 
 /// Cached prefix execution data used to resume canonical builds.

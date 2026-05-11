@@ -435,6 +435,16 @@ where
         )?;
         let block: N::Block = block.into();
         let block = RecoveredBlock::new_unhashed(block, senders);
+        let block_hash = block.hash();
+
+        // Validate with canon hash if sequence is built with full payload that contains SR
+        if let Some(expected) = args.canon_hash
+            && expected != block_hash
+        {
+            return Err(eyre::eyre!(
+                "canonical hash mismatch on sequence-end validation: expected={expected}, computed={block_hash}"
+            ));
+        }
 
         let executed_block = if calculate_state_root {
             // Create the overlay provider NOW, while we're on the engine loop thread and trie changeset
