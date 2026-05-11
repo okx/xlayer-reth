@@ -243,7 +243,6 @@ impl WsConnect for WsConnector {
 mod tests {
     use super::*;
     use alloy_primitives::bytes::Bytes;
-    use brotli::enc::BrotliEncoderParams;
     use op_alloy_rpc_types_engine::OpFlashblockPayload;
     use std::{future, iter};
     use tokio_tungstenite::tungstenite::{
@@ -453,14 +452,9 @@ mod tests {
 
     fn to_brotli_message(block: &OpFlashblockPayload) -> Result<Message, Error> {
         let json = serde_json::to_vec(&wrap_msg(block)).unwrap();
-        let mut compressed = Vec::new();
-        brotli::BrotliCompress(
-            &mut json.as_slice(),
-            &mut compressed,
-            &BrotliEncoderParams::default(),
-        )?;
-
-        Ok(Message::Binary(Bytes::from(compressed)))
+        let compressed = xlayer_builder::broadcast::compress::brotli_encode(&json)
+            .expect("brotli_encode succeeds");
+        Ok(Message::Binary(Bytes::from(compressed.to_vec())))
     }
 
     fn flashblock() -> OpFlashblockPayload {

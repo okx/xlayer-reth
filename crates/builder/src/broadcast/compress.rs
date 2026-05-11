@@ -18,9 +18,16 @@ pub const BROTLI_QUALITY: u32 = 5;
 /// Brotli sliding-window size in log2 bytes. 22 is the brotli default.
 pub const BROTLI_LGWIN: u32 = 22;
 
-/// Compress `json` bytes with brotli at [`BROTLI_QUALITY`].
+/// One-byte marker prefixed to every brotli-compressed frame. ASCII Record
+/// Separator — non-printable, cannot appear as the first byte of a JSON
+/// document.
+pub const BROTLI_MAGIC: u8 = 0x1E;
+
+/// Compress `json` bytes with brotli at [`BROTLI_QUALITY`], prefixed with
+/// [`BROTLI_MAGIC`].
 pub fn brotli_encode(json: &[u8]) -> io::Result<Bytes> {
-    let mut compressed = Vec::with_capacity(json.len() / 4);
+    let mut compressed = Vec::with_capacity(json.len() / 4 + 1);
+    compressed.push(BROTLI_MAGIC);
     let params = BrotliEncoderParams {
         quality: BROTLI_QUALITY as i32,
         lgwin: BROTLI_LGWIN as i32,
@@ -41,10 +48,18 @@ pub fn try_decompress(bytes: &[u8]) -> io::Result<Cow<'_, [u8]>> {
         return Ok(Cow::Borrowed(bytes));
     }
 
-    let mut decompressor = brotli::Decompressor::new(bytes, 4096);
-    let mut decompressed = Vec::new();
-    io::copy(&mut decompressor, &mut decompressed)?;
-    Ok(Cow::Owned(decompressed))
+    match bytes.first() {
+        Some(&BROTLI_MAGIC) => {
+            let mut decompressor = brotli::Decompressor::new(&bytes[1..], 4096);
+            let mut decompressed = Vec::new();
+            io::copy(&mut decompressor, &mut decompressed)?;
+            Ok(Cow::Owned(decompressed))
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "frame is neither legacy JSON nor a brotli frame (missing magic byte)",
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -71,6 +86,13 @@ mod tests {
     }
 
     #[test]
+    fn encoded_frame_starts_with_magic_byte() {
+        let original = br#"{"key":"value"}"#;
+        let compressed = brotli_encode(original).expect("encode");
+        assert_eq!(compressed.first(), Some(&BROTLI_MAGIC));
+    }
+
+    #[test]
     fn auto_detect_legacy_json_passthrough() {
         let json = br#"{"key":"value"}"#;
         let result = try_decompress(json).expect("passthrough succeeds");
@@ -86,12 +108,12 @@ mod tests {
     }
 
     #[test]
-    fn auto_detect_brotli_decompresses() {
+    fn dispatch_brotli_decompresses() {
         let original = br#"{"key":"value","data":"some larger payload for brotli to compress"}"#;
         let compressed = brotli_encode(original).expect("encode");
         assert!(
             !compressed.starts_with(b"{"),
-            "compressed output must not start with `{{` (would defeat auto-detect)"
+            "compressed output must not start with `{{` (would route through legacy JSON path)"
         );
         let result = try_decompress(&compressed).expect("decompress succeeds");
         assert_eq!(result.as_ref(), original);
@@ -99,10 +121,25 @@ mod tests {
     }
 
     #[test]
-    fn malformed_brotli_returns_err() {
-        // Bytes that don't start with `{` and aren't valid brotli.
+    fn missing_magic_byte_returns_err() {
+        // Bytes that don't start with `{` or the magic marker — must be rejected.
         let garbage = &[0xff_u8, 0xff, 0xff, 0xff, 0xff];
         let result = try_decompress(garbage);
-        assert!(result.is_err(), "malformed brotli must error, not silently pass through");
+        assert!(result.is_err(), "frame without magic byte must error, not silently pass through");
+    }
+
+    #[test]
+    fn magic_byte_with_bad_brotli_body_returns_err() {
+        // Magic byte present but the body is not valid brotli — the decompressor must fail
+        // instead of returning garbled bytes.
+        let bad = &[BROTLI_MAGIC, 0xff, 0xff, 0xff, 0xff];
+        let result = try_decompress(bad);
+        assert!(result.is_err(), "magic byte followed by non-brotli body must error");
+    }
+
+    #[test]
+    fn empty_input_returns_err() {
+        let result = try_decompress(&[]);
+        assert!(result.is_err(), "empty input must error (neither JSON nor brotli frame)");
     }
 }
