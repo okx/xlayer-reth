@@ -259,13 +259,14 @@ pub struct FlashblocksRpcArgs {
     )]
     pub flashblocks_subscription_max_addresses: usize,
 
-    /// Disable EIP-7928 block access list usage on the flashblocks RPC node.
+    /// Enable EIP-7928 block access list usage on the flashblocks RPC node.
     #[arg(
-        long = "xlayer.flashblocks-disable-access-list",
-        help = "Disable EIP-7928 access list usage on the flashblocks RPC node",
-        default_value = "false"
+        long = "xlayer.flashblocks-access-list",
+        help = "Enable EIP-7928 access list usage on the flashblocks RPC node",
+        default_value = "true",
+        action = clap::ArgAction::Set,
     )]
-    pub flashblocks_disable_access_list: bool,
+    pub flashblocks_access_list: bool,
 
     /// Enable flashblocks RPC state comparison debug mode
     #[arg(
