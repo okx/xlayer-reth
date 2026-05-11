@@ -94,6 +94,14 @@ pub struct BuilderMetrics {
     pub flashblocks_time_drift: Histogram,
     /// Time offset we used for first flashblock
     pub first_flashblock_time_offset: Histogram,
+    /// Total number of WebSocket subscribers rejected (per-IP or global)
+    pub ws_subscribers_rejected_total: Counter,
+    /// Total number of WebSocket subscribers closed by idle sweep
+    pub ws_subscribers_idle_swept_total: Counter,
+    /// Current number of active WebSocket subscribers
+    pub ws_subscribers_active: Gauge,
+    /// Maximum number of connections from any single IP
+    pub ws_subscribers_per_ip_max: Gauge,
 }
 
 impl BuilderMetrics {
