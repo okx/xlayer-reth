@@ -356,3 +356,118 @@ async fn progressive_lag_reduces_flashblocks(rbuilder: LocalInstance) -> eyre::R
 
     flashblocks_listener.stop().await
 }
+
+/// Validates the EIP-7928 BAL produced via the upstream `State::with_bal_builder()`
+/// path is wire-correct end-to-end. Combines two invariants in one e2e run:
+///
+/// * **EIP-7928 index assignment**: pre-exec records at `block_access_index = 0`,
+///   tx K records at `K + 1`. The base flashblock (index=0) carries the pre-exec
+///   entry at `bal_index=0` and the L1-info system tx at `bal_index=1`.
+/// * **Per-flashblock incrementality**: subsequent flashblocks (index>=1) carry
+///   ONLY their own tx range — no pre-exec leak from FB 0 (caught by the
+///   `take_built_alloy_bal()` + `bal_builder = Some(Bal::new())` re-arm pair),
+///   and no overlap of `bal_index` across FBs (i.e., FB N max < FB N+1 min).
+#[rb_test(args = BuilderArgs {
+    chain_block_time: 1000,
+    flashblocks: FlashblocksArgs {
+        enabled: true,
+        flashblocks_port: 1242,
+        flashblocks_addr: "127.0.0.1".into(),
+        flashblocks_block_time: 200,
+        flashblocks_disable_state_root: true,
+        ..Default::default()
+    },
+    ..Default::default()
+})]
+async fn test_bal_eip7928_per_flashblock_invariants(rbuilder: LocalInstance) -> eyre::Result<()> {
+    use alloy_eip7928::BlockAccessList;
+    use alloy_rlp::Decodable;
+    use std::collections::BTreeSet;
+
+    let driver = rbuilder.driver().await?;
+    let flashblocks_listener = rbuilder.spawn_flashblocks_listener();
+
+    // Send enough txs that the block produces multiple flashblocks (need
+    // ≥2 FBs to assert non-trivial incrementality).
+    for _ in 0..6 {
+        let _ = driver.create_transaction().random_valid_transfer().send().await?;
+    }
+    let _block = driver.build_new_block_with_current_timestamp(None).await?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let flashblocks = flashblocks_listener.get_flashblocks();
+    assert!(flashblocks.len() >= 2, "expected at least 2 flashblocks; got {}", flashblocks.len());
+
+    // For each flashblock, decode its wire BAL and collect every
+    // `block_access_index` referenced.
+    fn collect_indices(bal: &BlockAccessList) -> BTreeSet<u64> {
+        let mut set = BTreeSet::new();
+        for account in bal {
+            for c in &account.balance_changes {
+                set.insert(c.block_access_index);
+            }
+            for c in &account.nonce_changes {
+                set.insert(c.block_access_index);
+            }
+            for c in &account.code_changes {
+                set.insert(c.block_access_index);
+            }
+            for sc in &account.storage_changes {
+                for c in &sc.changes {
+                    set.insert(c.block_access_index);
+                }
+            }
+        }
+        set
+    }
+
+    let mut per_fb: Vec<(u64, BTreeSet<u64>)> = Vec::new();
+    for fb in &flashblocks {
+        let Some(raw_bal) = fb.metadata.access_list.as_ref() else { continue };
+        let mut buf: &[u8] = raw_bal.as_ref();
+        let bal = BlockAccessList::decode(&mut buf).expect("BAL must decode");
+        per_fb.push((fb.index, collect_indices(&bal)));
+    }
+    assert!(!per_fb.is_empty(), "expected at least one flashblock to carry a BAL");
+
+    // EIP-7928 invariant: base FB carries pre-exec at bal_index=0 AND tx 0
+    // (L1-info attribute deposit) at bal_index=1.
+    let fb0 = per_fb
+        .iter()
+        .find(|(idx, _)| *idx == 0)
+        .map(|(_, set)| set)
+        .expect("base flashblock must carry a BAL");
+    assert!(fb0.contains(&0), "FB 0 must carry pre-exec entry at bal_index=0; got {fb0:?}");
+    assert!(fb0.contains(&1), "FB 0 must carry the L1-info system tx at bal_index=1; got {fb0:?}",);
+
+    // Per-FB incrementality: only the base FB may carry bal_index=0. If a
+    // subsequent FB does, `take_built_alloy_bal() + re-arm` leaked.
+    for (fb_idx, indices) in &per_fb {
+        if *fb_idx == 0 {
+            continue;
+        }
+        assert!(
+            !indices.contains(&0),
+            "FB {fb_idx} leaked pre-exec entries at bal_index=0: {indices:?}",
+        );
+    }
+
+    // Global monotonicity: across FBs that carry indices, FB N's max is
+    // strictly less than FB N+1's min. Catches any per-FB cumulative leak
+    // beyond just the pre-exec slot.
+    let mut nonempty: Vec<&(u64, BTreeSet<u64>)> =
+        per_fb.iter().filter(|(_, s)| !s.is_empty()).collect();
+    nonempty.sort_by_key(|(idx, _)| *idx);
+    for w in nonempty.windows(2) {
+        let (a_fb, a_set) = w[0];
+        let (b_fb, b_set) = w[1];
+        let a_max = *a_set.iter().next_back().expect("non-empty");
+        let b_min = *b_set.iter().next().expect("non-empty");
+        assert!(
+            a_max < b_min,
+            "FB {a_fb} (max bal_index={a_max}) and FB {b_fb} (min bal_index={b_min}) overlap",
+        );
+    }
+
+    flashblocks_listener.stop().await
+}

@@ -5,6 +5,7 @@ pub mod validator;
 pub use engine::{XLayerEngineValidator, XLayerEngineValidatorBuilder};
 pub use validator::FlashblockSequenceValidator;
 
+use alloy_eip7928::BlockAccessList;
 use alloy_eips::eip4895::Withdrawal;
 use alloy_rpc_types_engine::PayloadId;
 use op_alloy_rpc_types_engine::OpFlashblockPayloadBase;
@@ -20,6 +21,7 @@ pub struct BuildArgs<I> {
     pub base: OpFlashblockPayloadBase,
     pub payload_id: PayloadId,
     pub transactions: I,
+    pub access_list: Option<BlockAccessList>,
     pub withdrawals: Vec<Withdrawal>,
     pub last_flashblock_index: u64,
     pub target_index: u64,

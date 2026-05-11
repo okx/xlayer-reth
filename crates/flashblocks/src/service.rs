@@ -3,7 +3,7 @@ use crate::{
     execution::{FlashblockReceipt, OverlayProviderFactory},
     persist::{handle_persistence, handle_relay_flashblocks},
     state::{handle_canonical_stream, handle_execution_tasks, handle_incoming_flashblocks},
-    ReceivedFlashblocksRx, XLayerEngineValidator,
+    ReceivedFlashblocksRx, WsFrame, XLayerEngineValidator,
 };
 use futures_util::Stream;
 use std::{net::SocketAddr, sync::Arc};
@@ -25,7 +25,7 @@ use reth_tasks::TaskExecutor;
 
 use xlayer_builder::{
     args::FlashblocksArgs,
-    broadcast::{WebSocketPublisher, XLayerFlashblockMessage},
+    broadcast::WebSocketPublisher,
     metrics::{tokio::FlashblocksTaskMetrics, BuilderMetrics},
 };
 
@@ -35,6 +35,8 @@ pub struct FlashblocksRpcCtx<N: NodePrimitives> {
     pub canon_state_rx: CanonStateNotificationStream<N>,
     /// Flashblocks RPC debug mode to enable state comparison.
     pub debug_state_comparison: bool,
+    /// Flag to disable EIP-7928 flashblocks access lists.
+    pub disable_access_list: bool,
 }
 
 /// Context for handling flashblocks persistence and relaying.
@@ -58,7 +60,7 @@ where
     /// Task executor.
     task_executor: TaskExecutor,
     /// Broadcast channel to forward received flashblocks from the subscription.
-    received_flashblocks_tx: Sender<Arc<XLayerFlashblockMessage>>,
+    received_flashblocks_tx: Sender<Arc<WsFrame>>,
 }
 
 impl<N> FlashblocksRpcService<N>
@@ -133,7 +135,7 @@ where
         engine_validator: XLayerEngineValidator<Provider, EvmConfig, V, N, ChainSpec>,
         incoming_rx: S,
     ) where
-        S: Stream<Item = eyre::Result<XLayerFlashblockMessage>> + Unpin + Send + 'static,
+        S: Stream<Item = eyre::Result<WsFrame>> + Unpin + Send + 'static,
         EvmConfig: ConfigureEvm<
                 Primitives = N,
                 NextBlockEnvCtx: From<OpFlashblockPayloadBase> + Unpin + Send,
@@ -153,7 +155,7 @@ where
         V: Send + Sync + 'static,
     {
         debug!(target: "flashblocks", "Initializing flashblocks rpc");
-        let raw_cache = Arc::new(RawFlashblocksCache::new());
+        let raw_cache = Arc::new(RawFlashblocksCache::new(self.rpc_ctx.disable_access_list));
 
         // Spawn incoming raw flashblocks handle.
         let received_tx = self.received_flashblocks_tx.clone();
