@@ -313,7 +313,11 @@ where
                 "failed to execute flashblocks sequence, validator not initialized"
             ));
         };
-        fb_validator.execute_sequence(args).await
+        // On failure, drop the state root task handle so the `PayloadProcessor`'s
+        // polluted sparse trie cache is released, then propagate the error.
+        fb_validator.execute_sequence(args).await.inspect_err(|_| {
+            guard.drop_flashblocks_state_root_handle();
+        })
     }
 }
 

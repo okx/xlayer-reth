@@ -166,6 +166,15 @@ where
             self.state_root_handle = None;
         }
 
+        // Detect a lost incremental sparse-trie pipeline: a pending sequence exists
+        // (so we are mid-sequence) but the previously-preserved state root handle is
+        // gone. This happens after a prior flashblock validation failed and the
+        // validator dropped the handle, which clears the `PayloadProcessor`'s sparse
+        // trie cache. A freshly-spawned SR task would only see the current suffix's
+        // state updates — not the accumulated prefix updates from earlier
+        // flashblocks — so its computed root would be incorrect. Force serial SR.
+        let lost_sr_pipeline = pending_sequence.is_some() && self.state_root_handle.is_none();
+
         // Compute SR only when:
         // 1. `sequence_end` signal is received
         // 2. Final flashblock arrived (last_index == target_index AND target > 0)
@@ -312,6 +321,17 @@ where
             let hashed_state = self.provider.hashed_post_state(&output.state);
             let mut maybe_state_root = None;
             match strategy {
+                StateRootStrategy::StateRootTask if lost_sr_pipeline => {
+                    // Sparse-trie cache was flushed after a prior failed validation in this
+                    // sequence. Fall through to serial SR computation.
+                    warn!(
+                        target: "flashblocks::validator",
+                        execute_height = args.base.block_number,
+                        flashblock_index = args.last_flashblock_index,
+                        target_index = args.target_index,
+                        "Incremental sparse-trie pipeline lost after prior failure; falling back to serial state root",
+                    );
+                }
                 StateRootStrategy::StateRootTask => {
                     debug!(target: "flashblocks::validator", execute_height = args.base.block_number, "Using sparse trie state root algorithm");
 
