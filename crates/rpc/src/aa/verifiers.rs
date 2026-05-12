@@ -112,6 +112,13 @@ impl<Provider> AcceptedVerifiersImpl<Provider> {
 
 /// Builds the verifier-policy response for a given fork.
 pub fn build_response_for_spec(spec: OpSpecId) -> AcceptedVerifiersResponse {
+    if spec < OpSpecId::XLAYER_V1 {
+        return AcceptedVerifiersResponse {
+            accepts_unknown_verifiers: false,
+            verifiers: Vec::new(),
+        };
+    }
+
     let params = xlayer_gas_params(spec);
 
     // Worst-case Delegate budget = outer + most expensive native inner.
@@ -171,10 +178,8 @@ where
             .map_err(|e| rpc_internal_error(format!("latest header lookup failed: {e}")))?
             .map(|h| h.timestamp())
             .unwrap_or(0);
-        let spec = alloy_op_evm::spec_by_timestamp_after_bedrock(
-            &*self.provider.chain_spec(),
-            timestamp,
-        );
+        let spec =
+            alloy_op_evm::spec_by_timestamp_after_bedrock(&*self.provider.chain_spec(), timestamp);
         Ok(build_response_for_spec(spec))
     }
 }
@@ -231,16 +236,37 @@ mod tests {
         assert!(!json.contains("max_auth_cost"));
     }
 
-    /// Pre-XLAYER_V1 forks return zero `maxAuthCost` values: the gas
-    /// slots aren't populated yet, but the addresses are still
-    /// advertised so wallets can pre-build for the upcoming fork.
+    /// Pre-XLAYER_V1 forks return an empty verifier list with
+    /// `acceptsUnknownVerifiers: false` — the AA infrastructure isn't
+    /// active yet, and clients must not interpret the response as
+    /// "AA accepted today."
     #[test]
-    fn pre_xlayer_v1_returns_zero_gas_with_addresses_present() {
+    fn pre_xlayer_v1_returns_empty_response_with_acceptance_disabled() {
         let r = build_response_for_spec(OpSpecId::BEDROCK);
-        assert_eq!(r.verifiers.len(), 4);
-        for v in &r.verifiers {
-            assert!(v.native);
-            assert_eq!(v.max_auth_cost, U256::ZERO, "{:?} should have zero gas pre-XLAYER_V1", v.address);
+        assert!(!r.accepts_unknown_verifiers, "AA not active pre-XLAYER_V1");
+        assert!(r.verifiers.is_empty(), "no verifiers advertised before fork activation");
+    }
+
+    /// Boundary case: every fork from BEDROCK up to (but not including)
+    /// XLAYER_V1 must produce the empty response. Catches regressions
+    /// where a new intermediate fork is introduced and the gating cutoff
+    /// silently shifts.
+    #[test]
+    fn forks_strictly_before_xlayer_v1_are_all_gated() {
+        for spec in [
+            OpSpecId::BEDROCK,
+            OpSpecId::REGOLITH,
+            OpSpecId::CANYON,
+            OpSpecId::ECOTONE,
+            OpSpecId::FJORD,
+            OpSpecId::GRANITE,
+            OpSpecId::HOLOCENE,
+            OpSpecId::ISTHMUS,
+            OpSpecId::JOVIAN,
+        ] {
+            let r = build_response_for_spec(spec);
+            assert!(!r.accepts_unknown_verifiers, "{spec:?}: must not accept AA pre-XLAYER_V1");
+            assert!(r.verifiers.is_empty(), "{spec:?}: must not advertise verifiers pre-XLAYER_V1");
         }
     }
 }

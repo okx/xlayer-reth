@@ -280,13 +280,15 @@ fn main() {
                     info!(target: "reth::cli", "xlayer AA accepted-verifiers RPC initialized");
 
                     // Register XLayerAA 2D-nonce override (eth_getTransactionCount).
-                    let tx_count_override =
-                        TransactionCountOverrideImpl::new(ctx.provider().clone());
-                    ctx.modules.add_or_replace_if_module_configured(
-                        RethRpcModule::Eth,
-                        TransactionCountOverrideServer::into_rpc(tx_count_override),
-                    )?;
-                    info!(target: "reth::cli", "xlayer AA 2D-nonce override (eth_getTransactionCount) initialized");
+                    if flashblocks_state.is_none() {
+                        let tx_count_override =
+                            TransactionCountOverrideImpl::new(ctx.registry.eth_api().clone());
+                        ctx.modules.add_or_replace_if_module_configured(
+                            RethRpcModule::Eth,
+                            TransactionCountOverrideServer::into_rpc(tx_count_override),
+                        )?;
+                        info!(target: "reth::cli", "xlayer AA 2D-nonce override (eth_getTransactionCount) initialized");
+                    }
 
                     // Register X Layer RPC
                     let peer_status = fb_p2p_status.get().cloned();

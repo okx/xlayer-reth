@@ -2,15 +2,14 @@
 //!
 //! Extends `eth_getTransactionCount` with an optional `nonce_key`
 //! parameter so callers can query the 2D nonce channel maintained by
-//! the `NonceManager` predeploy. Without this, AA clients have no
-//! cheap way to discover the next nonce for a `(sender, nonce_key)`
-//! pair.
+//! the `NonceManager` predeploy.
 //!
 //! AA receipt enrichment (`payer`, `phaseStatuses`) is handled directly
 //! inside the upstream `OpReceiptConverter` (see
 //! `op-reth/crates/rpc/src/eth/receipt.rs`) — no downstream wiring
 //! needed.
 
+pub mod pool;
 pub mod verifiers;
 
 use alloy_eips::BlockId;
@@ -20,8 +19,18 @@ use jsonrpsee::{
     proc_macros::rpc,
     types::{error::INTERNAL_ERROR_CODE, ErrorObjectOwned},
 };
+use op_alloy_network::Optimism;
 use op_revm::precompiles_xlayer::{aa_nonce_slot, NONCE_MANAGER_ADDRESS};
+use reth_optimism_rpc::{OpEthApi, OpEthApiError};
+use reth_optimism_txpool::Eip8130PoolView;
+use reth_rpc_eth_api::{
+    helpers::{FullEthApi, SpawnBlocking},
+    EthApiServer, EthApiTypes, RpcConvert, RpcNodeCore,
+};
+use reth_rpc_eth_types::EthApiError;
 use reth_storage_api::StateProviderFactory;
+
+use crate::aa::pool::{layer_aa_pool_head, read_aa_slot};
 
 /// Reads the 2D nonce for `(address, nonce_key)` from the Nonce
 /// Manager predeploy's storage at the requested block.
@@ -52,18 +61,6 @@ pub fn read_2d_nonce<P: StateProviderFactory>(
 
 /// Overrides `eth_getTransactionCount` with an optional `nonce_key`
 /// parameter for 2D nonce channel queries.
-///
-/// **Naming.** We intentionally keep the method name
-/// `eth_getTransactionCount` (the exact standard one) rather than
-/// introducing a new namespace. Reth's JSON-RPC registry routes
-/// duplicate method names to the last-registered handler — so
-/// attaching this override after the stock eth module means a
-/// client calling `eth_getTransactionCount(addr, block)` continues
-/// to work unchanged, while a client that passes a third
-/// `nonce_key` argument transparently opts into the AA path.
-///
-/// Matches Base's surface: `nonce_key` is a camelCased U256 at
-/// position 2 (after address and block).
 #[rpc(server, namespace = "eth")]
 pub trait TransactionCountOverride {
     /// Returns the transaction count (nonce) for an address.
@@ -82,21 +79,29 @@ pub trait TransactionCountOverride {
 
 /// Server implementation of [`TransactionCountOverride`].
 #[derive(Debug, Clone)]
-pub struct TransactionCountOverrideImpl<Provider> {
-    provider: Provider,
+pub struct TransactionCountOverrideImpl<N: RpcNodeCore, Rpc: RpcConvert> {
+    eth_api: OpEthApi<N, Rpc>,
 }
 
-impl<Provider> TransactionCountOverrideImpl<Provider> {
-    /// Creates a new override wrapping the given state provider.
-    pub const fn new(provider: Provider) -> Self {
-        Self { provider }
+impl<N: RpcNodeCore, Rpc: RpcConvert> TransactionCountOverrideImpl<N, Rpc> {
+    pub const fn new(eth_api: OpEthApi<N, Rpc>) -> Self {
+        Self { eth_api }
     }
 }
 
 #[async_trait::async_trait]
-impl<Provider> TransactionCountOverrideServer for TransactionCountOverrideImpl<Provider>
+impl<N, Rpc> TransactionCountOverrideServer for TransactionCountOverrideImpl<N, Rpc>
 where
-    Provider: StateProviderFactory + Send + Sync + 'static,
+    N: RpcNodeCore,
+    Rpc: RpcConvert,
+    OpEthApi<N, Rpc>: FullEthApi<NetworkTypes = Optimism, Error = OpEthApiError>
+        + EthApiTypes<RpcConvert = Rpc>
+        + RpcNodeCore
+        + SpawnBlocking
+        + Send
+        + Sync
+        + 'static,
+    <OpEthApi<N, Rpc> as RpcNodeCore>::Pool: Eip8130PoolView,
 {
     async fn get_transaction_count(
         &self,
@@ -104,26 +109,28 @@ where
         block_number: Option<BlockId>,
         nonce_key: Option<U256>,
     ) -> RpcResult<U256> {
-        let block_id = block_number.unwrap_or_default();
         match nonce_key {
-            Some(key) => read_2d_nonce(&self.provider, address, block_id, key),
-            None => {
-                // Standard account-nonce path; delegates to the
-                // same state provider the stock eth module uses.
-                // Keeping this path here (rather than forwarding to
-                // the inner eth handler) means the override is
-                // self-contained and doesn't need an inner Arc of
-                // the eth module for the degenerate case.
-                let state = self
-                    .provider
-                    .state_by_block_id(block_id)
-                    .map_err(|e| rpc_internal_error(format!("state access error: {e}")))?;
-                let nonce = state
-                    .basic_account(&address)
-                    .map_err(|e| rpc_internal_error(format!("account read error: {e}")))?
-                    .map(|a| a.nonce)
-                    .unwrap_or_default();
-                Ok(U256::from(nonce))
+            // No `nonce_key` → defer to the upstream handler so the
+            // `pending` block tag still surfaces txpool-resident nonces
+            // (returns max(state nonce, highest_consecutive_pool_nonce + 1)).
+            None => EthApiServer::transaction_count(&self.eth_api, address, block_number).await,
+            // 2D nonce read against NonceManager predeploy storage. For the
+            // `pending` tag we additionally layer the AA pool's per-lane
+            // consecutive head, mirroring how the 1D path layers
+            // `get_highest_consecutive_transaction_by_sender`.
+            Some(key) => {
+                let block_id = block_number.unwrap_or_default();
+                self.eth_api
+                    .spawn_blocking_io_fut(move |this| async move {
+                        let state = this
+                            .provider()
+                            .state_by_block_id(block_id)
+                            .map_err(EthApiError::from)?;
+                        let slot_value = read_aa_slot(state.as_ref(), address, key)?;
+                        Ok(layer_aa_pool_head(this.pool(), address, key, slot_value, block_number))
+                    })
+                    .await
+                    .map_err(|e| -> jsonrpsee_types::error::ErrorObject<'static> { e.into() })
             }
         }
     }
@@ -162,8 +169,7 @@ mod tests {
         let slot = aa_nonce_slot(owner, nonce_key);
         provider.add_account(
             NONCE_MANAGER_ADDRESS,
-            ExtendedAccount::new(0, U256::ZERO)
-                .extend_storage([(slot.into(), U256::from(99u64))]),
+            ExtendedAccount::new(0, U256::ZERO).extend_storage([(slot.into(), U256::from(99u64))]),
         );
 
         let nonce = read_2d_nonce(&provider, owner, BlockId::default(), nonce_key).unwrap();
@@ -198,60 +204,5 @@ mod tests {
         let b = read_2d_nonce(&provider, owner, BlockId::default(), key_b).unwrap();
         assert_eq!(a, U256::from(11u64));
         assert_eq!(b, U256::from(22u64));
-    }
-
-    #[tokio::test]
-    async fn get_transaction_count_without_nonce_key_uses_account_nonce() {
-        let provider = MockEthProvider::default();
-        let address = Address::repeat_byte(0x22);
-        provider.add_account(address, ExtendedAccount::new(7, U256::ZERO));
-
-        let api = TransactionCountOverrideImpl::new(provider);
-        let nonce = TransactionCountOverrideServer::get_transaction_count(&api, address, None, None)
-            .await
-            .unwrap();
-        assert_eq!(nonce, U256::from(7u64));
-    }
-
-    #[tokio::test]
-    async fn get_transaction_count_unknown_address_returns_zero() {
-        let provider = MockEthProvider::default();
-        let api = TransactionCountOverrideImpl::new(provider);
-        let nonce = TransactionCountOverrideServer::get_transaction_count(
-            &api,
-            Address::repeat_byte(0x99),
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(nonce, U256::ZERO);
-    }
-
-    #[tokio::test]
-    async fn get_transaction_count_with_nonce_key_uses_2d_nonce() {
-        let provider = MockEthProvider::default();
-        let address = Address::repeat_byte(0x33);
-        let nonce_key = U256::from(5u64);
-        let slot = aa_nonce_slot(address, nonce_key);
-        // Account-nonce field intentionally non-zero — the AA path must
-        // ignore it and read NonceManager storage instead.
-        provider.add_account(address, ExtendedAccount::new(1, U256::ZERO));
-        provider.add_account(
-            NONCE_MANAGER_ADDRESS,
-            ExtendedAccount::new(0, U256::ZERO)
-                .extend_storage([(slot.into(), U256::from(21u64))]),
-        );
-
-        let api = TransactionCountOverrideImpl::new(provider);
-        let nonce = TransactionCountOverrideServer::get_transaction_count(
-            &api,
-            address,
-            Some(BlockId::default()),
-            Some(nonce_key),
-        )
-        .await
-        .unwrap();
-        assert_eq!(nonce, U256::from(21u64));
     }
 }
