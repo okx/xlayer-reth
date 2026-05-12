@@ -5,7 +5,7 @@
 //! relays them to downstream WebSocket subscribers.
 
 use crate::{
-    broadcast::{Message, WebSocketPublisher, XLayerFlashblockMessage},
+    broadcast::{BroadcastFrame, Message, WebSocketPublisher, XLayerFlashblockMessage},
     flashblocks::utils::cache::FlashblockPayloadsCache,
 };
 use std::sync::Arc;
@@ -20,7 +20,7 @@ use tracing::warn;
 /// flashblocks).
 pub(crate) struct DefaultPayloadHandler {
     /// Receives incoming P2P messages from peers.
-    p2p_rx: mpsc::Receiver<Message>,
+    p2p_rx: mpsc::Receiver<BroadcastFrame>,
     /// Cache for externally received pending flashblock transactions.
     p2p_cache: FlashblockPayloadsCache,
     /// WebSocket publisher for relaying flashblocks to downstream subscribers.
@@ -31,7 +31,7 @@ pub(crate) struct DefaultPayloadHandler {
 
 impl DefaultPayloadHandler {
     pub(crate) fn new(
-        p2p_rx: mpsc::Receiver<Message>,
+        p2p_rx: mpsc::Receiver<BroadcastFrame>,
         p2p_cache: FlashblockPayloadsCache,
         ws_pub: Arc<WebSocketPublisher>,
         cancel: tokio_util::sync::CancellationToken,
@@ -45,13 +45,14 @@ impl DefaultPayloadHandler {
 
         loop {
             tokio::select! {
-                Some(message) = self.p2p_rx.recv() => {
-                    match message {
+                Some(frame) = self.p2p_rx.recv() => {
+                    match frame.decoded.as_ref() {
                         Message::OpFlashblockPayload(fb_payload) => {
-                            if let XLayerFlashblockMessage::Payload(payload) = &fb_payload {
+                            if let XLayerFlashblockMessage::Payload(payload) = fb_payload {
                                 self.p2p_cache.add_flashblock_payload(payload.inner.clone());
                             }
-                            if let Err(e) = self.ws_pub.publish(&fb_payload) {
+                            // Relay using the original wire bytes — no re-encode.
+                            if let Err(e) = self.ws_pub.publish(frame.bytes.clone(), fb_payload) {
                                 warn!(target: "payload_builder", e = ?e, "failed to publish flashblock to websocket publisher");
                             }
                         }

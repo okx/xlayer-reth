@@ -132,6 +132,8 @@ impl<N: NodePrimitives> PendingSequence<N> {
                 ),
             },
             transactions,
+            // TODO: add support for BAL when OpPayload supports
+            access_list: None,
             withdrawals,
             last_flashblock_index: self.prefix_execution_meta.last_flashblock_index,
             target_index: self.prefix_execution_meta.last_flashblock_index,

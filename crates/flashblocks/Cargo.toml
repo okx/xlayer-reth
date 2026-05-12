@@ -53,7 +53,7 @@ reth-trie-parallel.workspace = true
 # alloy
 alloy-consensus.workspace = true
 alloy-eips = { workspace = true, features = ["serde"] }
-alloy-eip7928.workspace = true
+alloy-eip7928 = { workspace = true, features = ["serde", "rlp"] }
 alloy-evm.workspace = true
 alloy-json-rpc.workspace = true
 alloy-primitives = { workspace = true, features = ["serde"] }

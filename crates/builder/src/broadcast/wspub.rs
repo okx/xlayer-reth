@@ -1,6 +1,7 @@
 use crate::{
     broadcast::XLayerFlashblockMessage, metrics::tokio::MonitoredTask, metrics::BuilderMetrics,
 };
+use alloy_primitives::Bytes;
 use core::{
     fmt::{Debug, Formatter},
     net::SocketAddr,
@@ -20,7 +21,7 @@ use tokio_tungstenite::{
     accept_async,
     tungstenite::{
         protocol::frame::{coding::CloseCode, CloseFrame},
-        Message, Utf8Bytes,
+        Message,
     },
     WebSocketStream,
 };
@@ -29,12 +30,12 @@ use tracing::{debug, info, trace, warn};
 /// A WebSockets publisher that accepts connections from client websockets and broadcasts to them
 /// updates about new flashblocks. It maintains a count of sent messages and active subscriptions.
 ///
-/// This is modelled as a `futures::Sink` that can be used to send `OpFlashblockPayload` messages.
+/// This is modelled as a `futures::Sink` that can be used to send `Bytes` wire bytes messages.
 pub struct WebSocketPublisher {
     sent: Arc<AtomicUsize>,
     subs: Arc<AtomicUsize>,
     term: watch::Sender<bool>,
-    pipe: broadcast::Sender<Utf8Bytes>,
+    pipe: broadcast::Sender<Bytes>,
     subscriber_limit: Option<u16>,
 }
 
@@ -65,10 +66,7 @@ impl WebSocketPublisher {
         Ok(Self { sent, subs, term, pipe, subscriber_limit })
     }
 
-    pub fn publish(&self, payload: &XLayerFlashblockMessage) -> io::Result<usize> {
-        // Serialize the payload to a UTF-8 string
-        // serialize only once, then just copy around only a pointer
-        // to the serialized data for each subscription.
+    pub fn publish(&self, bytes: Bytes, payload: &XLayerFlashblockMessage) -> io::Result<usize> {
         match payload {
             XLayerFlashblockMessage::Payload(payload) => {
                 info!(
@@ -90,14 +88,8 @@ impl WebSocketPublisher {
                 );
             }
         }
-
-        let serialized = serde_json::to_string(payload)?;
-        let utf8_bytes = Utf8Bytes::from(serialized);
-        let size = utf8_bytes.len();
-        // Send the serialized payload to all subscribers
-        self.pipe
-            .send(utf8_bytes)
-            .map_err(|e| io::Error::new(io::ErrorKind::ConnectionAborted, e))?;
+        let size = bytes.len();
+        self.pipe.send(bytes).map_err(|e| io::Error::new(io::ErrorKind::ConnectionAborted, e))?;
         Ok(size)
     }
 }
@@ -113,7 +105,7 @@ impl Drop for WebSocketPublisher {
 async fn listener_loop(
     listener: TcpListener,
     metrics: Arc<BuilderMetrics>,
-    receiver: Receiver<Utf8Bytes>,
+    receiver: Receiver<Bytes>,
     term: watch::Receiver<bool>,
     sent: Arc<AtomicUsize>,
     subs: Arc<AtomicUsize>,
@@ -188,7 +180,7 @@ async fn broadcast_loop(
     stream: WebSocketStream<TcpStream>,
     metrics: Arc<BuilderMetrics>,
     term: watch::Receiver<bool>,
-    blocks: broadcast::Receiver<Utf8Bytes>,
+    blocks: broadcast::Receiver<Bytes>,
     sent: Arc<AtomicUsize>,
 ) {
     let mut term = term;
@@ -218,8 +210,15 @@ async fn broadcast_loop(
                     sent.fetch_add(1, Ordering::Relaxed);
                     metrics.messages_sent_count.increment(1);
 
-                    trace!(target: "payload_builder::broadcast", "Broadcasted payload: {:?}", payload);
-                    if let Err(e) = stream.send(Message::Text(payload)).await {
+                    trace!(
+                        target: "payload_builder::broadcast",
+                        size = payload.len(),
+                        "Broadcasted payload"
+                    );
+                    if let Err(e) = stream
+                        .send(Message::Binary(tokio_tungstenite::tungstenite::Bytes::from(payload)))
+                        .await
+                    {
                         debug!(target: "payload_builder::broadcast", "Send payload error for flashblocks subscription {peer_addr}: {e}");
                         break; // Exit the loop if sending fails
                     }

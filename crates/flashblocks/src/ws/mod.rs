@@ -1,5 +1,5 @@
-mod decoding;
+mod frame;
 mod stream;
 
-pub use decoding::FlashBlockDecoder;
+pub use frame::WsFrame;
 pub use stream::WsFlashBlockStream;

@@ -136,6 +136,14 @@ reth-trie-common = { git = "https://github.com/okx/reth", rev = "22bdddf9e0eff2a
 reth-trie-db = { git = "https://github.com/okx/reth", rev = "22bdddf9e0eff2a2444feca9994c5f191829bdcd" }
 reth-trie-parallel = { git = "https://github.com/okx/reth", rev = "22bdddf9e0eff2a2444feca9994c5f191829bdcd" }
 
+# xlayer tools
+reth-codecs = { version = "0.3.0", default-features = false, features = [
+  "alloy",
+] }
+reth-stages-types = { git = "https://github.com/okx/reth", rev = "22bdddf9e0eff2a2444feca9994c5f191829bdcd" }
+reth-static-file = { git = "https://github.com/okx/reth", rev = "22bdddf9e0eff2a2444feca9994c5f191829bdcd" }
+reth-prune-types = { git = "https://github.com/okx/reth", rev = "22bdddf9e0eff2a2444feca9994c5f191829bdcd" }
+
 # ==============================================================================
 # Reth Optimism Dependencies (from local optimism/rust op-reth)
 # These are OP-chain-specific crates, sourced from the optimism monorepo.

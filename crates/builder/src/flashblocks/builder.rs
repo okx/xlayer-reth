@@ -14,7 +14,7 @@ use crate::{
     traits::{ClientBounds, PoolBounds},
 };
 use eyre::WrapErr as _;
-use std::{collections::BTreeMap, sync::Arc, time::Instant};
+use std::{sync::Arc, time::Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -24,7 +24,7 @@ use alloy_consensus::{
 };
 use alloy_eips::{eip7685::EMPTY_REQUESTS_HASH, merge::BEACON_NONCE, Encodable2718};
 use alloy_evm::block::BlockExecutionResult;
-use alloy_primitives::{Address, BlockHash, B256, U256};
+use alloy_primitives::{BlockHash, B256, U256};
 use op_alloy_rpc_types_engine::{
     OpFlashblockPayload, OpFlashblockPayloadBase, OpFlashblockPayloadDelta,
     OpFlashblockPayloadMetadata,
@@ -38,8 +38,7 @@ use reth_optimism_consensus::{calculate_receipt_root_no_memo_optimism, isthmus};
 use reth_optimism_evm::{OpEvmConfig, OpNextBlockEnvAttributes};
 use reth_optimism_forks::OpHardforks;
 use reth_optimism_node::{OpBuiltPayload, OpPayloadBuilderAttributes};
-use reth_optimism_primitives::{OpReceipt, OpTransactionSigned};
-
+use reth_optimism_primitives::OpTransactionSigned;
 use reth_payload_primitives::BuiltPayload;
 use reth_payload_util::BestPayloadTransactions;
 use reth_primitives_traits::RecoveredBlock;
@@ -49,31 +48,13 @@ use reth_provider::{
 use reth_revm::{
     database::StateProviderDatabase,
     db::{states::bundle_state::BundleRetention, BundleState},
+    state::bal::Bal,
     State,
 };
 use reth_tasks::TaskExecutor;
 use reth_transaction_pool::TransactionPool;
 use reth_trie::{updates::TrieUpdates, HashedPostState, TrieInput};
 use revm::Database;
-
-/// Converts a reth OpReceipt to an op-alloy OpReceipt
-/// TODO: remove this once reth updates to use the op-alloy defined type as well.
-fn convert_receipt(receipt: &OpReceipt) -> op_alloy_consensus::OpReceipt {
-    match receipt {
-        OpReceipt::Legacy(r) => op_alloy_consensus::OpReceipt::Legacy(r.clone()),
-        OpReceipt::Eip2930(r) => op_alloy_consensus::OpReceipt::Eip2930(r.clone()),
-        OpReceipt::Eip1559(r) => op_alloy_consensus::OpReceipt::Eip1559(r.clone()),
-        OpReceipt::Eip7702(r) => op_alloy_consensus::OpReceipt::Eip7702(r.clone()),
-        OpReceipt::Deposit(r) => {
-            op_alloy_consensus::OpReceipt::Deposit(op_alloy_consensus::OpDepositReceipt {
-                inner: r.inner.clone(),
-                deposit_nonce: r.deposit_nonce,
-                deposit_receipt_version: r.deposit_receipt_version,
-            })
-        }
-        OpReceipt::PostExec(r) => op_alloy_consensus::OpReceipt::PostExec(r.clone()),
-    }
-}
 
 type NextBestFlashblocksTxs<Pool> = BestFlashblocksTxs<
     <Pool as TransactionPool>::Transaction,
@@ -362,8 +343,11 @@ where
         let db = StateProviderDatabase::new(&state_provider);
         // 1. execute the pre steps and seal an early block with that
         let sequencer_tx_start_time = Instant::now();
-        let mut state =
-            State::builder().with_database(cached_reads.as_db_mut(db)).with_bundle_update().build();
+        let mut state = State::builder()
+            .with_database(cached_reads.as_db_mut(db))
+            .with_bundle_update()
+            .with_bal_builder()
+            .build();
 
         let mut info = execute_pre_steps(&mut state, &ctx)?;
         let sequencer_tx_time = sequencer_tx_start_time.elapsed();
@@ -960,7 +944,10 @@ where
         .map_err(PayloadBuilderError::other)?
         .apply_pre_execution_changes()?;
 
-    // 2. execute sequencer transactions
+    // 2. bump fbal index after pre-execution state (index 0)
+    state.bump_bal_index();
+
+    // 3. execute sequencer transactions
     let info = ctx.execute_sequencer_transactions(state)?;
 
     Ok(info)
@@ -1099,14 +1086,6 @@ where
     let (excess_blob_gas, blob_gas_used) = ctx.blob_fields(info);
     let extra_data = ctx.extra_data()?;
 
-    // need to read balances before take_bundle() below
-    let new_account_balances = state
-        .bundle_state
-        .state
-        .iter()
-        .filter_map(|(address, account)| account.info.as_ref().map(|info| (*address, info.balance)))
-        .collect::<BTreeMap<Address, U256>>();
-
     let bundle_state = state.take_bundle();
     let execution_output = BlockExecutionOutput {
         state: bundle_state.clone(),
@@ -1117,6 +1096,13 @@ where
             blob_gas_used: blob_gas_used.unwrap_or_default(),
         },
     };
+
+    // Take the current flashblock incremental bal and merge it into the accumulator
+    // on the `ExecutionInfo`, and reset the bal builder for the next flashblock.
+    let flashblock_bal = state.take_built_bal();
+    state.bal_state.bal_builder = Some(Bal::new());
+    let fbal = flashblock_bal.clone().map(|bal| bal.into_alloy_bal());
+    info.merge_access_list(flashblock_bal);
 
     let header = Header {
         parent_hash: ctx.parent().hash(),
@@ -1192,24 +1178,14 @@ where
     // For X Layer, monitoring logs
     let new_tx_hashes = new_transactions.iter().map(|tx| tx.tx_hash()).collect::<Vec<_>>();
 
-    let new_receipts = info.receipts[last_idx..].to_vec();
     if let Some(fb) = fb_state {
         if let Some(updates) = trie_updates_to_cache.take() {
             fb.prev_trie_updates = Some(updates);
         }
         fb.set_last_flashblock_tx_index(info.executed_transactions.len());
     }
-    let receipts_with_hash = new_transactions
-        .iter()
-        .zip(new_receipts.iter())
-        .map(|(tx, receipt)| (tx.tx_hash(), convert_receipt(receipt)))
-        .collect::<BTreeMap<B256, op_alloy_consensus::OpReceipt>>();
-    let metadata = OpFlashblockPayloadMetadata {
-        receipts: Some(receipts_with_hash),
-        new_account_balances: Some(new_account_balances),
-        block_number: ctx.parent().number + 1,
-        access_list: None,
-    };
+
+    let metadata = OpFlashblockPayloadMetadata::new(ctx.parent().number + 1, None, None, fbal);
 
     let (_, blob_gas_used) = ctx.blob_fields(info);
 
