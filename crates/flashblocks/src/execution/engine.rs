@@ -4,7 +4,7 @@ use crate::{
 };
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use alloy_consensus::Block;
 use alloy_eips::{eip2718::Encodable2718, BlockNumHash};
@@ -27,7 +27,10 @@ use reth_node_builder::rpc::{
 };
 use reth_optimism_forks::OpHardforks;
 use reth_payload_primitives::{BuiltPayload, InvalidPayloadAttributesError, NewPayloadError};
-use reth_primitives_traits::{NodePrimitives, Recovered, SealedBlock, WithEncoded};
+use reth_primitives_traits::{
+    transaction::{signed::SignedTransaction, TxHashRef},
+    Block as BlockTrait, BlockBody, NodePrimitives, Recovered, SealedBlock, WithEncoded,
+};
 use reth_provider::{
     BlockReader, CanonStateSubscriptions, HashedPostStateProvider, HeaderProvider,
     StateProviderFactory, StateReader,
@@ -152,6 +155,8 @@ where
         ctx: TreeCtx<'_, N>,
     ) -> ValidationOutcome<N> {
         let num_hash = payload.num_hash();
+        let sealed_block = self.validator.convert_payload_to_block(payload.clone()).ok();
+
         // SAFETY: `blocking_lock()` is safe here because the engine tree runs on a dedicated
         // OS thread (`spawn_os_thread("engine", ...)` in `reth-engine-tree`), not a tokio
         // worker. These `EngineValidator` trait methods are only called from
@@ -165,12 +170,25 @@ where
             return Ok((executed_block, None));
         }
 
-        debug!(
+        // Hot path: use pending FB sequence state and the warm FB sequence validator
+        if let Some(ref block) = sealed_block
+            && let Some(args) = guard.try_get_flashblocks_buildable_args(block)
+            && let Some(executed_block) = guard.engine_execute_sequence(args, num_hash.hash)
+        {
+            return Ok((executed_block, None));
+        }
+
+        info!(
             target: "flashblocks::engine_validator",
             block_number = num_hash.number,
             block_hash = %num_hash.hash,
-            "Flashblocks cache miss, engine validating payload",
+            "Failed to build with flashblocks pending sequence, defaulting to engine validation",
         );
+
+        // Drop any in-flight flashblocks sparse-trie task so the `PayloadProcessor`'s
+        // preserved sparse trie is released
+        guard.drop_flashblocks_state_root_handle();
+
         let (executed_block, timing) = guard.engine_validator.validate_payload(payload, ctx)?;
         guard.try_advance_flashblocks_state(&executed_block);
         Ok((executed_block, timing))
@@ -190,6 +208,13 @@ where
             return Ok((executed_block, None));
         }
 
+        // Hot path: use pending FB sequence state and the warm FB sequence validator
+        if let Some(args) = guard.try_get_flashblocks_buildable_args(&block)
+            && let Some(executed_block) = guard.engine_execute_sequence(args, num_hash.hash)
+        {
+            return Ok((executed_block, None));
+        }
+
         // If flashblocks is enabled and engine validator is validating this new block,
         // it could mean that the default CL/EL sync received the block before the full
         // flashblocks sequence has received the last target flashblock.
@@ -202,8 +227,13 @@ where
             target: "flashblocks::engine_validator",
             block_number = num_hash.number,
             block_hash = %num_hash.hash,
-            "Flashblocks cache miss, engine validating block",
+            "Failed to build with flashblocks pending sequence, defaulting to engine validation",
         );
+
+        // Drop any in-flight flashblocks sparse-trie task so the `PayloadProcessor`'s
+        // preserved sparse trie is released
+        guard.drop_flashblocks_state_root_handle();
+
         let (executed_block, timing) = guard.engine_validator.validate_block(block, ctx)?;
         guard.try_advance_flashblocks_state(&executed_block);
         Ok((executed_block, timing))
@@ -283,7 +313,11 @@ where
                 "failed to execute flashblocks sequence, validator not initialized"
             ));
         };
-        fb_validator.execute_sequence(args).await
+        // On failure, drop the state root task handle so the `PayloadProcessor`'s
+        // polluted sparse trie cache is released, then propagate the error.
+        fb_validator.execute_sequence(args).await.inspect_err(|_| {
+            guard.drop_flashblocks_state_root_handle();
+        })
     }
 }
 
@@ -304,9 +338,25 @@ where
 
 impl<Provider, Evm, V, N, ChainSpec> XLayerEngineValidatorInner<Provider, Evm, V, N, ChainSpec>
 where
-    Evm: ConfigureEvm,
     N: NodePrimitives,
-    ChainSpec: OpHardforks,
+    N::Receipt: FlashblockReceipt,
+    N::SignedTx: Encodable2718 + SignedTransaction,
+    N::Block: From<Block<N::SignedTx>>,
+    <<N::Block as BlockTrait>::Body as BlockBody>::Transaction: TxHashRef,
+    Evm: ConfigureEvm<Primitives = N, NextBlockEnvCtx: From<OpFlashblockPayloadBase> + Unpin + Send>
+        + Send
+        + 'static,
+    Provider: StateProviderFactory
+        + HeaderProvider<Header = <N as NodePrimitives>::BlockHeader>
+        + OverlayProviderFactory
+        + BlockReader
+        + StateReader
+        + HashedPostStateProvider
+        + Unpin
+        + Clone
+        + Send
+        + 'static,
+    ChainSpec: OpHardforks + Send + Sync + 'static,
 {
     /// Checks the flashblocks confirm cache for a pre-validated block. Returns
     /// the cached `ExecutedBlock` on hit, skipping re-execution entirely.
@@ -319,6 +369,14 @@ where
             "Flashblocks cache hit, returning pre-validated block",
         );
         Some(executed_block)
+    }
+
+    /// Drops any in-flight flashblocks state root task handle so the shared
+    /// `PayloadProcessor`'s preserved sparse trie is released.
+    fn drop_flashblocks_state_root_handle(&mut self) {
+        if let Some(fb) = self.fb_validator.as_mut() {
+            fb.drop_state_root_handle();
+        }
     }
 
     /// Optimistically advances the flashblocks state cache after engine validation.
@@ -334,6 +392,48 @@ where
                 "Failed handle engine block on flashblocks state cache",
             );
         }
+    }
+
+    /// Try using the current flashblocks sequence to generate buildable args to be
+    /// validated by the flashblocks sequence validator's warm caches, using the
+    /// default payload as the synthesized end.
+    #[expect(clippy::type_complexity)]
+    fn try_get_flashblocks_buildable_args(
+        &mut self,
+        block: &SealedBlock<N::Block>,
+    ) -> Option<BuildArgs<Vec<WithEncoded<Recovered<N::SignedTx>>>>> {
+        let pending = self.fb_state.as_ref()?.get_pending_sequence()?;
+        pending
+            .try_insert_default_payload(block.clone())
+            .inspect_err(|error| {
+                info!(
+                    target: "flashblocks::engine_validator",
+                    %error,
+                    "incoming default payload does not extend current pending sequence",
+                );
+            })
+            .ok()
+    }
+
+    /// Drives the flashblocks sequence validator's warm pipeline to a sequence-end
+    /// commit using the synthesized [`BuildArgs`], then re-checks the executed block
+    /// with the canonical hash.
+    fn engine_execute_sequence(
+        &mut self,
+        args: BuildArgs<Vec<WithEncoded<Recovered<N::SignedTx>>>>,
+        canon_hash: alloy_primitives::B256,
+    ) -> Option<ExecutedBlock<N>> {
+        let fb_validator = self.fb_validator.as_mut()?;
+        let runtime = fb_validator.runtime().handle().clone();
+        if let Err(e) = runtime.block_on(fb_validator.execute_sequence(args)) {
+            info!(
+                target: "flashblocks::engine_validator",
+                %e,
+                "execute_sequence failed on incremental building from engine default payload",
+            );
+            return None;
+        }
+        self.fb_state.as_ref()?.get_executed_block_by_hash(&canon_hash)
     }
 }
 

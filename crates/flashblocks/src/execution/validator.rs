@@ -61,22 +61,29 @@ use reth_tasks::Runtime;
 use reth_trie::{trie_cursor::TrieCursorFactory, updates::TrieUpdates, HashedPostState, StateRoot};
 use reth_trie_parallel::{
     root::{ParallelStateRoot, ParallelStateRootError},
-    state_root_task::StateRootComputeOutcome,
+    state_root_task::{StateRootComputeOutcome, StateRootHandle},
 };
 
 /// Builds [`PendingSequence`]s from the accumulated flashblock transaction sequences.
 /// Commits results directly to [`FlashblockStateCache`] via `handle_pending_sequence()`.
 ///
-/// The execution uses the Reth's [`PayloadProcessor`] for optimal execution and state
-/// root calculation of flashlbocks sequence. All 3 state root computation strategies
-/// are supported (synchronous, parrallel and state root task using sparse trie).
+/// Execution always proceeds incrementally: each flashblock spawns the [`PayloadProcessor`]
+/// with the previous bundle prestate (when present) and executes only the new suffix
+/// transactions, reusing prior receipts and senders. Bundle reverts are flattened to a
+/// single transition for engine-tree compatibility.
 ///
+/// All three state root strategies are supported: `Synchronous`, `Parallel`, and
+/// `StateRootTask`. For `StateRootTask`, the same `StateRootHandle` is threaded across
+/// every flashblock spawn within a sequence so the sparse trie pipeline accumulates
+/// streamed updates incrementally; only the final flashblock installs the
+/// completion-on-drop state hook so the task finalizes exactly once.
+///
+/// State provider sources:
 /// - **Fresh (canonical parent)**: `StateProviderBuilder` with no overlay blocks.
 /// - **Fresh (non-canonical parent)**: `StateProviderBuilder` with overlay blocks from
 ///   the flashblocks confirm/pending cache via `get_overlay_data()`.
-/// - **Incremental (same height)**: Full re-execution via `execute_fresh()`. The warm
-///   execution cache and `PreservedSparseTrie` from the previous sequence build offset
-///   the cost of re-executing prefix transactions.
+/// - **Incremental (same height)**: anchored at the previous flashblock hash so the
+///   pending sequence's executed block sits in the overlay chain.
 #[derive(Debug)]
 pub struct FlashblockSequenceValidator<N: NodePrimitives, EvmConfig, Provider, ChainSpec>
 where
@@ -97,6 +104,8 @@ where
     payload_processor: PayloadProcessor<EvmConfig>,
     /// Task runtime for spawning parallel work.
     runtime: Runtime,
+    /// Optional state root task handle of the current pending sequence
+    state_root_handle: Option<StateRootHandle>,
 }
 
 impl<N, EvmConfig, Provider, ChainSpec>
@@ -133,6 +142,7 @@ where
             tree_config,
             payload_processor,
             runtime,
+            state_root_handle: None,
         }
     }
 
@@ -151,31 +161,33 @@ where
         // Pre-validate incoming flashblocks sequence
         let pending_sequence = self.prevalidate_incoming_sequence(&args)?;
 
+        // Fresh build - drop any state root handle left over from prior validations
+        if pending_sequence.is_none() {
+            self.state_root_handle = None;
+        }
+
+        // Detect a lost incremental sparse-trie pipeline: a pending sequence exists
+        // (so we are mid-sequence) but the previously-preserved state root handle is
+        // gone. This happens after a prior flashblock validation failed and the
+        // validator dropped the handle, which clears the `PayloadProcessor`'s sparse
+        // trie cache. A freshly-spawned SR task would only see the current suffix's
+        // state updates — not the accumulated prefix updates from earlier
+        // flashblocks — so its computed root would be incorrect. Force serial SR.
+        let lost_sr_pipeline = pending_sequence.is_some() && self.state_root_handle.is_none();
+
         // Compute SR only when:
         // 1. `sequence_end` signal is received
         // 2. Final flashblock arrived (last_index == target_index AND target > 0)
-        //
-        // Skip computing SR when:
-        // 1. Intermediate flashblock sequence (last_index < target_index)
-        // 2. Base payload at index 0 with target still unknown (target == 0)
-        //
-        // Skipped flashblocks use `spawn_cache_exclusive()` for execution + prewarming only,
-        // bypassing the sparse trie pipeline, deferred trie tasks, and changeset cache
-        // population. This reduces MDBX read contention with the engine's persistence writes.
         let calculate_state_root = args.sequence_end
             || (args.last_flashblock_index == args.target_index && args.target_index > 0);
-        let strategy = if calculate_state_root {
-            self.plan_state_root_computation()
-        } else {
-            // No SR calculation logic - always use cache-exclusive
-            StateRootStrategy::Synchronous
-        };
+        let strategy = self.plan_state_root_computation();
 
         let parent_hash = args.base.parent_hash;
         let block_transactions: Vec<_> = args.transactions.into_iter().collect();
         let block_transaction_count = block_transactions.len();
 
-        let mut transactions: Vec<_> = if let Some(ref seq) = pending_sequence {
+        // If pending sequence exist, we validate incremental with only the new suffix txs
+        let transactions: Vec<_> = if let Some(ref seq) = pending_sequence {
             block_transactions
                 .iter()
                 .skip(seq.prefix_execution_meta.cached_tx_count)
@@ -188,21 +200,7 @@ where
         // Hash to get state provider builder for overlay data.
         // 1. Fresh builds - get the provider builder from parent hash.
         // 2. Incremental builds - get provider builder from pending sequence hash.
-        let mut hash = pending_sequence.as_ref().map_or(parent_hash, |seq| seq.get_hash());
-
-        // Re-execute the full pending sequence for concurrent state root task. We use:
-        // 1. Parent block's state root to get the trie nodes (PreservedSparseTrie) from
-        //    the previous block's computed state root.
-        // 2. Parent hash to get the state overlay provider builder at start of block.
-        // 3. Full block transactions to execute.
-        // 4. Re-use cache reads in pending sequence for fast re-execution with pre-warm
-        //    state accounts.
-        if calculate_state_root && strategy == StateRootStrategy::StateRootTask {
-            // Re-execute all transactions from parent state for concurrent sparse trie SR.
-            // Parallel and synchronous strategies use incremental suffix execution instead.
-            transactions = block_transactions.clone();
-            hash = parent_hash;
-        }
+        let hash = pending_sequence.as_ref().map_or(parent_hash, |seq| seq.get_hash());
 
         let (provider_builder, header, overlay_data) = self.state_provider_builder(hash)?;
         let mut state_provider = provider_builder.build()?;
@@ -223,21 +221,19 @@ where
             withdrawals: Some(args.withdrawals),
         };
 
-        let overlay_factory = calculate_state_root.then(|| {
-            // Create lazy overlay from ancestors - this doesn't block, allowing execution to start
-            // before the trie data is ready. The overlay will be computed on first access.
-            let (lazy_overlay, anchor_hash) =
-                Self::get_parent_lazy_overlay(overlay_data.as_ref(), hash);
+        // Create lazy overlay from ancestors - this doesn't block, allowing execution to start
+        // before the trie data is ready. The overlay will be computed on first access.
+        let (lazy_overlay, anchor_hash) =
+            Self::get_parent_lazy_overlay(overlay_data.as_ref(), parent_hash);
 
-            // Create overlay factory for payload processor (StateRootTask path needs it for
-            // multiproofs)
-            OverlayStateProviderFactory::new(
-                self.provider.clone(),
-                self.flashblocks_state.get_changeset_cache(),
-            )
-            .with_block_hash(Some(anchor_hash))
-            .with_lazy_overlay(lazy_overlay)
-        });
+        // Create overlay factory for payload processor (StateRootTask path needs it for
+        // multiproofs)
+        let overlay_factory = OverlayStateProviderFactory::new(
+            self.provider.clone(),
+            self.flashblocks_state.get_changeset_cache(),
+        )
+        .with_block_hash(Some(anchor_hash))
+        .with_lazy_overlay(lazy_overlay);
 
         // Spawn the appropriate processor based on strategy.
         let mut handle = self.spawn_payload_processor(
@@ -267,7 +263,7 @@ where
             transactions,
             pending_sequence.as_ref(),
             &mut handle,
-            calculate_state_root && strategy == StateRootStrategy::StateRootTask,
+            calculate_state_root,
         )?;
         debug!(
             target: "flashblocks::validator",
@@ -321,13 +317,21 @@ where
         })?;
 
         let (state_root, trie_output, hashed_state) = if calculate_state_root {
-            let overlay_factory = overlay_factory
-                .as_ref()
-                .expect("overlay factory must exist when calculate_state_root is set");
             let root_time = Instant::now();
             let hashed_state = self.provider.hashed_post_state(&output.state);
             let mut maybe_state_root = None;
             match strategy {
+                StateRootStrategy::StateRootTask if lost_sr_pipeline => {
+                    // Sparse-trie cache was flushed after a prior failed validation in this
+                    // sequence. Fall through to serial SR computation.
+                    warn!(
+                        target: "flashblocks::validator",
+                        execute_height = args.base.block_number,
+                        flashblock_index = args.last_flashblock_index,
+                        target_index = args.target_index,
+                        "Incremental sparse-trie pipeline lost after prior failure; falling back to serial state root",
+                    );
+                }
                 StateRootStrategy::StateRootTask => {
                     debug!(target: "flashblocks::validator", execute_height = args.base.block_number, "Using sparse trie state root algorithm");
 
@@ -420,6 +424,12 @@ where
             (B256::ZERO, Arc::default(), HashedPostState::default())
         };
 
+        // Preserve the running state root pipeline so the next flashblock sequence validation
+        // keeps streaming updates into the same sparse trie.
+        if !calculate_state_root && strategy == StateRootStrategy::StateRootTask {
+            self.state_root_handle = handle.take_state_root_handle();
+        }
+
         // Capture execution metrics before `output` is moved into the deferred trie task.
         let prefix_gas_used = output.result.gas_used;
         let prefix_blob_gas_used = output.result.blob_gas_used;
@@ -442,15 +452,23 @@ where
         )?;
         let block: N::Block = block.into();
         let block = RecoveredBlock::new_unhashed(block, senders);
+        let block_hash = block.hash();
+
+        // Validate with canon hash if sequence is built with full payload that contains SR
+        if let Some(expected) = args.canon_hash
+            && expected != block_hash
+        {
+            return Err(eyre::eyre!(
+                "canonical hash mismatch on sequence-end validation: expected={expected}, computed={block_hash}"
+            ));
+        }
 
         let executed_block = if calculate_state_root {
             // Create the overlay provider NOW, while we're on the engine loop thread and trie changeset
             // eviction cannot race with us. If we deferred this to the background task, persistence
             // could advance and evict changeset cache entries between factory creation and the task
             // actually running, causing expensive DB fallback computations when building the overlay.
-            let changeset_provider = overlay_factory
-                .expect("overlay factory must exist when calculate_state_root is set")
-                .database_provider_ro()?;
+            let changeset_provider = overlay_factory.database_provider_ro()?;
             self.spawn_deferred_trie_task(
                 block,
                 output,
@@ -627,7 +645,7 @@ where
         transactions: Vec<WithEncoded<Recovered<N::SignedTx>>>,
         pending_sequence: Option<&PendingSequence<N>>,
         handle: &mut PayloadHandle<T, Err, N::Receipt>,
-        state_root_task: bool,
+        calculate_state_root: bool,
     ) -> eyre::Result<(
         BlockExecutionOutput<N::Receipt>,
         Vec<Address>,
@@ -647,7 +665,7 @@ where
             .unwrap_or_default();
         let cached_db = read_cache.as_db_mut(StateProviderDatabase::new(state_provider));
         let mut state_builder = State::builder().with_database(cached_db).with_bundle_update();
-        if !state_root_task && let Some(seq) = pending_sequence {
+        if let Some(seq) = pending_sequence {
             state_builder = state_builder
                 .with_bundle_prestate(seq.pending.executed_block.execution_output.state.clone());
         }
@@ -664,8 +682,7 @@ where
 
         // Spawn background task to compute receipt root and logs bloom incrementally.
         // Unbounded channel is used since tx count bounds capacity anyway (max ~30k txs per block).
-        let prefix_receipt_count =
-            pending_sequence.filter(|_| !state_root_task).map_or(0, |s| s.pending.receipts.len());
+        let prefix_receipt_count = pending_sequence.map_or(0, |s| s.pending.receipts.len());
 
         let receipts_len = prefix_receipt_count + transactions.len();
         let (receipt_tx, receipt_rx) = crossbeam_channel::unbounded();
@@ -676,14 +693,19 @@ where
             .spawn_blocking_named("receipt-root", move || task_handle.run(receipts_len));
 
         let transaction_count = transactions.len();
-        let mut executor = executor.with_state_hook(
+        let state_hook = if calculate_state_root {
+            // Sequence end: drop signals completion to the state root task
+            handle.state_hook().map(|hook| Box::new(hook) as Box<dyn alloy_evm::block::OnStateHook>)
+        } else {
+            // Not sequence end: stream updates without signaling completion on drop
             handle
-                .state_hook()
-                .map(|hook| Box::new(hook) as Box<dyn alloy_evm::block::OnStateHook>),
-        );
+                .state_hook_persistent()
+                .map(|hook| Box::new(hook) as Box<dyn alloy_evm::block::OnStateHook>)
+        };
+        let mut executor = executor.with_state_hook(state_hook);
 
         // Apply pre-execution changes for fresh builds
-        if state_root_task || pending_sequence.is_none() {
+        if pending_sequence.is_none() {
             executor.apply_pre_execution_changes()?;
         }
 
@@ -696,14 +718,13 @@ where
             handle,
             &receipt_tx,
             execute_height,
-            state_root_task,
         )?;
         drop(receipt_tx);
 
         // Finish execution and replace with the generated suffix receipts
         let (_evm, mut result) = executor.finish().map(|(evm, result)| (evm.into_db(), result))?;
         result.receipts = suffix_receipts;
-        if !state_root_task && let Some(seq) = pending_sequence {
+        if let Some(seq) = pending_sequence {
             result = Self::merge_suffix_results(
                 &seq.prefix_execution_meta,
                 (*seq.pending.receipts).clone(),
@@ -711,7 +732,7 @@ where
             );
         }
         // Reconstruct full senders list
-        let senders = if !state_root_task && let Some(seq) = pending_sequence {
+        let senders = if let Some(seq) = pending_sequence {
             let mut all_senders = seq.pending.executed_block.recovered_block.senders().to_vec();
             all_senders.extend(suffix_senders);
             all_senders
@@ -733,7 +754,7 @@ where
         // transitions into one:
         // - Keep the earliest (parent-state) account info revert per address
         // - Merge storage reverts across transitions (earliest per slot via or_insert)
-        if !state_root_task && pending_sequence.is_some() && bundle.reverts.len() > 1 {
+        if pending_sequence.is_some() && bundle.reverts.len() > 1 {
             let mut reverts_map = HashMap::<Address, AccountRevert>::new();
             for reverts in bundle.reverts.iter() {
                 for (addr, new_revert) in reverts {
@@ -758,7 +779,7 @@ where
         Ok((output, senders, result_rx, read_cache))
     }
 
-    #[expect(clippy::type_complexity, clippy::too_many_arguments)]
+    #[expect(clippy::type_complexity)]
     fn execute_transactions<Executor, Err, T>(
         &self,
         mut executor: Executor,
@@ -767,7 +788,6 @@ where
         handle: &mut PayloadHandle<T, Err, N::Receipt>,
         receipt_tx: &crossbeam_channel::Sender<IndexedReceipt<N::Receipt>>,
         execute_height: u64,
-        state_root_task: bool,
     ) -> eyre::Result<(Executor, Vec<Address>, Vec<N::Receipt>), BlockExecutionError>
     where
         T: ExecutableTxFor<EvmConfig>
@@ -782,7 +802,7 @@ where
             + 'static,
     {
         // Send all previously executed receipts to the receipt root task for incremental builds.
-        let receipt_index_offset = if !state_root_task && let Some(seq) = pending_sequence {
+        let receipt_index_offset = if let Some(seq) = pending_sequence {
             let prefix_count = seq.pending.receipts.len();
             for (index, receipt) in seq.pending.receipts.iter().enumerate() {
                 let _ = receipt_tx.send(IndexedReceipt::new(index, receipt.clone()));
@@ -801,9 +821,7 @@ where
         // In that case, invoking the callback on every transaction would resend the previous
         // receipt with the same index and can panic the ordered root builder.
         let mut last_sent_len = 0usize;
-        let prefix_gas_used = pending_sequence
-            .filter(|_| !state_root_task)
-            .map_or(0, |seq| seq.prefix_execution_meta.gas_used);
+        let prefix_gas_used = pending_sequence.map_or(0, |seq| seq.prefix_execution_meta.gas_used);
         loop {
             let Some(tx_result) = transactions.next() else { break };
 
@@ -848,7 +866,7 @@ where
         env: ExecutionEnv<EvmConfig>,
         txs: Vec<WithEncoded<Recovered<N::SignedTx>>>,
         provider_builder: StateProviderBuilder<N, Provider>,
-        overlay_factory: Option<OverlayStateProviderFactory<Provider>>,
+        overlay_factory: OverlayStateProviderFactory<Provider>,
         strategy: StateRootStrategy,
         bal: Option<Arc<BlockAccessList>>,
     ) -> eyre::Result<
@@ -860,38 +878,19 @@ where
     > {
         let tx_iter = Self::flashblock_tx_iterator(txs);
         match strategy {
-            StateRootStrategy::StateRootTask => {
-                // Use the pre-computed overlay factory for multiproofs
-                Ok(self.payload_processor.spawn(
-                    env,
-                    tx_iter,
-                    provider_builder,
-                    overlay_factory.expect("overlay factory must exist for StateRootTask strategy"),
-                    &self.tree_config,
-                    // TODO: BAL is intentionally NOT fed into the StateRootTask pipeline — pass `None`
-                    // until upstream BAL+sparse-trie integration stabilizes.
-                    //
-                    // Why: combining BAL with the sparse-trie task is still WIP upstream and the
-                    // currently-released path (reth v2.1.0 / PRs #23393 + #23423) regresses on small
-                    // and large blocks:
-                    // - Empty/small blocks below `SMALL_BLOCK_TX_THRESHOLD`: PR #23393 disables the
-                    //   per-tx state hook whenever BAL is present, but the prewarm task only emits
-                    //   `FinishedStateUpdates` on the BAL-prewarm branch. Small blocks take the
-                    //   skip-prewarm fallback → no terminator is sent → sparse trie hits the 1s
-                    //   timeout. Fixed upstream by PR #23833 (gates state-hook removal on whether
-                    //   BAL prewarm actually runs).
-                    // - Heavy blocks: PR #23423's `par_iter().for_each_init(...)` streaming sends
-                    //   one `HashedStateUpdate` per `AccountChanges`, fragmenting the channel and
-                    //   under-utilizing proof workers via the chunk-size=5 dispatch path.
-                    //
-                    // The tx-based prewarm path (BAL=None) is the well-tested upstream flow and is
-                    // what we run in production today. Re-enable BAL here once the upstream WIP
-                    // lands and we verify both modes on devnet stress runs.
-                    //
-                    // Upstream WIP branch: https://github.com/paradigmxyz/reth/tree/bal-devnet-3
-                    None,
-                ))
-            }
+            StateRootStrategy::StateRootTask => Ok(self.payload_processor.spawn(
+                env,
+                tx_iter,
+                provider_builder,
+                overlay_factory,
+                &self.tree_config,
+                // TODO: BAL is intentionally NOT fed into the StateRootTask pipeline — pass `None`
+                // until upstream BAL+sparse-trie integration stabilizes.
+                //
+                // Upstream WIP branch: https://github.com/paradigmxyz/reth/tree/bal-devnet-3
+                None,
+                self.state_root_handle.take(),
+            )),
             StateRootStrategy::Parallel | StateRootStrategy::Synchronous => Ok(self
                 .payload_processor
                 .spawn_cache_exclusive(env, tx_iter, provider_builder, bal)),
@@ -1232,5 +1231,24 @@ where
         fn(WithEncoded<Recovered<T>>) -> Result<WithEncoded<Recovered<T>>, Infallible>,
     ) {
         (transactions, |tx| Ok(tx))
+    }
+}
+
+impl<N, EvmConfig, Provider, ChainSpec>
+    FlashblockSequenceValidator<N, EvmConfig, Provider, ChainSpec>
+where
+    N: NodePrimitives,
+    EvmConfig: ConfigureEvm,
+    ChainSpec: OpHardforks,
+{
+    /// Drops the in-flight state root task handle, releasing the [`PayloadProcessor`]'s
+    /// preserved sparse trie back to its slot.
+    pub fn drop_state_root_handle(&mut self) {
+        self.state_root_handle = None;
+    }
+
+    /// Returns the [`Runtime`] held by the validator.
+    pub const fn runtime(&self) -> &Runtime {
+        &self.runtime
     }
 }
