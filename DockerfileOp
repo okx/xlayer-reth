@@ -5,6 +5,12 @@ LABEL org.opencontainers.image.source=https://github.com/xlayer/xlayer-reth
 LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
 
 RUN apt-get update && apt-get -y upgrade && apt-get install -y libclang-dev pkg-config
+RUN --mount=type=secret,id=copilot,target=/tmp/copilot.pem,required=false \
+    if [ -f /tmp/copilot.pem ]; then \
+        cp /tmp/copilot.pem /etc/ssl/copilot.pem && \
+        git config --global http.sslCAInfo /etc/ssl/copilot.pem; \
+    fi
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 
 # Builds a cargo-chef plan
 FROM chef AS planner
