@@ -24,6 +24,7 @@ use op_alloy_rpc_types::OpTransactionRequest;
 use reth_chain_state::CanonStateSubscriptions;
 use reth_optimism_primitives::OpPrimitives;
 use reth_optimism_rpc::{OpEthApi, OpEthApiError};
+use reth_optimism_txpool::Eip8130PoolView;
 use reth_primitives_traits::SealedHeaderFor;
 use reth_revm::{database::StateProviderDatabase, db::State};
 use reth_rpc_convert::{RpcConvert, RpcTransaction};
@@ -35,10 +36,12 @@ use reth_rpc_eth_types::{
     block::convert_transaction_receipt, EthApiError, RpcInvalidTransactionError,
 };
 use reth_rpc_server_types::result::ToRpcResult;
-use reth_storage_api::{StateProvider, StateProviderBox, StateProviderFactory};
+use reth_storage_api::{StateProviderBox, StateProviderFactory};
 use reth_transaction_pool::TransactionPool;
 
 use xlayer_flashblocks::FlashblockStateCache;
+
+use crate::aa::pool::{layer_aa_pool_head, read_aa_slot};
 
 /// Eth API override for flashblocks RPC integration.
 #[cfg_attr(not(test), rpc(server, namespace = "eth"))]
@@ -190,11 +193,17 @@ pub trait FlashblocksEthApiOverride {
 
     /// Returns the number of transactions sent from an address at given block number, with the
     /// flashblock state cache overlay support for pending and confirmed block states.
+    ///
+    /// When `nonce_key` is provided, returns the EIP-8130 2D-nonce for that lane
+    /// (`(address, nonce_key)`) by reading `aa_nonce_slot` on `NONCE_MANAGER_ADDRESS`
+    /// against the same flashblock overlay used for the 1D path, so post-flashblock
+    /// AA-tx slot bumps are reflected before the block is canonicalized.
     #[method(name = "getTransactionCount")]
     async fn transaction_count(
         &self,
         address: Address,
         block_number: Option<BlockId>,
+        nonce_key: Option<U256>,
     ) -> RpcResult<U256>;
 
     /// Returns code at a given address at given block number, with the flashblock state cache
@@ -250,6 +259,7 @@ where
         + Send
         + Sync
         + 'static,
+    <OpEthApi<N, Rpc> as RpcNodeCore>::Pool: Eip8130PoolView,
 {
     // ----------------- Block apis -----------------
     /// Handler for: `eth_blockNumber`
@@ -580,8 +590,47 @@ where
         &self,
         address: Address,
         block_number: Option<BlockId>,
+        nonce_key: Option<U256>,
     ) -> RpcResult<U256> {
-        trace!(target: "rpc::eth", ?address, ?block_number, "Serving eth_getTransactionCount");
+        trace!(target: "rpc::eth", ?address, ?block_number, ?nonce_key, "Serving eth_getTransactionCount");
+
+        // EIP-8130 2D-nonce path. Reads `aa_nonce_slot(address, key)` on the
+        // NonceManager predeploy. The flashblock overlay layers in-memory
+        // bundle-state storage writes on top of canonical state.
+        //
+        // For the `pending` tag we additionally layer the AA pool's per-lane
+        // consecutive head, analogous to how the 1D path layers
+        // `get_highest_consecutive_transaction_by_sender`. This closes the
+        // window where an AA tx has been admitted to the pool but not yet
+        // included in any subblock — without it, a wallet polling for its
+        // next sequence inside that ~200ms window would get a stale answer.
+        if let Some(key) = nonce_key {
+            if let Some((state, _)) = self.get_flashblock_state_provider_by_id(block_number)? {
+                return self
+                    .eth_api
+                    .spawn_blocking_io_fut(move |this| async move {
+                        let slot_value = read_aa_slot(state.as_ref(), address, key)?;
+                        Ok(layer_aa_pool_head(this.pool(), address, key, slot_value, block_number))
+                    })
+                    .await
+                    .map_err(|e| -> jsonrpsee_types::error::ErrorObject<'static> { e.into() });
+            }
+            // No overlay for this block id → read against canonical state.
+            // Mirrors `TransactionCountOverrideImpl` so behavior is identical
+            // when the flashblocks cache is empty / disabled at this height.
+            let block_id = block_number.unwrap_or_default();
+            return self
+                .eth_api
+                .spawn_blocking_io_fut(move |this| async move {
+                    let state =
+                        this.provider().state_by_block_id(block_id).map_err(EthApiError::from)?;
+                    let slot_value = read_aa_slot(state.as_ref(), address, key)?;
+                    Ok(layer_aa_pool_head(this.pool(), address, key, slot_value, block_number))
+                })
+                .await
+                .map_err(|e| -> jsonrpsee_types::error::ErrorObject<'static> { e.into() });
+        }
+
         if let Some((state, _)) = self.get_flashblock_state_provider_by_id(block_number)? {
             return self
                 .eth_api

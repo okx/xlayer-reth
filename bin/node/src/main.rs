@@ -33,8 +33,9 @@ use xlayer_flashblocks::{
 use xlayer_legacy_rpc::{layer::LegacyRpcRouterLayer, LegacyRpcRouterConfig};
 use xlayer_monitor::{start_monitor_handle, RpcMonitorLayer, XLayerMonitor};
 use xlayer_rpc::{
-    DefaultRpcExt, DefaultRpcExtApiServer, FlashblocksEthApiExt, FlashblocksEthApiOverrideServer,
-    FlashblocksEthFilterExt, FlashblocksFilterOverrideServer,
+    AcceptedVerifiersImpl, AcceptedVerifiersServer, DefaultRpcExt, DefaultRpcExtApiServer,
+    FlashblocksEthApiExt, FlashblocksEthApiOverrideServer, FlashblocksEthFilterExt,
+    FlashblocksFilterOverrideServer, TransactionCountOverrideImpl, TransactionCountOverrideServer,
 };
 
 #[global_allocator]
@@ -268,6 +269,26 @@ fn main() {
                     } else {
                         None
                     };
+
+                    // Register XLayer AA verifier policy RPC (eth_getAcceptedVerifiers).
+                    ctx.modules.merge_if_module_configured(
+                        RethRpcModule::Eth,
+                        AcceptedVerifiersServer::into_rpc(AcceptedVerifiersImpl::new(
+                            ctx.provider().clone(),
+                        )),
+                    )?;
+                    info!(target: "reth::cli", "xlayer AA accepted-verifiers RPC initialized");
+
+                    // Register XLayerAA 2D-nonce override (eth_getTransactionCount).
+                    if flashblocks_state.is_none() {
+                        let tx_count_override =
+                            TransactionCountOverrideImpl::new(ctx.registry.eth_api().clone());
+                        ctx.modules.add_or_replace_if_module_configured(
+                            RethRpcModule::Eth,
+                            TransactionCountOverrideServer::into_rpc(tx_count_override),
+                        )?;
+                        info!(target: "reth::cli", "xlayer AA 2D-nonce override (eth_getTransactionCount) initialized");
+                    }
 
                     // Register X Layer RPC
                     let peer_status = fb_p2p_status.get().cloned();

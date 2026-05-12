@@ -471,6 +471,7 @@ impl FlashblocksBuilderTx {
             base,
             enveloped_tx: Some(Bytes::new()),
             deposit: Default::default(),
+            eip8130: Default::default(),
         });
         let to = tx_env.0.base.kind.into_to().unwrap_or_default();
 

@@ -49,8 +49,12 @@ impl Signer {
             OpTypedTransaction::Eip2930(tx) => tx.signature_hash(),
             OpTypedTransaction::Eip1559(tx) => tx.signature_hash(),
             OpTypedTransaction::Eip7702(tx) => tx.signature_hash(),
-            // System transactions (Deposit, PostExec) are not user-signed.
-            OpTypedTransaction::Deposit(_) | OpTypedTransaction::PostExec(_) => B256::ZERO,
+            // System transactions (Deposit, PostExec) are not user-signed. EIP-8130 (AA) txs
+            // are user-authenticated via sender_auth/payer_auth blobs, not the envelope sig;
+            // the builder never constructs AA txs, so this arm is unreachable in practice.
+            OpTypedTransaction::Deposit(_)
+            | OpTypedTransaction::PostExec(_)
+            | OpTypedTransaction::Eip8130(_) => B256::ZERO,
         };
         let signature = self.sign_message(signature_hash)?;
         let signed = OpTransactionSigned::new_unhashed(tx, signature);
