@@ -18,6 +18,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use alloy_primitives::{hex, Address, U256};
 use alloy_sol_types::{sol, SolCall};
 
+use op_revm::precompiles_xlayer::{aa_nonce_slot, NONCE_MANAGER_ADDRESS};
 use xlayer_e2e_test::operations;
 
 const ITERATIONS: usize = 11;
@@ -2881,4 +2882,141 @@ async fn fb_benchmark_new_transactions_subscription_test() -> Result<()> {
     println!("Avg Flashblocks newTx sub duration: {avg_duration:?}");
 
     Ok(())
+}
+
+// ========================================================================
+// XLayerAA (EIP-8130) tests
+// ========================================================================
+
+/// Submits a minimal K1-EOA EIP-8130 (XLayerAA) transaction with `nonce_key = 0`
+/// through the flashblocks node and verifies — via the flashblocks **pending**
+/// state — that the `NonceManager` storage slot for `(sender, nonce_key=0)` is
+/// bumped by exactly one. Mirrors the wire layout used by
+/// `deps/optimism/scripts_aa/send_k1_eoa_tx.ts`.
+///
+/// Storage reads use `BlockId::Pending` so they hit the `FlashblocksEthApiExt`
+/// override path (`crates/rpc/src/eth.rs::storage_at` → pending flashblock
+/// state overlay), which is what makes this an FB-specific test rather than a
+/// general EL+CL integration test. Mirrors the `fb_pending_*` naming and tag
+/// convention.
+#[tokio::test]
+async fn fb_pending_aa_eip8130_nonce_bump_test() {
+    use alloy_eips::eip2718::Encodable2718;
+    use alloy_primitives::Bytes;
+    use alloy_signer::SignerSync;
+    use alloy_signer_local::PrivateKeySigner;
+    use op_alloy_consensus::{sender_signature_hash, Eip8130CallEntry, TxEip8130};
+
+    sleep_one_blocktime().await;
+    operations::settle_pending_transactions(operations::DEFAULT_L2_NETWORK_URL_FB)
+        .await
+        .expect("Failed to settle pending transactions");
+
+    let fb_client = operations::create_test_client(operations::DEFAULT_L2_NETWORK_URL_FB);
+
+    // Sender = pre-funded rich key. Same key used by other native-tx tests.
+    let signer =
+        PrivateKeySigner::from_str(operations::DEFAULT_RICH_PRIVATE_KEY.trim_start_matches("0x"))
+            .expect("invalid rich private key");
+    let sender = signer.address();
+    let to = Address::from_str(operations::DEFAULT_L2_NEW_ACC1_ADDRESS).expect("Invalid address");
+    let nonce_key = U256::ZERO;
+
+    let chain_id = operations::eth_chain_id(&fb_client).await.expect("eth_chainId failed");
+
+    // Read pre-tx NonceManager seq for (sender, nonce_key=0) from the
+    // flashblocks pending state. Source-of-truth for `nonce_sequence` — the
+    // legacy EOA account nonce does not move under AA execution, so
+    // `eth_getTransactionCount` is the wrong place to read.
+    let slot = aa_nonce_slot(sender, nonce_key);
+    let slot_hex = format!("0x{slot:x}");
+    let nonce_mgr_hex = format!("{NONCE_MANAGER_ADDRESS:#x}");
+
+    let pre_storage = operations::eth_get_storage_at(
+        &fb_client,
+        &nonce_mgr_hex,
+        &slot_hex,
+        Some(operations::BlockId::Pending),
+    )
+    .await
+    .expect("Pre-tx eth_getStorageAt(NonceManager, Pending) failed");
+    let pre_seq =
+        U256::from_str_radix(pre_storage.trim_start_matches("0x"), 16).unwrap_or(U256::ZERO);
+    let nonce_sequence: u64 =
+        pre_seq.try_into().expect("nonce_sequence overflowed u64 — devnet state corrupted?");
+
+    // Build the EIP-8130 envelope (K1 EOA mode: `from = None`, sender is
+    // recovered from `sender_auth`). Wire layout matches
+    // `TxEip8130::encode_for_sender_signing`.
+    let mut tx = TxEip8130 {
+        chain_id,
+        from: None,
+        nonce_key,
+        nonce_sequence,
+        expiry: 0,
+        max_priority_fee_per_gas: 0,
+        max_fee_per_gas: 1_000_000_000,
+        gas_limit: 200_000,
+        account_changes: Vec::new(),
+        calls: vec![vec![Eip8130CallEntry { to, data: Bytes::new() }]],
+        payer: None,
+        sender_auth: Bytes::new(),
+        payer_auth: Bytes::new(),
+    };
+
+    let prehash = sender_signature_hash(&tx);
+    let signature = signer.sign_hash_sync(&prehash).expect("Sign EIP-8130 preimage failed");
+    // `as_bytes()` lays out `r || s || (27 + y_parity)`, matching EIP-8130's
+    // ecrecover-style `sender_auth` convention.
+    tx.sender_auth = Bytes::copy_from_slice(&signature.as_bytes());
+
+    let mut raw = Vec::with_capacity(tx.encode_2718_len());
+    tx.encode_2718(&mut raw);
+    let raw_hex = format!("0x{}", hex::encode(&raw));
+
+    // Submit via the XLayer sync RPC: it returns `{transactionHash, blockNumber, ...}`
+    // only after the tx is included in a flashblock.
+    let response = operations::eth_send_raw_transaction_sync(&fb_client, &raw_hex)
+        .await
+        .expect("eth_sendRawTransactionSync(EIP-8130) failed");
+    let tx_hash = response["transactionHash"]
+        .as_str()
+        .expect("sync response must contain transactionHash")
+        .to_string();
+    println!("Sent EIP-8130 tx: {tx_hash}");
+
+    // Belt-and-suspenders: confirm a successful receipt and the AA tx type byte.
+    let receipt = operations::wait_for_tx_mined(operations::DEFAULT_L2_NETWORK_URL_FB, &tx_hash)
+        .await
+        .expect("EIP-8130 tx not mined on flashblocks node");
+    assert_eq!(
+        receipt["status"].as_str(),
+        Some("0x1"),
+        "EIP-8130 tx receipt status must be success, got: {receipt}"
+    );
+    assert_eq!(
+        receipt["type"].as_str(),
+        Some("0x7b"),
+        "Receipt tx type must be 0x7b (EIP-8130), got: {receipt}"
+    );
+
+    // Post-tx storage read on the flashblocks pending state — slot must bump
+    // by exactly 1 in the pending flashblock overlay served by the FB cache.
+    let post_storage = operations::eth_get_storage_at(
+        &fb_client,
+        &nonce_mgr_hex,
+        &slot_hex,
+        Some(operations::BlockId::Pending),
+    )
+    .await
+    .expect("Post-tx eth_getStorageAt(NonceManager, Pending) failed");
+    let post_seq =
+        U256::from_str_radix(post_storage.trim_start_matches("0x"), 16).unwrap_or(U256::ZERO);
+
+    assert_eq!(
+        post_seq,
+        pre_seq + U256::from(1u64),
+        "NonceManager seq for (sender={sender:#x}, nonce_key=0) must bump by exactly 1 \
+         in pending flashblock state: pre={pre_seq}, post={post_seq}"
+    );
 }

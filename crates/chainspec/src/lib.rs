@@ -153,5 +153,6 @@ pub static XLAYER_DEVNET_HARDFORKS: Lazy<ChainHardforks> = Lazy::new(|| {
         (EthereumHardfork::Prague.boxed(), ForkCondition::Timestamp(0)),
         (OpHardfork::Isthmus.boxed(), ForkCondition::Timestamp(0)),
         (OpHardfork::Jovian.boxed(), ForkCondition::Timestamp(XLAYER_DEVNET_JOVIAN_TIMESTAMP)),
+        (OpHardfork::XLayerV1.boxed(), ForkCondition::Timestamp(0)),
     ])
 });

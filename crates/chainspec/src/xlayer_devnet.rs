@@ -219,6 +219,7 @@ mod tests {
         assert!(spec.fork(OpHardfork::Holocene).active_at_timestamp(ts));
         assert!(spec.fork(OpHardfork::Isthmus).active_at_timestamp(ts));
         assert!(spec.fork(OpHardfork::Jovian).active_at_timestamp(ts));
+        assert!(spec.fork(OpHardfork::XLayerV1).active_at_timestamp(ts));
     }
 
     #[test]
