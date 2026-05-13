@@ -2950,7 +2950,7 @@ async fn fb_pending_aa_eip8130_nonce_bump_test() {
     // `TxEip8130::encode_for_sender_signing`.
     let mut tx = TxEip8130 {
         chain_id,
-        from: None,
+        sender: None,
         nonce_key,
         nonce_sequence,
         expiry: 0,
