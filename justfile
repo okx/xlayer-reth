@@ -35,6 +35,11 @@ init-git:
 ensure-submodules:
     @git submodule status | grep -q '^-' && git submodule update --init --recursive || true
 
+# Ensure tempdir exists for shebang recipes
+[private]
+ensure-tempdir:
+    @mkdir -p target/tmp
+
 # Runs target checks on all crates, except [crate1], [crate2], ...
 sweep-check *crates="":
     #!/usr/bin/env bash
@@ -140,7 +145,7 @@ install-tools-maxperf:
 clean:
     cargo clean
 
-build-docker suffix="" git_sha="" git_timestamp="":
+build-docker suffix="" git_sha="" git_timestamp="": ensure-tempdir
     #!/usr/bin/env bash
     set -e
     # Only clean .cargo in production mode, preserve it for dev builds
