@@ -1,3 +1,5 @@
+set tempdir := "target/tmp"
+
 alias c := check
 alias f := fix
 alias t := test
@@ -19,9 +21,24 @@ alias wt := watch-test
 alias wc := watch-check
 alias xl := xlayer
 alias sc := sweep-check
+alias ig := init-git
 
 default:
     @just --list
+
+# Initialize git submodules
+init-git:
+    git submodule update --init --recursive
+
+# Ensure submodules are initialized (used as dependency)
+[private]
+ensure-submodules:
+    @git submodule status | grep -q '^-' && git submodule update --init --recursive || true
+
+# Ensure tempdir exists for shebang recipes
+[private]
+ensure-tempdir:
+    @mkdir -p target/tmp
 
 # Runs target checks on all crates, except [crate1], [crate2], ...
 sweep-check *crates="":
@@ -100,17 +117,17 @@ check-clippy:
 fix-clippy:
     cargo clippy --all-targets --workspace --fix --allow-dirty --allow-staged
 
-build:
+build: ensure-submodules
     @rm -rf .cargo  # Clean dev mode files
     cargo build --release
 
-build-maxperf:
+build-maxperf: ensure-submodules
     RUSTFLAGS="-C target-cpu=native" cargo build --profile maxperf --features jemalloc,asm-keccak
 
-build-tools:
+build-tools: ensure-submodules
     cargo build --release --package xlayer-reth-tools
 
-build-tools-maxperf:
+build-tools-maxperf: ensure-submodules
     RUSTFLAGS="-C target-cpu=native" cargo build --package xlayer-reth-tools --profile maxperf --features jemalloc,asm-keccak
 
 install:
@@ -128,7 +145,7 @@ install-tools-maxperf:
 clean:
     cargo clean
 
-build-docker suffix="" git_sha="" git_timestamp="":
+build-docker suffix="" git_sha="" git_timestamp="": ensure-tempdir
     #!/usr/bin/env bash
     set -e
     # Only clean .cargo in production mode, preserve it for dev builds
@@ -153,7 +170,12 @@ build-docker suffix="" git_sha="" git_timestamp="":
         BUILD_ARGS="$BUILD_ARGS --build-arg VERGEN_GIT_COMMIT_TIMESTAMP={{git_timestamp}}"
     fi
 
-    docker build $BUILD_ARGS -t $TAG -f DockerfileOp .
+    SECRET_ARG=""
+    if [ -f /etc/ssl/copilot.pem ]; then
+        SECRET_ARG="--secret id=copilot,src=/etc/ssl/copilot.pem"
+    fi
+
+    docker build $BUILD_ARGS $SECRET_ARG -t $TAG -f DockerfileOp .
     docker tag $TAG op-reth:latest
     echo "🔖 Tagged $TAG as op-reth:latest"
 
@@ -182,7 +204,12 @@ build-docker-tools suffix="" git_sha="" git_timestamp="":
         BUILD_ARGS="$BUILD_ARGS --build-arg VERGEN_GIT_COMMIT_TIMESTAMP={{git_timestamp}}"
     fi
 
-    docker build $BUILD_ARGS -t $TAG -f DockerfileTools .
+    SECRET_ARG=""
+    if [ -f /etc/ssl/copilot.pem ]; then
+        SECRET_ARG="--secret id=copilot,src=/etc/ssl/copilot.pem"
+    fi
+
+    docker build $BUILD_ARGS $SECRET_ARG -t $TAG -f DockerfileTools .
     docker tag $TAG xlayer-reth-tools:latest
     echo "🔖 Tagged $TAG as xlayer-reth-tools:latest"
 
