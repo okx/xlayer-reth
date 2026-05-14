@@ -123,6 +123,7 @@ xlayer-reth-node init --chain /path/to/genesis.json --datadir /data/xlayer
 For local development and testing, you can run a dev node without requiring an external sequencer or L1 connection. The dev mode automatically mines blocks at a configurable interval.
 
 ```bash
+mkdir -p $DACS/.tmp 
 OTEL_EXPORTER_OTLP_PROTOCOL=http cargo r -p xlayer-reth-node node \
   --datadir .op-reth-ttt \
   --engine.legacy-state-root \
@@ -140,7 +141,8 @@ OTEL_EXPORTER_OTLP_PROTOCOL=http cargo r -p xlayer-reth-node node \
   --txpool.max-account-slots 10000000 \
   --http \
   --http.api eth,debug,net,web3,txpool \
-  --log.stdout.filter "info,engine::tree::payload_validator=debug"
+  --log.stdout.filter "info,engine::tree::payload_validator=debug" \
+  --ipcpath $DACS/.tmp/reth.ipc
 ```
 
 Key flags:
