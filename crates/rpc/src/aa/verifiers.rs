@@ -11,17 +11,19 @@
 //!
 //! ## What we report today
 //!
-//! The four native verifiers wired into the handler at
-//! [`alloy_op_evm::eip8130::native_verifier::NativeVerifier`] —
-//! K1 / P256 raw / P256 WebAuthn / Delegate — each with `native: true`
+//! Pre-XLAYER_V1 forks: an empty response with
+//! `acceptsUnknownVerifiers: false` — AA is not active yet, and clients
+//! must not interpret the answer as "AA accepted today."
+//!
+//! From XLAYER_V1 onward: the four native verifiers wired into the
+//! handler at [`alloy_op_evm::eip8130::native_verifier::NativeVerifier`]
+//! — K1 / P256 raw / P256 WebAuthn / Delegate — each with `native: true`
 //! and `maxAuthCost` pulled from the active fork's
 //! [`xlayer_gas_params`].
 //!
-//! `acceptsUnknownVerifiers` is hardcoded to `true` because the
-//! handler runs `STATICCALL` against any non-native verifier address
-//! within [`op_revm::constants::XLAYER_AA_CUSTOM_VERIFIER_GAS_CAP`].
-//! When a declarative acceptance-policy registry lands (per-node CLI /
-//! chainspec config), this flag becomes a real toggle.
+//! `acceptsUnknownVerifiers` is hardcoded to `false` for now: custom
+//! verifiers are not yet supported. TODO: flip once the node accepts
+//! and admits transactions naming non-native verifier addresses.
 
 use alloy_consensus::BlockHeader;
 use alloy_primitives::{Address, U256};
@@ -48,10 +50,9 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct AcceptedVerifiersResponse {
     /// Whether the node admits transactions naming verifiers that are
-    /// not in the [`Self::verifiers`] allowlist. The handler currently
-    /// runs custom verifiers via `STATICCALL` within a global gas cap,
-    /// so this is `true`; flipping to a strict allowlist would require
-    /// a node-side enforcement step that does not yet exist.
+    /// not in the [`Self::verifiers`] allowlist. Currently hardcoded to
+    /// `false`: the node does not yet support custom verifiers. TODO:
+    /// flip once node-level acceptance is wired up.
     pub accepts_unknown_verifiers: bool,
     /// Verifiers the node explicitly knows about. Each entry tags
     /// whether the node has a native fast-path implementation and the
@@ -95,9 +96,9 @@ pub trait AcceptedVerifiers {
 /// Server implementation: derives the active fork on each RPC call from
 /// the latest block's timestamp + chainspec, so the response tracks fork
 /// activation rather than baking in a single [`OpSpecId`]. Pre-XLAYER_V1
-/// forks return zero `maxAuthCost` values for the four AA verifier slots
-/// (gas slots aren't populated yet) but still advertise the addresses so
-/// wallets can pre-build for the upcoming fork.
+/// forks return an empty response (no verifiers, acceptance disabled)
+/// so wallets don't misread the answer as "AA is live today" before the
+/// fork has actually activated.
 #[derive(Debug, Clone)]
 pub struct AcceptedVerifiersImpl<Provider> {
     provider: Provider,
@@ -112,6 +113,13 @@ impl<Provider> AcceptedVerifiersImpl<Provider> {
 
 /// Builds the verifier-policy response for a given fork.
 pub fn build_response_for_spec(spec: OpSpecId) -> AcceptedVerifiersResponse {
+    if spec < OpSpecId::XLAYER_V1 {
+        return AcceptedVerifiersResponse {
+            accepts_unknown_verifiers: false,
+            verifiers: Vec::new(),
+        };
+    }
+
     let params = xlayer_gas_params(spec);
 
     // Worst-case Delegate budget = outer + most expensive native inner.
@@ -124,11 +132,11 @@ pub fn build_response_for_spec(spec: OpSpecId) -> AcceptedVerifiersResponse {
         .saturating_add(params.p256_webauthn_verification_gas());
 
     AcceptedVerifiersResponse {
-        // Custom verifiers run via STATICCALL with the
-        // XLAYER_AA_CUSTOM_VERIFIER_GAS_CAP budget today, so they're
-        // effectively accepted. A strict-allowlist policy would flip this
-        // to `false` once node-level enforcement lands.
-        accepts_unknown_verifiers: true,
+        // TODO: custom verifiers are not supported yet. Flip to `true`
+        // once the node admits transactions naming non-native verifier
+        // addresses (and the handler runs them within a per-call gas
+        // cap).
+        accepts_unknown_verifiers: false,
         verifiers: vec![
             AcceptedVerifier {
                 address: K1_VERIFIER_ADDRESS,
@@ -171,10 +179,8 @@ where
             .map_err(|e| rpc_internal_error(format!("latest header lookup failed: {e}")))?
             .map(|h| h.timestamp())
             .unwrap_or(0);
-        let spec = alloy_op_evm::spec_by_timestamp_after_bedrock(
-            &*self.provider.chain_spec(),
-            timestamp,
-        );
+        let spec =
+            alloy_op_evm::spec_by_timestamp_after_bedrock(&*self.provider.chain_spec(), timestamp);
         Ok(build_response_for_spec(spec))
     }
 }
@@ -193,7 +199,8 @@ mod tests {
     #[test]
     fn xlayer_v1_response_matches_constants_and_gas_table() {
         let r = build_response_for_spec(OpSpecId::XLAYER_V1);
-        assert!(r.accepts_unknown_verifiers);
+        // Custom verifiers aren't supported yet — see the field doc.
+        assert!(!r.accepts_unknown_verifiers);
         assert_eq!(r.verifiers.len(), 4);
 
         let by_addr = |addr: Address| {
@@ -225,22 +232,43 @@ mod tests {
     fn response_serializes_with_camel_case_keys() {
         let r = build_response_for_spec(OpSpecId::XLAYER_V1);
         let json = serde_json::to_string(&r).unwrap();
-        assert!(json.contains("\"acceptsUnknownVerifiers\":true"));
+        assert!(json.contains("\"acceptsUnknownVerifiers\":false"));
         assert!(json.contains("\"maxAuthCost\""));
         assert!(!json.contains("accepts_unknown_verifiers"));
         assert!(!json.contains("max_auth_cost"));
     }
 
-    /// Pre-XLAYER_V1 forks return zero `maxAuthCost` values: the gas
-    /// slots aren't populated yet, but the addresses are still
-    /// advertised so wallets can pre-build for the upcoming fork.
+    /// Pre-XLAYER_V1 forks return an empty verifier list with
+    /// `acceptsUnknownVerifiers: false` — the AA infrastructure isn't
+    /// active yet, and clients must not interpret the response as
+    /// "AA accepted today."
     #[test]
-    fn pre_xlayer_v1_returns_zero_gas_with_addresses_present() {
+    fn pre_xlayer_v1_returns_empty_response_with_acceptance_disabled() {
         let r = build_response_for_spec(OpSpecId::BEDROCK);
-        assert_eq!(r.verifiers.len(), 4);
-        for v in &r.verifiers {
-            assert!(v.native);
-            assert_eq!(v.max_auth_cost, U256::ZERO, "{:?} should have zero gas pre-XLAYER_V1", v.address);
+        assert!(!r.accepts_unknown_verifiers, "AA not active pre-XLAYER_V1");
+        assert!(r.verifiers.is_empty(), "no verifiers advertised before fork activation");
+    }
+
+    /// Boundary case: every fork from BEDROCK up to (but not including)
+    /// XLAYER_V1 must produce the empty response. Catches regressions
+    /// where a new intermediate fork is introduced and the gating cutoff
+    /// silently shifts.
+    #[test]
+    fn forks_strictly_before_xlayer_v1_are_all_gated() {
+        for spec in [
+            OpSpecId::BEDROCK,
+            OpSpecId::REGOLITH,
+            OpSpecId::CANYON,
+            OpSpecId::ECOTONE,
+            OpSpecId::FJORD,
+            OpSpecId::GRANITE,
+            OpSpecId::HOLOCENE,
+            OpSpecId::ISTHMUS,
+            OpSpecId::JOVIAN,
+        ] {
+            let r = build_response_for_spec(spec);
+            assert!(!r.accepts_unknown_verifiers, "{spec:?}: must not accept AA pre-XLAYER_V1");
+            assert!(r.verifiers.is_empty(), "{spec:?}: must not advertise verifiers pre-XLAYER_V1");
         }
     }
 }

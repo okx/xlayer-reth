@@ -20,6 +20,7 @@ reth-chainspec.workspace = true
 reth-optimism-forks.workspace = true
 reth-optimism-rpc.workspace = true
 reth-optimism-primitives.workspace = true
+reth-optimism-txpool.workspace = true
 reth-primitives-traits.workspace = true
 reth-revm.workspace = true
 reth-rpc.workspace = true
