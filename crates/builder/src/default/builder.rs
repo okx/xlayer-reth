@@ -11,7 +11,7 @@ use tracing::{info, warn};
 
 use alloy_consensus::{transaction::TxHashRef, Transaction, Typed2718};
 use alloy_eips::eip2718::WithEncoded;
-use alloy_evm::Evm as _;
+use alloy_evm::{Evm as _, EvmFactory, FromTxWithEncoded};
 use alloy_primitives::U256;
 use op_alloy_consensus::OpTransaction;
 use op_revm::constants::L1_BLOCK_CONTRACT;
@@ -20,9 +20,10 @@ use reth_basic_payload_builder::*;
 use reth_chainspec::ChainSpecProvider;
 use reth_evm::{
     execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutionError},
-    ConfigureEvm,
+    ConfigureEvm, EvmFactoryFor,
 };
 use reth_execution_types::BlockExecutionOutput;
+use reth_optimism_evm::OpTx;
 use reth_optimism_forks::OpHardforks;
 use reth_optimism_node::OpPayloadBuilderAttributes;
 use reth_optimism_payload_builder::{
@@ -87,6 +88,8 @@ where
         >,
     >,
     Txs: OpPayloadTransactions<Pool::Transaction>,
+    EvmFactoryFor<Evm>: EvmFactory<Tx = OpTx>,
+    OpTx: FromTxWithEncoded<N::SignedTx>,
 {
     type Attributes = OpPayloadAttrs;
     type BuiltPayload = OpBuiltPayload<N>;
