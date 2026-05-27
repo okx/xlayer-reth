@@ -151,6 +151,7 @@ nanoid = { version = "0.4" }
 reth-ipc.workspace = true
 reth-optimism-rpc = { workspace = true, features = ["client"] }
 rlimit = { version = "0.10" }
+tempfile = "3.20"
 tokio = { workspace = true, features = ["test-util"] }
 
 [features]

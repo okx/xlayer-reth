@@ -18,8 +18,10 @@
 //!
 //! Enable with `--features jit`.
 
+pub mod aot_store;
 pub mod executor;
 pub mod factory;
 
+pub use aot_store::PersistentArtifactStore;
 pub use executor::JitExecutorBuilder;
 pub use factory::{JitEvmFactory, JitOpEvm};
