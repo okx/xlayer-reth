@@ -140,7 +140,8 @@ OTEL_EXPORTER_OTLP_PROTOCOL=http cargo r -p xlayer-reth-node node \
   --txpool.max-account-slots 10000000 \
   --http \
   --http.api eth,debug,net,web3,txpool \
-  --log.stdout.filter "info,engine::tree::payload_validator=debug"
+  --log.stdout.filter "info,engine::tree::payload_validator=debug" \
+  --ipcpath $(PWD)/reth.ipc
 ```
 
 Key flags:
