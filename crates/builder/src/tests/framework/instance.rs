@@ -38,9 +38,11 @@ use reth::{
     tasks::Runtime,
 };
 
+use reth_chainspec::ForkCondition;
 use reth_node_builder::{NodeBuilder, NodeConfig};
 use reth_optimism_chainspec::OpChainSpec;
 use reth_optimism_cli::commands::Commands;
+use reth_optimism_forks::{OpHardfork, OpHardforks};
 use reth_optimism_node::{
     args::RollupArgs,
     node::{OpAddOns, OpAddOnsBuilder, OpEngineValidatorBuilder, OpPoolBuilder},
@@ -83,8 +85,15 @@ impl LocalInstance {
     ) -> eyre::Result<Self> {
         let mut args = args;
         let runtime = runtime();
+        // Enable the gasless mempool whenever the chain schedules the `XLayerV1` (gasless) fork.
+        // In production this is the explicit `--rollup.enable-gasless` flag; the in-process test
+        // harness derives it from the chain spec so gasless tests (which activate `XLayerV1`) opt
+        // in without a separate knob.
+        let enable_gasless =
+            config.chain.op_fork_activation(OpHardfork::XLayerV1) != ForkCondition::Never;
         let rollup_args = reth_optimism_node::args::RollupArgs {
             enable_tx_conditional: true,
+            enable_gasless,
             ..Default::default()
         };
         let op_node = OpNode::new(rollup_args.clone());
@@ -296,8 +305,12 @@ fn runtime() -> Runtime {
 }
 
 fn pool_component(rollup_args: &RollupArgs) -> OpPoolBuilder {
+    // When gasless is enabled the mempool must accept zero-priced transactions (lowering
+    // `minimal_protocol_basefee` to 0), otherwise gasless txs never reach the payload builder. The
+    // percentile only affects pool ordering, not acceptance, so the default is fine for tests.
     OpPoolBuilder::default()
         .with_enable_tx_conditional(rollup_args.enable_tx_conditional)
+        .with_gasless(rollup_args.enable_gasless, 0.5)
         .with_supervisor(rollup_args.supervisor_http.clone(), rollup_args.supervisor_safety_level)
 }
 

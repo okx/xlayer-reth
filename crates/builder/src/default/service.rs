@@ -119,6 +119,8 @@ where
         };
 
         let conf = ctx.config().builder.clone();
+        // `OpEvmConfig` derives the gasless whitelist contract from the chain id (consensus-uniform
+        // across building and validation — see `reth_optimism_evm::xlayer_gasless_contract`).
         let default_builder = reth_optimism_payload_builder::OpPayloadBuilder::with_builder_config(
             pool,
             ctx.provider().clone(),

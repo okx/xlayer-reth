@@ -471,6 +471,10 @@ impl FlashblocksBuilderTx {
             base,
             enveloped_tx: Some(Bytes::new()),
             deposit: Default::default(),
+            // Only ever simulates builder-injected txs signed by the TEE signer (e.g.
+            // `incrementFlashblockNumber`), not user txs. The gasless whitelist check lives in
+            // `transact_maybe_gasless` and is irrelevant here.
+            is_gasless: false,
         });
         let to = tx_env.0.base.kind.into_to().unwrap_or_default();
 

@@ -128,8 +128,13 @@ impl FlashblocksServiceBuilder {
             FlashblockPayloadsCache::new(None)
         };
 
+        // `OpEvmConfig` derives the gasless whitelist contract from the chain id, so every config is
+        // gasless-aware by construction — consensus-uniform across block building and validation
+        // (see `reth_optimism_evm::xlayer_gasless_contract`). No per-site wiring needed here.
+        let evm_config = || OpEvmConfig::optimism(ctx.chain_spec());
+
         let mut payload_builder = FlashblocksBuilder::new(
-            OpEvmConfig::optimism(ctx.chain_spec()),
+            evm_config(),
             pool,
             ctx.provider().clone(),
             ctx.task_executor().clone(),
@@ -159,7 +164,7 @@ impl FlashblocksServiceBuilder {
         let handler_ctx = FlashblockHandlerContext::new(
             &ctx.provider().clone(),
             self.config.clone(),
-            OpEvmConfig::optimism(ctx.chain_spec()),
+            evm_config(),
             metrics.clone(),
         )
         .wrap_err("failed to create flashblocks payload builder context")?;
