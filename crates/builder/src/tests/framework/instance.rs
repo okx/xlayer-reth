@@ -38,11 +38,11 @@ use reth::{
     tasks::Runtime,
 };
 
-use reth_chainspec::ForkCondition;
+use reth_chainspec::EthChainSpec;
 use reth_node_builder::{NodeBuilder, NodeConfig};
 use reth_optimism_chainspec::OpChainSpec;
 use reth_optimism_cli::commands::Commands;
-use reth_optimism_forks::{OpHardfork, OpHardforks};
+use reth_optimism_evm::xlayer_gasless_contract;
 use reth_optimism_node::{
     args::RollupArgs,
     node::{OpAddOns, OpAddOnsBuilder, OpEngineValidatorBuilder, OpPoolBuilder},
@@ -85,12 +85,11 @@ impl LocalInstance {
     ) -> eyre::Result<Self> {
         let mut args = args;
         let runtime = runtime();
-        // Enable the gasless mempool whenever the chain schedules the `XLayerV1` (gasless) fork.
-        // In production this is the explicit `--rollup.enable-gasless` flag; the in-process test
-        // harness derives it from the chain spec so gasless tests (which activate `XLayerV1`) opt
-        // in without a separate knob.
-        let enable_gasless =
-            config.chain.op_fork_activation(OpHardfork::XLayerV1) != ForkCondition::Never;
+        // Enable the gasless mempool whenever the chain has a gasless whitelist contract (i.e. an
+        // XLayer chain id). In production this is the explicit `--rollup.enable-gasless` flag; the
+        // in-process test harness derives it from the chain so gasless tests (which run on an
+        // XLayer chain id) opt in without a separate knob.
+        let enable_gasless = xlayer_gasless_contract(config.chain.chain().id()).is_some();
         let rollup_args = reth_optimism_node::args::RollupArgs {
             enable_tx_conditional: true,
             enable_gasless,

@@ -90,8 +90,8 @@ pub async fn native_balance_transfer(
 ///
 /// The fee fields are set explicitly to `0` so the gas filler does not populate them. Such a tx is
 /// only accepted by the mempool (and executed without charging fees) when the target node runs the
-/// XLayer gasless mempool: the `XLayerV1` hardfork is active and the on-chain gasless whitelist
-/// contract approves the transfer.
+/// XLayer gasless mempool: gasless is enabled and the on-chain gasless whitelist contract approves
+/// the transfer.
 pub async fn gasless_zero_price_transfer(
     endpoint_url: &str,
     amount: U256,

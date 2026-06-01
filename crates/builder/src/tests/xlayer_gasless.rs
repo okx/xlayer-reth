@@ -3,9 +3,8 @@
 //! These exercise the gasless path end-to-end through the flashblocks builder:
 //! - the mempool accepts a zero-priced tx (gasless mempool enabled, `minimal_protocol_basefee`
 //!   lowered to 0), and
-//! - the flashblocks payload builder executes it gaslessly when the `XLayerV1` hardfork is active
-//!   and the on-chain whitelist contract (derived from the chain id) approves it (see
-//!   `FlashblocksBuilderCtx::transact_maybe_gasless`).
+//! - the flashblocks payload builder executes it gaslessly when the on-chain whitelist contract
+//!   (derived from the chain id) approves it (see `FlashblocksBuilderCtx::transact_maybe_gasless`).
 //!
 //! Note on base fee: reth's pool best-iterator (`BestTransactionsWithFees`) only yields txs whose
 //! `max_fee_per_gas >= block base fee`, so a zero-priced tx is only yielded when the block base fee
@@ -29,28 +28,28 @@ use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use alloy_provider::Provider;
 use macros::rb_test;
 use op_alloy_consensus::OpTypedTransaction;
-use reth_chainspec::ForkCondition;
 use reth_node_builder::NodeConfig;
 use reth_optimism_chainspec::OpChainSpec;
 use reth_optimism_evm::XLAYER_DEVNET_GASLESS_CONTRACT as GASLESS_CONTRACT;
-use reth_optimism_forks::OpHardfork;
 use std::{sync::Arc, time::Duration};
 
 /// Recipient of the gasless test transfers.
 const RECIPIENT: Address = address!("1111111111111111111111111111111111111111");
 
-/// Minimal contract bytecode that returns ABI `true` (a 32-byte word == 1) for any call:
-/// `PUSH1 1, PUSH1 0, MSTORE, PUSH1 32, PUSH1 0, RETURN`. Approves every gasless query
-/// (`isGaslessEnabled()` and `isWhitelisted(..)`).
-const ALWAYS_TRUE_BYTECODE: [u8; 10] = [0x60, 0x01, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3];
+/// Minimal contract bytecode returning ABI `(true, 0xffffff)` for any call — approves every gasless
+/// query with a gas allowance far above the test tx's gas limit. Layout: `mem[0..32]=1` (allowed),
+/// `mem[32..64]=0xffffff` (gasLimit), `return mem[0..64]`.
+const ALLOW_HIGH_GAS_BYTECODE: [u8; 17] = [
+    0x60, 0x01, 0x60, 0x00, 0x52, 0x62, 0xff, 0xff, 0xff, 0x60, 0x20, 0x52, 0x60, 0x40, 0x60, 0x00,
+    0xf3,
+];
 
-/// Minimal contract bytecode that returns ABI `false` (32 zero bytes) for any call:
-/// `PUSH1 0, PUSH1 0, MSTORE, PUSH1 32, PUSH1 0, RETURN`. Denies every gasless query.
-const ALWAYS_FALSE_BYTECODE: [u8; 10] =
-    [0x60, 0x00, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3];
+/// Minimal contract bytecode returning ABI `(false, 0)` for any call (64 zero bytes) — denies every
+/// gasless query.
+const DENY_BYTECODE: [u8; 5] = [0x60, 0x40, 0x60, 0x00, 0xf3];
 
 /// Builds the in-process node config with a custom `OpChainSpec` that:
-/// - has the `XLayerV1` (gasless) hardfork active from genesis, and
+/// - runs on the XLayer devnet chain id (so `OpEvmConfig` derives the gasless contract), and
 /// - deploys the given gasless whitelist contract bytecode at [`GASLESS_CONTRACT`].
 ///
 /// The base genesis is the same template the default test harness uses, so the funded test
@@ -80,17 +79,12 @@ fn gasless_node_config(gasless_bytecode: &[u8]) -> NodeConfig<OpChainSpec> {
         },
     );
 
-    let mut chain_spec = OpChainSpec::from_genesis(genesis);
-    // Activate `XLayerV1` from genesis (the gasless fork). The genesis JSON has no field for it,
-    // so it is inserted directly into the hardfork schedule. `XLayerV1` does not affect the
-    // genesis header, so the already-sealed header stays valid.
-    chain_spec.inner.hardforks.insert(OpHardfork::XLayerV1, ForkCondition::Timestamp(0));
-
+    let chain_spec = OpChainSpec::from_genesis(genesis);
     default_node_config().with_chain(Arc::new(chain_spec))
 }
 
 /// Builds [`BuilderArgs`] for the gasless tests. The gasless mempool is enabled by the test
-/// harness because the chain spec activates the `XLayerV1` fork (see `gasless_node_config`), so no
+/// harness because the chain runs on an XLayer chain id (see `gasless_node_config`), so no
 /// separate arg is needed.
 fn gasless_args() -> BuilderArgs {
     BuilderArgs {
@@ -149,13 +143,13 @@ async fn build_until_included(
     eyre::bail!("transaction {tx_hash} was not included within the expected number of blocks")
 }
 
-/// With gasless enabled, `XLayerV1` active, and the whitelist contract approving everything, a
-/// zero-priced tx is accepted by the mempool, executed gaslessly by the flashblocks builder, and
-/// included with a successful receipt. Because it is gasless, the sender pays *no* gas fee — its
-/// balance decreases by exactly the transferred value.
+/// With gasless enabled and the whitelist contract approving everything, a zero-priced tx is
+/// accepted by the mempool, executed gaslessly by the flashblocks builder, and included with a
+/// successful receipt. Because it is gasless, the sender pays *no* gas fee — its balance decreases
+/// by exactly the transferred value.
 #[rb_test(
     args = gasless_args(),
-    config = gasless_node_config(&ALWAYS_TRUE_BYTECODE)
+    config = gasless_node_config(&ALLOW_HIGH_GAS_BYTECODE)
 )]
 async fn gasless_zero_price_tx_whitelisted_included(rbuilder: LocalInstance) -> eyre::Result<()> {
     let driver = rbuilder.driver().await?;
@@ -191,14 +185,14 @@ async fn gasless_zero_price_tx_whitelisted_included(rbuilder: LocalInstance) -> 
     Ok(())
 }
 
-/// With `XLayerV1` active but the gasless contract denying everything, the mempool's gasless
-/// admission gate rejects the zero-priced tx at `eth_sendRawTransaction`: it is not whitelisted, so
-/// it cannot be gasless, and a non-gasless zero-priced tx is underpriced. This asserts the
-/// whitelist gate is enforced at admission — the deny contract is consulted (returns false) and the
-/// tx is rejected rather than admitted.
+/// With the gasless contract denying everything, the mempool's gasless admission gate rejects the
+/// zero-priced tx at `eth_sendRawTransaction`: it is not whitelisted, so it cannot be gasless, and a
+/// non-gasless zero-priced tx is underpriced. This asserts the whitelist gate is enforced at
+/// admission — the deny contract is consulted (returns false) and the tx is rejected rather than
+/// admitted.
 #[rb_test(
     args = gasless_args(),
-    config = gasless_node_config(&ALWAYS_FALSE_BYTECODE)
+    config = gasless_node_config(&DENY_BYTECODE)
 )]
 async fn gasless_zero_price_tx_not_whitelisted_rejected(
     rbuilder: LocalInstance,

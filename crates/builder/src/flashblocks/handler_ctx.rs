@@ -46,8 +46,8 @@ impl FlashblockHandlerContext {
     {
         let chain_spec = client.chain_spec();
         // Derived from the chain id by `OpEvmConfig` (consensus-uniform with the block executor),
-        // not from node-local config. Gasless application is gated on `XLayerV1` (see
-        // `FlashblocksBuilderCtx::is_gasless`).
+        // not from node-local config. Gasless application is gated on this contract approving the
+        // tx (see `FlashblocksBuilderCtx::is_gasless`).
         let gasless_contract = evm_config.gasless_contract();
         Ok(Self {
             evm_config,

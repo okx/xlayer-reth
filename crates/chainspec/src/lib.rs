@@ -33,23 +33,6 @@ pub const XLAYER_TESTNET_JOVIAN_TIMESTAMP: u64 = 1764327600;
 /// 2025-11-28 11:00:00 UTC
 pub const XLAYER_DEVNET_JOVIAN_TIMESTAMP: u64 = 1764327600;
 
-/// XLayer mainnet XLayerV1 (gasless) hardfork activation timestamp.
-///
-/// SIMULATED placeholder — TODO: confirm the final mainnet activation time.
-/// 2026-07-01 00:00:00 UTC.
-pub const XLAYER_MAINNET_XLAYERV1_TIMESTAMP: u64 = 1782864000;
-
-/// XLayer testnet XLayerV1 (gasless) hardfork activation timestamp.
-///
-/// SIMULATED placeholder — TODO: confirm the final testnet activation time.
-/// 2026-06-01 00:00:00 UTC.
-pub const XLAYER_TESTNET_XLAYERV1_TIMESTAMP: u64 = 1780272000;
-
-/// XLayer devnet XLayerV1 (gasless) hardfork activation timestamp.
-///
-/// Active from genesis on devnet so local/dev networks exercise the gasless feature.
-pub const XLAYER_DEVNET_XLAYERV1_TIMESTAMP: u64 = 0;
-
 /// X Layer mainnet list of hardforks.
 ///
 /// All time-based hardforks are activated at genesis (timestamp 0).
@@ -88,7 +71,6 @@ pub static XLAYER_MAINNET_HARDFORKS: Lazy<ChainHardforks> = Lazy::new(|| {
         (EthereumHardfork::Prague.boxed(), ForkCondition::Timestamp(0)),
         (OpHardfork::Isthmus.boxed(), ForkCondition::Timestamp(0)),
         (OpHardfork::Jovian.boxed(), ForkCondition::Timestamp(XLAYER_MAINNET_JOVIAN_TIMESTAMP)),
-        (OpHardfork::XLayerV1.boxed(), ForkCondition::Timestamp(XLAYER_MAINNET_XLAYERV1_TIMESTAMP)),
     ])
 });
 
@@ -130,7 +112,6 @@ pub static XLAYER_TESTNET_HARDFORKS: Lazy<ChainHardforks> = Lazy::new(|| {
         (EthereumHardfork::Prague.boxed(), ForkCondition::Timestamp(0)),
         (OpHardfork::Isthmus.boxed(), ForkCondition::Timestamp(0)),
         (OpHardfork::Jovian.boxed(), ForkCondition::Timestamp(XLAYER_TESTNET_JOVIAN_TIMESTAMP)),
-        (OpHardfork::XLayerV1.boxed(), ForkCondition::Timestamp(XLAYER_TESTNET_XLAYERV1_TIMESTAMP)),
     ])
 });
 
@@ -172,6 +153,5 @@ pub static XLAYER_DEVNET_HARDFORKS: Lazy<ChainHardforks> = Lazy::new(|| {
         (EthereumHardfork::Prague.boxed(), ForkCondition::Timestamp(0)),
         (OpHardfork::Isthmus.boxed(), ForkCondition::Timestamp(0)),
         (OpHardfork::Jovian.boxed(), ForkCondition::Timestamp(XLAYER_DEVNET_JOVIAN_TIMESTAMP)),
-        (OpHardfork::XLayerV1.boxed(), ForkCondition::Timestamp(XLAYER_DEVNET_XLAYERV1_TIMESTAMP)),
     ])
 });

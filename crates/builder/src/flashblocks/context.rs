@@ -83,7 +83,7 @@ pub struct FlashblocksBuilderCtx {
     pub bridge_intercept_config: xlayer_bridge_intercept::BridgeInterceptConfig,
     /// On-chain gasless whitelist contract, derived from the chain id by `OpEvmConfig` (consensus
     /// uniform with the block executor; `None` on non-gasless chains). Used to detect zero-priced,
-    /// whitelisted txs during block building, gated on the `XLayerV1` hardfork being active.
+    /// whitelisted txs during block building.
     pub gasless_contract: Option<GaslessContract>,
 }
 
@@ -274,10 +274,10 @@ impl FlashblocksBuilderCtx {
     /// (whitelisted) transactions would be rejected by base-fee validation even when gasless is
     /// enabled.
     ///
-    /// A tx is gasless only when gasless building is enabled, a whitelist contract is configured,
-    /// the tx is not a deposit, `XLayerV1` is active at the block timestamp, the tx is zero-priced
-    /// (`max_fee_per_gas == 0`), and the on-chain contract whitelists it. For non-gasless txs this
-    /// is equivalent to a plain `evm.transact(tx)`.
+    /// A tx is gasless only when a whitelist contract is configured, the tx is not a deposit, the
+    /// tx is zero-priced (`max_fee_per_gas == 0`), and the on-chain contract approves it (allowed
+    /// and within the per-tx gas allowance). For non-gasless txs this is equivalent to a plain
+    /// `evm.transact(tx)`.
     ///
     /// Returns `(result_and_state, is_gasless)`.
     #[allow(clippy::type_complexity)]
@@ -301,9 +301,9 @@ impl FlashblocksBuilderCtx {
     }
 
     /// Returns whether `tx` qualifies as a gasless transaction for the current block. See
-    /// [`Self::transact_maybe_gasless`] for the criteria. Performs uncommitted system calls to the
+    /// [`Self::transact_maybe_gasless`] for the criteria. Performs an uncommitted system call to the
     /// configured gasless contract; the call returns `Ok(false)` whenever no contract is configured
-    /// for the chain, the tx is a deposit, `XLayerV1` is inactive, or the tx is priced.
+    /// for the chain, the tx is a deposit, or the tx is priced.
     fn is_gasless<DB>(
         &self,
         evm: &mut OpEvm<DB, NoOpInspector, PrecompilesMap, OpTx>,
@@ -313,10 +313,6 @@ impl FlashblocksBuilderCtx {
         DB: Database,
     {
         if tx.is_deposit() || tx.max_fee_per_gas() != 0 {
-            return Ok(false);
-        }
-        let block_ts = self.attributes().timestamp();
-        if !self.chain_spec.is_xlayer_v1_active_at_timestamp(block_ts) {
             return Ok(false);
         }
         match self.gasless_contract {
@@ -670,8 +666,8 @@ impl FlashblocksBuilderCtx {
 
             let tx_simulation_start_time = Instant::now();
             // Gasless: zero-priced, whitelisted txs are executed with the base-fee check relaxed
-            // (gated on an active `XLayerV1` fork + the chain's gasless contract). Non-gasless txs
-            // are unaffected — see [`Self::transact_maybe_gasless`].
+            // (gated on the chain's gasless contract approving the tx). Non-gasless txs are
+            // unaffected — see [`Self::transact_maybe_gasless`].
             let (ResultAndState { result, state }, is_gasless) = match self
                 .transact_maybe_gasless(&mut evm, &tx)
             {
