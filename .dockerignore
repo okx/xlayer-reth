@@ -1,5 +1,5 @@
-# Rust build artifacts
-target/
+# Rust build artifacts (root + all submodules, e.g. deps/optimism/rust/target)
+**/target/
 
 # Git
 #.git/
@@ -25,7 +25,7 @@ tests/
 # Build outputs
 dist/
 tmp/
-node_modules/
+**/node_modules/
 
 # Unused submodule subdirectories (only rust/ path deps are needed)
 deps/optimism/rust/kona
