@@ -358,7 +358,9 @@ reth-trie-db = { git = "https://github.com/okx/reth", rev = "22bdddf9e0eff2a2444
 libp2p-yamux = { path = "deps/libp2p-yamux" }
 
 # revmc — paradigmxyz/revmc upstream main, no private patches.
-# Branch `xlayer/upstream-only` is reset to origin/main of paradigmxyz/revmc.
-revmc          = { path = "../revmc/crates/revmc" }
-revmc-runtime  = { path = "../revmc/crates/revmc-runtime" }
-revmc-context  = { path = "../revmc/crates/revmc-context" }
+# Pinned to commit c665f076 (PR #371, paradigmxyz/revmc origin/main snapshot).
+# Using git URL instead of local path so a fresh `git clone` + `cargo build`
+# works without any sibling-directory setup.
+revmc          = { git = "https://github.com/paradigmxyz/revmc", rev = "c665f0766987b5d3847dc4013b094d6b1822e1cb" }
+revmc-runtime  = { git = "https://github.com/paradigmxyz/revmc", rev = "c665f0766987b5d3847dc4013b094d6b1822e1cb" }
+revmc-context  = { git = "https://github.com/paradigmxyz/revmc", rev = "c665f0766987b5d3847dc4013b094d6b1822e1cb" }
