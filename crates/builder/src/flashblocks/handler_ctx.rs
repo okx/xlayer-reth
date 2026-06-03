@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use reth_basic_payload_builder::PayloadConfig;
 use reth_evm::EvmEnv;
 use reth_optimism_chainspec::OpChainSpec;
-use reth_optimism_evm::{OpEvmConfig, OpNextBlockEnvAttributes};
+use reth_optimism_evm::{GaslessContract, OpEvmConfig, OpNextBlockEnvAttributes};
 use reth_optimism_forks::OpHardforks;
 use reth_optimism_payload_builder::{
     config::{OpDAConfig, OpGasLimitConfig},
@@ -30,6 +30,8 @@ pub(super) struct FlashblockHandlerContext {
     max_gas_per_txn: Option<u64>,
     /// The metrics for the builder
     metrics: Arc<BuilderMetrics>,
+    /// On-chain gasless whitelist contract (see [`FlashblocksBuilderCtx::gasless_contract`]).
+    gasless_contract: Option<GaslessContract>,
 }
 
 impl FlashblockHandlerContext {
@@ -43,12 +45,17 @@ impl FlashblockHandlerContext {
         Client: ClientBounds,
     {
         let chain_spec = client.chain_spec();
+        // Derived from the chain id by `OpEvmConfig` (consensus-uniform with the block executor),
+        // not from node-local config. Gasless application is gated on this contract approving the
+        // tx (see `FlashblocksBuilderCtx::is_gasless`).
+        let gasless_contract = evm_config.gasless_contract();
         Ok(Self {
             evm_config,
             da_config: builder_config.da_config.clone(),
             chain_spec,
             max_gas_per_txn: builder_config.max_gas_per_txn,
             metrics,
+            gasless_contract,
         })
     }
 
@@ -89,6 +96,7 @@ impl FlashblockHandlerContext {
             builder_signer: None,
             metrics: self.metrics,
             max_gas_per_txn: self.max_gas_per_txn,
+            gasless_contract: self.gasless_contract,
         }
     }
 }

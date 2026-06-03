@@ -8,11 +8,15 @@ use std::{sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace};
 
-use alloy_consensus::{conditional::BlockConditionalAttributes, Eip658Value, Transaction};
+use alloy_consensus::{
+    conditional::BlockConditionalAttributes, transaction::Recovered, Eip658Value, Transaction,
+};
 use alloy_eips::eip2718::WithEncoded;
 use alloy_eips::{Encodable2718, Typed2718};
 use alloy_evm::Database;
-use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
+use alloy_op_evm::{
+    block::receipt_builder::OpReceiptBuilder, block::OpTxEnv, GaslessFeeHook, OpEvm,
+};
 use alloy_primitives::{BlockHash, Bytes, U256};
 use alloy_rpc_types_eth::Withdrawals;
 use op_alloy_consensus::OpDepositReceipt;
@@ -22,12 +26,14 @@ use reth::payload::PayloadBuilderAttributes;
 use reth_basic_payload_builder::PayloadConfig;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_evm::{
-    eth::receipt_builder::ReceiptBuilderCtx, op_revm::L1BlockInfo, ConfigureEvm, Evm, EvmEnv,
-    EvmError, InvalidTxError,
+    eth::receipt_builder::ReceiptBuilderCtx, op_revm::L1BlockInfo, precompiles::PrecompilesMap,
+    ConfigureEvm, Evm, EvmEnv, EvmError, InvalidTxError,
 };
 use reth_node_api::PayloadBuilderError;
 use reth_optimism_chainspec::OpChainSpec;
-use reth_optimism_evm::{OpEvmConfig, OpNextBlockEnvAttributes};
+use reth_optimism_evm::{
+    GaslessContract, OpEvmConfig, OpNextBlockEnvAttributes, XLayerGaslessFeeHook,
+};
 use reth_optimism_forks::OpHardforks;
 use reth_optimism_node::OpPayloadBuilderAttributes;
 use reth_optimism_payload_builder::{
@@ -45,7 +51,10 @@ use reth_primitives::SealedHeader;
 use reth_primitives_traits::{InMemorySize, SignedTransaction};
 use reth_revm::{context::Block, State};
 use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction};
-use revm::{context::result::ResultAndState, interpreter::as_u64_saturated, DatabaseCommit};
+use revm::{
+    context::result::ResultAndState, inspector::NoOpInspector, interpreter::as_u64_saturated,
+    DatabaseCommit,
+};
 
 /// Container type that holds all necessities to build a new payload.
 #[derive(Debug)]
@@ -72,6 +81,10 @@ pub struct FlashblocksBuilderCtx {
     pub metrics: Arc<BuilderMetrics>,
     /// Max gas that can be used by a transaction.
     pub max_gas_per_txn: Option<u64>,
+    /// On-chain gasless whitelist contract, derived from the chain id by `OpEvmConfig` (consensus
+    /// uniform with the block executor; `None` on non-gasless chains). Used to detect zero-priced,
+    /// whitelisted txs during block building.
+    pub gasless_contract: Option<GaslessContract>,
 }
 
 impl FlashblocksBuilderCtx {
@@ -257,6 +270,63 @@ impl FlashblocksBuilderCtx {
     }
 
     /// Executes all sequencer transactions that are included in the payload attributes.
+    /// Detects whether `tx` should execute gaslessly and runs it through the gasless fee hook.
+    ///
+    /// This mirrors the gasless detection in the upstream block executor
+    /// (`OpBlockExecutor::execute_transaction_without_commit`). The flashblocks builder executes
+    /// pool transactions directly via [`Evm::transact`] rather than through the block executor, so
+    /// the detection and base-fee relaxation have to be replicated here, otherwise zero-priced
+    /// (whitelisted) transactions would be rejected by base-fee validation even when gasless is
+    /// enabled.
+    #[allow(clippy::type_complexity)]
+    fn transact_maybe_gasless<DB>(
+        &self,
+        evm: &mut OpEvm<DB, NoOpInspector, PrecompilesMap>,
+        tx: &Recovered<OpTransactionSigned>,
+    ) -> Result<
+        (
+            ResultAndState<<OpEvm<DB, NoOpInspector, PrecompilesMap> as Evm>::HaltReason>,
+            bool,
+        ),
+        <OpEvm<DB, NoOpInspector, PrecompilesMap> as Evm>::Error,
+    >
+    where
+        DB: Database,
+    {
+        let is_gasless = self.is_gasless(evm, tx)?;
+        let mut tx_env = self.evm_config.tx_env(tx);
+        tx_env.set_gasless(is_gasless);
+        let result =
+            XLayerGaslessFeeHook::transact_with_gasless_fee_checks(evm, tx_env, is_gasless)?;
+        Ok((result, is_gasless))
+    }
+
+    /// Returns whether `tx` qualifies as a gasless transaction for the current block. See
+    /// [`Self::transact_maybe_gasless`] for the criteria. Performs an uncommitted system call to the
+    /// configured gasless contract; the call returns `Ok(false)` whenever no contract is configured
+    /// for the chain, the tx is a deposit, or the tx is priced.
+    fn is_gasless<DB>(
+        &self,
+        evm: &mut OpEvm<DB, NoOpInspector, PrecompilesMap>,
+        tx: &Recovered<OpTransactionSigned>,
+    ) -> Result<bool, <OpEvm<DB, NoOpInspector, PrecompilesMap> as Evm>::Error>
+    where
+        DB: Database,
+    {
+        if tx.is_deposit() || tx.max_fee_per_gas() != 0 {
+            return Ok(false);
+        }
+        match self.gasless_contract {
+            // `GaslessContract::is_gasless` only fails on an unrecoverable EVM/db error during the
+            // uncommitted system call; surface it as an EVM error so the caller can treat the tx
+            // as fatal for this build attempt (matching the executor's behavior).
+            Some(contract) => contract
+                .is_gasless(evm, tx.inner())
+                .map_err(|err| revm::context::result::EVMError::Custom(err.to_string())),
+            None => Ok(false),
+        }
+    }
+
     pub(super) fn execute_sequencer_transactions(
         &self,
         db: &mut State<impl Database>,
@@ -411,19 +481,22 @@ impl FlashblocksBuilderCtx {
                 ));
             }
 
-            // Ensure transaction execution is valid
-            let ResultAndState { result, state } = match evm.transact(&recovered_tx) {
-                Ok(res) => res,
-                Err(err) => {
-                    trace!(
-                        target: "payload_builder",
-                        %err,
-                        ?recovered_tx,
-                        "Error replaying cached flashblock transaction"
-                    );
-                    return Err(PayloadBuilderError::EvmExecutionError(Box::new(err)));
-                }
-            };
+            // Ensure transaction execution is valid. Replayed cached txs must be executed under
+            // the same gasless rules the producing builder used, otherwise a zero-priced
+            // whitelisted tx that was valid in the original flashblock would be rejected here.
+            let (ResultAndState { result, state }, is_gasless) =
+                match self.transact_maybe_gasless(&mut evm, &recovered_tx) {
+                    Ok(res) => res,
+                    Err(err) => {
+                        trace!(
+                            target: "payload_builder",
+                            %err,
+                            ?recovered_tx,
+                            "Error replaying cached flashblock transaction"
+                        );
+                        return Err(PayloadBuilderError::EvmExecutionError(Box::new(err)));
+                    }
+                };
 
             // Add gas used by the transaction to cumulative gas used
             let gas_used = result.gas_used();
@@ -444,10 +517,15 @@ impl FlashblocksBuilderCtx {
             // Commit changes
             evm.db_mut().commit(state);
 
-            // update add to total fees
-            let miner_fee = recovered_tx
-                .effective_tip_per_gas(self.base_fee())
-                .expect("fee is always valid; execution succeeded");
+            // update add to total fees. Gasless txs contribute no miner fee (see the equivalent
+            // note in `execute_best_transactions`).
+            let miner_fee = if is_gasless {
+                0
+            } else {
+                recovered_tx
+                    .effective_tip_per_gas(self.base_fee())
+                    .expect("fee is always valid; execution succeeded")
+            };
             info.total_fees += U256::from(miner_fee) * U256::from(gas_used);
 
             // Append sender and transaction to the respective lists
@@ -567,7 +645,12 @@ impl FlashblocksBuilderCtx {
             }
 
             let tx_simulation_start_time = Instant::now();
-            let ResultAndState { result, state } = match evm.transact(&tx) {
+            // Gasless: zero-priced, whitelisted txs are executed with the base-fee check relaxed
+            // (gated on the chain's gasless contract approving the tx). Non-gasless txs are
+            // unaffected — see [`Self::transact_maybe_gasless`].
+            let (ResultAndState { result, state }, is_gasless) = match self
+                .transact_maybe_gasless(&mut evm, &tx)
+            {
                 Ok(res) => res,
                 Err(err) => {
                     if let Some(err) = err.as_invalid_tx_err() {
@@ -635,10 +718,15 @@ impl FlashblocksBuilderCtx {
             // commit changes
             evm.db_mut().commit(state);
 
-            // update add to total fees
-            let miner_fee = tx
-                .effective_tip_per_gas(base_fee)
-                .expect("fee is always valid; execution succeeded");
+            // update add to total fees. Gasless txs contribute no miner fee (they execute with an
+            // effective gas price of 0) and `effective_tip_per_gas` would return `None` for a
+            // zero-priced tx under a non-zero base fee, so skip the fee accounting for them.
+            let miner_fee = if is_gasless {
+                0
+            } else {
+                tx.effective_tip_per_gas(base_fee)
+                    .expect("fee is always valid; execution succeeded")
+            };
             info.total_fees += U256::from(miner_fee) * U256::from(gas_used);
 
             // append sender and transaction to the respective lists

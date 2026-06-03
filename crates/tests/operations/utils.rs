@@ -76,6 +76,41 @@ pub async fn native_balance_transfer(
     Ok(format!("{tx_hash:#x}"))
 }
 
+/// Sends a zero-priced (`max_fee_per_gas == 0`, `max_priority_fee_per_gas == 0`) EIP-1559 native
+/// transfer from the rich account and waits for it to be mined, returning the tx hash.
+///
+/// The fee fields are set explicitly to `0` so the gas filler does not populate them. Such a tx is
+/// only accepted by the mempool (and executed without charging fees) when the target node runs the
+/// XLayer gasless mempool: the `XLayerV1` hardfork is active and the on-chain gasless whitelist
+/// contract approves the transfer.
+pub async fn gasless_zero_price_transfer(
+    endpoint_url: &str,
+    amount: U256,
+    to_address: &str,
+) -> Result<String> {
+    let signer = PrivateKeySigner::from_str(DEFAULT_RICH_PRIVATE_KEY.trim_start_matches("0x"))?;
+    let wallet = EthereumWallet::from(signer.clone());
+    let provider = ProviderBuilder::new().wallet(wallet).connect_http(endpoint_url.parse()?);
+
+    let from = signer.address();
+    let to = Address::from_str(to_address)?;
+    let nonce = provider.get_transaction_count(from).pending().await?;
+    let tx = TransactionRequest::default()
+        .with_from(from)
+        .with_to(to)
+        .with_value(amount)
+        .with_nonce(nonce)
+        .with_chain_id(DEFAULT_L2_CHAIN_ID)
+        .with_gas_limit(21_000)
+        .with_max_fee_per_gas(0)
+        .with_max_priority_fee_per_gas(0);
+    let pending_tx = provider.send_transaction(tx).await?;
+    let tx_hash = *pending_tx.tx_hash();
+
+    wait_for_tx_mined(endpoint_url, &format!("{tx_hash:#x}")).await?;
+    Ok(format!("{tx_hash:#x}"))
+}
+
 /// Funds an address with native tokens and waits for the balance to be available
 pub async fn fund_address_and_wait_for_balance(
     client: &HttpClient,
