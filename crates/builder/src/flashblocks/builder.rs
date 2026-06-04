@@ -329,6 +329,10 @@ where
             builder_signer: self.config.builder_signer,
             metrics: self.metrics.clone(),
             max_gas_per_txn: self.config.max_gas_per_txn,
+            // Chain-derived (consensus-uniform with the block executor); see
+            // `OpEvmConfig::gasless_contract`. Gasless application is gated on this contract
+            // approving the tx.
+            gasless_contract: self.evm_config.gasless_contract(),
         })
     }
 
