@@ -1208,8 +1208,13 @@ async fn test_legacy_eth_get_logs(#[case] test_name: &str) {
             let receipt = operations::eth_get_transaction_receipt(&client, &tx_hash)
                 .await
                 .expect("Failed to get receipt");
-            let block_hash =
-                receipt["blockHash"].as_str().expect("Receipt should have blockHash").to_string();
+            let block_number = receipt["blockNumber"]
+                .as_str()
+                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+                .expect("Receipt should have blockNumber");
+            let block_hash = operations::canonical_block_hash(&client, block_number)
+                .await
+                .expect("Failed to resolve canonical block hash");
 
             let logs = operations::eth_get_logs_by_block_hash(
                 &client,

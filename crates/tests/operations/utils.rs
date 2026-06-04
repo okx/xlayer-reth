@@ -250,6 +250,22 @@ pub async fn wait_for_blocks(client: &HttpClient, min_blocks: u64) -> u64 {
     block_number
 }
 
+/// Returns the canonical (sealed) block hash for `block_number`.
+///
+/// Under flashblocks a tx receipt's `blockHash` read during the preconfirmation window is the
+/// in-progress flashblock hash, which differs from the final sealed block hash. Querying by that
+/// transient hash (e.g. `eth_getLogs`/`eth_getBlockByHash`) fails with "unknown block". This waits
+/// for the block to seal (a later block to exist) and then reads the stable canonical hash by
+/// number.
+pub async fn canonical_block_hash(client: &HttpClient, block_number: u64) -> Result<String> {
+    wait_for_blocks(client, block_number).await;
+    let block = eth_get_block_by_number_or_hash(client, BlockId::Number(block_number), false).await?;
+    block["hash"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| eyre!("block {block_number} missing canonical hash"))
+}
+
 /// Setup the test environment by waiting for blocks and returning a valid block hash and number
 pub async fn setup_test_environment(client: &HttpClient) -> Result<(String, u64)> {
     // Wait for at least one block to be available
@@ -400,10 +416,7 @@ pub async fn transfer_erc20_token_batch(
         .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
         .ok_or_else(|| eyre!("Failed to parse block number from receipt"))?;
 
-    let block_hash = receipt["blockHash"]
-        .as_str()
-        .ok_or_else(|| eyre!("Failed to get block hash from receipt"))?
-        .to_string();
+    let block_hash = canonical_block_hash(&client, block_number).await?;
 
     Ok((tx_hashes, block_number, block_hash))
 }
