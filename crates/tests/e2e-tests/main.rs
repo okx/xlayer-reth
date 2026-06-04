@@ -14,6 +14,8 @@ use std::str::FromStr;
 use tokio::time::Duration;
 use xlayer_e2e_test::operations;
 
+mod gasless;
+
 #[tokio::test]
 async fn test_send_transaction() {
     // Transfer 1 ETH to test account 1
@@ -30,29 +32,6 @@ async fn test_send_transaction() {
     .expect("Failed to transfer tokens");
 
     println!("Transaction hash: {tx_hash}");
-    assert!(tx_hash.starts_with("0x"));
-}
-
-/// Gasless e2e: a zero-priced (`max_fee_per_gas == 0`) EIP-1559 transfer is accepted by the
-/// mempool and mined with a successful receipt.
-///
-/// Requires the target node to run the XLayer gasless mempool — the `XLayerV1` hardfork active and
-/// the on-chain gasless whitelist contract deployed and approving the transfer. On a node without
-/// gasless enabled the zero-priced tx is rejected as underpriced and this test fails.
-#[tokio::test]
-async fn test_gasless_zero_price_transfer() {
-    let amount = U256::from(1u64);
-    let to_address = operations::manager::DEFAULT_L2_NEW_ACC1_ADDRESS;
-
-    let tx_hash = operations::gasless_zero_price_transfer(
-        operations::manager::DEFAULT_L2_NETWORK_URL,
-        amount,
-        to_address,
-    )
-    .await
-    .expect("zero-priced tx should be accepted and mined when gasless is enabled");
-
-    println!("Gasless transaction hash: {tx_hash}");
     assert!(tx_hash.starts_with("0x"));
 }
 
