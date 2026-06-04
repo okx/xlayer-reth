@@ -259,7 +259,8 @@ pub async fn wait_for_blocks(client: &HttpClient, min_blocks: u64) -> u64 {
 /// number.
 pub async fn canonical_block_hash(client: &HttpClient, block_number: u64) -> Result<String> {
     wait_for_blocks(client, block_number).await;
-    let block = eth_get_block_by_number_or_hash(client, BlockId::Number(block_number), false).await?;
+    let block =
+        eth_get_block_by_number_or_hash(client, BlockId::Number(block_number), false).await?;
     block["hash"]
         .as_str()
         .map(|s| s.to_string())
