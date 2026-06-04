@@ -269,10 +269,7 @@ impl FlashblocksBuilderCtx {
         }
     }
 
-    /// Executes all sequencer transactions that are included in the payload attributes.
-    /// Detects whether `tx` should execute gaslessly and runs it through the gasless fee hook.
-    ///
-    /// This mirrors the gasless detection in the upstream block executor
+    /// Mirrors the gasless detection in the upstream block executor
     /// (`OpBlockExecutor::execute_transaction_without_commit`). The flashblocks builder executes
     /// pool transactions directly via [`Evm::transact`] rather than through the block executor, so
     /// the detection and base-fee relaxation have to be replicated here, otherwise zero-priced
@@ -284,10 +281,7 @@ impl FlashblocksBuilderCtx {
         evm: &mut OpEvm<DB, NoOpInspector, PrecompilesMap>,
         tx: &Recovered<OpTransactionSigned>,
     ) -> Result<
-        (
-            ResultAndState<<OpEvm<DB, NoOpInspector, PrecompilesMap> as Evm>::HaltReason>,
-            bool,
-        ),
+        (ResultAndState<<OpEvm<DB, NoOpInspector, PrecompilesMap> as Evm>::HaltReason>, bool),
         <OpEvm<DB, NoOpInspector, PrecompilesMap> as Evm>::Error,
     >
     where
@@ -301,10 +295,6 @@ impl FlashblocksBuilderCtx {
         Ok((result, is_gasless))
     }
 
-    /// Returns whether `tx` qualifies as a gasless transaction for the current block. See
-    /// [`Self::transact_maybe_gasless`] for the criteria. Performs an uncommitted system call to the
-    /// configured gasless contract; the call returns `Ok(false)` whenever no contract is configured
-    /// for the chain, the tx is a deposit, or the tx is priced.
     fn is_gasless<DB>(
         &self,
         evm: &mut OpEvm<DB, NoOpInspector, PrecompilesMap>,
@@ -424,6 +414,7 @@ impl FlashblocksBuilderCtx {
 
     /// Executes cached transactions received via P2P, used to replay previously sequenced flashblock
     /// transactions when the builder changes before the full block is built.
+    /// Detects whether `tx` should execute gaslessly and runs it through the gasless fee hook.
     pub(super) fn execute_cached_flashblocks_transactions(
         &self,
         info: &mut ExecutionInfo,
@@ -481,9 +472,7 @@ impl FlashblocksBuilderCtx {
                 ));
             }
 
-            // Ensure transaction execution is valid. Replayed cached txs must be executed under
-            // the same gasless rules the producing builder used, otherwise a zero-priced
-            // whitelisted tx that was valid in the original flashblock would be rejected here.
+            // Ensure transaction execution is valid.
             let (ResultAndState { result, state }, is_gasless) =
                 match self.transact_maybe_gasless(&mut evm, &recovered_tx) {
                     Ok(res) => res,

@@ -5,6 +5,7 @@
 //! hardfork active and the on-chain gasless whitelist contract deployed and approving the transfer.
 
 use alloy_primitives::U256;
+use serde_json::json;
 use xlayer_e2e_test::operations;
 
 /// Gasless e2e across the sequencer and a validator/follower node.
@@ -110,10 +111,13 @@ async fn block_state_root_and_hash(
     client: &operations::HttpClient,
     block_number: u64,
 ) -> (String, String) {
-    let block =
-        operations::eth_get_block_by_number_or_hash(client, operations::BlockId::Number(block_number), false)
-            .await
-            .expect("block should be retrievable");
+    let block = operations::eth_get_block_by_number_or_hash(
+        client,
+        operations::BlockId::Number(block_number),
+        false,
+    )
+    .await
+    .expect("block should be retrievable");
     let state_root =
         block["stateRoot"].as_str().expect("block must include a stateRoot").to_string();
     let hash = block["hash"].as_str().expect("block must include a hash").to_string();
@@ -145,5 +149,73 @@ async fn test_gasless_debug_trace_transaction() {
     assert!(
         trace.get("structLogs").is_some() || trace.get("gas").is_some(),
         "unexpected debug_traceTransaction shape: {trace}"
+    );
+}
+
+/// A zero-priced (`maxFeePerGas == 0`) call object whose `to`/input match the whitelisted gasless
+/// transfer, so it should be detected as gasless on the RPC re-execution path. `from` is the rich
+/// account (funded). The explicit zero fee caps force the base-fee check that the gasless path must
+/// relax — without gasless awareness the node rejects it with `max fee per gas less than block base
+/// fee`.
+fn gasless_call_object() -> serde_json::Value {
+    json!({
+        "from": operations::manager::DEFAULT_RICH_ADDRESS,
+        "to": operations::manager::DEFAULT_L2_NEW_ACC1_ADDRESS,
+        "value": "0x1",
+        "gas": "0x5208", // 21000
+        "maxFeePerGas": "0x0",
+        "maxPriorityFeePerGas": "0x0",
+    })
+}
+
+/// Checks whether `eth_call` supports gasless: a zero-priced, whitelisted call must execute instead
+/// of being rejected by the base-fee check. The gasless-aware `Call::transact` override on the OP
+/// eth API is what makes this succeed; if `eth_call` is not gasless-aware the request errors with
+/// `max fee per gas less than block base fee` and this fails.
+#[tokio::test]
+async fn test_gasless_eth_call() {
+    let seq_url = operations::manager::DEFAULT_L2_SEQ_URL;
+    let client = operations::create_test_client(seq_url);
+
+    let result = operations::eth_call(&client, Some(gasless_call_object()), None)
+        .await
+        .expect("eth_call must succeed for a zero-priced gasless call (no base-fee rejection)");
+    println!("eth_call result: {result}");
+
+    // A plain native transfer to an EOA returns empty call data ("0x").
+    assert!(result.starts_with("0x"), "unexpected eth_call result: {result}");
+}
+
+/// Checks whether `eth_simulateV1` supports gasless. Runs the zero-priced whitelisted call inside a
+/// single `blockStateCalls` entry with `validation: true` so the base-fee/fee checks are exercised
+/// (the whole point of the gasless relaxation). If the simulate path is gasless-aware the inner
+/// call returns `status == 0x1`; otherwise the request is rejected with a base-fee error and this
+/// fails — answering whether `eth_simulateV1` honors gasless.
+#[tokio::test]
+async fn test_gasless_eth_simulate_v1() {
+    let seq_url = operations::manager::DEFAULT_L2_SEQ_URL;
+    let client = operations::create_test_client(seq_url);
+
+    let payload = json!({
+        "blockStateCalls": [ { "calls": [ gasless_call_object() ] } ],
+        "validation": true,
+        "traceTransfers": true,
+        "returnFullTransactions": false,
+    });
+
+    let result = operations::eth_simulate_v1(&client, payload, None).await.expect(
+        "eth_simulateV1 must succeed for a zero-priced gasless call (no base-fee rejection)",
+    );
+    println!("eth_simulateV1 result: {result}");
+
+    let call_result = result
+        .get(0)
+        .and_then(|block| block.get("calls"))
+        .and_then(|calls| calls.get(0))
+        .unwrap_or_else(|| panic!("unexpected eth_simulateV1 shape: {result}"));
+    assert_eq!(
+        call_result.get("status").and_then(|s| s.as_str()),
+        Some("0x1"),
+        "gasless call must simulate successfully: {call_result}"
     );
 }

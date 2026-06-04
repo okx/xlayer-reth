@@ -232,9 +232,7 @@ async fn gasless_zero_price_tx_not_whitelisted_rejected(
     args = gasless_args(),
     config = gasless_node_config_opt(None)
 )]
-async fn gasless_zero_price_tx_no_contract_rejected(
-    rbuilder: LocalInstance,
-) -> eyre::Result<()> {
+async fn gasless_zero_price_tx_no_contract_rejected(rbuilder: LocalInstance) -> eyre::Result<()> {
     let driver = rbuilder.driver().await?;
     let provider = driver.provider().clone();
 

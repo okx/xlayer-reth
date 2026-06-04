@@ -84,10 +84,6 @@ impl LocalInstance {
         let mut args = args;
         let task_manager = task_manager();
 
-        // Enable the gasless mempool whenever the chain has a gasless whitelist contract (i.e. an
-        // XLayer chain id). In production this is the explicit `--rollup.allow-gasless` flag; the
-        // in-process test harness derives it from the chain so gasless tests (which run on an
-        // XLayer chain id) opt in without a separate knob.
         let allow_gasless = xlayer_gasless_contract(config.chain.chain().id()).is_some();
         // Create RollupArgs separately via CLI parse trick (same pattern as BuilderArgs)
         let rollup_args =
@@ -299,9 +295,6 @@ fn task_manager() -> TaskManager {
 }
 
 fn pool_component(rollup_args: &RollupArgs) -> OpPoolBuilder {
-    // When gasless is enabled the mempool must accept zero-priced transactions (lowering
-    // `minimal_protocol_basefee` to 0), otherwise gasless txs never reach the payload builder. The
-    // percentile only affects pool ordering, not acceptance, so the default is fine for tests.
     OpPoolBuilder::default()
         .with_enable_tx_conditional(rollup_args.enable_tx_conditional)
         .with_gasless(rollup_args.allow_gasless, 0.1)
