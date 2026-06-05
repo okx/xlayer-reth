@@ -1,5 +1,4 @@
-// NOTE: Once the reth fork is updated with FlashBlockExtension, use:
-//   use crate::innertx::extract_innertx;
+use crate::innertx::EnrichedFlashBlock;
 use crate::pubsub::{
     EnrichedTransaction, FlashblockParams, FlashblockStreamEvent, FlashblockSubscriptionKind,
     FlashblocksFilter,
@@ -15,7 +14,7 @@ use jsonrpsee::{
 };
 use moka::policy::EvictionPolicy;
 use moka::sync::Cache;
-use reth_optimism_flashblocks::{PendingBlockRx, PendingFlashBlock};
+use reth_optimism_flashblocks::PendingFlashBlock;
 use reth_primitives_traits::{
     NodePrimitives, Recovered, RecoveredBlock, SealedBlock, TransactionMeta,
 };
@@ -28,6 +27,7 @@ use reth_storage_api::BlockNumReader;
 use reth_tasks::TaskSpawner;
 use reth_tracing::tracing::{trace, warn};
 use std::{collections::HashSet, future::ready, sync::Arc};
+use tokio::sync::watch;
 use tokio_stream::{wrappers::WatchStream, Stream};
 
 const MAX_TXHASH_CACHE_SIZE: u64 = 10_000;
@@ -89,7 +89,7 @@ where
     /// Subscription tasks are spawned via [`tokio::task::spawn`]
     pub fn new(
         eth_pubsub: EthPubSub<Eth>,
-        pending_block_rx: PendingBlockRx<N>,
+        pending_block_rx: watch::Receiver<Option<EnrichedFlashBlock<N>>>,
         subscription_task_spawner: Box<dyn TaskSpawner>,
         tx_converter: Eth::RpcConvert,
         max_subscribed_addresses: usize,
@@ -195,7 +195,7 @@ where
 #[derive(Clone)]
 pub struct FlashblocksPubSubInner<Eth: EthApiTypes, N: NodePrimitives> {
     /// Pending block receiver from flashblocks, if available
-    pub(crate) pending_block_rx: PendingBlockRx<N>,
+    pub(crate) pending_block_rx: watch::Receiver<Option<EnrichedFlashBlock<N>>>,
     /// The type that's used to spawn subscription tasks.
     pub(crate) subscription_task_spawner: Box<dyn TaskSpawner>,
     /// RPC transaction converter.
@@ -220,26 +220,23 @@ where
             .build();
 
         WatchStream::new(self.pending_block_rx.clone())
-            .filter_map(move |pending_block_opt| {
-                ready(pending_block_opt.map(|pending_block| {
-                    // Read pre-computed innertx from the extension (set by the
-                    // enricher bridge task or the worker hook).
-                    // Once the reth fork is updated with FlashBlockExtension:
-                    //   extract_innertx(pending_block.extension.as_ref())
+            .filter_map(move |enriched_opt| {
+                ready(enriched_opt.map(|enriched| {
+                    // Read pre-computed innertx from the side-channel wrapper
+                    // (set by the enricher bridge task) only when a subscriber
+                    // requested it.
                     let block_innertx = if filter.sub_tx_filter.tx_inner_tx {
-                        pending_block.extension.as_ref().and_then(|ext| {
-                            ext.downcast_ref::<Vec<Vec<xlayer_innertx::innertx_inspector::InternalTransaction>>>()
-                        })
+                        enriched.innertx.as_deref()
                     } else {
                         None
                     };
 
                     futures::stream::iter(Self::flashblock_to_stream_events(
-                        &pending_block,
+                        &enriched.block,
                         &filter,
                         &tx_converter,
                         &txhash_cache,
-                        block_innertx.map(|v| v.as_slice()),
+                        block_innertx,
                     ))
                 }))
             })

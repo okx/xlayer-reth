@@ -24,10 +24,9 @@ use reth_optimism_cli::Cli;
 use reth_optimism_node::{args::RollupArgs, OpNode};
 use reth_rpc_server_types::RethRpcModule;
 
-use reth_optimism_flashblocks::FlashBlockExtension;
 use xlayer_chainspec::XLayerChainSpecParser;
 use xlayer_flashblocks::handler::FlashblocksService;
-use xlayer_flashblocks::innertx::InnerTxHook;
+use xlayer_flashblocks::innertx::{EnrichedFlashBlock, InnerTxHook};
 use xlayer_flashblocks::subscription::FlashblocksPubSub;
 use xlayer_innertx::{
     db_utils::initialize_inner_tx_db,
@@ -182,53 +181,51 @@ fn main() {
                         {
                             let eth_pubsub = ctx.registry.eth_handlers().pubsub.clone();
 
-                            // If innertx is enabled, create a bridge task that enriches
-                            // each `PendingFlashBlock` with internal transaction traces
-                            // before feeding them to the subscription layer. This computes
-                            // innertx once per flashblock update (not per subscriber).
-                            //
-                            // NOTE: Requires the reth fork to be updated with the
-                            // `FlashBlockExtension` field on `PendingFlashBlock`.
-                            // After updating the reth git rev, uncomment the bridge task below.
-                            let rx_for_pubsub = if args.xlayer_args.enable_inner_tx {
-                                let innertx_hook = InnerTxHook::new(
+                            // Bridge task: wrap each `PendingFlashBlock` in an
+                            // `EnrichedFlashBlock` for the subscription layer. When innertx is
+                            // enabled, internal-transaction traces are computed once per
+                            // flashblock update here (not per subscriber). The reth fork at this
+                            // rev has no `FlashBlockExtension` on `PendingFlashBlock`, so the
+                            // traces ride this side-channel wrapper instead of the block itself.
+                            let innertx_hook = args.xlayer_args.enable_inner_tx.then(|| {
+                                InnerTxHook::new(
                                     ctx.node().provider().clone(),
                                     ctx.node().evm_config().clone(),
-                                );
-                                let (enriched_tx, enriched_rx) =
-                                    tokio::sync::watch::channel(pending_blocks_rx.borrow().clone());
-                                let original_rx = pending_blocks_rx;
+                                )
+                            });
 
-                                ctx.node().task_executor().spawn_critical(
-                                    "xlayer-flashblocks-innertx-enricher",
-                                    Box::pin(async move {
-                                        let mut rx = original_rx;
-                                        while rx.changed().await.is_ok() {
-                                            let enriched = rx.borrow_and_update().clone().map(
-                                                |mut block| {
-                                                    if let Some(traces) =
-                                                        innertx_hook.compute_innertx(block.block())
-                                                    {
-                                                        block.extension = Some(
-                                                            FlashBlockExtension::new(traces),
-                                                        );
-                                                    }
-                                                    block
-                                                },
-                                            );
-                                            let _ = enriched_tx.send(enriched);
-                                        }
-                                    }),
-                                );
+                            let initial = pending_blocks_rx.borrow().clone().map(|block| {
+                                let innertx = innertx_hook
+                                    .as_ref()
+                                    .and_then(|hook| hook.compute_innertx(block.block()));
+                                EnrichedFlashBlock { block, innertx }
+                            });
+                            let (enriched_tx, enriched_rx) = tokio::sync::watch::channel(initial);
+                            let mut original_rx = pending_blocks_rx;
+
+                            ctx.node().task_executor().spawn_critical(
+                                "xlayer-flashblocks-innertx-enricher",
+                                Box::pin(async move {
+                                    while original_rx.changed().await.is_ok() {
+                                        let enriched =
+                                            original_rx.borrow_and_update().clone().map(|block| {
+                                                let innertx =
+                                                    innertx_hook.as_ref().and_then(|hook| {
+                                                        hook.compute_innertx(block.block())
+                                                    });
+                                                EnrichedFlashBlock { block, innertx }
+                                            });
+                                        let _ = enriched_tx.send(enriched);
+                                    }
+                                }),
+                            );
+                            if args.xlayer_args.enable_inner_tx {
                                 info!(target: "reth::cli", "xlayer innertx enricher task spawned");
-                                enriched_rx
-                            } else {
-                                pending_blocks_rx
-                            };
+                            }
 
                             let flashblocks_pubsub = FlashblocksPubSub::new(
                                 eth_pubsub,
-                                rx_for_pubsub,
+                                enriched_rx,
                                 Box::new(ctx.node().task_executor().clone()),
                                 new_op_eth_api.converter().clone(),
                                 xlayer_args.flashblocks_subscription_max_addresses,

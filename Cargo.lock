@@ -14199,6 +14199,7 @@ name = "xlayer-flashblocks"
 version = "0.1.0"
 dependencies = [
  "alloy-consensus",
+ "alloy-evm",
  "alloy-json-rpc",
  "alloy-primitives",
  "alloy-rpc-types-eth",
@@ -14207,10 +14208,12 @@ dependencies = [
  "futures",
  "jsonrpsee",
  "moka",
+ "reth-evm",
  "reth-node-api",
  "reth-node-core",
  "reth-optimism-flashblocks",
  "reth-primitives-traits",
+ "reth-revm",
  "reth-rpc",
  "reth-rpc-convert",
  "reth-rpc-eth-api",
@@ -14219,12 +14222,14 @@ dependencies = [
  "reth-storage-api",
  "reth-tasks",
  "reth-tracing",
+ "revm-database",
  "serde",
  "serde_json",
  "tokio",
  "tokio-stream",
  "tracing",
  "xlayer-builder",
+ "xlayer-innertx",
 ]
 
 [[package]]
@@ -14314,10 +14319,12 @@ dependencies = [
  "reth-node-builder",
  "reth-optimism-cli",
  "reth-optimism-evm",
+ "reth-optimism-flashblocks",
  "reth-optimism-node",
  "reth-optimism-payload-builder",
  "reth-payload-builder",
  "reth-rpc-server-types",
+ "tokio",
  "tracing",
  "url",
  "xlayer-builder",

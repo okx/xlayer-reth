@@ -1,6 +1,7 @@
 use alloy_consensus::BlockHeader as _;
 use alloy_evm::block::BlockExecutor;
 use reth_evm::ConfigureEvm;
+use reth_optimism_flashblocks::PendingFlashBlock;
 use reth_primitives_traits::{BlockBody as _, NodePrimitives, RecoveredBlock};
 use reth_revm::database::StateProviderDatabase;
 use reth_storage_api::StateProviderFactory;
@@ -8,16 +9,31 @@ use revm_database::states::State;
 use tracing::warn;
 use xlayer_innertx::innertx_inspector::{InternalTransaction, TraceCollector};
 
-// NOTE: Once the reth fork is updated with the hook changes, replace this with:
-//   use reth_optimism_flashblocks::hook::{FlashBlockExtension, PostExecutionHook};
-// For now, we define a local shim type for the extension data type used by the
-// bridge task in main.rs.
-
-/// Type used to store innertx traces inside a `FlashBlockExtension`.
-/// The bridge enricher task wraps `Vec<Vec<InternalTransaction>>` in a
-/// `FlashBlockExtension::new(traces)`, and consumers downcast via
-/// `extract_innertx`.
+/// Type used to carry innertx traces alongside a flashblock.
+///
+/// Each outer entry corresponds positionally to a transaction in the block;
+/// the inner vector holds that transaction's internal traces.
 pub type InnerTxTraces = Vec<Vec<InternalTransaction>>;
+
+/// A pending flashblock paired with optional pre-computed innertx traces.
+///
+/// The reth fork at the current rev does not expose `FlashBlockExtension` on
+/// `PendingFlashBlock`, so innertx is threaded to the subscription layer through
+/// this side-channel wrapper instead. The enricher bridge task in `main.rs`
+/// computes traces once per flashblock update and wraps each block here; the
+/// subscription layer reads `innertx` back out when a subscriber requests it.
+pub struct EnrichedFlashBlock<N: NodePrimitives> {
+    /// The pending flashblock.
+    pub block: PendingFlashBlock<N>,
+    /// Pre-computed per-transaction innertx traces, if computed.
+    pub innertx: Option<InnerTxTraces>,
+}
+
+impl<N: NodePrimitives> Clone for EnrichedFlashBlock<N> {
+    fn clone(&self) -> Self {
+        Self { block: self.block.clone(), innertx: self.innertx.clone() }
+    }
+}
 
 /// Computes internal transaction traces for a block by replaying execution
 /// with a [`TraceCollector`] inspector.
@@ -58,26 +74,13 @@ impl<P, E> InnerTxHook<P, E> {
                 warn!(
                     target: "xlayer::flashblocks::innertx",
                     %err,
-                    "Failed to compute innertx in post-execution hook"
+                    "Failed to compute innertx for flashblock"
                 );
                 None
             }
         }
     }
 }
-
-// NOTE: Once the reth fork is updated, implement the PostExecutionHook trait:
-//
-// impl<P, E, N> PostExecutionHook<N> for InnerTxHook<P, E>
-// where
-//     P: StateProviderFactory + Send + Sync + 'static,
-//     E: ConfigureEvm<Primitives = N> + Send + Sync + 'static,
-//     N: NodePrimitives + 'static,
-// {
-//     fn on_executed(&self, block: &RecoveredBlock<N::Block>) -> Option<FlashBlockExtension> {
-//         self.compute_innertx::<N>(block).map(FlashBlockExtension::new)
-//     }
-// }
 
 /// Replays a block with [`TraceCollector`] to capture internal transaction traces.
 fn replay_block_innertx<P, E, N>(
@@ -109,22 +112,3 @@ where
 
     Ok(inspector.get())
 }
-
-/// Convenience function to extract innertx data from a `FlashBlockExtension`.
-///
-/// Once the reth fork is updated, this downcasts from the type-erased extension.
-/// For now it works with the bridge task's direct `InnerTxTraces` value.
-///
-/// Returns `None` if the extension is absent or does not contain innertx data.
-pub fn extract_innertx_from_traces(
-    traces: Option<&InnerTxTraces>,
-) -> Option<&Vec<Vec<InternalTransaction>>> {
-    traces
-}
-
-// NOTE: Once the reth fork is updated with FlashBlockExtension, use this instead:
-// pub fn extract_innertx(
-//     extension: Option<&FlashBlockExtension>,
-// ) -> Option<&Vec<Vec<InternalTransaction>>> {
-//     extension.and_then(|ext| ext.downcast_ref::<Vec<Vec<InternalTransaction>>>())
-// }
