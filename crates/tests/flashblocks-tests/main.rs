@@ -199,7 +199,7 @@ async fn fb_benchmark_native_tx_confirmation() {
             operations::DEFAULT_L2_NETWORK_URL,
             U256::from(operations::GWEI),
             test_address,
-            true,
+            false,
         )
         .await
         .unwrap();
