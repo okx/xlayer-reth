@@ -1289,7 +1289,7 @@ async fn fb_benchmark_native_tx_confirmation() {
             U256::from(operations::GWEI),
             test_address,
             None,
-            true,
+            false,
         )
         .await
         .unwrap();
