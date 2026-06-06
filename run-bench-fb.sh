@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+# 3-mode bench wrapper for JIT-AOT comparison.
+#
+# Usage:
+#   MODE=nojit                  ./run-bench-aot.sh     # Pure interpreter
+#   MODE=jit_cold               ./run-bench-aot.sh     # JIT, no persistence (in-memory only)
+#   MODE=aot AOT_PREWARMUP=1    ./run-bench-aot.sh     # First-run AOT: warm cache to disk, then bench
+#   MODE=aot                    ./run-bench-aot.sh     # Subsequent AOT: load existing cache, then bench
+#
+# Env:
+#   AOT_DIR     — directory for persistent dylib cache (default: $HOME/.xlayer-fb-bench)
+#   BLOCK_TIME  — passed to run.sh (default: 1s)
+set -euo pipefail
+
+MODE="${MODE:-jit_cold}"
+XLAYER_DIR="/Users/jiezhang/meili/jie.zhang1_dacs_at_okg.com/114/Documents/repository/xlayer-reth"
+SA_DIR="/Users/jiezhang/meili/jie.zhang1_dacs_at_okg.com/114/Documents/SA-Benchmark"
+PROJECT_ROOT="/Users/jiezhang/meili/jie.zhang1_dacs_at_okg.com/114/Documents/repository/xlayer-reth"
+RESULT_DIR="$PROJECT_ROOT/bench-results"
+AOT_DIR="${AOT_DIR:-$PROJECT_ROOT/fb-cache}"
+mkdir -p "$RESULT_DIR"
+
+case "$MODE" in
+    nojit)    JIT_FLAG=0; AOT_DIR_ARG="" ;;
+    jit_cold) JIT_FLAG=1; AOT_DIR_ARG="" ;;
+    aot)      JIT_FLAG=1; AOT_DIR_ARG="$AOT_DIR" ;;
+    *)        echo "MODE must be one of: nojit, jit_cold, aot" >&2; exit 1 ;;
+esac
+
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+NODE_LOG="$RESULT_DIR/fb-node-${MODE}-${TIMESTAMP}.log"
+RESULT_OUT="$RESULT_DIR/fb-result-${MODE}-${TIMESTAMP}.out"
+DEPLOY_LOG="$RESULT_DIR/fb-deploy-${MODE}-${TIMESTAMP}.log"
+WARMUP_LOG="$RESULT_DIR/fb-warmup-${MODE}-${TIMESTAMP}.out"
+
+# ============================================================================
+# Helper functions
+# ============================================================================
+
+start_node() {
+    local jit_flag="$1"
+    local aot_dir="$2"
+    local logfile="$3"
+    pkill -9 -f xlayer-reth-jit 2>/dev/null || true
+    sleep 2
+    rm -rf "$PROJECT_ROOT/jit-data" "$PROJECT_ROOT/jit-logs"
+    rm -f "$PROJECT_ROOT/reth.ipc"
+    cd "$XLAYER_DIR"
+    # Force TMPDIR to a writable project-local location. macOS sandbox blocks the
+    # default /var/folders/... TMPDIR when the binary is launched from inside
+    # Claude Code, breaking revmc's tempfile::tempdir() calls for LLVM linking.
+    local tmp_override="$XLAYER_DIR/target/test_tmp"
+    mkdir -p "$tmp_override" 2>/dev/null || true
+    TMPDIR="$tmp_override" XLAYER_JIT_ENABLED=$jit_flag XLAYER_AOT_DIR="$aot_dir" \
+        BLOCK_TIME="${BLOCK_TIME:-1s}" \
+        ./run-fb.sh > "$logfile" 2>&1 &
+    echo $!
+}
+
+wait_for_rpc() {
+    for i in $(seq 1 60); do
+        if curl -s http://127.0.0.1:8545 -X POST \
+             -H 'Content-Type: application/json' \
+             -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' 2>/dev/null \
+           | grep -q result; then
+            echo "RPC ready (${i}s)"
+            return 0
+        fi
+        sleep 1
+    done
+    echo "ERROR: RPC not ready in 60s" >&2
+    return 1
+}
+
+stop_node() {
+    local pid="$1"
+    kill "$pid" 2>/dev/null || true
+    sleep 3
+    pkill -9 -f xlayer-reth-jit 2>/dev/null || true
+}
+
+deploy_contracts() {
+    local logfile="$1"
+    export PATH="/Users/jiezhang/.nvm/versions/node/v20.20.2/bin:$PATH"
+    cd "$SA_DIR"
+    sed -i '' 's/^DEPLOY_CONTRACTS=.*/DEPLOY_CONTRACTS=true/' .env
+    if ! npx hardhat run scripts/deploy/deploy.ts --network local --no-compile > "$logfile" 2>&1; then
+        echo "ERROR: yarn deploy failed" >&2
+        tail -30 "$logfile" >&2
+        return 1
+    fi
+    sed -i '' 's/^DEPLOY_CONTRACTS=.*/DEPLOY_CONTRACTS=false/' .env
+    sleep 5
+}
+
+warmup_polycli() {
+    local logfile="$1"
+    cd "$SA_DIR"
+    local orig=$(grep '^TOTAL_UOP=' .env | cut -d= -f2)
+    sed -i '' 's/^TOTAL_UOP=.*/TOTAL_UOP=2000/' .env
+    export PATH="$HOME/go/bin:$PATH"
+    ./2-bench.sh > "$logfile" 2>&1 || true
+    sed -i '' "s/^TOTAL_UOP=.*/TOTAL_UOP=$orig/" .env
+}
+
+drain_txpool() {
+    for drain in $(seq 1 60); do
+        local pool=$(curl -s http://127.0.0.1:8545 -X POST -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","method":"txpool_status","params":[],"id":1}' 2>/dev/null)
+        local pend_hex=$(echo "$pool" | grep -oE '"pending":"0x[0-9a-fA-F]+"' | grep -oE '0x[0-9a-fA-F]+' || echo "0x0")
+        local queu_hex=$(echo "$pool" | grep -oE '"queued":"0x[0-9a-fA-F]+"' | grep -oE '0x[0-9a-fA-F]+' || echo "0x0")
+        local pend=$((pend_hex))
+        local queu=$((queu_hex))
+        if [ "$pend" -eq 0 ] && [ "$queu" -eq 0 ]; then
+            echo "txpool drained after ${drain}s"
+            return 0
+        fi
+        sleep 1
+    done
+}
+
+# ============================================================================
+# Step A: AOT prewarmup (mode=aot first run only)
+# ============================================================================
+
+if [ "$MODE" = "aot" ] && [ "${AOT_PREWARMUP:-0}" = "1" ]; then
+    echo ""
+    echo "================================================================="
+    echo "[aot prewarmup] populating $AOT_DIR with JIT compilations"
+    echo "================================================================="
+    rm -rf "$AOT_DIR"
+    mkdir -p "$AOT_DIR"
+
+    PREWARM_LOG="$RESULT_DIR/fb-prewarmup-${TIMESTAMP}.log"
+    NODE_PID=$(start_node 1 "$AOT_DIR" "$PREWARM_LOG")
+    echo "prewarmup node PID=$NODE_PID, log=$PREWARM_LOG"
+    wait_for_rpc
+
+    deploy_contracts "$RESULT_DIR/fb-prewarmup-deploy-${TIMESTAMP}.log"
+    echo "running warmup polycli (2000 UOP)..."
+    warmup_polycli "$RESULT_DIR/fb-prewarmup-warmup-${TIMESTAMP}.out"
+    sleep 10  # give workers time to flush compiled artifacts to disk
+
+    stop_node "$NODE_PID"
+    sleep 3
+    ART_COUNT=$(ls "$AOT_DIR"/*.so 2>/dev/null | wc -l | tr -d ' ')
+    MANIFEST_COUNT=$(ls "$AOT_DIR"/*.manifest.json 2>/dev/null | wc -l | tr -d ' ')
+    echo "AOT cache populated: $ART_COUNT dylib + $MANIFEST_COUNT manifests in $AOT_DIR"
+    if [ "$ART_COUNT" -eq 0 ]; then
+        echo "WARN: AOT prewarmup produced no artifacts; subsequent aot run will fall back to JIT cold"
+    fi
+fi
+
+# ============================================================================
+# Step B: real measurement
+# ============================================================================
+
+echo ""
+echo "================================================================="
+echo "[$MODE] real measurement run (jit=$JIT_FLAG aot_dir='$AOT_DIR_ARG')"
+echo "================================================================="
+
+NODE_PID=$(start_node $JIT_FLAG "$AOT_DIR_ARG" "$NODE_LOG")
+echo "node PID=$NODE_PID, log=$NODE_LOG"
+wait_for_rpc
+
+if [ "$MODE" = "aot" ] && [ -d "$AOT_DIR" ]; then
+    # Probe node log for the "AOT store opened loaded=N" line
+    sleep 1
+    if grep -q "AOT store opened" "$NODE_LOG" 2>/dev/null; then
+        echo "AOT preload OK: $(grep "AOT store opened" "$NODE_LOG" | tail -1)"
+    else
+        echo "WARN: did not see 'AOT store opened' in node log"
+    fi
+fi
+
+deploy_contracts "$DEPLOY_LOG"
+echo "deploy ok"
+
+echo "=== [$MODE] JIT warmup (2000 UOP) ==="
+warmup_polycli "$WARMUP_LOG"
+
+echo "=== [$MODE] drain txpool ==="
+drain_txpool
+sleep 5
+
+echo "=== [$MODE] real bench ==="
+cd "$SA_DIR"
+./2-bench.sh 2>&1 | tee "$RESULT_OUT"
+BENCH_EXIT=${PIPESTATUS[0]}
+
+stop_node "$NODE_PID"
+
+echo ""
+echo "================================================================="
+echo "[$MODE] DONE"
+echo "================================================================="
+echo "Bench result:    $RESULT_OUT"
+echo "Node log:        $NODE_LOG"
+echo "Warmup log:      $WARMUP_LOG"
+[ -n "$AOT_DIR_ARG" ] && echo "AOT dir:         $AOT_DIR_ARG ($(ls "$AOT_DIR_ARG"/*.so 2>/dev/null | wc -l | tr -d ' ') dylib)"
+echo ""
+echo "=== Final TPS ==="
+grep -iE "Final TPS|tps=" "$RESULT_OUT" | tail -3
+
+# Pull AOT stats from node log if available
+if grep -q "AOT store opened" "$NODE_LOG" 2>/dev/null; then
+    echo ""
+    echo "=== AOT stats from node log ==="
+    grep -E "AOT store opened|JIT runtime enabled" "$NODE_LOG" | head -5
+fi
+
+exit $BENCH_EXIT

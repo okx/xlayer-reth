@@ -29,3 +29,14 @@ copilot.pem
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Git worktrees (Superpowers convention)
+.worktrees/
+
+# Bench artifacts (large binaries / data / outputs)
+/aot-cache/
+/bench-results/
+/bin/
+/golden-state/
+/jit-data/
+/bench-data/bench-opstack-genesis-nojovian-600m.json
