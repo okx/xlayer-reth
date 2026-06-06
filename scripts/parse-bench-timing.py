@@ -34,6 +34,39 @@ KV_RE = re.compile(r"\b([a-z_][a-z0-9_]*)=(\d+)")
 # the \b word boundary used in KV_RE.
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
+# --- tslog reader ----------------------------------------------------------
+# Format: `ts=1717228800.000000 phase=<name> [key=value ...]`
+# All keys/values are bareword tokens separated by spaces. Values are kept
+# as strings; the caller converts numerics where needed.
+TSLOG_KV_RE = re.compile(r"\b([a-z_][a-z0-9_]*)=([^\s]+)")
+
+
+def read_tslog(path: Path) -> list[dict]:
+    """Parse one .tslog file into a list of event dicts.
+
+    Each line yields one dict with at least `ts` (float) and `phase` (str)
+    keys, plus any extra `key=value` tokens kept as strings.
+
+    Returns `[]` if the file is missing.
+    """
+    if not path.exists():
+        return []
+    events: list[dict] = []
+    with path.open(errors="replace") as f:
+        for raw in f:
+            kv = dict(TSLOG_KV_RE.findall(raw))
+            if "ts" not in kv or "phase" not in kv:
+                continue
+            event = {"phase": kv.pop("phase")}
+            try:
+                event["ts"] = float(kv.pop("ts"))
+            except ValueError:
+                continue
+            event.update(kv)
+            events.append(event)
+    return events
+
+
 PHASE_FIELDS = (
     "pre_exec_us",
     "seq_txs_us",

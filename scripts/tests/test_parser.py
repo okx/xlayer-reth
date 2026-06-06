@@ -21,9 +21,13 @@ FIXTURES = HERE / "fixtures"
 class TestTslogReader(unittest.TestCase):
     def test_complete_tslog_loads(self):
         events = ptm.read_tslog(FIXTURES / "complete-run" / "aot-cycle-aot-20260601_120000.tslog")
+        self.assertEqual(len(events), 19)
         self.assertEqual(events[0]["phase"], "run_start")
         self.assertEqual(events[-1]["phase"], "run_end")
         self.assertEqual(events[0]["mode"], "aot")
+        self.assertEqual(events[8]["phase"], "warmup_start")
+        self.assertEqual(events[8]["block"], "8")  # block kept as string from regex
+        self.assertAlmostEqual(events[0]["ts"], 1717228800.0, places=3)
 
     def test_partial_tslog_loads_without_run_end(self):
         events = ptm.read_tslog(FIXTURES / "partial-tslog" / "aot-cycle-nojit-20260601_120100.tslog")
