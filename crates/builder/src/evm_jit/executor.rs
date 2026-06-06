@@ -148,6 +148,7 @@ where
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
         let chain_spec = ctx.chain_spec();
         let backend = build_backend_from_env();
+        spawn_periodic_jit_stats(backend.clone());
         Ok(OpEvmConfig {
             executor_factory: OpBlockExecutorFactory::new(
                 OpRethReceiptBuilder::default(),
@@ -158,4 +159,45 @@ where
             _pd: PhantomData,
         })
     }
+}
+
+/// Spawns a background task that emits a single-line `info!` log every
+/// `XLAYER_JIT_STATS_INTERVAL_MS` (default 1000 ms) with the current
+/// [`JitBackend`] statistics snapshot. Disabled when the interval is `0`.
+///
+/// Each log line is grep-friendly:
+///
+/// ```text
+/// INFO xlayer::jit::stats resident=4 compile_ok=4 compile_err=0 dispatched=4 \
+///      lookups_hits=12345 lookups_misses=4 pending=0 evictions=0 code_bytes=1234567
+/// ```
+fn spawn_periodic_jit_stats(backend: JitBackend) {
+    let interval_ms: u64 = env_or("XLAYER_JIT_STATS_INTERVAL_MS", 1000);
+    if interval_ms == 0 {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut ticker =
+            tokio::time::interval(std::time::Duration::from_millis(interval_ms));
+        // The first tick fires immediately; consume it so the first emitted line
+        // reflects at least `interval_ms` of runtime activity.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let s = backend.stats();
+            tracing::info!(
+                target: "xlayer::jit::stats",
+                resident = s.resident_entries,
+                compile_ok = s.compilations_succeeded,
+                compile_err = s.compilations_failed,
+                dispatched = s.compilations_dispatched,
+                lookup_hits = s.lookup_hits,
+                lookup_misses = s.lookup_misses,
+                pending = s.pending_jobs,
+                evictions = s.evictions,
+                code_bytes = s.jit_code_bytes,
+                "jit_periodic_stats"
+            );
+        }
+    });
 }
