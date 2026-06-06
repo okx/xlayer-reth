@@ -1,0 +1,3 @@
+2026-06-01T12:02:00.000000Z  INFO reth: starting reth node
+2026-06-01T12:02:01.000000Z  INFO reth::rpc: RPC server started
+2026-06-01T12:02:02.000000Z  INFO xlayer::jit: JIT runtime enabled enabled=false blocking=false

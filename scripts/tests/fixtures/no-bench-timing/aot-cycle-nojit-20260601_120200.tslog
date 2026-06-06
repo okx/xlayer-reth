@@ -1,0 +1,19 @@
+ts=1717229000.000000 phase=run_start mode=nojit round=1
+ts=1717229000.000123 phase=cleanup_start
+ts=1717229002.010357 phase=cleanup_end
+ts=1717229002.010500 phase=cp_golden_start
+ts=1717229010.551522 phase=cp_golden_end
+ts=1717229010.551700 phase=node_start
+ts=1717229011.786200 phase=rpc_wait_start
+ts=1717229012.773800 phase=rpc_ready
+ts=1717229012.900000 phase=warmup_start block=8
+ts=1717229058.103440 phase=warmup_end block=24
+ts=1717229058.103600 phase=drain_start
+ts=1717229066.313600 phase=drain_end
+ts=1717229066.313700 phase=sleep5_start
+ts=1717229071.314930 phase=sleep5_end
+ts=1717229071.315000 phase=real_bench_start block=42
+ts=1717229258.747100 phase=real_bench_end block=287
+ts=1717229258.747200 phase=stop_node_start
+ts=1717229263.759203 phase=stop_node_end
+ts=1717229263.759300 phase=run_end

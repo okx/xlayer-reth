@@ -1,0 +1,11 @@
+============== ERC4337 Test Parameters ==================
+Total UOP: 50000
+Batch Size: 1
+Total Transactions: 50000
+Concurrency: 50
+Rate Limit: 5000
+Call Data Type: APPROVE_ERC20
+Starting loadtest ... (Results will be saved to result_20260601_1200.out)
+...
+loadtest finished tps=287.30 numErrors=0
+Final TPS: 287.30

@@ -1,0 +1,19 @@
+ts=1717228800.000000 phase=run_start mode=aot round=1
+ts=1717228800.000123 phase=cleanup_start
+ts=1717228802.010357 phase=cleanup_end
+ts=1717228802.010500 phase=cp_golden_start
+ts=1717228810.551522 phase=cp_golden_end
+ts=1717228810.551700 phase=node_start
+ts=1717228811.786200 phase=rpc_wait_start
+ts=1717228812.773800 phase=rpc_ready
+ts=1717228812.900000 phase=warmup_start block=8
+ts=1717228858.103440 phase=warmup_end block=24
+ts=1717228858.103600 phase=drain_start
+ts=1717228866.313600 phase=drain_end
+ts=1717228866.313700 phase=sleep5_start
+ts=1717228871.314930 phase=sleep5_end
+ts=1717228871.315000 phase=real_bench_start block=42
+ts=1717229058.747100 phase=real_bench_end block=287
+ts=1717229058.747200 phase=stop_node_start
+ts=1717229063.759203 phase=stop_node_end
+ts=1717229063.759300 phase=run_end

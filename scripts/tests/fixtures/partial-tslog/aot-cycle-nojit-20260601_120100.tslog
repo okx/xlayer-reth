@@ -1,0 +1,9 @@
+ts=1717228900.000000 phase=run_start mode=nojit round=1
+ts=1717228900.000200 phase=cleanup_start
+ts=1717228902.000200 phase=cleanup_end
+ts=1717228902.000400 phase=cp_golden_start
+ts=1717228910.500000 phase=cp_golden_end
+ts=1717228910.500200 phase=node_start
+ts=1717228911.500000 phase=rpc_wait_start
+ts=1717228912.500000 phase=rpc_ready
+ts=1717228912.600000 phase=warmup_start block=8
