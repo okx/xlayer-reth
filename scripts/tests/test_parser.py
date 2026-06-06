@@ -36,5 +36,30 @@ class TestTslogReader(unittest.TestCase):
         self.assertNotIn("run_end", phases)
 
 
+class TestNodeLogReader(unittest.TestCase):
+    def test_complete_node_log(self):
+        result = ptm.read_node_log(FIXTURES / "complete-run" / "aot-node-aot-20260601_120000.log")
+        self.assertGreater(len(result["blocks"]), 250)
+        first_real = next(b for b in result["blocks"] if b["block"] == 42)
+        self.assertEqual(first_real["n_seq_txs"], 1)
+        self.assertGreater(first_real["n_pool_txs"], 100)
+        self.assertGreater(len(result["jit_snapshots"]), 10)
+        self.assertIsNotNone(result["aot_open"])
+        self.assertEqual(result["aot_open"]["loaded"], 4)
+        self.assertEqual(result["aot_open"]["dlopen_us"], 142000)
+
+    def test_no_bench_timing_node_log(self):
+        result = ptm.read_node_log(FIXTURES / "no-bench-timing" / "aot-node-nojit-20260601_120200.log")
+        self.assertEqual(result["blocks"], [])
+        self.assertIsNone(result["aot_open"])
+
+
+class TestPolycliReader(unittest.TestCase):
+    def test_polycli_final_tps(self):
+        result = ptm.read_polycli_out(FIXTURES / "complete-run" / "aot-result-aot-20260601_120000.out")
+        self.assertAlmostEqual(result["final_tps"], 287.30, places=2)
+        self.assertEqual(result["num_errors"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

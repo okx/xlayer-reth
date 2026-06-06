@@ -67,6 +67,76 @@ def read_tslog(path: Path) -> list[dict]:
     return events
 
 
+# --- node log reader -------------------------------------------------------
+# Tracing emits RFC-3339 timestamps prefix: "2026-06-01T12:02:00.000000Z  INFO ..."
+NODE_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z)")
+
+
+def _parse_node_ts(line: str) -> float | None:
+    m = NODE_TS_RE.match(line)
+    if not m:
+        return None
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(m.group(1).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def read_node_log(path: Path) -> dict:
+    """Parse a node log into structured pieces.
+
+    Returns: {"blocks": [...], "jit_snapshots": [...], "aot_open": {...}|None}
+      - blocks: each dict has {block, n_total_txs, n_seq_txs, n_pool_txs, gas_used,
+                               pre_exec_us, seq_txs_us, pool_exec_us, finish_us,
+                               total_us, ts (float unix)}
+      - jit_snapshots: each dict has {ts, resident, compile_ok, lookup_hits, ...}
+      - aot_open: {dlopen_us, loaded, n_manifests, ts} or None
+    """
+    blocks: list[dict] = []
+    jit_snapshots: list[dict] = []
+    aot_open: dict | None = None
+    if not path.exists():
+        return {"blocks": blocks, "jit_snapshots": jit_snapshots, "aot_open": aot_open}
+
+    with path.open(errors="replace") as f:
+        for raw in f:
+            line = ANSI_RE.sub("", raw)
+            ts = _parse_node_ts(line)
+            if "block_phase_breakdown" in line:
+                kv = {k: int(v) for k, v in KV_RE.findall(line)}
+                if "block" in kv:
+                    kv["ts"] = ts
+                    blocks.append(kv)
+            elif "jit_periodic_stats" in line:
+                kv = {k: int(v) for k, v in KV_RE.findall(line)}
+                kv["ts"] = ts
+                jit_snapshots.append(kv)
+            elif "AOT store opened" in line:
+                kv = {k: int(v) for k, v in KV_RE.findall(line)}
+                kv["ts"] = ts
+                aot_open = kv
+    return {"blocks": blocks, "jit_snapshots": jit_snapshots, "aot_open": aot_open}
+
+
+# --- polycli out reader ----------------------------------------------------
+POLYCLI_TPS_RE = re.compile(r"Final TPS:\s*([\d.]+)")
+POLYCLI_ERR_RE = re.compile(r"numErrors=(\d+)")
+
+
+def read_polycli_out(path: Path) -> dict:
+    """Parse polycli output for Final TPS + numErrors. Missing -> None."""
+    if not path.exists():
+        return {"final_tps": None, "num_errors": None}
+    text = path.read_text(errors="replace")
+    tps_m = POLYCLI_TPS_RE.search(text)
+    err_m = POLYCLI_ERR_RE.search(text)
+    return {
+        "final_tps": float(tps_m.group(1)) if tps_m else None,
+        "num_errors": int(err_m.group(1)) if err_m else None,
+    }
+
+
 PHASE_FIELDS = (
     "pre_exec_us",
     "seq_txs_us",
