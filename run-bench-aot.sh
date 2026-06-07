@@ -32,6 +32,13 @@ NODE_LOG="$RESULT_DIR/aot-node-${MODE}-${TIMESTAMP}.log"
 RESULT_OUT="$RESULT_DIR/aot-result-${MODE}-${TIMESTAMP}.out"
 DEPLOY_LOG="$RESULT_DIR/aot-deploy-${MODE}-${TIMESTAMP}.log"
 WARMUP_LOG="$RESULT_DIR/aot-warmup-${MODE}-${TIMESTAMP}.out"
+TSLOG="$RESULT_DIR/aot-cycle-${MODE}-${TIMESTAMP}.tslog"
+ts_log() {
+    # phase=$1 [k=v ...]
+    local ts
+    ts=$(python3 -c 'import time; print(f"{time.time():.6f}")')
+    echo "ts=$ts phase=$1 ${*:2}" >> "$TSLOG"
+}
 
 # ============================================================================
 # Helper functions
@@ -41,16 +48,20 @@ start_node() {
     local jit_flag="$1"
     local aot_dir="$2"
     local logfile="$3"
+    ts_log cleanup_start
     pkill -9 -f xlayer-reth-jit 2>/dev/null || true
     sleep 2
     rm -rf "$PROJECT_ROOT/jit-data" "$PROJECT_ROOT/jit-logs"
     rm -f "$PROJECT_ROOT/reth.ipc"
+    ts_log cleanup_end
     # If a golden state snapshot exists, restore it instead of starting from
     # genesis. This skips the ~12-min hardhat recompile + deploy step that
     # would otherwise run once per mode.
     if [ -d "$PROJECT_ROOT/golden-state" ]; then
         echo "[start_node] restoring golden-state → jit-data"
+        ts_log cp_golden_start
         cp -R "$PROJECT_ROOT/golden-state" "$PROJECT_ROOT/jit-data"
+        ts_log cp_golden_end
     fi
     cd "$XLAYER_DIR"
     # Force TMPDIR to a writable project-local location. macOS sandbox blocks the
@@ -58,6 +69,7 @@ start_node() {
     # Claude Code, breaking revmc's tempfile::tempdir() calls for LLVM linking.
     local tmp_override="$XLAYER_DIR/target/test_tmp"
     mkdir -p "$tmp_override" 2>/dev/null || true
+    ts_log node_start
     TMPDIR="$tmp_override" XLAYER_JIT_ENABLED=$jit_flag XLAYER_AOT_DIR="$aot_dir" \
         BLOCK_TIME="${BLOCK_TIME:-1s}" \
         ./run.sh > "$logfile" 2>&1 &
@@ -65,12 +77,14 @@ start_node() {
 }
 
 wait_for_rpc() {
+    ts_log rpc_wait_start
     for i in $(seq 1 60); do
         if curl -s http://127.0.0.1:8545 -X POST \
              -H 'Content-Type: application/json' \
              -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' 2>/dev/null \
            | grep -q result; then
             echo "RPC ready (${i}s)"
+            ts_log rpc_ready
             return 0
         fi
         sleep 1
@@ -167,6 +181,7 @@ echo "================================================================="
 echo "[$MODE] real measurement run (jit=$JIT_FLAG aot_dir='$AOT_DIR_ARG')"
 echo "================================================================="
 
+ts_log run_start mode=$MODE
 NODE_PID=$(start_node $JIT_FLAG "$AOT_DIR_ARG" "$NODE_LOG")
 echo "node PID=$NODE_PID, log=$NODE_LOG"
 wait_for_rpc
@@ -191,18 +206,29 @@ else
 fi
 
 echo "=== [$MODE] JIT warmup (2000 UOP) ==="
+ts_log warmup_start
 warmup_polycli "$WARMUP_LOG"
+ts_log warmup_end
 
 echo "=== [$MODE] drain txpool ==="
+ts_log drain_start
 drain_txpool
+ts_log drain_end
+ts_log sleep5_start
 sleep 5
+ts_log sleep5_end
 
 echo "=== [$MODE] real bench ==="
 cd "$SA_DIR"
+ts_log real_bench_start
 ./2-bench.sh 2>&1 | tee "$RESULT_OUT"
 BENCH_EXIT=${PIPESTATUS[0]}
+ts_log real_bench_end
 
+ts_log stop_node_start
 stop_node "$NODE_PID"
+ts_log stop_node_end
+ts_log run_end
 
 echo ""
 echo "================================================================="
