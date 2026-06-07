@@ -59,13 +59,17 @@ fn expand_tilde(raw: &str) -> PathBuf {
 fn build_aot_store_from_env() -> Option<Arc<dyn ArtifactStore>> {
     let dir = std::env::var("XLAYER_AOT_DIR").ok().filter(|d| !d.is_empty())?;
     let path = expand_tilde(&dir);
+    let t_open = std::time::Instant::now();
     match PersistentArtifactStore::open(path.clone()) {
         Ok(store) => {
+            let dlopen_us = t_open.elapsed().as_micros() as u64;
             let loaded = store.len();
             tracing::info!(
                 target: "xlayer::jit::aot",
                 dir = %path.display(),
                 loaded,
+                dlopen_us,
+                n_manifests = loaded,
                 "AOT store opened"
             );
             Some(Arc::new(store) as Arc<dyn ArtifactStore>)
