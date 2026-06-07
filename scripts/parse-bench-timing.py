@@ -488,15 +488,101 @@ def cmp_table(groups: list[tuple[str, dict]]) -> None:
         print(line)
 
 
+def render_tables(data: dict) -> str:
+    """Render 4 terminal tables from a process_run() result."""
+    out = []
+    meta = data["meta"]
+    out.append(f"=== {meta['mode']} @ {meta['timestamp']} ===")
+    if meta["warnings"]:
+        out.append("WARNINGS: " + "; ".join(meta["warnings"]))
+
+    # Table 1: wall-clock by phase
+    wc = data.get("wall_clock_by_phase") or {}
+    out.append("\n--- wall-clock by phase ---")
+    out.append(f"{'phase':<20} {'us':>14} {'fraction':>10}")
+    total = wc.get("total_run_us") or 0
+    for k, v in wc.items():
+        if v is None:
+            out.append(f"{k:<20} {'n/a':>14} {'n/a':>10}")
+            continue
+        if k == "total_run_us":
+            frac = 100.0
+        else:
+            frac = (v / total * 100) if total else 0
+        out.append(f"{k:<20} {v:>14} {frac:>9.1f}%")
+
+    # Table 2: chain block phases
+    cbr = data.get("chain_blocks_real")
+    out.append(f"\n--- chain block phases (real window, n={cbr['n_blocks'] if cbr else 0}, filtered heavy) ---")
+    if cbr:
+        out.append(f"{'phase':<14} {'p50':>10} {'p95':>10} {'mean':>10}")
+        for k, v in cbr["phase_us"].items():
+            out.append(f"{k:<14} {str(v.get('p50','n/a')):>10} {str(v.get('p95','n/a')):>10} {str(v.get('mean','n/a')):>10}")
+        out.append(f"per_tx_pool_us = {cbr['per_tx_pool_us']}   per_mgas_total_us = {cbr['per_mgas_total_us']}")
+    else:
+        out.append("  (no bench_timing data in window)")
+
+    # Table 3: JIT stats delta
+    jsd = data.get("jit_stats_delta") or {}
+    out.append("\n--- JIT stats delta (real window) ---")
+    if jsd:
+        for k in ("real_window_seconds", "compile_ok_delta", "lookup_hits_delta",
+                  "lookup_misses_delta", "lookup_hit_rate", "evictions_delta"):
+            if k in jsd:
+                v = jsd[k]
+                if isinstance(v, float):
+                    out.append(f"  {k:<22} {v:.5f}")
+                else:
+                    out.append(f"  {k:<22} {v}")
+    else:
+        out.append("  (no jit::stats snapshots in window)")
+
+    # Table 4: TPS
+    tps = data["tps"]
+    out.append("\n--- TPS + ratios ---")
+    for k, v in tps.items():
+        if v is None:
+            out.append(f"  {k:<26} n/a")
+        elif isinstance(v, float):
+            out.append(f"  {k:<26} {v:.4f}")
+        else:
+            out.append(f"  {k:<26} {v}")
+    return "\n".join(out)
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--label", action="append", default=[],
-                    help="Group label; pair with following file(s) until next --label")
-    ap.add_argument("files", nargs="*", help="Log file(s)")
+    ap.add_argument("--run-dir", type=Path, help="bench-results directory containing aot-cycle/aot-node/aot-result files")
+    ap.add_argument("--mode", choices=["nojit", "jit_cold", "aot"], help="run mode (required with --run-dir)")
+    ap.add_argument("--timestamp", help="run timestamp YYYYMMDD_HHMMSS (required with --run-dir)")
+    ap.add_argument("--json-out", type=Path, help="explicit JSON output path (default: <run-dir>/cycle-timing-<mode>-<ts>.json)")
+    ap.add_argument("--min-block-txs", type=int, default=100, help="filter blocks with n_total_txs below this (default: 100)")
+    # Legacy mode (kept for backwards compatibility):
+    ap.add_argument("--label", action="append", default=[], help="legacy: group label for files")
+    ap.add_argument("files", nargs="*", help="legacy: log files for --label mode")
     args = ap.parse_args()
 
-    # Re-parse argv to interleave labels and files (argparse's action="append"
-    # doesn't preserve interleaving with positional args, so do it manually).
+    if args.run_dir:
+        if not (args.mode and args.timestamp):
+            ap.error("--mode and --timestamp are required with --run-dir")
+        data = process_run(args.run_dir, args.mode, args.timestamp)
+        json_path = args.json_out or args.run_dir / f"cycle-timing-{args.mode}-{args.timestamp}.json"
+        import json
+        json_path.write_text(json.dumps(data, indent=2))
+        print(f"JSON written: {json_path}")
+        print(render_tables(data))
+        return
+
+    _legacy_main(args)
+
+
+def _legacy_main(args):
+    """Run the original --label X.log --label Y.log behavior (preserved verbatim from prior main)."""
+    if not args.label and not args.files:
+        print("usage: parse-bench-timing.py --run-dir DIR --mode MODE --timestamp TS")
+        print("   or: parse-bench-timing.py --label nojit X.log --label aot Y.log")
+        sys.exit(1)
+    # Re-parse argv to interleave labels and files (existing logic)
     groups: list[tuple[str, list[Path]]] = []
     current_label = None
     current_files: list[Path] = []
@@ -510,26 +596,19 @@ def main():
             current_label = raw[i + 1]
             current_files = []
             i += 2
+        elif a in ("--run-dir", "--mode", "--timestamp", "--json-out", "--min-block-txs"):
+            i += 2  # skip flag + value
         else:
             current_files.append(Path(a))
             i += 1
     if current_label is not None:
         groups.append((current_label, current_files))
-    if not groups:
-        # No --label given; treat each file as its own group
-        for f in args.files:
-            groups.append((Path(f).name, [Path(f)]))
-
-    if not groups:
-        ap.print_help()
-        sys.exit(1)
 
     parsed_groups: list[tuple[str, dict]] = []
     for label, files in groups:
         parsed = merge([parse_log(p) for p in files])
         parsed_groups.append((label, parsed))
         summarize(label, parsed)
-
     cmp_table(parsed_groups)
 
 
