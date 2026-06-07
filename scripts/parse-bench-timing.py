@@ -298,9 +298,20 @@ def process_run(run_dir: Path, mode: str, timestamp: str) -> dict:
     chain_blocks_real = _chain_blocks_real(node_data["blocks"], window)
     jit_delta = _jit_stats_delta(node_data["jit_snapshots"], events)
 
+    # Augment window with derived counts (per design spec §6 bench_window).
+    rs = window.get("real_start_block")
+    re_ = window.get("real_end_block")
+    if rs is not None and re_ is not None:
+        in_window = [b for b in node_data["blocks"] if rs <= b.get("block", -1) <= re_]
+        window["n_real_blocks"] = len(in_window)
+        window["n_blocks_filtered_light"] = len(in_window) - (
+            chain_blocks_real["n_blocks"] if chain_blocks_real else 0
+        )
+    else:
+        window["n_real_blocks"] = None
+        window["n_blocks_filtered_light"] = None
+
     if chain_blocks_real and "real_bench_us" in wall_clock:
-        rs = window.get("real_start_block")
-        re_ = window.get("real_end_block")
         sum_total_us = sum(b.get("total_us", 0) for b in node_data["blocks"] if rs <= b.get("block", -1) <= re_)
         ratio = sum_total_us / wall_clock["real_bench_us"] if wall_clock["real_bench_us"] else None
     else:

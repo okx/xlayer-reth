@@ -86,6 +86,9 @@ class TestProcessRun(unittest.TestCase):
         self.assertEqual(bw["warmup_end_block"], 24)
         self.assertEqual(bw["real_start_block"], 42)
         self.assertEqual(bw["real_end_block"], 287)
+        # Design spec §6: bench_window also exposes derived counts.
+        self.assertEqual(bw["n_real_blocks"], 287 - 42 + 1)
+        self.assertGreaterEqual(bw["n_blocks_filtered_light"], 0)
 
         # chain_blocks_real: filter heavy blocks (>= 100 txs)
         cbr = result["chain_blocks_real"]
