@@ -178,15 +178,59 @@ python3 scripts/parse-bench-timing.py \
 
 ---
 
-## 7. 当前 git 状态
+## 6.5 Instrumentation reference (2026-06-07 更新)
+
+完整 schema + 设计动机见:
+- `docs/superpowers/specs/2026-06-07-jit-bench-timing-instrumentation-design.md`
+- `docs/superpowers/plans/2026-06-07-jit-bench-timing-instrumentation.md`
+
+| 数据点 | 来源 | 输出文件 |
+|---|---|---|
+| 每个 phase 的 wall-clock | shell `ts_log` | `bench-results/aot-cycle-${MODE}-${TS}.tslog` |
+| 每 round × mode + cool_down 的边界 | shell `ts_log_outer` | `bench-results/paid-Nx3-*/paid-Nx3-cycle.tslog` |
+| 每块 chain CPU 4 段 + `n_seq_txs` / `n_pool_txs` | `xlayer::bench_timing` info!(op-reth `OpBuilder::build`) | node log |
+| 每秒 JIT counter 累计 | `xlayer::jit::stats` info!(`executor.rs`) | node log |
+| AOT dlopen 耗时 + 装载 dylib 数 | `xlayer::jit::aot` info!(`build_aot_store_from_env`,含 `dlopen_us` 字段) | node log |
+| polycli Final TPS | SA-Bench 自己 emit | `bench-results/aot-result-${MODE}-${TS}.out` |
+
+**Parser 新用法**:
+```bash
+# 单 run 出 JSON + 4 张终端表
+python3 scripts/parse-bench-timing.py \
+    --run-dir bench-results \
+    --mode aot \
+    --timestamp 20260607_143012 \
+    [--min-block-txs 100]    # 心跳过滤阈值,默认 100
+
+# 老用法仍兼容(legacy --label mode)
+python3 scripts/parse-bench-timing.py \
+    --label nojit X.log --label aot Y.log
+```
+
+**JSON 关键字段**(`bench-results/cycle-timing-${MODE}-${TS}.json`):
+- `wall_clock_by_phase.*_us`: 9 个 phase 微秒数 + `total_run_us`(总)
+- `bench_window.{warmup,real}_{start,end}_block`: 4 个 block sentinels + `n_real_blocks` + `n_blocks_filtered_light`
+- `chain_blocks_real.phase_us.{pre_exec,seq_txs,pool_exec,finish,total}`: real 窗口内,过滤心跳后,4+1 段 chain CPU 的 p50/p95/mean
+- `chain_blocks_real.per_tx_pool_us`: `Σpool_exec_us / Σn_pool_txs` — 单 tx 纯 EVM 时间
+- `chain_blocks_real.per_mgas_total_us`: `Σtotal_us / (Σgas_used/1e6)` — 比 us/tx 更稳的归一化指标
+- `jit_stats_delta`: real 窗口和 warmup 窗口内的 JIT counter 增量(分开,真正反映 bench 期间 JIT 行为)
+- `aot.{dlopen_us, n_dylib_loaded}`: AOT 启动 dlopen 耗时 + 装载 dylib 数(AOT mode 才有)
+- `tps.wall_clock_bench_ratio`: chain block CPU 占 polycli wall-clock 的比例(典型 ~10%,即 §9 老问题)
+- `meta.warnings`: 数据缺失场景的告警(`tslog_missing` / `tslog_partial` / `no_bench_timing_lines` 等)
+
+**Parser 单元测试**: `python3 -m unittest scripts.tests.test_parser -v` — 8 个 fixture 测试覆盖 complete-run / partial-tslog / no-bench-timing 三类场景
+
+---
+
+## 7. 当前 git 状态(2026-06-07 更新)
 
 | 项 | 值 |
 |---|---|
-| xlayer-reth 分支 | `xl/jit-timing`(基于 `xl/jit-upstream`)|
-| 改动文件 | `crates/builder/src/evm_jit/executor.rs` + submodule pointer |
-| op-reth submodule 分支 | `xl/jit-bench-timing`(基于 `xl/jit-evm-factory-generic`)|
-| 改动文件 | `deps/optimism/rust/op-reth/crates/payload/src/builder.rs` |
-| 是否已 commit | **未 commit**,均为工作树修改 |
+| xlayer-reth 分支 | `xl/jit-timing` |
+| 包含 commit | baseline + JIT periodic stats + bump op-reth + AOT dlopen_us + 4 个 shell/parser commit + 多个 reviewer 修正 + docs |
+| op-reth submodule 分支 | `xl/jit-bench-timing` |
+| 包含 commit | 4-phase timing + `n_seq_txs` / `n_pool_txs`(`cumulative_tx_count` 加入 `ExecutionInfo`) |
+| 是否已 push | 见 Task 16 完成状态 |
 
 ---
 
