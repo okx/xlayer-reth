@@ -17,8 +17,17 @@ OUT_DIR="$PROJECT_ROOT/bench-results/paid-${ROUNDS}x3-$TS"
 mkdir -p "$OUT_DIR"
 SUMMARY="$OUT_DIR/SUMMARY.txt"
 : > "$SUMMARY"
+OUTER_TSLOG="$OUT_DIR/paid-Nx3-cycle.tslog"
+ts_log_outer() {
+    # phase=$1 [k=v ...]
+    local ts
+    ts=$(python3 -c 'import time; print(f"{time.time():.6f}")')
+    echo "ts=$ts phase=$1 ${*:2}" >> "$OUTER_TSLOG"
+}
 
 cd "$XLAYER_DIR"
+
+ts_log_outer driver_start rounds=$ROUNDS
 
 COOL_DOWN="${COOL_DOWN:-60}"
 run_one() {
@@ -29,10 +38,14 @@ run_one() {
     # every run (including the first) starts from a consistent thermal /
     # OS-cache state — otherwise mode 1 runs hot off setup, modes 2-N run
     # cool off the prior 60-300s sleep, biasing comparison.
+    ts_log_outer cool_down_start mode=$mode round=$round
     echo "  [pre-bench cool-down ${COOL_DOWN}s]" | tee -a "$SUMMARY"
     sleep "$COOL_DOWN"
+    ts_log_outer cool_down_end mode=$mode round=$round
+    ts_log_outer run_start mode=$mode round=$round
     echo "=== mode=$mode round=$round ===" | tee -a "$SUMMARY"
     MODE="$mode" ./run-bench-aot.sh > "$logfile" 2>&1
+    ts_log_outer run_end mode=$mode round=$round
     local tps=$(grep -E "^Final TPS:" "$logfile" | tail -1 | awk '{print $3}')
     local errs=$(grep "Num errors" "$logfile" | tail -1 | grep -oE "numErrors=[0-9]+" | cut -d= -f2)
     printf "  %-10s round=%d Final TPS=%-12s errors=%s\n" "$mode" "$round" "$tps" "$errs" | tee -a "$SUMMARY"
@@ -57,6 +70,7 @@ for r in $(seq 1 "$ROUNDS"); do
     done
 done
 
+ts_log_outer driver_end
 echo "" | tee -a "$SUMMARY"
 echo "=== Aggregation (n=$ROUNDS per mode) ===" | tee -a "$SUMMARY"
 for m in nojit jit_cold aot; do
