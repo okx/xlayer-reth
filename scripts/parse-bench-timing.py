@@ -274,7 +274,7 @@ def _jit_stats_delta(jit_snapshots: list[dict], events: list[dict]) -> dict:
     return delta
 
 
-def process_run(run_dir: Path, mode: str, timestamp: str) -> dict:
+def process_run(run_dir: Path, mode: str, timestamp: str, min_block_txs: int = 100) -> dict:
     """Build the JSON schema for one run. Returns the schema dict (caller writes JSON)."""
     tslog = run_dir / f"aot-cycle-{mode}-{timestamp}.tslog"
     node = run_dir / f"aot-node-{mode}-{timestamp}.log"
@@ -295,7 +295,7 @@ def process_run(run_dir: Path, mode: str, timestamp: str) -> dict:
 
     wall_clock = _phase_durations(events)
     window = _bench_window(events)
-    chain_blocks_real = _chain_blocks_real(node_data["blocks"], window)
+    chain_blocks_real = _chain_blocks_real(node_data["blocks"], window, min_block_txs=min_block_txs)
     jit_delta = _jit_stats_delta(node_data["jit_snapshots"], events)
 
     # Augment window with derived counts (per design spec §6 bench_window).
@@ -506,10 +506,13 @@ def render_tables(data: dict) -> str:
             out.append(f"{k:<20} {'n/a':>14} {'n/a':>10}")
             continue
         if k == "total_run_us":
-            frac = 100.0
+            out.append(f"{k:<20} {v:>14} {100.0:>9.1f}%")
+        elif total:
+            frac = v / total * 100
+            out.append(f"{k:<20} {v:>14} {frac:>9.1f}%")
         else:
-            frac = (v / total * 100) if total else 0
-        out.append(f"{k:<20} {v:>14} {frac:>9.1f}%")
+            # partial run (no total_run_us) — fraction undefined; show n/a
+            out.append(f"{k:<20} {v:>14} {'n/a':>10}")
 
     # Table 2: chain block phases
     cbr = data.get("chain_blocks_real")
@@ -565,7 +568,7 @@ def main():
     if args.run_dir:
         if not (args.mode and args.timestamp):
             ap.error("--mode and --timestamp are required with --run-dir")
-        data = process_run(args.run_dir, args.mode, args.timestamp)
+        data = process_run(args.run_dir, args.mode, args.timestamp, min_block_txs=args.min_block_txs)
         json_path = args.json_out or args.run_dir / f"cycle-timing-{args.mode}-{args.timestamp}.json"
         import json
         json_path.write_text(json.dumps(data, indent=2))
