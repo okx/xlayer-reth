@@ -93,6 +93,23 @@ wait_for_rpc() {
     return 1
 }
 
+safe_block_number() {
+    local result hex
+    for attempt in 1 2 3; do
+        result=$(curl -s --max-time 2 http://127.0.0.1:8545 -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' 2>/dev/null)
+        hex=$(echo "$result" | grep -oE '"result":"0x[0-9a-fA-F]+"' | grep -oE '0x[0-9a-fA-F]+')
+        if [ -n "$hex" ]; then
+            printf '%d\n' "$hex"
+            return 0
+        fi
+        sleep 1
+    done
+    echo unknown
+    return 1
+}
+
 stop_node() {
     local pid="$1"
     kill "$pid" 2>/dev/null || true
@@ -206,9 +223,11 @@ else
 fi
 
 echo "=== [$MODE] JIT warmup (2000 UOP) ==="
-ts_log warmup_start
+WARMUP_START_BLOCK=$(safe_block_number)
+ts_log warmup_start block=$WARMUP_START_BLOCK
 warmup_polycli "$WARMUP_LOG"
-ts_log warmup_end
+WARMUP_END_BLOCK=$(safe_block_number)
+ts_log warmup_end block=$WARMUP_END_BLOCK
 
 echo "=== [$MODE] drain txpool ==="
 ts_log drain_start
@@ -220,10 +239,12 @@ ts_log sleep5_end
 
 echo "=== [$MODE] real bench ==="
 cd "$SA_DIR"
-ts_log real_bench_start
+REAL_START_BLOCK=$(safe_block_number)
+ts_log real_bench_start block=$REAL_START_BLOCK
 ./2-bench.sh 2>&1 | tee "$RESULT_OUT"
 BENCH_EXIT=${PIPESTATUS[0]}
-ts_log real_bench_end
+REAL_END_BLOCK=$(safe_block_number)
+ts_log real_bench_end block=$REAL_END_BLOCK
 
 ts_log stop_node_start
 stop_node "$NODE_PID"
