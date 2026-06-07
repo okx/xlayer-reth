@@ -99,19 +99,26 @@ def read_node_log(path: Path) -> dict:
     if not path.exists():
         return {"blocks": blocks, "jit_snapshots": jit_snapshots, "aot_open": aot_open}
 
+    # Minimal-schema guards: drop truncated lines so downstream callers (process_run,
+    # _jit_stats_delta) can index essential fields without defensive .get() everywhere.
+    # KV_RE is digit-only by design; string-valued fields like "dir=..." on AOT lines
+    # are intentionally dropped — only numeric metrics flow downstream.
+    BLOCK_REQUIRED = ("block", "n_total_txs")
+    JIT_REQUIRED = ("compile_ok", "lookup_hits", "lookup_misses", "evictions")
     with path.open(errors="replace") as f:
         for raw in f:
             line = ANSI_RE.sub("", raw)
             ts = _parse_node_ts(line)
             if "block_phase_breakdown" in line:
                 kv = {k: int(v) for k, v in KV_RE.findall(line)}
-                if "block" in kv:
+                if all(f in kv for f in BLOCK_REQUIRED):
                     kv["ts"] = ts
                     blocks.append(kv)
             elif "jit_periodic_stats" in line:
                 kv = {k: int(v) for k, v in KV_RE.findall(line)}
-                kv["ts"] = ts
-                jit_snapshots.append(kv)
+                if all(f in kv for f in JIT_REQUIRED):
+                    kv["ts"] = ts
+                    jit_snapshots.append(kv)
             elif "AOT store opened" in line:
                 kv = {k: int(v) for k, v in KV_RE.findall(line)}
                 kv["ts"] = ts
