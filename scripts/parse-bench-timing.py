@@ -144,6 +144,208 @@ def read_polycli_out(path: Path) -> dict:
     }
 
 
+# --- merge + window slicing ------------------------------------------------
+PHASE_PAIRS = [
+    ("cleanup", "cleanup_start", "cleanup_end"),
+    ("cp_golden", "cp_golden_start", "cp_golden_end"),
+    ("node_start", "node_start", "rpc_wait_start"),  # node_start has no _end; ends when rpc_wait starts
+    ("rpc_wait", "rpc_wait_start", "rpc_ready"),
+    ("warmup_polycli", "warmup_start", "warmup_end"),
+    ("drain_txpool", "drain_start", "drain_end"),
+    ("sleep5", "sleep5_start", "sleep5_end"),
+    ("real_bench", "real_bench_start", "real_bench_end"),
+    ("stop_node", "stop_node_start", "stop_node_end"),
+]
+
+
+def _phase_durations(events: list[dict]) -> dict:
+    """Return {<name>_us: int} for each phase pair found. Missing phases → key absent."""
+    by_phase = {e["phase"]: e for e in events}
+    out = {}
+    for name, start_key, end_key in PHASE_PAIRS:
+        s = by_phase.get(start_key)
+        e = by_phase.get(end_key)
+        if s and e:
+            out[f"{name}_us"] = int((e["ts"] - s["ts"]) * 1_000_000)
+    if "run_start" in by_phase and "run_end" in by_phase:
+        out["total_run_us"] = int((by_phase["run_end"]["ts"] - by_phase["run_start"]["ts"]) * 1_000_000)
+    return out
+
+
+def _bench_window(events: list[dict]) -> dict:
+    """Pull the 4 block sentinels from tslog events."""
+    by_phase = {e["phase"]: e for e in events}
+    out = {}
+    for shell_phase, json_key in [
+        ("warmup_start", "warmup_start_block"),
+        ("warmup_end", "warmup_end_block"),
+        ("real_bench_start", "real_start_block"),
+        ("real_bench_end", "real_end_block"),
+    ]:
+        evt = by_phase.get(shell_phase)
+        if evt and "block" in evt and evt["block"] != "unknown":
+            try:
+                out[json_key] = int(evt["block"])
+            except ValueError:
+                out[json_key] = None
+        else:
+            out[json_key] = None
+    return out
+
+
+def _percentiles(values: list[int]) -> dict:
+    if not values:
+        return {"p50": None, "p95": None, "mean": None}
+    s = sorted(values)
+    n = len(s)
+    return {
+        "p50": s[n // 2],
+        "p95": s[min(n - 1, int(n * 0.95))],
+        "mean": sum(s) // n,
+    }
+
+
+def _chain_blocks_real(node_blocks: list[dict], window: dict, min_block_txs: int = 100) -> "dict | None":
+    """Filter to [real_start_block, real_end_block] then drop n_total_txs < min_block_txs."""
+    if not node_blocks:
+        return None
+    rs = window.get("real_start_block")
+    re_ = window.get("real_end_block")
+    if rs is None or re_ is None:
+        return None
+    in_window = [b for b in node_blocks if rs <= b.get("block", -1) <= re_]
+    heavy = [b for b in in_window if b.get("n_total_txs", 0) >= min_block_txs]
+    if not heavy:
+        return None
+    phase_fields = ("pre_exec_us", "seq_txs_us", "pool_exec_us", "finish_us", "total_us")
+    phase_us = {
+        f.replace("_us", ""): _percentiles([b[f] for b in heavy if f in b]) for f in phase_fields
+    }
+    tx_fields = ("n_seq_txs", "n_pool_txs", "n_total_txs")
+    tx_counts = {}
+    for f in tx_fields:
+        v = [b[f] for b in heavy if f in b]
+        tx_counts[f] = {"avg": sum(v) / len(v) if v else None, "max": max(v) if v else None}
+    sum_pool_us = sum(b.get("pool_exec_us", 0) for b in heavy)
+    sum_pool_tx = sum(b.get("n_pool_txs", 0) for b in heavy)
+    sum_total_us = sum(b.get("total_us", 0) for b in heavy)
+    sum_gas = sum(b.get("gas_used", 0) for b in heavy)
+    per_tx_pool_us = sum_pool_us // sum_pool_tx if sum_pool_tx else None
+    per_mgas_total_us = int(sum_total_us / (sum_gas / 1_000_000)) if sum_gas else None
+    return {
+        "n_blocks": len(heavy),
+        "phase_us": phase_us,
+        "tx_counts": tx_counts,
+        "per_tx_pool_us": per_tx_pool_us,
+        "per_mgas_total_us": per_mgas_total_us,
+    }
+
+
+def _jit_stats_delta(jit_snapshots: list[dict], events: list[dict]) -> dict:
+    """Compute jit counter delta between bench window start/end snapshots."""
+    by_phase = {e["phase"]: e for e in events}
+    real_start = by_phase.get("real_bench_start")
+    real_end = by_phase.get("real_bench_end")
+    if not (real_start and real_end and jit_snapshots):
+        return {}
+    s = next((sn for sn in jit_snapshots if sn["ts"] and sn["ts"] >= real_start["ts"]), None)
+    e = next((sn for sn in reversed(jit_snapshots) if sn["ts"] and sn["ts"] <= real_end["ts"]), None)
+    if not (s and e):
+        return {}
+    delta = {
+        "real_window_seconds": int(real_end["ts"] - real_start["ts"]),
+        "compile_ok_delta": e["compile_ok"] - s["compile_ok"],
+        "compile_ok_total": e["compile_ok"],
+        "lookup_hits_delta": e["lookup_hits"] - s["lookup_hits"],
+        "lookup_misses_delta": e["lookup_misses"] - s["lookup_misses"],
+        "evictions_delta": e["evictions"] - s["evictions"],
+        "code_bytes_final": e.get("code_bytes", 0),
+    }
+    total = delta["lookup_hits_delta"] + delta["lookup_misses_delta"]
+    delta["lookup_hit_rate"] = (delta["lookup_hits_delta"] / total) if total else None
+    warmup_start = by_phase.get("warmup_start")
+    warmup_end = by_phase.get("warmup_end")
+    if warmup_start and warmup_end:
+        ws = next((sn for sn in jit_snapshots if sn["ts"] and sn["ts"] >= warmup_start["ts"]), None)
+        we = next((sn for sn in reversed(jit_snapshots) if sn["ts"] and sn["ts"] <= warmup_end["ts"]), None)
+        if ws and we:
+            delta["compile_ok_warmup"] = we["compile_ok"] - ws["compile_ok"]
+            delta["lookup_hits_warmup"] = we["lookup_hits"] - ws["lookup_hits"]
+    return delta
+
+
+def process_run(run_dir: Path, mode: str, timestamp: str) -> dict:
+    """Build the JSON schema for one run. Returns the schema dict (caller writes JSON)."""
+    tslog = run_dir / f"aot-cycle-{mode}-{timestamp}.tslog"
+    node = run_dir / f"aot-node-{mode}-{timestamp}.log"
+    polycli = run_dir / f"aot-result-{mode}-{timestamp}.out"
+
+    warnings: list[str] = []
+    events = read_tslog(tslog)
+    if not events:
+        warnings.append("tslog_missing")
+    elif not any(e["phase"] == "run_end" for e in events):
+        warnings.append("tslog_partial: run_end missing")
+
+    node_data = read_node_log(node)
+    if not node_data["blocks"]:
+        warnings.append("no_bench_timing_lines")
+
+    polycli_data = read_polycli_out(polycli)
+
+    wall_clock = _phase_durations(events)
+    window = _bench_window(events)
+    chain_blocks_real = _chain_blocks_real(node_data["blocks"], window)
+    jit_delta = _jit_stats_delta(node_data["jit_snapshots"], events)
+
+    if chain_blocks_real and "real_bench_us" in wall_clock:
+        rs = window.get("real_start_block")
+        re_ = window.get("real_end_block")
+        sum_total_us = sum(b.get("total_us", 0) for b in node_data["blocks"] if rs <= b.get("block", -1) <= re_)
+        ratio = sum_total_us / wall_clock["real_bench_us"] if wall_clock["real_bench_us"] else None
+    else:
+        sum_total_us = 0
+        ratio = None
+    effective_chain = None
+    if chain_blocks_real and chain_blocks_real["tx_counts"]["n_total_txs"]["avg"]:
+        total_tx = chain_blocks_real["tx_counts"]["n_total_txs"]["avg"] * chain_blocks_real["n_blocks"]
+        if sum_total_us:
+            effective_chain = total_tx / (sum_total_us / 1_000_000)
+
+    # Normalize AOT field names to match the JSON schema in the design spec:
+    # the Rust log emits `loaded` (legacy) which the schema calls `n_dylib_loaded`.
+    aot_out = None
+    if node_data["aot_open"]:
+        src = node_data["aot_open"]
+        aot_out = {
+            "dlopen_us": src.get("dlopen_us"),
+            "n_dylib_loaded": src.get("loaded"),
+            "n_manifests": src.get("n_manifests", src.get("loaded")),
+        }
+
+    return {
+        "schema_version": 1,
+        "meta": {
+            "mode": mode,
+            "round": None,
+            "timestamp": timestamp,
+            "warnings": warnings,
+        },
+        "wall_clock_by_phase": wall_clock if wall_clock else {"total_run_us": None},
+        "bench_window": window,
+        "chain_blocks_real": chain_blocks_real,
+        "jit_stats_delta": jit_delta,
+        "aot": aot_out,
+        "tps": {
+            "polycli_final": polycli_data["final_tps"],
+            "polycli_errors": polycli_data["num_errors"],
+            "effective_chain": effective_chain,
+            "per_tx_pool_us": chain_blocks_real["per_tx_pool_us"] if chain_blocks_real else None,
+            "wall_clock_bench_ratio": ratio,
+        },
+    }
+
+
 PHASE_FIELDS = (
     "pre_exec_us",
     "seq_txs_us",

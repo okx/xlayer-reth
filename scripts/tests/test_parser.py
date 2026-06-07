@@ -61,5 +61,70 @@ class TestPolycliReader(unittest.TestCase):
         self.assertEqual(result["num_errors"], 0)
 
 
+class TestProcessRun(unittest.TestCase):
+    def test_complete_run_json(self):
+        result = ptm.process_run(
+            run_dir=FIXTURES / "complete-run",
+            mode="aot",
+            timestamp="20260601_120000",
+        )
+        self.assertEqual(result["schema_version"], 1)
+        self.assertEqual(result["meta"]["mode"], "aot")
+
+        # wall_clock_by_phase: 10 fields, all populated
+        wc = result["wall_clock_by_phase"]
+        for field in ("cleanup_us", "cp_golden_us", "node_start_us",
+                      "rpc_wait_us", "warmup_polycli_us", "drain_txpool_us",
+                      "sleep5_us", "real_bench_us", "stop_node_us", "total_run_us"):
+            self.assertIn(field, wc)
+            self.assertIsNotNone(wc[field])
+            self.assertGreater(wc[field], 0)
+
+        # bench_window
+        bw = result["bench_window"]
+        self.assertEqual(bw["warmup_start_block"], 8)
+        self.assertEqual(bw["warmup_end_block"], 24)
+        self.assertEqual(bw["real_start_block"], 42)
+        self.assertEqual(bw["real_end_block"], 287)
+
+        # chain_blocks_real: filter heavy blocks (>= 100 txs)
+        cbr = result["chain_blocks_real"]
+        self.assertGreater(cbr["n_blocks"], 100)
+        self.assertGreater(cbr["phase_us"]["pool_exec"]["p50"], 0)
+
+        # jit_stats_delta
+        jsd = result["jit_stats_delta"]
+        self.assertGreater(jsd["lookup_hits_delta"], 0)
+
+        # aot — renamed loaded -> n_dylib_loaded per spec
+        self.assertIsNotNone(result["aot"])
+        self.assertEqual(result["aot"]["dlopen_us"], 142000)
+        self.assertEqual(result["aot"]["n_dylib_loaded"], 4)
+
+        # tps
+        self.assertAlmostEqual(result["tps"]["polycli_final"], 287.30, places=2)
+        self.assertGreater(result["tps"]["effective_chain"], 0)
+        self.assertGreater(result["tps"]["wall_clock_bench_ratio"], 0)
+        self.assertLess(result["tps"]["wall_clock_bench_ratio"], 1.0)
+
+    def test_partial_tslog_does_not_crash(self):
+        result = ptm.process_run(
+            run_dir=FIXTURES / "partial-tslog",
+            mode="nojit",
+            timestamp="20260601_120100",
+        )
+        self.assertIn("tslog_partial", " ".join(result["meta"]["warnings"]))
+        self.assertIsNone(result["wall_clock_by_phase"].get("total_run_us"))
+
+    def test_no_bench_timing_emits_warning(self):
+        result = ptm.process_run(
+            run_dir=FIXTURES / "no-bench-timing",
+            mode="nojit",
+            timestamp="20260601_120200",
+        )
+        self.assertIsNone(result["chain_blocks_real"])
+        self.assertIn("no_bench_timing_lines", " ".join(result["meta"]["warnings"]))
+
+
 if __name__ == "__main__":
     unittest.main()
