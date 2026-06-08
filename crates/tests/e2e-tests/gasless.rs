@@ -2,7 +2,10 @@
 //!
 //! These target a running node's RPC and exercise the zero-priced (gasless) transaction path end
 //! to end. They require the target nodes to run the XLayer gasless mempool — the `XLayerV1`
-//! hardfork active and the on-chain gasless whitelist contract deployed and approving the transfer.
+//! hardfork active and the gasless whitelist predeploy present at genesis with the rich account as
+//! its owner. The tests then own their precondition: they enable gasless and register the transfer
+//! target on-chain themselves (see `operations::ensure_gasless_whitelist`), so no devnet bootstrap
+//! step is needed to approve the transfer.
 
 use alloy_primitives::U256;
 use serde_json::json;
@@ -153,19 +156,30 @@ async fn test_gasless_debug_trace_transaction() {
 }
 
 /// A zero-priced (`maxFeePerGas == 0`) call object whose `to`/input match the whitelisted gasless
-/// transfer, so it should be detected as gasless on the RPC re-execution path. `from` is the rich
+/// target, so it should be detected as gasless on the RPC re-execution path. `from` is the rich
 /// account (funded). The explicit zero fee caps force the base-fee check that the gasless path must
 /// relax — without gasless awareness the node rejects it with `max fee per gas less than block base
-/// fee`.
+/// fee`. `input` carries a 4-byte probe so the whitelist's calldata-length guard passes (an empty
+/// input is never gasless).
 fn gasless_call_object() -> serde_json::Value {
     json!({
         "from": operations::manager::DEFAULT_RICH_ADDRESS,
         "to": operations::manager::DEFAULT_L2_NEW_ACC1_ADDRESS,
         "value": "0x1",
-        "gas": "0x5208", // 21000
+        "input": "0xdeadbeef",  // 4 bytes probe calldata to pass the whitelist's calldata-length guard
+        "gas": "0xc350", // 50000
         "maxFeePerGas": "0x0",
         "maxPriorityFeePerGas": "0x0",
     })
+}
+
+/// Registers the gasless precondition (gasless enabled + the call target whitelisted).
+async fn ensure_gasless_call_whitelisted(seq_url: &str) {
+    let target =
+        operations::manager::DEFAULT_L2_NEW_ACC1_ADDRESS.parse().expect("valid target address");
+    operations::ensure_gasless_whitelist(seq_url, target)
+        .await
+        .expect("gasless whitelist precondition must be set up");
 }
 
 /// Checks whether `eth_call` supports gasless: a zero-priced, whitelisted call must execute instead
@@ -175,6 +189,7 @@ fn gasless_call_object() -> serde_json::Value {
 #[tokio::test]
 async fn test_gasless_eth_call() {
     let seq_url = operations::manager::DEFAULT_L2_SEQ_URL;
+    ensure_gasless_call_whitelisted(seq_url).await;
     let client = operations::create_test_client(seq_url);
 
     let result = operations::eth_call(&client, Some(gasless_call_object()), None)
@@ -194,6 +209,7 @@ async fn test_gasless_eth_call() {
 #[tokio::test]
 async fn test_gasless_eth_simulate_v1() {
     let seq_url = operations::manager::DEFAULT_L2_SEQ_URL;
+    ensure_gasless_call_whitelisted(seq_url).await;
     let client = operations::create_test_client(seq_url);
 
     let payload = json!({
