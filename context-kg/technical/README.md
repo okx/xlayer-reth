@@ -15,6 +15,7 @@
 - [modules/module-flashblocks.md](modules/module-flashblocks.md) — Flashblocks crate: cache management, execution pipeline, engine validation, subscriptions
 - [modules/module-chainspec.md](modules/module-chainspec.md) — Chain specification: network configs, hardfork schedules
 - [modules/module-intercept.md](modules/module-intercept.md) — Bridge transaction interception
+- [modules/module-blacklist.md](modules/module-blacklist.md) — Chain-level blacklist interception (xlayer-blacklist / -node crates, XLOP-1100)
 - [modules/module-legacy-rpc.md](modules/module-legacy-rpc.md) — Legacy RPC routing middleware
 - [modules/module-monitor.md](modules/module-monitor.md) — Full-link transaction monitoring
 - [modules/module-rpc.md](modules/module-rpc.md) — X Layer RPC extensions with flashblock cache overlay
@@ -25,6 +26,8 @@
 - [pitfalls/data-consistency.md](pitfalls/data-consistency.md) — State consistency, cache invalidation, reorg handling
 - [pitfalls/concurrency-issues.md](pitfalls/concurrency-issues.md) — Mutex locking, race conditions, task scheduling, channel backpressure
 - [pitfalls/security-concerns.md](pitfalls/security-concerns.md) — Input validation, injection prevention, bridge security
+- [pitfalls/upstream-component-type-pinning.md](pitfalls/upstream-component-type-pinning.md) — Why wrapping op-reth pool/executor/EVM components fails to compile; use field-threading
+- [pitfalls/harness-gaps.md](pitfalls/harness-gaps.md) — Process: uncompiled integration-point citations are not ground truth
 
 ### Core Flows
 - [core-flows/block-building-flow.md](core-flows/block-building-flow.md) — Standard payload building lifecycle

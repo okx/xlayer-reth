@@ -16,7 +16,7 @@ use reth::{
     builder::{DebugNodeLauncher, EngineNodeLauncher, Node, NodeHandle},
     providers::providers::BlockchainProvider,
 };
-use reth_chainspec::ChainSpecProvider;
+use reth_chainspec::{ChainSpecProvider, EthChainSpec};
 use reth_node_builder::rpc::BasicEngineValidatorBuilder;
 use reth_optimism_cli::Cli;
 use reth_optimism_evm::OpEvmConfig;
@@ -25,6 +25,7 @@ use reth_provider::CanonStateSubscriptions;
 use reth_rpc_builder::config::RethRpcServerConfig;
 use reth_rpc_server_types::RethRpcModule;
 
+use xlayer_blacklist_node::BlacklistRuntimeCtx;
 use xlayer_chainspec::XLayerChainSpecParser;
 use xlayer_flashblocks::{
     FlashblockSequenceValidator, FlashblockStateCache, FlashblocksPersistCtx, FlashblocksPubSub,
@@ -89,6 +90,20 @@ fn main() {
             let genesis_block = builder.config().chain.genesis().number.unwrap_or_default();
             info!("X Layer genesis block = {}", genesis_block);
 
+            // XLOP-1100: chain-level blacklist runtime context (FR-6 chain-id dispatch).
+            // Threaded into the sequencer payload-builder face (FR-2/3) so the block builder
+            // can drop / revert transactions touching blacklisted addresses and emit metrics.
+            // The feature is active iff the running chain id resolves to a mirror address;
+            // otherwise every read is a no-op (fail-open).
+            let bl_ctx = BlacklistRuntimeCtx::new(builder.config().chain.chain().id());
+            if bl_ctx.is_enabled() {
+                info!(
+                    target: "xlayer::blacklist",
+                    chain_id = bl_ctx.chain_id(),
+                    "XLayer chain-level blacklist enabled (sequencer builder face)"
+                );
+            }
+
             // Clone xlayer_args early to avoid partial move issues
             let xlayer_args = args.xlayer_args.clone();
             let datadir = builder.config().datadir().clone();
@@ -138,7 +153,8 @@ fn main() {
                 xlayer_args.sequencer_mode,
                 fb_p2p_status.clone(),
             )?
-            .with_bridge_config(bridge_config);
+            .with_bridge_config(bridge_config)
+            .with_blacklist_ctx(bl_ctx);
 
             // Get the engine validator for flashblocks RPC.
             let engine_validator = Arc::new(OnceLock::new());

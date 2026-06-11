@@ -14,6 +14,8 @@ workspace = true
 [dependencies]
 # internal
 xlayer-bridge-intercept.workspace = true
+xlayer-blacklist.workspace = true
+xlayer-blacklist-node.workspace = true
 xlayer-builder.workspace = true
 xlayer-flashblocks.workspace = true
 xlayer-chainspec.workspace = true

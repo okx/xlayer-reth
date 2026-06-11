@@ -1,0 +1,56 @@
+[package]
+name = "xlayer-blacklist-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+# Node-side integration ("wiring") layer for the XLayer chain-level blacklist feature
+# (XLOP-1100). Holds the revm/reth/op-reth adapters that connect the pure cross-client
+# core (`xlayer-blacklist`) to the three execution faces + the ingress mempool:
+#   - revm `Inspector` adapter feeding `BlacklistInspector` (FR-2)
+#   - live `MirrorViewCaller` over a read-only system-address staticcall (FR-4)
+#   - `XLayerBlacklistTxValidator` wrapping `OpTransactionValidator` (FR-1)
+#   - `XLayerBlacklistEvmConfig` wrapping `OpEvmConfig` (`ConfigureEvm`) (FR-2/3/4)
+#   - `XLayerExecutorBuilder` / `XLayerBlacklistPoolBuilder` node-builder components
+#   - `BlacklistRuntimeCtx` snapshot handle + chain dispatch + metrics (FR-6/7)
+#
+# NOTE: compiling this crate pulls the full op-reth/revm dependency tree; it is verified
+# at the review/test stage (3.1) on a build-capable host, not in the memory-limited
+# implementation stage. Every upstream signature used here is grounded in read source
+# (op-reth submodule, reth git checkout, extracted revm/alloy-evm) — see the crate's
+# module docs and the stage research notes for file:line citations.
+[dependencies]
+xlayer-blacklist.workspace = true
+
+# core types
+alloy-primitives.workspace = true
+alloy-consensus.workspace = true
+
+# reth / op-reth integration
+reth-transaction-pool.workspace = true
+reth-evm.workspace = true
+reth-provider.workspace = true
+reth-revm.workspace = true
+reth-node-builder.workspace = true
+reth-node-api.workspace = true
+reth-chainspec.workspace = true
+reth-optimism-evm.workspace = true
+reth-optimism-node.workspace = true
+reth-optimism-forks.workspace = true
+reth-optimism-txpool.workspace = true
+reth-optimism-primitives.workspace = true
+reth-primitives-traits.workspace = true
+revm.workspace = true
+
+# support
+arc-swap.workspace = true
+reth-metrics.workspace = true
+metrics.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+eyre.workspace = true

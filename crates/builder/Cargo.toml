@@ -13,6 +13,8 @@ workspace = true
 [dependencies]
 xlayer-trace-monitor.workspace = true
 xlayer-bridge-intercept.workspace = true
+xlayer-blacklist.workspace = true
+xlayer-blacklist-node.workspace = true
 
 # reth
 reth.workspace = true

@@ -119,6 +119,7 @@ impl LocalInstance {
                 FlashblocksServiceBuilder {
                     config: builder_config,
                     bridge_intercept: Default::default(),
+                    blacklist_ctx: None,
                     peer_status_sink: std::sync::Arc::new(std::sync::OnceLock::new()),
                 },
             ))

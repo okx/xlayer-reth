@@ -1,0 +1,21 @@
+[package]
+name = "xlayer-blacklist"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+# Standalone cross-client consensus core for the XLayer chain-level blacklist
+# interception feature (XLOP-1100). Mirrors the zero-internal-dependency form of
+# `crates/intercept`: depends only on alloy-primitives + metrics + thiserror +
+# tracing so it compiles in isolation without the op-reth dependency tree.
+[dependencies]
+alloy-primitives.workspace = true
+reth-metrics.workspace = true
+metrics.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

@@ -90,6 +90,7 @@ impl FlashblockHandlerContext {
             metrics: self.metrics,
             max_gas_per_txn: self.max_gas_per_txn,
             bridge_intercept_config: Default::default(),
+            blacklist_ctx: None,
         }
     }
 }

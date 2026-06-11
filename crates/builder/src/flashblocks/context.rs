@@ -72,6 +72,9 @@ pub struct FlashblocksBuilderCtx {
     pub max_gas_per_txn: Option<u64>,
     /// Configuration for bridge transaction interception.
     pub bridge_intercept_config: xlayer_bridge_intercept::BridgeInterceptConfig,
+    /// Chain-level blacklist runtime context (XLOP-1100, FR-2/3 builder face). `None` when
+    /// the feature is disabled / the chain id has no mirror address.
+    pub blacklist_ctx: Option<xlayer_blacklist_node::BlacklistRuntimeCtx>,
 }
 
 impl FlashblocksBuilderCtx {
@@ -645,6 +648,28 @@ impl FlashblocksBuilderCtx {
             {
                 best_txs.mark_invalid(tx.signer(), tx.nonce());
                 continue;
+            }
+
+            // XLayer chain-level blacklist (XLOP-1100, FR-2/3 builder face — L2-normal drop).
+            // Mirrors the bridge-intercept disposition: a non-deposit L2 transaction whose
+            // committed Transfer-class logs touch a blacklisted address is dropped
+            // (`mark_invalid`) before its state is committed, and the revert is metered. The
+            // committed-effects judgement (check②) operates on `result.logs()`; an empty
+            // snapshot (feature disabled / chain not enabled) is a no-op (fail-open).
+            if let Some(bl_ctx) = &self.blacklist_ctx {
+                let snapshot = bl_ctx.load_snapshot();
+                if !snapshot.is_empty() {
+                    let inspector = xlayer_blacklist::BlacklistInspector::new();
+                    if let Some(hit) = xlayer_blacklist::BlacklistEvaluator::evaluate(
+                        &inspector,
+                        result.logs(),
+                        &snapshot,
+                    ) {
+                        bl_ctx.record_exec_revert(&hit);
+                        best_txs.mark_invalid(tx.signer(), tx.nonce());
+                        continue;
+                    }
+                }
             }
 
             info.cumulative_gas_used += gas_used;

@@ -26,6 +26,9 @@ use reth_provider::CanonStateSubscriptions;
 pub struct FlashblocksServiceBuilder {
     pub config: BuilderConfig,
     pub bridge_intercept: xlayer_bridge_intercept::BridgeInterceptConfig,
+    /// Chain-level blacklist runtime context (XLOP-1100, FR-2/3 builder face). `None` when
+    /// the feature is disabled / the chain id has no mirror address.
+    pub blacklist_ctx: Option<xlayer_blacklist_node::BlacklistRuntimeCtx>,
     pub peer_status_sink: Arc<OnceLock<crate::broadcast::PeerStatusTracker>>,
 }
 
@@ -36,6 +39,15 @@ impl FlashblocksServiceBuilder {
         config: xlayer_bridge_intercept::BridgeInterceptConfig,
     ) -> &mut Self {
         self.bridge_intercept = config;
+        self
+    }
+
+    /// Set the chain-level blacklist runtime context to apply to the payload builder.
+    pub fn with_blacklist_ctx(
+        &mut self,
+        ctx: xlayer_blacklist_node::BlacklistRuntimeCtx,
+    ) -> &mut Self {
+        self.blacklist_ctx = Some(ctx);
         self
     }
 
@@ -142,6 +154,7 @@ impl FlashblocksServiceBuilder {
             task_metrics.clone(),
         );
         payload_builder.bridge_intercept_config = self.bridge_intercept.clone();
+        payload_builder.blacklist_ctx = self.blacklist_ctx.clone();
         let payload_job_config = BasicPayloadJobGeneratorConfig::default();
 
         let payload_generator = BlockPayloadJobGenerator::with_builder(

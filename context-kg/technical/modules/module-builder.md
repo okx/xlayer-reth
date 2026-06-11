@@ -21,7 +21,12 @@
 ### `flashblocks/` — Flashblock Building Core
 - `BuilderConfig` / `FlashblocksConfig`: Runtime configuration converted from CLI args
 - `FlashblocksServiceBuilder`: Implements `PayloadServiceBuilder` — spawns P2P node, payload handler, and background tasks
-- `FlashblocksBuilderCtx`: EVM execution context with hardfork-aware configuration
+- `FlashblocksBuilderCtx`: EVM execution context with hardfork-aware configuration. Carries
+  per-feature config as plain fields threaded `payload.rs → service.rs → builder.rs → context.rs`:
+  `bridge_intercept_config` (bridge intercept) and `blacklist_ctx: Option<BlacklistRuntimeCtx>`
+  (chain-level blacklist, XLOP-1100 — see module-blacklist). This field-threading is the sanctioned
+  way to add per-tx interception; wrapping node components does not compile (see
+  pitfalls/upstream-component-type-pinning).
 - `FlashblocksPayloadHandler`: Processes built flashblock payloads, handles external flashblock execution
 - `FlashblocksBuilder`: Core builder logic — transaction selection, execution, payload assembly
 - `BestFlashblocksTxs`: Transaction iterator wrapper that tracks committed transactions across flashblocks
@@ -59,3 +64,16 @@
 5. **End-of-sequence signaling**: `XLayerFlashblockEnd` sent after last flashblock in a block, preventing processing of additional flashblocks after sequence completion.
 
 6. **Non-blocking stream connections**: P2P `open_stream` operations are non-blocking with configurable retry intervals (DEFAULT_PEER_RETRY_INTERVAL=1s). Failed peers are evicted and reconnected on next retry tick.
+
+7. **Three transaction loops in `flashblocks/context.rs` have different deposit semantics** — do not
+   confuse them when adding per-tx logic (this caused an adversarial-review Blocker on XLOP-1100):
+   - `execute_sequencer_transactions` (≈`:256`, iterates `self.attributes().transactions`) is the
+     **only** loop on the builder path that actually executes deposits (decision point `:303`
+     `evm.transact(&sequencer_tx)`, commit barrier `:336`; pre-exec `depositor_nonce` captured at
+     `:290-301`). Deposit-facing logic (e.g. included-as-reverted) belongs here.
+   - `execute_cached_flashblocks_transactions` (≈`:360-421`) is the p2p cached-flashblocks **replay**
+     loop; it **rejects all deposits** at `:416-421`, so its `:424` transact never runs a deposit.
+     Not a deposit interception point.
+   - `execute_best_transactions` (≈`:498-`) is the pool best-tx loop; it **skips** pool deposits at
+     `:574`. This is where normal (non-deposit) L2-tx interception lives (bridge intercept `:639`,
+     blacklist L2-normal drop ≈`:653-673`).

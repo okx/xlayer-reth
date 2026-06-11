@@ -6,6 +6,7 @@ use reth_node_builder::{components::BasicPayloadServiceBuilder, BuilderContext};
 use reth_optimism_evm::OpEvmConfig;
 use reth_optimism_node::node::OpPayloadBuilder;
 use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
+use xlayer_blacklist_node::BlacklistRuntimeCtx;
 use xlayer_bridge_intercept::BridgeInterceptConfig;
 use xlayer_builder::{
     args::BuilderArgs,
@@ -64,6 +65,7 @@ impl XLayerPayloadServiceBuilder {
                 XLayerPayloadServiceBuilderInner::Flashblocks(Box::new(FlashblocksServiceBuilder {
                     config,
                     bridge_intercept: Default::default(),
+                    blacklist_ctx: None,
                     peer_status_sink: peer_status.clone(),
                 }))
             } else {
@@ -98,6 +100,24 @@ impl XLayerPayloadServiceBuilder {
             }
             // DefaultWithP2P runs the upstream OpPayloadBuilder as a failsafe during
             // conductor failover — bridge intercept is not supported on this path.
+            XLayerPayloadServiceBuilderInner::DefaultWithP2P(_) => {}
+            XLayerPayloadServiceBuilderInner::Default(_) => {}
+        }
+        self
+    }
+
+    /// Apply the chain-level blacklist runtime context (XLOP-1100, FR-2/3 builder face).
+    ///
+    /// Only the flashblocks sequencer builder applies the blacklist execution gate — like
+    /// bridge intercept, the `DefaultWithP2P` failsafe path and the RPC-node `Default` path
+    /// run unmodified upstream logic and are intentionally not gated. The context carries the
+    /// chain-keyed snapshot handle + metrics; it is a no-op (fail-open) when the chain id does
+    /// not resolve to a mirror address.
+    pub fn with_blacklist_ctx(mut self, ctx: BlacklistRuntimeCtx) -> Self {
+        match &mut self.builder {
+            XLayerPayloadServiceBuilderInner::Flashblocks(fb) => {
+                fb.with_blacklist_ctx(ctx);
+            }
             XLayerPayloadServiceBuilderInner::DefaultWithP2P(_) => {}
             XLayerPayloadServiceBuilderInner::Default(_) => {}
         }

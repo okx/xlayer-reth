@@ -193,6 +193,8 @@ pub(super) struct FlashblocksBuilder<Pool, Client> {
     pub task_metrics: Arc<FlashblocksTaskMetrics>,
     /// Configuration for bridge transaction interception.
     pub bridge_intercept_config: xlayer_bridge_intercept::BridgeInterceptConfig,
+    /// Chain-level blacklist runtime context (XLOP-1100, FR-2/3 builder face).
+    pub blacklist_ctx: Option<xlayer_blacklist_node::BlacklistRuntimeCtx>,
 }
 
 impl<Pool, Client> FlashblocksBuilder<Pool, Client> {
@@ -224,6 +226,7 @@ impl<Pool, Client> FlashblocksBuilder<Pool, Client> {
             builder_tx,
             task_metrics,
             bridge_intercept_config: Default::default(),
+            blacklist_ctx: None,
         }
     }
 }
@@ -311,6 +314,7 @@ where
             metrics: self.metrics.clone(),
             max_gas_per_txn: self.config.max_gas_per_txn,
             bridge_intercept_config: self.bridge_intercept_config.clone(),
+            blacklist_ctx: self.blacklist_ctx.clone(),
         })
     }
 

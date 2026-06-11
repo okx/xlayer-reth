@@ -14,6 +14,8 @@ repository = "https://github.com/okx/xlayer-reth.git"
 resolver = "2"
 exclude = ["deps"]
 members = [
+    "crates/blacklist",
+    "crates/blacklist-node",
     "crates/builder",
     "crates/chainspec",
     "crates/flashblocks",
@@ -66,6 +68,8 @@ codegen-units = 1
 # ==============================================================================
 
 xlayer-bridge-intercept = { path = "crates/intercept" }
+xlayer-blacklist = { path = "crates/blacklist" }
+xlayer-blacklist-node = { path = "crates/blacklist-node" }
 xlayer-builder = { path = "crates/builder" }
 xlayer-chainspec = { path = "crates/chainspec" }
 xlayer-flashblocks = { path = "crates/flashblocks" }
@@ -249,6 +253,7 @@ metrics = "0.24.0"
 moka = { version = "0.12.11", features = ["sync"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 once_cell = "1.19"
+arc-swap = "1.7"
 parking_lot = { version = "0.12.3" }
 secp256k1 = { version = "0.30", default-features = false }
 serde = "1"

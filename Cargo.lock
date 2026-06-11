@@ -1084,6 +1084,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "arc-swap"
+version = "1.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a3a1fd6f75306b68087b831f025c712524bcb19aad54e557b1129cfa0a2b207"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "archery"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14288,6 +14297,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "xlayer-blacklist"
+version = "0.0.6"
+dependencies = [
+ "alloy-primitives",
+ "metrics",
+ "reth-metrics",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
+name = "xlayer-blacklist-node"
+version = "0.0.6"
+dependencies = [
+ "alloy-consensus",
+ "alloy-primitives",
+ "arc-swap",
+ "eyre",
+ "metrics",
+ "reth-chainspec",
+ "reth-evm",
+ "reth-metrics",
+ "reth-node-api",
+ "reth-node-builder",
+ "reth-optimism-evm",
+ "reth-optimism-forks",
+ "reth-optimism-node",
+ "reth-optimism-primitives",
+ "reth-optimism-txpool",
+ "reth-primitives-traits",
+ "reth-provider",
+ "reth-revm",
+ "reth-transaction-pool",
+ "revm",
+ "thiserror 2.0.18",
+ "tracing",
+ "xlayer-blacklist",
+]
+
+[[package]]
 name = "xlayer-bridge-intercept"
 version = "0.0.6"
 dependencies = [
@@ -14400,6 +14449,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber 0.3.23",
  "url",
+ "xlayer-blacklist",
+ "xlayer-blacklist-node",
  "xlayer-bridge-intercept",
  "xlayer-trace-monitor",
 ]
@@ -14612,6 +14663,8 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "xlayer-blacklist",
+ "xlayer-blacklist-node",
  "xlayer-bridge-intercept",
  "xlayer-builder",
  "xlayer-chainspec",
