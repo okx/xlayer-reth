@@ -942,6 +942,23 @@ fn execute_pre_steps<DB>(
 where
     DB: Database<Error = ProviderError> + std::fmt::Debug,
 {
+    // XLOP-1100 (FR-4): read the block-head blacklist snapshot ONCE per block from the
+    // parent state — before any pre-execution change or tx — and store it into the shared
+    // runtime ctx for the sequencer + best-tx execution gates to reuse. `state` is the pure
+    // parent state at this point (no in-block delta), so an `add` landing in block N is only
+    // visible from N+1. A disabled chain / unresolved mirror is a no-op (empty snapshot).
+    if let Some(bl_ctx) = &ctx.blacklist_ctx
+        && let Some(mirror) = bl_ctx.mirror()
+    {
+        let start = std::time::Instant::now();
+        let snapshot = {
+            let mut evm = ctx.evm_config.evm_with_env(&mut *state, ctx.evm_env.clone());
+            xlayer_blacklist_node::read_blacklist_snapshot(&mut evm, mirror)
+        };
+        bl_ctx.record_snapshot_read(start.elapsed().as_secs_f64());
+        bl_ctx.store_snapshot(snapshot);
+    }
+
     // 1. apply pre-execution changes
     ctx.evm_config
         .builder_for_next_block(state, ctx.parent(), ctx.block_env_attributes.clone())

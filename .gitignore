@@ -29,3 +29,6 @@ copilot.pem
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Local build TMPDIR (workaround for sandbox link failures)
+.tmpbuild/

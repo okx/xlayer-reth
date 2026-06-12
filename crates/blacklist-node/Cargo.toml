@@ -30,6 +30,11 @@ xlayer-blacklist.workspace = true
 # core types
 alloy-primitives.workspace = true
 alloy-consensus.workspace = true
+alloy-evm.workspace = true
+alloy-op-evm.workspace = true
+alloy-rpc-types-eth.workspace = true
+op-alloy-rpc-types.workspace = true
+op-revm.workspace = true
 
 # reth / op-reth integration
 reth-transaction-pool.workspace = true

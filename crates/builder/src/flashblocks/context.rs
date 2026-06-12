@@ -16,7 +16,7 @@ use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
 use alloy_primitives::{BlockHash, Bytes, U256};
 use alloy_rpc_types_eth::Withdrawals;
 use core::fmt::Debug;
-use op_alloy_consensus::{OpDepositReceipt, OpTxType};
+use op_alloy_consensus::{OpDepositReceipt, OpTxEnvelope, OpTxType};
 use op_revm::{L1BlockInfo, OpSpecId};
 
 use reth_basic_payload_builder::PayloadConfig;
@@ -43,7 +43,9 @@ use reth_payload_builder::PayloadId;
 use reth_primitives_traits::{InMemorySize, SealedHeader, SignedTransaction};
 use reth_revm::{context::Block, State};
 use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction};
-use revm::{context::result::ResultAndState, interpreter::as_u64_saturated, DatabaseCommit};
+use revm::{
+    context::result::ResultAndState, interpreter::as_u64_saturated, Database as _, DatabaseCommit,
+};
 
 /// Container type that holds all necessities to build a new payload.
 #[derive(Debug)]
@@ -267,7 +269,16 @@ impl FlashblocksBuilderCtx {
         // batch from the running tx count.
         let next_bal_index = info.executed_transactions.len() as u64 + 1;
         db.set_bal_index(next_bal_index);
-        let mut evm = self.evm_config.evm_with_env(&mut *db, self.evm_env.clone());
+        // XLOP-1100 (FR-3): mount the blacklist inspector so a committed-hit deposit can be
+        // detected by all three checks. Inspection is off for disabled chains / empty lists.
+        let bl_snapshot = self.blacklist_ctx.as_ref().map(|c| c.load_snapshot());
+        let bl_active = bl_snapshot.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
+        let mut evm = self.evm_config.evm_with_env_and_inspector(
+            &mut *db,
+            self.evm_env.clone(),
+            xlayer_blacklist_node::XLayerRevmInspector::new(),
+        );
+        evm.set_inspector_enabled(bl_active);
 
         for sequencer_tx in &self.attributes().transactions {
             // A sequencer's block should never contain blob transactions.
@@ -303,6 +314,9 @@ impl FlashblocksBuilderCtx {
                     ))
                 })?;
 
+            if bl_active {
+                evm.inspector_mut().reset();
+            }
             let ResultAndState { result, state } = match evm.transact(&sequencer_tx) {
                 Ok(res) => res,
                 Err(err) => {
@@ -315,8 +329,111 @@ impl FlashblocksBuilderCtx {
                 }
             };
 
-            // add gas used by the transaction to cumulative gas used, before creating the receipt
             let gas_used = result.tx_gas_used();
+
+            // XLOP-1100 (FR-3): a committed-hit DEPOSIT is included-as-reverted (it cannot be
+            // dropped — OP forces inclusion). Exempt senders (system / L1-attributes) and
+            // disabled chains are never gated. Reproduces op-revm's failed-deposit post-state:
+            // discard execution effects, keep mint, bump sender nonce, status=0,
+            // gasUsed=gasLimit, empty logs, DepositNonce=N.
+            if bl_active
+                && sequencer_tx.is_deposit()
+                && !xlayer_blacklist::deposit::is_exempt_sender(&sequencer_tx.signer())
+            {
+                let snapshot = bl_snapshot.as_deref().expect("bl_active implies snapshot");
+                let mut obs = evm.inspector().observations().clone();
+                let sd_targets = evm.inspector().selfdestruct_targets().to_vec();
+                let listed_changes: Vec<_> = state
+                    .iter()
+                    .filter_map(|(addr, acct)| {
+                        if !snapshot.contains(addr) {
+                            return None;
+                        }
+                        let balance_start = (*evm.db_mut())
+                            .basic(*addr)
+                            .ok()
+                            .flatten()
+                            .map(|i| i.balance)
+                            .unwrap_or_default();
+                        Some(xlayer_blacklist_node::ListedBalanceChange {
+                            address: *addr,
+                            balance_start,
+                            balance_end: acct.info.balance,
+                        })
+                    })
+                    .collect();
+                // Deposits pay no L2 execution gas fee, so the sender/coinbase fee-strip is
+                // moot here (effective_gas_price = 0); a listed deposit sender is caught by
+                // check① regardless.
+                let fee = xlayer_blacklist_node::FeeContext {
+                    sender: sequencer_tx.signer(),
+                    coinbase: self.evm_env.block_env.beneficiary,
+                    gas_used,
+                    effective_gas_price: 0,
+                    base_fee: self.base_fee(),
+                };
+                for cand in xlayer_blacklist_node::reconstruct_balance_candidates(
+                    listed_changes,
+                    &fee,
+                    &sd_targets,
+                ) {
+                    obs.record_balance_candidate(cand);
+                }
+                if let Some(hit) =
+                    xlayer_blacklist::BlacklistEvaluator::evaluate(&obs, result.logs(), snapshot)
+                {
+                    if let Some(bl_ctx) = &self.blacklist_ctx {
+                        bl_ctx.record_exec_revert(&hit);
+                    }
+                    let gas_limit = sequencer_tx.gas_limit();
+                    let pre_nonce = depositor_nonce.unwrap_or_default();
+                    let mint = match sequencer_tx.inner() {
+                        OpTxEnvelope::Deposit(d) if d.mint != 0 => {
+                            Some(alloy_primitives::U256::from(d.mint))
+                        }
+                        _ => None,
+                    };
+                    let outcome = xlayer_blacklist::deposit::apply_included_as_reverted(
+                        pre_nonce,
+                        gas_limit,
+                        mint,
+                        self.is_canyon_active(),
+                    );
+                    // Full gasLimit charged to the block (op-geth ChargeUsed parity).
+                    info.cumulative_gas_used += gas_limit;
+                    // Failed deposit receipt: status=0, empty logs, DepositNonce=N, Canyon ver.
+                    let receipt_builder =
+                        self.evm_config.block_executor_factory().receipt_builder();
+                    let inner = alloy_consensus::Receipt {
+                        status: alloy_consensus::Eip658Value::Eip658(false),
+                        cumulative_gas_used: info.cumulative_gas_used,
+                        logs: Vec::new(),
+                    };
+                    info.receipts.push(receipt_builder.build_deposit_receipt(OpDepositReceipt {
+                        inner,
+                        deposit_nonce: Some(pre_nonce),
+                        deposit_receipt_version: self.is_canyon_active().then_some(1),
+                    }));
+                    // Commit only the reverted post-state (sender nonce+1 + kept mint).
+                    let pre_info = (*evm.db_mut())
+                        .basic(sequencer_tx.signer())
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default();
+                    let delta = xlayer_blacklist_node::reverted_deposit_state(
+                        sequencer_tx.signer(),
+                        pre_info,
+                        &outcome,
+                    );
+                    evm.db_mut().commit(delta);
+                    info.executed_senders.push(sequencer_tx.signer());
+                    info.executed_transactions.push(sequencer_tx.into_inner());
+                    evm.db_mut().bump_bal_index();
+                    continue;
+                }
+            }
+
+            // add gas used by the transaction to cumulative gas used, before creating the receipt
             info.cumulative_gas_used += gas_used;
 
             if !sequencer_tx.is_deposit() {
@@ -498,7 +615,19 @@ impl FlashblocksBuilderCtx {
         // batch from the running tx count.
         let next_bal_index = info.executed_transactions.len() as u64 + 1;
         db.set_bal_index(next_bal_index);
-        let mut evm = self.evm_config.evm_with_env(&mut *db, self.evm_env.clone());
+        // XLOP-1100 (FR-2): mount the blacklist inspector so check①(committed CALL touch)
+        // and check③(ETH balance) observations are captured on the build path. Inspection is
+        // toggled OFF for disabled chains / empty lists, so they run the non-inspecting EVM
+        // path with zero overhead (AC5). The block-head snapshot was loaded once in
+        // `execute_pre_steps`; reuse it here for the whole tx loop.
+        let bl_snapshot = self.blacklist_ctx.as_ref().map(|c| c.load_snapshot());
+        let bl_active = bl_snapshot.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
+        let mut evm = self.evm_config.evm_with_env_and_inspector(
+            &mut *db,
+            self.evm_env.clone(),
+            xlayer_blacklist_node::XLayerRevmInspector::new(),
+        );
+        evm.set_inspector_enabled(bl_active);
 
         debug!(
             target: "payload_builder",
@@ -585,6 +714,11 @@ impl FlashblocksBuilderCtx {
                 return Ok(Some(()));
             }
 
+            // Per-tx reset: the EVM (and its inspector) is built once outside the loop, so
+            // clear the prior tx's observations before executing this one.
+            if bl_active {
+                evm.inspector_mut().reset();
+            }
             let tx_simulation_start_time = Instant::now();
             let ResultAndState { result, state } = match evm.transact(&tx) {
                 Ok(res) => res,
@@ -651,24 +785,62 @@ impl FlashblocksBuilderCtx {
             }
 
             // XLayer chain-level blacklist (XLOP-1100, FR-2/3 builder face — L2-normal drop).
-            // Mirrors the bridge-intercept disposition: a non-deposit L2 transaction whose
-            // committed Transfer-class logs touch a blacklisted address is dropped
-            // (`mark_invalid`) before its state is committed, and the revert is metered. The
-            // committed-effects judgement (check②) operates on `result.logs()`; an empty
-            // snapshot (feature disabled / chain not enabled) is a no-op (fail-open).
-            if let Some(bl_ctx) = &self.blacklist_ctx {
-                let snapshot = bl_ctx.load_snapshot();
-                if !snapshot.is_empty() {
-                    let inspector = xlayer_blacklist::BlacklistInspector::new();
-                    if let Some(hit) = xlayer_blacklist::BlacklistEvaluator::evaluate(
-                        &inspector,
-                        result.logs(),
-                        &snapshot,
-                    ) {
+            // Full three-check (priority call > log > balance) on committed effects, mirroring
+            // the bridge-intercept disposition: a committed hit on a non-deposit L2 tx is
+            // dropped (`mark_invalid`) before its state is committed, and the revert is metered.
+            //   - check① committed CALL touch  : from the mounted inspector's frame tree
+            //   - check② committed Transfer log : from `result.logs()`
+            //   - check③ committed ETH balance  : reconstructed from the state diff (listed
+            //     addresses changed by this tx), with the op-geth fee set stripped
+            // An empty snapshot / disabled chain is a no-op (fail-open) — `bl_active` is false.
+            if bl_active {
+                let snapshot = bl_snapshot.as_deref().expect("bl_active implies snapshot");
+                // Clone the call-frame observations before borrowing the db for balances.
+                let mut obs = evm.inspector().observations().clone();
+                let sd_targets = evm.inspector().selfdestruct_targets().to_vec();
+                // check③ candidates: listed addresses changed by this tx (committed pre-tx
+                // balance from the pre-commit db, post-tx balance from the state diff).
+                let listed_changes: Vec<_> = state
+                    .iter()
+                    .filter_map(|(addr, acct)| {
+                        if !snapshot.contains(addr) {
+                            return None;
+                        }
+                        let balance_start = (*evm.db_mut())
+                            .basic(*addr)
+                            .ok()
+                            .flatten()
+                            .map(|i| i.balance)
+                            .unwrap_or_default();
+                        Some(xlayer_blacklist_node::ListedBalanceChange {
+                            address: *addr,
+                            balance_start,
+                            balance_end: acct.info.balance,
+                        })
+                    })
+                    .collect();
+                let fee = xlayer_blacklist_node::FeeContext {
+                    sender: tx.signer(),
+                    coinbase: self.evm_env.block_env.beneficiary,
+                    gas_used,
+                    effective_gas_price: tx.effective_gas_price(Some(base_fee)),
+                    base_fee,
+                };
+                for cand in xlayer_blacklist_node::reconstruct_balance_candidates(
+                    listed_changes,
+                    &fee,
+                    &sd_targets,
+                ) {
+                    obs.record_balance_candidate(cand);
+                }
+                if let Some(hit) =
+                    xlayer_blacklist::BlacklistEvaluator::evaluate(&obs, result.logs(), snapshot)
+                {
+                    if let Some(bl_ctx) = &self.blacklist_ctx {
                         bl_ctx.record_exec_revert(&hit);
-                        best_txs.mark_invalid(tx.signer(), tx.nonce());
-                        continue;
                     }
+                    best_txs.mark_invalid(tx.signer(), tx.nonce());
+                    continue;
                 }
             }
 

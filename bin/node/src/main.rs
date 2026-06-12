@@ -25,7 +25,11 @@ use reth_provider::CanonStateSubscriptions;
 use reth_rpc_builder::config::RethRpcServerConfig;
 use reth_rpc_server_types::RethRpcModule;
 
-use xlayer_blacklist_node::BlacklistRuntimeCtx;
+use reth_optimism_node::node::OpPoolBuilder;
+use xlayer_blacklist_node::{
+    BlacklistRuntimeCtx, XLayerBlacklistPoolBuilder, XLayerDepositBlacklistHook,
+    XLayerExecutorBuilder,
+};
 use xlayer_chainspec::XLayerChainSpecParser;
 use xlayer_flashblocks::{
     FlashblockSequenceValidator, FlashblockStateCache, FlashblocksPersistCtx, FlashblocksPubSub,
@@ -154,7 +158,7 @@ fn main() {
                 fb_p2p_status.clone(),
             )?
             .with_bridge_config(bridge_config)
-            .with_blacklist_ctx(bl_ctx);
+            .with_blacklist_ctx(bl_ctx.clone());
 
             // Get the engine validator for flashblocks RPC.
             let engine_validator = Arc::new(OnceLock::new());
@@ -180,7 +184,21 @@ fn main() {
 
             let NodeHandle { node, node_exit_future } = builder
                 .with_types_and_provider::<OpNode, BlockchainProvider<_>>()
-                .with_components(op_node.components().payload(payload_builder))
+                // XLOP-1100: install the blacklist deposit hook on the follower / newPayload
+                // executor face via a builder that produces the SAME `OpEvmConfig` type as the
+                // upstream default (no type change → add-ons/engine/RPC stack unaffected).
+                .with_components(
+                    op_node
+                        .components()
+                        .payload(payload_builder)
+                        .executor(XLayerExecutorBuilder::new(bl_ctx.clone()))
+                        // XLOP-1100 (FR-1): blacklist ingress filter on the standard
+                        // OpTransactionValidator (same pool type → add-ons unaffected).
+                        .pool(XLayerBlacklistPoolBuilder::new(
+                            OpPoolBuilder::default(),
+                            bl_ctx.clone(),
+                        )),
+                )
                 .with_add_ons(add_ons)
                 .extend_rpc_modules(move |ctx| {
                     let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
@@ -200,9 +218,18 @@ fn main() {
                         );
 
                         // Initialize the flashblocks validator
+                        // XLOP-1100: attach the deposit hook to the flashblocks-validation
+                        // EVM config (same `OpEvmConfig` type, hook set on its factory field).
+                        let fb_evm_config = {
+                            let mut cfg = OpEvmConfig::optimism(ctx.provider().chain_spec());
+                            cfg.executor_factory = cfg.executor_factory.with_blacklist_hook(Some(
+                                Arc::new(XLayerDepositBlacklistHook::new(bl_ctx.clone())),
+                            ));
+                            cfg
+                        };
                         engine_validator.set_flashblocks(
                             FlashblockSequenceValidator::new(
-                                OpEvmConfig::optimism(ctx.provider().chain_spec()),
+                                fb_evm_config,
                                 ctx.provider().clone(),
                                 ctx.provider().chain_spec(),
                                 flashblocks_state.clone(),

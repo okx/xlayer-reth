@@ -1,122 +1,110 @@
-//! FR-1 — ingress mempool validator wrapper.
+//! FR-1 — chain-level blacklist ingress filter.
 //!
-//! [`XLayerBlacklistTxValidator`] wraps op-reth's `OpTransactionValidator` (any
-//! [`TransactionValidator`]) and pre-screens the top-level `to` then `from` against the
-//! current blacklist snapshot before delegating. On a hit it rejects with a
-//! [`BlacklistRejected`] error (whose `Display` is the fixed [`POOL_REJECT_MESSAGE`]; the
-//! RPC layer maps a pool `Invalid(... Other(...))` to JSON-RPC code `-32000`). It is a
-//! best-effort filter — the execution gate (FR-2) backstops any snapshot lag.
-//!
-//! Grounded signatures (verbatim):
-//! - `TransactionValidator` trait — reth `crates/transaction-pool/src/validate/mod.rs:170-240`
-//!   (`type Transaction: PoolTransaction`, `type Block: Block`, async `validate_transaction`,
-//!   default `on_new_head_block(&self, &SealedBlock<Self::Block>)`).
-//! - `PoolTransaction: alloy_consensus::Transaction + …` — `traits.rs:1253`; `sender()` at
-//!   `:1329`; `to()` via the `alloy_consensus::Transaction` supertrait (`None` for Create).
-//! - `PoolTransactionError { is_bad_transaction, as_any }` — `error.rs:16`;
-//!   `InvalidPoolTransactionError::Other(Box<dyn PoolTransactionError>)` — `error.rs:285`.
-//! - delegation shape mirrors op-reth `OpTransactionValidator` impl `txpool/src/validator.rs:293-318`.
+//! Implements the upstream [`IngressBlacklistFilter`] (op-reth txpool) so the standard
+//! `OpTransactionValidator` rejects, at mempool admission (RPC + P2P), any tx whose top-level
+//! sender or recipient is blacklisted — without wrapping the validator type (which would
+//! change `N::Pool` and break the OpAddOns stack, see [[upstream-component-type-pinning]]).
+//! The filter is attached via `OpTransactionValidator::with_ingress_blacklist` by
+//! [`crate::XLayerBlacklistPoolBuilder`]. This is a best-effort gate: a stale snapshot is not
+//! a safety gap because the execution gate (FR-2/3) is the backstop (FR-1 AC2).
 
 use crate::runtime::BlacklistRuntimeCtx;
-use alloy_consensus::Transaction as _;
-use reth_primitives_traits::SealedBlock;
-use reth_transaction_pool::{
-    error::{InvalidPoolTransactionError, PoolTransactionError},
-    PoolTransaction, TransactionOrigin, TransactionValidationOutcome, TransactionValidator,
-};
-use std::any::Any;
+use alloy_primitives::Address;
+use reth_optimism_txpool::IngressBlacklistFilter;
+use xlayer_blacklist::POOL_REJECT_MESSAGE;
 
-/// Pool error for a blacklist-rejected transaction. `Display` == [`POOL_REJECT_MESSAGE`]
-/// (no dynamic fields); the RPC layer attaches code `-32000`.
-#[derive(Debug, thiserror::Error)]
-#[error("xlayer-blacklist: sender or recipient is on the blacklist")]
-pub struct BlacklistRejected;
-
-impl PoolTransactionError for BlacklistRejected {
-    fn is_bad_transaction(&self) -> bool {
-        // Deterministic hard reject — warrants peer penalisation (mirrors op-reth
-        // `InvalidCrossTx::CrossChainTxPreInterop`).
-        true
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-/// Wraps an inner [`TransactionValidator`] with the chain-level blacklist ingress check.
+/// Chain-level blacklist ingress filter backed by the shared [`BlacklistRuntimeCtx`] snapshot.
 #[derive(Debug, Clone)]
-pub struct XLayerBlacklistTxValidator<V> {
-    inner: V,
+pub struct XLayerIngressFilter {
     ctx: BlacklistRuntimeCtx,
 }
 
-impl<V> XLayerBlacklistTxValidator<V> {
-    /// Wrap `inner`, sharing the runtime context (snapshot handle + metrics).
-    pub fn new(inner: V, ctx: BlacklistRuntimeCtx) -> Self {
-        Self { inner, ctx }
+impl XLayerIngressFilter {
+    /// New filter sharing the chain-keyed runtime context (snapshot handle + metrics).
+    pub fn new(ctx: BlacklistRuntimeCtx) -> Self {
+        Self { ctx }
     }
 }
 
-impl<V> TransactionValidator for XLayerBlacklistTxValidator<V>
-where
-    V: TransactionValidator,
-{
-    type Transaction = V::Transaction;
-    type Block = V::Block;
-
-    async fn validate_transaction(
-        &self,
-        origin: TransactionOrigin,
-        transaction: Self::Transaction,
-    ) -> TransactionValidationOutcome<Self::Transaction> {
+impl IngressBlacklistFilter for XLayerIngressFilter {
+    fn reject_reason(&self, from: Address, to: Option<Address>) -> Option<&'static str> {
         let snapshot = self.ctx.load_snapshot();
-        // Empty snapshot (disabled chain / not yet populated) → allow unconditionally.
-        if !snapshot.is_empty() {
-            // Top-level `to` first (no signature recovery needed; `None` for Create).
-            if let Some(to) = transaction.to()
-                && snapshot.contains(&to)
-            {
-                return self.reject(transaction);
-            }
-            // Then top-level `from`. The pool tx is already recovered, so reading the
-            // sender never fails — a from-recovery failure cannot reject here (DM-1.3).
-            if snapshot.contains(&transaction.sender()) {
-                return self.reject(transaction);
-            }
+        // Disabled chain / empty list → pass everything through (FR-6 AC2).
+        if snapshot.is_empty() {
+            return None;
         }
-        self.inner.validate_transaction(origin, transaction).await
-    }
-
-    fn on_new_head_block(&self, new_tip_block: &SealedBlock<Self::Block>) {
-        // Delegate so the inner validator keeps updating its fork/L1 state.
-        self.inner.on_new_head_block(new_tip_block);
-    }
-}
-
-impl<V> XLayerBlacklistTxValidator<V> {
-    fn reject<T: PoolTransaction>(&self, transaction: T) -> TransactionValidationOutcome<T> {
-        self.ctx.record_pool_reject();
-        TransactionValidationOutcome::Invalid(
-            transaction,
-            InvalidPoolTransactionError::Other(Box::new(BlacklistRejected)),
-        )
+        // op-geth order: check top-level `to` first (no signature recovery needed), then
+        // `from`. Either hit → reject with the fixed, dynamic-field-free message (FR-7).
+        if let Some(to) = to
+            && snapshot.contains(&to)
+        {
+            self.ctx.record_pool_reject();
+            return Some(POOL_REJECT_MESSAGE);
+        }
+        if snapshot.contains(&from) {
+            self.ctx.record_pool_reject();
+            return Some(POOL_REJECT_MESSAGE);
+        }
+        None
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xlayer_blacklist::POOL_REJECT_MESSAGE;
+    use alloy_primitives::address;
+    use xlayer_blacklist::BlacklistSnapshot;
 
-    #[test]
-    fn rejected_message_matches_cross_client_constant() {
-        // The thiserror Display must stay byte-identical to the shared constant.
-        assert_eq!(BlacklistRejected.to_string(), POOL_REJECT_MESSAGE);
+    const AAA: Address = address!("00000000000000000000000000000000000000aa");
+    const BBB: Address = address!("00000000000000000000000000000000000000bb");
+
+    fn filter_with(addrs: &[Address]) -> XLayerIngressFilter {
+        let ctx = BlacklistRuntimeCtx::new(195);
+        let snap: BlacklistSnapshot = addrs.iter().copied().collect();
+        ctx.store_snapshot(snap);
+        XLayerIngressFilter::new(ctx)
     }
 
     #[test]
-    fn rejected_is_bad_transaction() {
-        assert!(BlacklistRejected.is_bad_transaction());
+    fn empty_snapshot_passes() {
+        let ctx = BlacklistRuntimeCtx::new(195); // enabled but empty list
+        let f = XLayerIngressFilter::new(ctx);
+        assert_eq!(f.reject_reason(AAA, Some(BBB)), None);
+    }
+
+    #[test]
+    fn to_hit_rejects_with_fixed_message() {
+        let f = filter_with(&[AAA]);
+        assert_eq!(f.reject_reason(BBB, Some(AAA)), Some(POOL_REJECT_MESSAGE));
+    }
+
+    #[test]
+    fn from_hit_rejects() {
+        let f = filter_with(&[AAA]);
+        assert_eq!(f.reject_reason(AAA, Some(BBB)), Some(POOL_REJECT_MESSAGE));
+    }
+
+    #[test]
+    fn no_hit_passes() {
+        let f = filter_with(&[AAA]);
+        let ccc = address!("00000000000000000000000000000000000000cc");
+        assert_eq!(f.reject_reason(BBB, Some(ccc)), None);
+    }
+
+    #[test]
+    fn create_tx_checks_from_only() {
+        let f = filter_with(&[AAA]);
+        // contract creation (to = None): only `from` is checked.
+        assert_eq!(f.reject_reason(AAA, None), Some(POOL_REJECT_MESSAGE));
+        assert_eq!(f.reject_reason(BBB, None), None);
+    }
+
+    #[test]
+    fn reject_message_is_fixed_and_field_free() {
+        assert_eq!(
+            POOL_REJECT_MESSAGE,
+            "xlayer-blacklist: sender or recipient is on the blacklist"
+        );
+        assert!(!POOL_REJECT_MESSAGE.contains("0x"));
     }
 }

@@ -1,48 +1,55 @@
-//! FR-2/3 (follower face) — node-builder `ExecutorBuilder` producing the wrapper EVM config.
+//! FR-3/FR-5 (follower face) — node-builder `ExecutorBuilder` that installs the blacklist
+//! deposit hook WITHOUT changing the EVM-config type.
 //!
-//! In this reth version `ExecutorBuilder` has only `type EVM: ConfigureEvm` + `build_evm`
-//! (no separate `Executor` type — the executor is produced at runtime by
-//! `ConfigureEvm::create_executor`). So this builder delegates to op-reth's
-//! `OpExecutorBuilder` to construct the inner `OpEvmConfig`, then wraps it in
-//! [`XLayerBlacklistEvmConfig`] carrying the chain-keyed [`BlacklistRuntimeCtx`].
+//! Critically, this builds the **same** `OpEvmConfig<ChainSpec, Primitives>` type that the
+//! upstream `OpExecutorBuilder` produces (so `N::Evm` is unchanged and the OpAddOns / engine
+//! / RPC stack still resolves — avoiding the type-pinning wall, see
+//! [[upstream-component-type-pinning]]). The only difference is that the deposit-intercept
+//! hook is attached to the config's (public) `executor_factory` field via the
+//! `with_blacklist_hook` setter added on `OpBlockExecutorFactory` (XLOP-1100). With no hook
+//! / disabled chain the produced config is byte-identical to the upstream default.
 //!
 //! Grounded signatures (verbatim):
-//! - `ExecutorBuilder { type EVM: ConfigureEvm<Primitives = PrimitivesTy<Node::Types>> + 'static;
-//!   fn build_evm(self, &BuilderContext<Node>) -> impl Future<Output = eyre::Result<Self::EVM>> }`
-//!   — reth `crates/node/builder/src/components/execute.rs:7-18`.
-//! - `OpExecutorBuilder::build_evm` builds `OpEvmConfig::new(ctx.chain_spec(), OpRethReceiptBuilder::default())`
-//!   — op-reth `node/src/node.rs` (`impl ExecutorBuilder for OpExecutorBuilder`).
+//! - `impl<Node> ExecutorBuilder<Node> for OpExecutorBuilder { type EVM =
+//!   OpEvmConfig<ChainSpec, Primitives>; fn build_evm = OpEvmConfig::new(ctx.chain_spec(),
+//!   OpRethReceiptBuilder::default()) }` — op-reth `node/src/node.rs:982-988`.
 
+use crate::follower_hook::XLayerDepositBlacklistHook;
 use crate::runtime::BlacklistRuntimeCtx;
-use crate::XLayerBlacklistEvmConfig;
-use reth_chainspec::EthChainSpec;
+use alloy_op_evm::block::DepositBlacklistHook;
+use reth_node_api::NodeTypes;
 use reth_node_builder::{components::ExecutorBuilder, BuilderContext, FullNodeTypes};
-use reth_optimism_node::node::OpExecutorBuilder;
+use reth_optimism_evm::{OpEvmConfig, OpRethReceiptBuilder};
+use reth_optimism_forks::OpHardforks;
+use reth_optimism_primitives::OpPrimitives;
+use std::sync::Arc;
 
-/// Node-builder executor component that installs the blacklist wrapper EVM config on the
-/// follower / executor face. Wraps the default [`OpExecutorBuilder`].
-#[derive(Debug, Default, Clone)]
+/// Node-builder executor component that attaches the blacklist deposit hook to the
+/// follower / newPayload-validation EVM config, keeping the upstream `OpEvmConfig` type.
+#[derive(Debug, Clone)]
 pub struct XLayerExecutorBuilder {
-    inner: OpExecutorBuilder,
+    ctx: BlacklistRuntimeCtx,
 }
 
 impl XLayerExecutorBuilder {
-    /// New builder wrapping the default OP executor builder.
-    pub fn new() -> Self {
-        Self::default()
+    /// New builder carrying the shared blacklist runtime context.
+    pub fn new(ctx: BlacklistRuntimeCtx) -> Self {
+        Self { ctx }
     }
 }
 
 impl<Node> ExecutorBuilder<Node> for XLayerExecutorBuilder
 where
-    Node: FullNodeTypes,
-    OpExecutorBuilder: ExecutorBuilder<Node>,
+    Node: FullNodeTypes<Types: NodeTypes<ChainSpec: OpHardforks, Primitives = OpPrimitives>>,
 {
-    type EVM = XLayerBlacklistEvmConfig<<OpExecutorBuilder as ExecutorBuilder<Node>>::EVM>;
+    type EVM =
+        OpEvmConfig<<Node::Types as NodeTypes>::ChainSpec, <Node::Types as NodeTypes>::Primitives>;
 
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
-        let inner_evm = self.inner.build_evm(ctx).await?;
-        let chain_id = ctx.chain_spec().chain().id();
-        Ok(XLayerBlacklistEvmConfig::new(inner_evm, BlacklistRuntimeCtx::new(chain_id)))
+        let mut evm_config = OpEvmConfig::new(ctx.chain_spec(), OpRethReceiptBuilder::default());
+        let hook: Arc<dyn DepositBlacklistHook> =
+            Arc::new(XLayerDepositBlacklistHook::new(self.ctx));
+        evm_config.executor_factory = evm_config.executor_factory.with_blacklist_hook(Some(hook));
+        Ok(evm_config)
     }
 }

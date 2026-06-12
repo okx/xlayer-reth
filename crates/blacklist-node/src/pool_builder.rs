@@ -1,38 +1,37 @@
-//! FR-1 (wiring) — node-builder `PoolBuilder` that installs [`XLayerBlacklistTxValidator`].
+//! FR-1 (wiring) — node-builder `PoolBuilder` that installs the blacklist ingress filter on
+//! the standard `OpTransactionValidator` WITHOUT changing the pool/validator type.
 //!
-//! Reproduces op-reth `OpPoolBuilder::build_pool` (`node/src/node.rs:1063-1140`) verbatim
-//! and inserts a single change: the constructed `OpTransactionValidator` is wrapped in
-//! [`XLayerBlacklistTxValidator`] before being handed to `TxPoolBuilder::with_validator`.
-//! The resulting `Self::Pool` therefore parameterises the task executor on the wrapper
-//! validator instead of the bare `OpTransactionValidator`.
-//!
-//! `PoolBuilder<Node, Evm>` trait — reth `crates/node/builder/src/components/pool.rs:16`:
-//! `type Pool: TransactionPool<…> + Unpin + 'static; fn build_pool(self, ctx, evm_config: Evm)`.
+//! Reproduces op-reth `OpPoolBuilder::build_pool` (`node/src/node.rs:1063-1140`) verbatim and
+//! inserts a single change: the constructed `OpTransactionValidator` gets the blacklist
+//! ingress filter attached via `with_ingress_blacklist`. The resulting `Self::Pool` is the
+//! SAME type as the upstream `OpTransactionPool` (no wrapper validator), so `N::Pool` is
+//! unchanged and the OpAddOns / RPC stack still resolves (avoids the type-pinning wall, see
+//! [[upstream-component-type-pinning]]).
 //!
 //! NOTE: this module touches the widest internal-API surface (blob store, task executor,
-//! supervisor client, maintenance tasks) and is the primary compile-verification target for
-//! stage 3.1 (it cannot be built in the memory-limited implementation stage). Every call is
-//! grounded in the cited op-reth source.
+//! supervisor client, maintenance tasks). When bumping op-reth, diff this against the current
+//! `OpPoolBuilder::build_pool` and re-sync.
 
 use crate::runtime::BlacklistRuntimeCtx;
-use crate::validator::XLayerBlacklistTxValidator;
+use crate::validator::XLayerIngressFilter;
 use reth_chainspec::EthChainSpec;
 use reth_node_api::{NodeTypes, TxTy};
 use reth_node_builder::{components::PoolBuilder, BuilderContext, FullNodeTypes, PrimitivesTy};
 use reth_optimism_forks::{OpHardfork, OpHardforks};
 use reth_optimism_node::node::OpPoolBuilder;
 use reth_optimism_txpool::{
-    supervisor::SupervisorClient, OpPool, OpPooledTx, OpTransactionValidator,
+    supervisor::SupervisorClient, IngressBlacklistFilter, OpPool, OpPooledTx,
+    OpTransactionValidator,
 };
 use reth_primitives_traits::NodePrimitives;
 use reth_transaction_pool::{
     blobstore::DiskFileBlobStore, CoinbaseTipOrdering, EthPoolTransaction, Pool,
     TransactionValidationTaskExecutor, TransactionValidator,
 };
+use std::sync::Arc;
 
-/// Node-builder pool component that wraps the OP transaction pool's validator with the
-/// chain-level blacklist ingress check (FR-1). Constructed from the chain-keyed runtime
-/// context so the validator and pool maintenance task share one snapshot handle.
+/// Node-builder pool component that attaches the chain-level blacklist ingress filter to the
+/// OP transaction pool's validator (FR-1), keeping the upstream pool/validator type.
 #[derive(Debug)]
 pub struct XLayerBlacklistPoolBuilder<T = reth_optimism_txpool::OpPooledTransaction> {
     inner: OpPoolBuilder<T>,
@@ -51,21 +50,16 @@ where
     Node: FullNodeTypes<Types: NodeTypes<ChainSpec: OpHardforks>>,
     T: EthPoolTransaction<Consensus = TxTy<Node::Types>> + OpPooledTx,
     Evm: reth_evm::ConfigureEvm<Primitives = PrimitivesTy<Node::Types>> + Clone + 'static,
-    // The inner `OpTransactionValidator` is a `TransactionValidator` over the node's tx and
-    // block types; the wrapper's blanket impl then yields the same associated types, so the
-    // task executor / pool accept it in place of the bare validator.
     OpTransactionValidator<Node::Provider, T, Evm>: TransactionValidator<
         Transaction = T,
         Block = <PrimitivesTy<Node::Types> as NodePrimitives>::Block,
     >,
 {
-    // Same pool shape as op-reth's `OpTransactionPool` alias, but with the wrapper validator
-    // swapped in for the bare `OpTransactionValidator` inside the task executor.
+    // SAME pool shape as op-reth's `OpTransactionPool` alias — the bare `OpTransactionValidator`
+    // (no wrapper), with the ingress filter attached as a field.
     type Pool = OpPool<
         Pool<
-            TransactionValidationTaskExecutor<
-                XLayerBlacklistTxValidator<OpTransactionValidator<Node::Provider, T, Evm>>,
-            >,
+            TransactionValidationTaskExecutor<OpTransactionValidator<Node::Provider, T, Evm>>,
             CoinbaseTipOrdering<T>,
             DiskFileBlobStore,
         >,
@@ -116,9 +110,12 @@ where
                     } else {
                         v
                     };
-                    // FR-1: the single XLayer change — wrap the OP validator with the blacklist
-                    // ingress check, sharing the chain-keyed snapshot handle + metrics.
-                    XLayerBlacklistTxValidator::new(op_validator, bl_ctx.clone())
+                    // FR-1: the single XLayer change — attach the blacklist ingress filter to
+                    // the standard validator (same type, no wrapper), sharing the chain-keyed
+                    // snapshot handle + metrics.
+                    let filter: Arc<dyn IngressBlacklistFilter> =
+                        Arc::new(XLayerIngressFilter::new(bl_ctx.clone()));
+                    op_validator.with_ingress_blacklist(Some(filter))
                 });
 
         let final_pool_config = pool_config_overrides.apply(ctx.pool_config());

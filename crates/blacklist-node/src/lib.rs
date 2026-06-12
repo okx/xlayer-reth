@@ -10,18 +10,22 @@
 //! extracted revm/alloy-evm). Compiling this crate requires the full op-reth tree and is
 //! verified at stage 3.1 on a build-capable host.
 
-pub mod evm_config;
+pub mod balance;
+pub mod deposit_apply;
 pub mod executor_builder;
+pub mod follower_hook;
 pub mod inspector;
 pub mod pool_builder;
 pub mod runtime;
 pub mod validator;
 pub mod view;
 
-pub use evm_config::XLayerBlacklistEvmConfig;
+pub use balance::{reconstruct_balance_candidates, FeeContext, ListedBalanceChange};
+pub use deposit_apply::reverted_deposit_state;
 pub use executor_builder::XLayerExecutorBuilder;
+pub use follower_hook::XLayerDepositBlacklistHook;
 pub use inspector::XLayerRevmInspector;
 pub use pool_builder::XLayerBlacklistPoolBuilder;
 pub use runtime::{BlacklistRuntimeCtx, SnapshotHandle};
-pub use validator::{BlacklistRejected, XLayerBlacklistTxValidator};
-pub use view::RethMirrorViewCaller;
+pub use validator::XLayerIngressFilter;
+pub use view::{read_blacklist_snapshot, RethMirrorViewCaller};

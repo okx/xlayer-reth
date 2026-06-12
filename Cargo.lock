@@ -14312,10 +14312,15 @@ name = "xlayer-blacklist-node"
 version = "0.0.6"
 dependencies = [
  "alloy-consensus",
+ "alloy-evm",
+ "alloy-op-evm",
  "alloy-primitives",
+ "alloy-rpc-types-eth",
  "arc-swap",
  "eyre",
  "metrics",
+ "op-alloy-rpc-types",
+ "op-revm",
  "reth-chainspec",
  "reth-evm",
  "reth-metrics",

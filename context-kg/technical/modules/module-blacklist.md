@@ -6,11 +6,23 @@ list cannot have asset transfers (native ETH, ERC20/721/1155, proxy multi-hop, p
 transferFrom/permit, selfdestruct, L1 forced deposit) succeed on L2. op-reth must produce a
 state-root- and field-identical-receipt result with op-geth for the same block, or it forks.
 
-> **Status (as of 2026-06-11, XLOP-1100 branch — partially shipped).** The cross-client core crate
-> is implemented, compiles, and is unit-tested. The node-side wrapper *types* exist but the
-> component-based wiring originally designed (custom pool/executor/EVM-config) is **blocked by
-> upstream type-pinning** — see [[upstream-component-type-pinning]]. Only the L2-normal builder-face
-> drop is live. Treat the remaining FRs (below) as not-yet-wired.
+> **Status (as of 2026-06-12, xl/blacklist_latest — wired, compiles end-to-end).** All faces are
+> now wired and the full node compiles:
+> - FR-4 block-head snapshot read: `builder::execute_pre_steps` (sequencer) + the follower
+>   executor's `apply_pre_execution_changes` both populate the shared `ArcSwap` snapshot.
+> - FR-2 sequencer face: three checks (call/log/balance) live in `flashblocks/context.rs`
+>   (inspector mounted via `evm_with_env_and_inspector`, balance reconstructed from the state diff).
+> - FR-3 deposit included-as-reverted: sequencer (`execute_sequencer_transactions`) + follower
+>   (deps/optimism `OpBlockExecutor` deposit hook), byte-identical post-state.
+> - FR-1 ingress: blacklist filter on the standard `OpTransactionValidator` (field, not wrapper).
+> - FR-5 cross-client decision **B**: deposits judged on check②+③ only (no check① — follower EVM
+>   cannot mount an inspector); op-geth must drop deposit check① to match. See
+>   [[project_blacklist-alignment-spec]] and IMPL-blacklist-full-alignment.
+>
+> The type-pinning wall ([[upstream-component-type-pinning]]) is avoided by adding optional
+> `Option<Arc<dyn …>>` fields to the upstream types (OpBlockExecutor / OpTransactionValidator) and
+> producing the SAME `OpEvmConfig` / pool types — NOT wrapping them. Remaining: end-to-end e2e
+> vector validation (shared adversarial vectors) before mainnet enablement.
 
 ## `crates/blacklist/` — Cross-Client Core (single source of truth for consensus constants)
 

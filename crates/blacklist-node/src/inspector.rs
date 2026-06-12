@@ -13,10 +13,10 @@
 //! - `CallOutcome::instruction_result(&self) -> &InstructionResult` — `…/call_outcome.rs:65`.
 //! - `InstructionResult::is_revert(self) -> bool` — `…/instruction_result.rs:268`.
 
-use alloy_primitives::{Address, I256, U256};
+use alloy_primitives::{Address, U256};
 use revm::interpreter::{CallInputs, CallOutcome};
 use revm::Inspector;
-use xlayer_blacklist::{BalanceCandidate, BlacklistInspector};
+use xlayer_blacklist::BlacklistInspector;
 
 /// revm `Inspector` that forwards call/selfdestruct observations into a
 /// [`BlacklistInspector`]. One instance per transaction.
@@ -25,12 +25,28 @@ pub struct XLayerRevmInspector {
     inner: BlacklistInspector,
     /// Stack of currently-open frame indices, for parent linking.
     open_frames: Vec<usize>,
+    /// Beneficiaries observed via the `selfdestruct` hook (for check③ category tagging).
+    selfdestruct_targets: Vec<Address>,
 }
 
 impl XLayerRevmInspector {
     /// A fresh inspector for one transaction.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Reset all per-transaction observations so a single inspector instance can be reused
+    /// across the txs of the build loop (the EVM is built once outside the loop, so the
+    /// inspector cannot be moved out per tx — it is cleared between txs instead).
+    pub fn reset(&mut self) {
+        self.inner = BlacklistInspector::new();
+        self.open_frames.clear();
+        self.selfdestruct_targets.clear();
+    }
+
+    /// Selfdestruct beneficiaries observed this transaction (for `check③` category).
+    pub fn selfdestruct_targets(&self) -> &[Address] {
+        &self.selfdestruct_targets
     }
 
     /// Borrow the accumulated observations (for `BlacklistEvaluator::evaluate`).
@@ -67,15 +83,11 @@ impl<CTX> Inspector<CTX> for XLayerRevmInspector {
         }
     }
 
-    fn selfdestruct(&mut self, _contract: Address, target: Address, value: U256) {
-        // The beneficiary receives `value`; record it as a selfdestruct-category candidate.
-        // (A net change beyond the fee set is judged by `BlacklistEvaluator`.)
-        self.inner.record_balance_candidate(BalanceCandidate {
-            address: target,
-            balance_start: U256::ZERO,
-            balance_end: value,
-            fee_delta: I256::ZERO,
-            selfdestruct: true,
-        });
+    fn selfdestruct(&mut self, _contract: Address, target: Address, _value: U256) {
+        // Record the beneficiary so check③'s state-diff reconstruction can tag its candidate
+        // with the `selfdestruct` category. The actual net balance change is taken from the
+        // committed state diff (authoritative), not from this hook's `value` — recording a
+        // candidate here too would double-count.
+        self.selfdestruct_targets.push(target);
     }
 }
