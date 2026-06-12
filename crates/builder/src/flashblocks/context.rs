@@ -341,7 +341,15 @@ impl FlashblocksBuilderCtx {
                 && !xlayer_blacklist::deposit::is_exempt_sender(&sequencer_tx.signer())
             {
                 let snapshot = bl_snapshot.as_deref().expect("bl_active implies snapshot");
-                let mut obs = evm.inspector().observations().clone();
+                // Cross-client decision B: deposits are judged on check②(logs) + check③(balance)
+                // ONLY — NOT check①(committed CALL touch). The follower validation EVM cannot
+                // mount an inspector, so to keep sequencer/follower/op-geth byte-identical the
+                // sequencer must also skip check① for deposits. Hence start from an EMPTY
+                // inspector (no call frames) and feed only the reconstructed balance candidates;
+                // do NOT use `evm.inspector().observations()` here (that carries CALL frames and
+                // would re-introduce check①, diverging from the follower). [op-geth
+                // EvaluateDeposit(skipCallTouch=true)]
+                let mut obs = xlayer_blacklist::BlacklistInspector::new();
                 let sd_targets = evm.inspector().selfdestruct_targets().to_vec();
                 let listed_changes: Vec<_> = state
                     .iter()
@@ -363,8 +371,7 @@ impl FlashblocksBuilderCtx {
                     })
                     .collect();
                 // Deposits pay no L2 execution gas fee, so the sender/coinbase fee-strip is
-                // moot here (effective_gas_price = 0); a listed deposit sender is caught by
-                // check① regardless.
+                // moot here (effective_gas_price = 0).
                 let fee = xlayer_blacklist_node::FeeContext {
                     sender: sequencer_tx.signer(),
                     coinbase: self.evm_env.block_env.beneficiary,
