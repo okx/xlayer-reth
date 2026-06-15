@@ -18,15 +18,22 @@ pub const XLAYER_MAINNET_CHAIN_ID: u64 = 196;
 /// Checksummed form: `0x73511669fd4dE447feD18BB79bAFeAC93aB7F31f`. [TD §4.6]
 pub const DEVNET_MIRROR_ADDRESS: Address = address!("73511669fd4de447fed18bb79bafeac93ab7f31f");
 
-/// Testnet (1952) mirror address — PLACEHOLDER.
+/// Testnet (1952) mirror address — PLACEHOLDER (byte-identical with op-geth).
 // TODO(XLOP-1071): replace placeholder before testnet enablement (Blocker 2).
-// During the placeholder period the mirror has no on-chain code, so the snapshot
-// read fails open to an empty list (effectively disabled — see [`crate::snapshot`]).
-pub const TESTNET_MIRROR_ADDRESS: Address = Address::ZERO;
+// Must stay byte-identical with op-geth `params.XLayerBlacklistMirror[1952]`
+// = HexToAddress("0x..626C61636B6C6973741952"), i.e. ASCII "blacklist" + 0x1952,
+// left-zero-padded to 20 bytes. During the placeholder period the mirror has no
+// on-chain code, so the snapshot read fails open to an empty list (effectively
+// disabled — see [`crate::snapshot`]); both clients behave identically (no-op) AND
+// now resolve the same address, so a future lockstep swap to the real address is safe.
+pub const TESTNET_MIRROR_ADDRESS: Address = address!("000000000000000000626c61636b6c6973741952");
 
-/// Mainnet (196) mirror address — PLACEHOLDER.
+/// Mainnet (196) mirror address — PLACEHOLDER (byte-identical with op-geth).
 // TODO(XLOP-1071): replace placeholder before mainnet enablement (Blocker 2).
-pub const MAINNET_MIRROR_ADDRESS: Address = Address::ZERO;
+// Must stay byte-identical with op-geth `params.XLayerBlacklistMirror[196]`
+// = HexToAddress("0x..626C61636B6C6973740196"), i.e. ASCII "blacklist" + 0x0196,
+// left-zero-padded to 20 bytes.
+pub const MAINNET_MIRROR_ADDRESS: Address = address!("000000000000000000626c61636b6c6973740196");
 
 /// Resolve the mirror contract address for `chain_id`.
 ///
@@ -61,6 +68,19 @@ mod tests {
         // DM-6.2 — placeholder period returns Some(placeholder); no code on-chain → no-op.
         assert_eq!(mirror_address_for_chain(XLAYER_TESTNET_CHAIN_ID), Some(TESTNET_MIRROR_ADDRESS));
         assert_eq!(mirror_address_for_chain(XLAYER_MAINNET_CHAIN_ID), Some(MAINNET_MIRROR_ADDRESS));
+    }
+
+    #[test]
+    fn placeholders_are_byte_identical_with_op_geth() {
+        // Cross-client pin: op-geth params.XLayerBlacklistMirror = HexToAddress of
+        // "0x..626C61636B6C6973741952" / "..0196" → right-most 20 bytes = ASCII
+        // "blacklist" + 0x1952 / 0x0196, left-zero-padded. Diverging from these bytes
+        // (e.g. resetting to ZERO, or swapping only one client) risks a future fork.
+        assert_eq!(TESTNET_MIRROR_ADDRESS, address!("000000000000000000626c61636b6c6973741952"));
+        assert_eq!(MAINNET_MIRROR_ADDRESS, address!("000000000000000000626c61636b6c6973740196"));
+        // "blacklist" ASCII anchor (62=b,6c=l,61=a,63=c,6b=k,6c=l,69=i,73=s,74=t).
+        assert_eq!(&TESTNET_MIRROR_ADDRESS.into_array()[9..18], b"blacklist");
+        assert_eq!(&MAINNET_MIRROR_ADDRESS.into_array()[9..18], b"blacklist");
     }
 
     #[test]
