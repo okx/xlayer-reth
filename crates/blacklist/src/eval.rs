@@ -203,6 +203,22 @@ mod tests {
     }
 
     #[test]
+    fn deposit_call_touch_only_not_intercepted_under_decision_b() {
+        // PRD A-7 / B-13 + Decision B: a deposit whose only effect is a CALL touch of a
+        // blacklisted address (no Transfer event, no balance change) is NOT intercepted,
+        // because deposits skip check① — the caller (follower hook / sequencer deposit
+        // branch) feeds an EMPTY `BlacklistInspector` for deposits, so no call frame is ever
+        // recorded. Modeled here as: snapshot DOES list the victim, but observations carry no
+        // call frames / no balance candidates and there are no logs → `evaluate` returns None.
+        // Contrast with `call_frame_touch_hits_with_call_category` (a normal L2 tx, which DOES
+        // record the call frame and hits). A regression that recorded call frames for deposits
+        // would flip this assertion to a hit, surfacing the divergence with op-geth.
+        let insp = BlacklistInspector::new(); // empty inspector == Decision B for deposits
+        let snap = snapshot_with(&[AAA]); // victim IS on the list
+        assert_eq!(BlacklistEvaluator::evaluate(&insp, &[], &snap), None);
+    }
+
+    #[test]
     fn erc20_transfer_log_hits_on_to() {
         // DM-2.1
         let insp = BlacklistInspector::new();
