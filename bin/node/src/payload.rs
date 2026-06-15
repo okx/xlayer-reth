@@ -108,16 +108,25 @@ impl XLayerPayloadServiceBuilder {
 
     /// Apply the chain-level blacklist runtime context (XLOP-1100, FR-2/3 builder face).
     ///
-    /// Only the flashblocks sequencer builder applies the blacklist execution gate — like
-    /// bridge intercept, the `DefaultWithP2P` failsafe path and the RPC-node `Default` path
-    /// run unmodified upstream logic and are intentionally not gated. The context carries the
-    /// chain-keyed snapshot handle + metrics; it is a no-op (fail-open) when the chain id does
-    /// not resolve to a mirror address.
+    /// This threads the ctx into the flashblocks builder's in-loop three-check gate (the
+    /// full FR-2 execution gate, normal-L2 drop included). The `DefaultWithP2P` failsafe path
+    /// and the RPC-node `Default` path do NOT take the ctx here, but they are NOT ungated:
+    /// the blacklist deposit hook lives on the EVM config's `executor_factory` (installed by
+    /// `XLayerExecutorBuilder`), so on those paths the block executor's
+    /// `apply_pre_execution_changes` refreshes the shared snapshot (→ the ingress filter
+    /// rejects blacklisted senders/recipients, FR-1) and `commit_transaction` applies deposit
+    /// included-as-reverted (FR-3) — provided the EVM config is actually used (see
+    /// `default/service.rs`, which must NOT discard it). The only face still missing on the
+    /// `DefaultWithP2P` path is the normal-L2 in-loop drop for proxy/event/balance hits whose
+    /// top-level from/to are clean (tracked separately). The ctx is a no-op (fail-open) when
+    /// the chain id does not resolve to a mirror address.
     pub fn with_blacklist_ctx(mut self, ctx: BlacklistRuntimeCtx) -> Self {
         match &mut self.builder {
             XLayerPayloadServiceBuilderInner::Flashblocks(fb) => {
                 fb.with_blacklist_ctx(ctx);
             }
+            // Snapshot refresh + deposit gate come from the executor-factory hook on these
+            // paths (see doc above), not from threading the ctx into the builder.
             XLayerPayloadServiceBuilderInner::DefaultWithP2P(_) => {}
             XLayerPayloadServiceBuilderInner::Default(_) => {}
         }

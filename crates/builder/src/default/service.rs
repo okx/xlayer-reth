@@ -44,7 +44,14 @@ where
         self,
         ctx: &BuilderContext<Node>,
         pool: Pool,
-        _: OpEvmConfig,
+        // XLOP-1100: use the component-layer EVM config (produced by XLayerExecutorBuilder with
+        // the blacklist deposit hook on its executor_factory) instead of discarding it. This is
+        // what makes the blacklist active on the DefaultWithP2P (failsafe) sequencer path:
+        // OpPayloadBuilder build → builder_for_next_block → OpBlockExecutor.apply_pre_execution_changes
+        // refreshes the shared snapshot (→ ingress filter works) and commit_transaction applies
+        // deposit included-as-reverted. Previously this arg was `_`-discarded and a fresh,
+        // hook-less `OpEvmConfig::optimism(...)` was constructed below, leaving the gate inert.
+        evm_config: OpEvmConfig,
     ) -> eyre::Result<PayloadBuilderHandle<<Node::Types as NodeTypes>::Payload>> {
         let cancel = tokio_util::sync::CancellationToken::new();
 
@@ -122,7 +129,9 @@ where
         let default_builder = reth_optimism_payload_builder::OpPayloadBuilder::with_builder_config(
             pool,
             ctx.provider().clone(),
-            OpEvmConfig::optimism(ctx.chain_spec()),
+            // XLOP-1100: the hook-carrying config from the component layer (see fn arg), not a
+            // fresh hook-less `OpEvmConfig::optimism(...)`.
+            evm_config,
             OpBuilderConfig { da_config: self.da_config, gas_limit_config: self.gas_limit_config },
         )
         .set_compute_pending_block(self.compute_pending_block);
