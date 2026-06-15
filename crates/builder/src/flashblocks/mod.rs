@@ -144,7 +144,7 @@ pub struct BuilderConfig {
     /// Maximum gas a transaction can use before being excluded.
     pub max_gas_per_txn: Option<u64>,
 
-    /// Per-block gas budget for gasless (zero-priced, whitelisted) transactions (in gas units).
+    /// Per-block gas budget for gasless transactions (in gas units).
     /// `None` = unlimited. Set via `--builder.gasless-block-gas-limit` (default 60,000,000).
     pub gasless_block_gas_limit: Option<u64>,
 
@@ -168,6 +168,7 @@ impl core::fmt::Debug for BuilderConfig {
             .field("gas_limit_config", &self.gas_limit_config)
             .field("flashblocks", &self.flashblocks)
             .field("max_gas_per_txn", &self.max_gas_per_txn)
+            .field("gasless_block_gas_limit", &self.gasless_block_gas_limit)
             .finish()
     }
 }

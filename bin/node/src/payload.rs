@@ -61,6 +61,9 @@ impl XLayerPayloadServiceBuilder {
                 builder_config,
             )))
         } else {
+            gas_limit_config.set_gasless_block_gas_limit(
+                xlayer_builder_args.gasless_block_gas_limit().unwrap_or(0),
+            );
             let payload_builder = OpPayloadBuilder::new(compute_pending_block)
                 .with_da_config(da_config)
                 .with_gas_limit_config(gas_limit_config);
