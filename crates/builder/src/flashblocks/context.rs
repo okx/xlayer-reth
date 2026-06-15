@@ -85,6 +85,8 @@ pub struct FlashblocksBuilderCtx {
     /// uniform with the block executor; `None` on non-gasless chains). Used to detect zero-priced,
     /// whitelisted txs during block building.
     pub gasless_contract: Option<GaslessContract>,
+    /// Per-block gas budget for gasless transactions (in gas units). `None` = unlimited.
+    pub gasless_block_gas_limit: Option<u64>,
 }
 
 impl FlashblocksBuilderCtx {
@@ -690,7 +692,23 @@ impl FlashblocksBuilderCtx {
                 continue;
             }
 
+            if is_gasless
+                && let Some(limit) = self.gasless_block_gas_limit
+                && info.cumulative_gasless_gas_used + gas_used > limit
+            {
+                log_txn(TxnExecutionResult::GaslessBlockGasLimitExceeded(
+                    info.cumulative_gasless_gas_used,
+                    gas_used,
+                    limit,
+                ));
+                best_txs.mark_invalid(tx.signer(), tx.nonce());
+                continue;
+            }
+
             info.cumulative_gas_used += gas_used;
+            if is_gasless {
+                info.cumulative_gasless_gas_used += gas_used;
+            }
             // record tx da size
             info.cumulative_da_bytes_used += tx_da_size;
 

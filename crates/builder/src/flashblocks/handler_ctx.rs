@@ -94,6 +94,7 @@ impl FlashblockHandlerContext {
             metrics: self.metrics,
             max_gas_per_txn: self.max_gas_per_txn,
             gasless_contract: self.gasless_contract,
+            gasless_block_gas_limit: None,
         }
     }
 }

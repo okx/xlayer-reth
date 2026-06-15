@@ -246,3 +246,160 @@ async fn gasless_zero_price_tx_no_contract_rejected(rbuilder: LocalInstance) -> 
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Gasless block gas limit tests
+// ---------------------------------------------------------------------------
+
+const NUM_GASLESS_SIGNERS: usize = 55;
+const GASLESS_TX_GAS: u64 = 21_000;
+const GASLESS_BUDGET: u64 = 1_000_000;
+const MAX_GASLESS_PER_BLOCK: usize = (GASLESS_BUDGET / GASLESS_TX_GAS) as usize; // 47
+
+/// Builds a node config with 55 pre-funded random signers for gasless budget testing.
+/// Returns `(config, signers)`.
+fn gasless_budget_node_config(signers: &[crate::signer::Signer]) -> NodeConfig<OpChainSpec> {
+    let genesis_json = include_str!("./framework/artifacts/genesis.json.tmpl");
+    let mut genesis: Genesis =
+        serde_json::from_str(genesis_json).expect("invalid genesis template JSON");
+
+    genesis.config.chain_id = 195;
+    genesis.base_fee_per_gas = Some(0);
+
+    // Deploy gasless whitelist contract (allow-all)
+    genesis.alloc.insert(
+        GASLESS_CONTRACT,
+        GenesisAccount {
+            code: Some(Bytes::copy_from_slice(&ALLOW_HIGH_GAS_BYTECODE)),
+            ..Default::default()
+        },
+    );
+
+    // Fund each random signer with enough ETH for their gasless transfer
+    for signer in signers {
+        genesis.alloc.insert(
+            signer.address,
+            GenesisAccount {
+                balance: U256::from(1_000_000_000_000_000_000u128),
+                ..Default::default()
+            },
+        );
+    }
+
+    let chain_spec = OpChainSpec::from_genesis(genesis);
+    default_node_config().with_chain(Arc::new(chain_spec))
+}
+
+/// BuilderArgs with gasless block gas limit = 1,000,000 (= 1M gas)
+fn gasless_budget_args() -> BuilderArgs {
+    BuilderArgs {
+        builder_signer: Some(builder_signer()),
+        gasless_block_gas_limit_raw: Some(GASLESS_BUDGET),
+        ..Default::default()
+    }
+}
+
+/// Signs a zero-priced EIP-1559 transfer from a specific signer.
+fn build_zero_priced_transfer_from(
+    signer: &crate::signer::Signer,
+    nonce: u64,
+    value: u128,
+) -> (Vec<u8>, B256) {
+    let tx = OpTypedTransaction::Eip1559(TxEip1559 {
+        chain_id: 195,
+        nonce,
+        gas_limit: GASLESS_TX_GAS,
+        max_fee_per_gas: 0,
+        max_priority_fee_per_gas: 0,
+        to: TxKind::Call(RECIPIENT),
+        value: U256::from(value),
+        ..Default::default()
+    });
+    let signed = signer.sign_tx(tx).expect("failed to sign tx");
+    let tx_hash = B256::from_slice(signed.tx_hash().as_ref());
+    (signed.encoded_2718(), tx_hash)
+}
+
+/// Verifies the per-block gasless gas budget:
+/// 1. **Cap**: first block includes ≤ 47 gasless txs (budget 1M / 21k gas each)
+/// 2. **Reset**: second block picks up remaining gasless txs (budget resets per block)
+/// 3. **Paid unaffected**: paid tx included in same block as capped gasless txs
+/// 4. **No permanent discard**: all 55 gasless txs are eventually included
+#[rb_test(
+    args = gasless_budget_args(),
+    config = gasless_budget_node_config(&*GASLESS_SIGNERS)
+)]
+async fn gasless_block_gas_limit_caps_and_resets(rbuilder: LocalInstance) -> eyre::Result<()> {
+    let driver = rbuilder.driver().await?;
+    let provider = driver.provider().clone();
+
+    // Submit 55 gasless txs (one from each pre-funded random signer, nonce 0)
+    let mut gasless_hashes = Vec::with_capacity(NUM_GASLESS_SIGNERS);
+    for signer in GASLESS_SIGNERS.iter() {
+        let (encoded, tx_hash) = build_zero_priced_transfer_from(signer, 0, 1_000);
+        let _pending = provider.send_raw_transaction(encoded.as_slice()).await?;
+        gasless_hashes.push(tx_hash);
+    }
+
+    // Submit 1 paid tx from the funded signer
+    let paid_signer = funded_signer();
+    let paid_nonce =
+        provider.get_transaction_count(paid_signer.address).pending().await.unwrap_or_default();
+    let paid_tx = OpTypedTransaction::Eip1559(TxEip1559 {
+        chain_id: 195,
+        nonce: paid_nonce,
+        gas_limit: 21_000,
+        max_fee_per_gas: 1_000_000,
+        max_priority_fee_per_gas: 1_000_000,
+        to: TxKind::Call(RECIPIENT),
+        value: U256::from(500u128),
+        ..Default::default()
+    });
+    let paid_signed = paid_signer.sign_tx(paid_tx)?;
+    let paid_hash = B256::from_slice(paid_signed.tx_hash().as_ref());
+    let _pending = provider.send_raw_transaction(paid_signed.encoded_2718().as_slice()).await?;
+
+    // Build block 1
+    let block1 = build_block_from_pool(&driver).await?;
+    let block1_gasless_count =
+        gasless_hashes.iter().filter(|h| block1.transactions.hashes().any(|bh| bh == **h)).count();
+
+    // Assertion 1: Cap — at most 47 gasless txs in block 1
+    assert!(
+        block1_gasless_count <= MAX_GASLESS_PER_BLOCK,
+        "block 1 should include at most {MAX_GASLESS_PER_BLOCK} gasless txs, got {block1_gasless_count}"
+    );
+    assert!(block1_gasless_count > 0, "block 1 should include at least some gasless txs");
+
+    // Assertion 3: Paid tx unaffected — included in same block
+    assert!(
+        block1.transactions.hashes().any(|h| h == paid_hash),
+        "paid tx must be included in block 1 even when gasless budget is exhausted"
+    );
+
+    // Build block 2
+    let block2 = build_block_from_pool(&driver).await?;
+    let block2_gasless_count =
+        gasless_hashes.iter().filter(|h| block2.transactions.hashes().any(|bh| bh == **h)).count();
+
+    // Assertion 2: Reset — block 2 picks up remaining gasless txs
+    assert!(
+        block2_gasless_count > 0,
+        "block 2 should include previously skipped gasless txs (budget must reset per block)"
+    );
+
+    // Assertion 4: No permanent discard — all gasless txs included across both blocks
+    // (may need more blocks if 55 > 47 + 47, but 55 < 94 so 2 blocks suffice)
+    let total_gasless_included = block1_gasless_count + block2_gasless_count;
+    assert_eq!(
+        total_gasless_included, NUM_GASLESS_SIGNERS,
+        "all {NUM_GASLESS_SIGNERS} gasless txs must be included across 2 blocks (no permanent discard), got {total_gasless_included}"
+    );
+
+    Ok(())
+}
+
+/// Pre-generated random signers for the gasless budget test. Using `LazyLock` ensures they are
+/// created once and reused across the `config` and test body (both reference `GASLESS_SIGNERS`).
+static GASLESS_SIGNERS: std::sync::LazyLock<[crate::signer::Signer; NUM_GASLESS_SIGNERS]> =
+    std::sync::LazyLock::new(|| core::array::from_fn(|_| crate::signer::Signer::random()));
