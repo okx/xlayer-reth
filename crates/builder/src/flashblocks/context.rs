@@ -13,7 +13,7 @@ use alloy_eips::eip2718::WithEncoded;
 use alloy_eips::{Encodable2718, Typed2718};
 use alloy_evm::Database;
 use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
-use alloy_primitives::{BlockHash, Bytes, U256};
+use alloy_primitives::{BlockHash, Bytes, TxHash, U256};
 use alloy_rpc_types_eth::Withdrawals;
 use core::fmt::Debug;
 use op_alloy_consensus::{OpDepositReceipt, OpTxEnvelope, OpTxType};
@@ -599,6 +599,10 @@ impl FlashblocksBuilderCtx {
     /// Executes the given best transactions and updates the execution info.
     ///
     /// Returns `Ok(Some(())` if the job was cancelled.
+    // XLayer (XLOP-1100): one extra out-param (`txs_to_evict`) pushes this to 8 args; the
+    // signature mirrors the upstream OpBuilder execute loop, so threading via a struct would
+    // diverge from that shape for no benefit.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn execute_best_transactions(
         &self,
         info: &mut ExecutionInfo,
@@ -607,6 +611,12 @@ impl FlashblocksBuilderCtx {
         block_gas_limit: u64,
         block_da_limit: Option<u64>,
         block_da_footprint_limit: Option<u64>,
+        // XLayer (XLOP-1100): out-param collecting tx hashes that hit a chain-level interception
+        // (bridge / blacklist) and must be physically removed from the pool after this build,
+        // so they are not re-fetched and re-executed every block. Filled only for the two
+        // interception hits below — NOT for gas/DA/conditional/interop skips (those txs are
+        // valid and must stay in the pool for a later block). Drained by the caller (builder.rs).
+        txs_to_evict: &mut Vec<TxHash>,
     ) -> Result<Option<()>, PayloadBuilderError> {
         let execute_txs_start_time = Instant::now();
         let mut num_txs_considered = 0;
@@ -779,7 +789,9 @@ impl FlashblocksBuilderCtx {
             }
 
             // Bridge interception check: if the transaction triggered a bridge event that
-            // should be blocked, skip committing state and mark it for pool removal.
+            // should be blocked, skip committing its state. `mark_invalid` drops it for the
+            // rest of this build; `txs_to_evict` schedules physical removal from the pool by
+            // the caller so it is not re-fetched and re-executed on every subsequent block.
             if xlayer_bridge_intercept::intercept_bridge_transaction_if_need(
                 result.logs(),
                 tx.signer(),
@@ -787,6 +799,7 @@ impl FlashblocksBuilderCtx {
             )
             .is_err()
             {
+                txs_to_evict.push(tx_hash);
                 best_txs.mark_invalid(tx.signer(), tx.nonce());
                 continue;
             }
@@ -846,6 +859,11 @@ impl FlashblocksBuilderCtx {
                     if let Some(bl_ctx) = &self.blacklist_ctx {
                         bl_ctx.record_exec_revert(&hit);
                     }
+                    // Schedule physical pool removal (see `txs_to_evict` doc). A blacklist hit
+                    // can come from a tx whose top-level from/to is clean (event/balance hit),
+                    // which the ingress filter cannot catch — without eviction it would be
+                    // re-fetched and re-executed every block (a CPU-amplification DoS vector).
+                    txs_to_evict.push(tx_hash);
                     best_txs.mark_invalid(tx.signer(), tx.nonce());
                     continue;
                 }

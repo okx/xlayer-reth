@@ -699,6 +699,10 @@ where
         ctx.metrics.transaction_pool_fetch_gauge.set(transaction_pool_fetch_time);
 
         let tx_execution_start_time = Instant::now();
+        // XLayer (XLOP-1100): collects tx hashes that hit a chain-level interception
+        // (bridge / blacklist) during this build so they can be physically evicted from the
+        // pool below — otherwise they linger and are re-executed every block.
+        let mut txs_to_evict = Vec::new();
         ctx.execute_best_transactions(
             info,
             state,
@@ -706,8 +710,17 @@ where
             target_gas_for_batch.min(ctx.block_gas_limit()),
             target_da_for_batch,
             target_da_footprint_for_batch,
+            &mut txs_to_evict,
         )
         .wrap_err("failed to execute best transactions")?;
+
+        // XLayer (XLOP-1100): physically remove interception-hit txs from the pool (aligns with
+        // op-geth's SetRejected → pool.Remove). Only the hit tx is removed (not descendants), so
+        // an innocent sender's later-nonce txs are left as nonce-gapped queued (harmless, not
+        // re-executed). `remove_transactions` takes `&self` (pool is internally synchronized).
+        if !txs_to_evict.is_empty() {
+            let _ = self.pool.remove_transactions(txs_to_evict);
+        }
 
         // Extract last transactions
         let new_transactions = fb_state
