@@ -43,18 +43,6 @@ impl XLayerPayloadServiceBuilder {
         da_config: OpDAConfig,
         gas_limit_config: OpGasLimitConfig,
     ) -> eyre::Result<Self> {
-        // BLOCKED(XLOP-1118, upstream): Fallback path gasless budget injection requires
-        // `OpGasLimitConfig::set_gasless_block_gas_limit(u64)` which does not exist in the pinned
-        // okx/reth revision (github.com/okx/reth @ d23dd0b973ad0e4bf383f98510aa9ff63a082834,
-        // crate reth-optimism-payload-builder v1.10.2, file crates/optimism/payload/src/config.rs).
-        // The struct only exposes `set_gas_limit(u64)` / `gas_limit() -> Option<u64>`.
-        // Once the upstream API lands, inject here:
-        //   gas_limit_config.set_gasless_block_gas_limit(
-        //       xlayer_builder_args.gasless_block_gas_limit().unwrap_or(0)
-        //   );
-        // The flashblocks path (primary sequencer path) enforces the budget via
-        // `FlashblocksBuilderCtx.gasless_block_gas_limit` and is fully functional.
-
         let builder = if xlayer_builder_args.flashblocks.enabled {
             let builder_config = BuilderConfig::try_from(xlayer_builder_args)?;
             XLayerPayloadServiceBuilderInner::Flashblocks(Box::new(FlashblocksServiceBuilder(
