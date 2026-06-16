@@ -11,10 +11,10 @@ use tracing::{info, warn};
 
 use alloy_consensus::{transaction::TxHashRef, Transaction, Typed2718};
 use alloy_eips::eip2718::WithEncoded;
-use alloy_evm::Evm as _;
+use alloy_evm::{block::TxResult as _, Evm as _};
 use alloy_primitives::U256;
 use op_alloy_consensus::OpTransaction;
-use op_revm::constants::L1_BLOCK_CONTRACT;
+use op_revm::{constants::L1_BLOCK_CONTRACT, L1BlockInfo};
 
 use reth_basic_payload_builder::*;
 use reth_chainspec::ChainSpecProvider;
@@ -32,12 +32,17 @@ use reth_optimism_payload_builder::{
     payload::{OpBuiltPayload, OpPayloadAttrs},
     OpPayloadPrimitives,
 };
-use reth_optimism_txpool::OpPooledTx;
+use reth_optimism_txpool::{
+    estimated_da_size::DataAvailabilitySized,
+    interop::{is_valid_interop, MaybeInteropTransaction},
+    OpPooledTx,
+};
 use reth_payload_builder_primitives::PayloadBuilderError;
 use reth_payload_primitives::{BuildNextEnv, BuiltPayloadExecutedBlock};
+use reth_payload_util::PayloadTransactions;
 use reth_revm::{database::StateProviderDatabase, db::State};
 use reth_storage_api::StateProviderFactory;
-use reth_transaction_pool::TransactionPool;
+use reth_transaction_pool::{PoolTransaction, TransactionPool};
 use revm::context::Block as _;
 
 /// The default optimism payload builder that wraps the additional builder p2p node
@@ -52,6 +57,10 @@ pub struct DefaultPayloadBuilder<Pool, Client, Evm, Txs, Attrs> {
     inner: reth_optimism_payload_builder::OpPayloadBuilder<Pool, Client, Evm, Txs, Attrs>,
     /// Cache of flashblock payloads received via P2P, keyed by parent hash.
     p2p_cache: FlashblockPayloadsCache,
+    /// XLOP-1100 (FR-2 面2): chain-level blacklist runtime context. When present AND the
+    /// snapshot is non-empty, the cache-miss build path runs the normal-L2 commit-condition
+    /// gate (check②). `None` / empty snapshot → fail-open, delegate to the upstream builder.
+    blacklist_ctx: Option<xlayer_blacklist_node::BlacklistRuntimeCtx>,
 }
 
 impl<Pool, Client, Evm, Txs, Attrs> DefaultPayloadBuilder<Pool, Client, Evm, Txs, Attrs> {
@@ -59,8 +68,9 @@ impl<Pool, Client, Evm, Txs, Attrs> DefaultPayloadBuilder<Pool, Client, Evm, Txs
     pub fn new(
         inner: reth_optimism_payload_builder::OpPayloadBuilder<Pool, Client, Evm, Txs, Attrs>,
         p2p_cache: FlashblockPayloadsCache,
+        blacklist_ctx: Option<xlayer_blacklist_node::BlacklistRuntimeCtx>,
     ) -> Self {
-        Self { inner, p2p_cache }
+        Self { inner, p2p_cache, blacklist_ctx }
     }
 }
 
@@ -68,7 +78,11 @@ impl<Pool: Clone, Client: Clone, Evm: ConfigureEvm + Clone, Txs: Clone, Attrs> C
     for DefaultPayloadBuilder<Pool, Client, Evm, Txs, Attrs>
 {
     fn clone(&self) -> Self {
-        Self { inner: self.inner.clone(), p2p_cache: self.p2p_cache.clone() }
+        Self {
+            inner: self.inner.clone(),
+            p2p_cache: self.p2p_cache.clone(),
+            blacklist_ctx: self.blacklist_ctx.clone(),
+        }
     }
 }
 
@@ -112,8 +126,17 @@ where
             return self.build_with_cached_txs(args, cached_txs);
         }
 
-        // Cache miss: delegate entirely to the inner OP builder
-        self.inner.try_build(args)
+        // Cache miss. XLOP-1100 (FR-2 面2): when the blacklist is active (chain has a mirror AND
+        // the block-head snapshot is non-empty), build via the gated path so normal-L2 txs that
+        // hit a blacklisted address via a Transfer event (check②) are excluded. Otherwise (feature
+        // off / empty list) delegate unchanged to the upstream builder — zero behavior change.
+        let bl_active =
+            self.blacklist_ctx.as_ref().map(|c| !c.load_snapshot().is_empty()).unwrap_or(false);
+        if bl_active {
+            self.build_with_gate(args)
+        } else {
+            self.inner.try_build(args)
+        }
     }
 
     fn on_missing_payload(
@@ -261,6 +284,196 @@ where
         // Freeze: deterministic payload from cached sequence, no re-building needed
         Ok(BuildOutcomeKind::Freeze(payload).with_cached_reads(cached_reads))
     }
+
+    /// XLOP-1100 (FR-2 面2): cache-miss build with the normal-L2 blacklist gate.
+    ///
+    /// Mirrors the upstream `OpBuilder::build` flow (block_builder, apply_pre_execution_changes,
+    /// execute_sequencer_transactions, best-txs, finish), keeping deposit included-as-reverted and
+    /// snapshot refresh on the (hooked) executor. Only the pool best-txs loop is replaced by a
+    /// gated one: each tx runs via `execute_transaction_with_commit_condition`, and a tx whose
+    /// committed logs hit the blacklist (check②, Transfer event) is discarded (CommitChanges::No),
+    /// marked invalid for this build, and scheduled for physical pool removal. Only reached when the
+    /// blacklist is active (caller-checked); check①/③ are out of scope on this path (see plan).
+    ///
+    /// NOTE: keep the per-tx gate in sync with
+    /// `crate::flashblocks::context::FlashblocksBuilderCtx::execute_best_transactions`.
+    fn build_with_gate(
+        &self,
+        args: BuildArguments<OpPayloadAttrs, OpBuiltPayload<N>>,
+    ) -> Result<BuildOutcome<OpBuiltPayload<N>>, PayloadBuilderError> {
+        let BuildArguments { mut cached_reads, config, cancel, best_payload, .. } = args;
+
+        let parent_hash = config.parent_header.hash();
+        let payload_id = config.payload_id;
+        let builder_attrs = OpPayloadBuilderAttributes::from_rpc_attrs(
+            parent_hash,
+            payload_id,
+            config.attributes.0,
+        )
+        .map_err(PayloadBuilderError::other)?;
+        let config = PayloadConfig {
+            parent_header: config.parent_header,
+            attributes: builder_attrs,
+            payload_id,
+        };
+
+        let ctx = OpPayloadBuilderCtx {
+            evm_config: self.inner.evm_config.clone(),
+            builder_config: self.inner.config.clone(),
+            chain_spec: self.inner.client.chain_spec(),
+            config,
+            cancel,
+            best_payload,
+        };
+
+        // Snapshot read once at block head (caller guaranteed non-empty).
+        let snapshot = self
+            .blacklist_ctx
+            .as_ref()
+            .map(|c| c.load_snapshot())
+            .expect("build_with_gate only called when blacklist_ctx is Some");
+
+        let state_provider = self.inner.client.state_by_block_hash(ctx.parent().hash())?;
+        let state = StateProviderDatabase::new(&state_provider);
+        let mut db = State::builder()
+            .with_database(cached_reads.as_db_mut(state))
+            .with_bundle_update()
+            .build();
+        db.load_cache_account(L1_BLOCK_CONTRACT).map_err(BlockExecutionError::other)?;
+
+        let mut builder = ctx.block_builder(&mut db)?;
+        builder.apply_pre_execution_changes().map_err(|err| {
+            warn!(target: "payload_builder", %err, "failed to apply pre-execution changes (gated build)");
+            PayloadBuilderError::Internal(err.into())
+        })?;
+        let mut info = ctx.execute_sequencer_transactions(&mut builder)?;
+
+        let mut txs_to_evict: Vec<alloy_primitives::TxHash> = Vec::new();
+
+        if !ctx.attributes().no_tx_pool {
+            let mut block_gas_limit = builder.evm_mut().block().gas_limit();
+            if let Some(gas_limit_config) = ctx.builder_config.gas_limit_config.gas_limit() {
+                block_gas_limit = gas_limit_config.min(block_gas_limit);
+            }
+            let block_da_limit = ctx.builder_config.da_config.max_da_block_size();
+            let tx_da_limit = ctx.builder_config.da_config.max_da_tx_size();
+            let base_fee = builder.evm_mut().block().basefee();
+
+            let best_attrs = ctx.best_transaction_attributes(builder.evm_mut().block());
+            let best_source = self.inner.best_transactions.clone();
+            let mut best_txs = best_source.best_transactions(self.inner.pool.clone(), best_attrs);
+
+            while let Some(pool_tx) = best_txs.next(()) {
+                let interop = pool_tx.interop_deadline();
+                let tx_da_size = pool_tx.estimated_da_size();
+                let tx = pool_tx.into_consensus();
+
+                let da_footprint_gas_scalar = ctx
+                    .chain_spec
+                    .is_jovian_active_at_timestamp(ctx.attributes().timestamp())
+                    .then_some(
+                        L1BlockInfo::fetch_da_footprint_gas_scalar(builder.evm_mut().db_mut())
+                            .expect("DA footprint should always be available post jovian"),
+                    );
+
+                if info.is_tx_over_limits(
+                    tx_da_size,
+                    block_gas_limit,
+                    tx_da_limit,
+                    block_da_limit,
+                    tx.gas_limit(),
+                    da_footprint_gas_scalar,
+                ) {
+                    best_txs.mark_invalid(tx.signer(), tx.nonce());
+                    continue;
+                }
+                // A sequencer block never contains blob/deposit txs from the pool.
+                if tx.is_eip4844() || tx.is_deposit() {
+                    best_txs.mark_invalid(tx.signer(), tx.nonce());
+                    continue;
+                }
+                if let Some(interop) = interop
+                    && !is_valid_interop(interop, ctx.config.attributes.timestamp())
+                {
+                    best_txs.mark_invalid(tx.signer(), tx.nonce());
+                    continue;
+                }
+                if ctx.cancel.is_cancelled() {
+                    // Stop pulling txs; finish the block built so far (mirrors the cache-replay
+                    // path, which also finishes partial on interruption).
+                    break;
+                }
+
+                // XLOP-1100 gate: commit the tx only if its logs do not hit the blacklist
+                // (check②). On a hit, the tx is discarded (state not committed), dropped from
+                // this build, and scheduled for physical pool removal.
+                let tx_hash = *tx.tx_hash();
+                let mut hit: Option<xlayer_blacklist::Hit> = None;
+                // Fully-qualified to force the `BlockBuilder` method (closure sees revm
+                // `ExecutionResult` with `.logs()`); the builder also satisfies `BlockExecutor`,
+                // whose same-named method passes `&Executor::Result` instead.
+                let committed = BlockBuilder::execute_transaction_with_commit_condition(
+                    &mut builder,
+                    tx.clone(),
+                    |result| {
+                        // `result` is the executor's `OpTxResult` (impl `TxResult`); reach the
+                        // revm `ExecutionResult` via `.result().result` to read committed logs.
+                        match blacklist_log_hit(result.result().result.logs(), &snapshot) {
+                            Some(h) => {
+                                hit = Some(h);
+                                reth_evm::block::CommitChanges::No
+                            }
+                            None => reth_evm::block::CommitChanges::Yes,
+                        }
+                    },
+                )
+                .map_err(|err| PayloadBuilderError::EvmExecutionError(Box::new(err)))?;
+
+                match committed {
+                    Some(gas_used) => {
+                        info.cumulative_gas_used += gas_used;
+                        info.cumulative_da_bytes_used += tx_da_size;
+                        let miner_fee = tx
+                            .effective_tip_per_gas(base_fee)
+                            .expect("fee is always valid; execution succeeded");
+                        info.total_fees += U256::from(miner_fee) * U256::from(gas_used);
+                    }
+                    None => {
+                        // Blacklist hit (or closure said No): exclude from the block.
+                        if let (Some(h), Some(bl)) = (hit.as_ref(), self.blacklist_ctx.as_ref()) {
+                            bl.record_exec_revert(h);
+                        }
+                        best_txs.mark_invalid(tx.signer(), tx.nonce());
+                        txs_to_evict.push(tx_hash);
+                        continue;
+                    }
+                }
+            }
+        }
+
+        let BlockBuilderOutcome { execution_result, hashed_state, trie_updates, block } =
+            builder.finish(&state_provider, None)?;
+
+        let sealed_block = Arc::new(block.sealed_block().clone());
+        let execution_outcome =
+            BlockExecutionOutput { state: db.take_bundle(), result: execution_result };
+        let executed: BuiltPayloadExecutedBlock<N> = BuiltPayloadExecutedBlock {
+            recovered_block: Arc::new(block),
+            execution_output: Arc::new(execution_outcome),
+            hashed_state: either::Either::Left(Arc::new(hashed_state)),
+            trie_updates: either::Either::Left(Arc::new(trie_updates)),
+        };
+        let payload =
+            OpBuiltPayload::new(ctx.payload_id(), sealed_block, info.total_fees, Some(executed));
+
+        // Physically remove blacklisted-hit txs from the pool (aligns with the flashblocks
+        // path + the per-block eviction added earlier). Best-effort; ignore the returned set.
+        if !txs_to_evict.is_empty() {
+            let _ = self.inner.pool.remove_transactions(txs_to_evict);
+        }
+
+        Ok(BuildOutcomeKind::Better { payload }.with_cached_reads(cached_reads))
+    }
 }
 
 /// Executes cached flashblocks transactions via [`BlockBuilder::execute_transaction`].
@@ -323,4 +536,71 @@ where
     }
 
     Ok(())
+}
+
+/// XLOP-1100 (FR-2 面2): per-tx blacklist decision used by `build_with_gate`.
+///
+/// check② only (committed Transfer-event logs) — the commit-condition closure can only see the
+/// tx result's logs, not call frames (check①) or the state diff (check③). Returns the hit
+/// (caller excludes the tx) or `None` (caller commits). Pure wrapper over the shared evaluator
+/// with an empty inspector so only the log check can fire.
+fn blacklist_log_hit(
+    logs: &[alloy_primitives::Log],
+    snapshot: &xlayer_blacklist::BlacklistSnapshot,
+) -> Option<xlayer_blacklist::Hit> {
+    xlayer_blacklist::BlacklistEvaluator::evaluate(
+        &xlayer_blacklist::BlacklistInspector::new(),
+        logs,
+        snapshot,
+    )
+}
+
+#[cfg(test)]
+mod blacklist_gate_tests {
+    use super::blacklist_log_hit;
+    use alloy_primitives::{address, Address, Log, LogData};
+    use xlayer_blacklist::{eval::TRANSFER_TOPIC0, BlacklistSnapshot, HitCategory};
+
+    const AAA: Address = address!("00000000000000000000000000000000000000aa");
+    const BBB: Address = address!("00000000000000000000000000000000000000bb");
+    const TOKEN: Address = address!("00000000000000000000000000000000000000dd");
+
+    fn snap(addrs: &[Address]) -> BlacklistSnapshot {
+        addrs.iter().copied().collect()
+    }
+
+    /// ERC20 `Transfer(from, to, value)` log: topics = [topic0, from, to].
+    fn transfer_log(from: Address, to: Address) -> Log {
+        let topics = vec![*TRANSFER_TOPIC0, from.into_word(), to.into_word()];
+        Log { address: TOKEN, data: LogData::new(topics, Default::default()).expect("log data") }
+    }
+
+    #[test]
+    fn transfer_to_blacklisted_is_hit() {
+        // forwarder/proxy case: tx top-level clean, internal Transfer to a listed address.
+        let hit = blacklist_log_hit(&[transfer_log(BBB, AAA)], &snap(&[AAA])).expect("hit");
+        assert_eq!(hit.category, HitCategory::Log);
+        assert_eq!(hit.address, AAA);
+    }
+
+    #[test]
+    fn transfer_from_blacklisted_is_hit() {
+        assert!(blacklist_log_hit(&[transfer_log(AAA, BBB)], &snap(&[AAA])).is_some());
+    }
+
+    #[test]
+    fn clean_transfer_no_hit() {
+        assert!(blacklist_log_hit(&[transfer_log(BBB, BBB)], &snap(&[AAA])).is_none());
+    }
+
+    #[test]
+    fn empty_snapshot_no_hit() {
+        // disabled chain / empty list → fail-open (caller delegates upstream anyway).
+        assert!(blacklist_log_hit(&[transfer_log(BBB, AAA)], &BlacklistSnapshot::empty()).is_none());
+    }
+
+    #[test]
+    fn no_logs_no_hit() {
+        assert!(blacklist_log_hit(&[], &snap(&[AAA])).is_none());
+    }
 }

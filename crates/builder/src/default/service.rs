@@ -33,6 +33,10 @@ pub struct DefaultBuilderServiceBuilder {
     pub da_config: OpDAConfig,
     pub gas_limit_config: OpGasLimitConfig,
     pub peer_status_sink: Arc<OnceLock<crate::broadcast::PeerStatusTracker>>,
+    /// XLOP-1100 (FR-2 面2): chain-level blacklist runtime context, threaded into the
+    /// failsafe builder's cache-miss build path so it runs the normal-L2 commit-condition
+    /// gate. `None` when the feature is off / chain has no mirror (fail-open).
+    pub blacklist_ctx: Option<xlayer_blacklist_node::BlacklistRuntimeCtx>,
 }
 
 impl<Node, Pool> PayloadServiceBuilder<Node, Pool, OpEvmConfig> for DefaultBuilderServiceBuilder
@@ -135,7 +139,8 @@ where
             OpBuilderConfig { da_config: self.da_config, gas_limit_config: self.gas_limit_config },
         )
         .set_compute_pending_block(self.compute_pending_block);
-        let payload_builder = DefaultPayloadBuilder::new(default_builder, p2p_cache.clone());
+        let payload_builder =
+            DefaultPayloadBuilder::new(default_builder, p2p_cache.clone(), self.blacklist_ctx);
         let payload_job_config = BasicPayloadJobGeneratorConfig::default()
             .interval(conf.interval)
             .deadline(conf.deadline)

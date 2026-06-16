@@ -76,6 +76,7 @@ impl XLayerPayloadServiceBuilder {
                         da_config,
                         gas_limit_config,
                         peer_status_sink: peer_status.clone(),
+                        blacklist_ctx: None,
                     },
                 ))
             }
@@ -108,26 +109,26 @@ impl XLayerPayloadServiceBuilder {
 
     /// Apply the chain-level blacklist runtime context (XLOP-1100, FR-2/3 builder face).
     ///
-    /// This threads the ctx into the flashblocks builder's in-loop three-check gate (the
-    /// full FR-2 execution gate, normal-L2 drop included). The `DefaultWithP2P` failsafe path
-    /// and the RPC-node `Default` path do NOT take the ctx here, but they are NOT ungated:
-    /// the blacklist deposit hook lives on the EVM config's `executor_factory` (installed by
-    /// `XLayerExecutorBuilder`), so on those paths the block executor's
-    /// `apply_pre_execution_changes` refreshes the shared snapshot (→ the ingress filter
-    /// rejects blacklisted senders/recipients, FR-1) and `commit_transaction` applies deposit
-    /// included-as-reverted (FR-3) — provided the EVM config is actually used (see
-    /// `default/service.rs`, which must NOT discard it). The only face still missing on the
-    /// `DefaultWithP2P` path is the normal-L2 in-loop drop for proxy/event/balance hits whose
-    /// top-level from/to are clean (tracked separately). The ctx is a no-op (fail-open) when
-    /// the chain id does not resolve to a mirror address.
+    /// - Flashblocks: threads the ctx into the in-loop three-check gate (full FR-2, normal-L2
+    ///   drop included).
+    /// - DefaultWithP2P (failsafe sequencer): threads the ctx so the cache-miss build path runs
+    ///   the normal-L2 commit-condition gate (check②, FR-2) on top of what the executor-factory
+    ///   hook already provides (snapshot refresh → ingress FR-1; deposit included-as-reverted FR-3).
+    /// - Default (RPC/follower): does NOT build sequencer blocks; snapshot/ingress/deposit come
+    ///   from the executor-factory hook on the import path, so the ctx is not threaded here.
+    ///
+    /// The ctx is a no-op (fail-open) when the chain id does not resolve to a mirror address or
+    /// the snapshot is empty.
     pub fn with_blacklist_ctx(mut self, ctx: BlacklistRuntimeCtx) -> Self {
         match &mut self.builder {
             XLayerPayloadServiceBuilderInner::Flashblocks(fb) => {
                 fb.with_blacklist_ctx(ctx);
             }
-            // Snapshot refresh + deposit gate come from the executor-factory hook on these
-            // paths (see doc above), not from threading the ctx into the builder.
-            XLayerPayloadServiceBuilderInner::DefaultWithP2P(_) => {}
+            XLayerPayloadServiceBuilderInner::DefaultWithP2P(dp) => {
+                dp.blacklist_ctx = Some(ctx);
+            }
+            // RPC/follower: snapshot/ingress/deposit come from the executor-factory hook on the
+            // import path, not from threading the ctx into the builder.
             XLayerPayloadServiceBuilderInner::Default(_) => {}
         }
         self
