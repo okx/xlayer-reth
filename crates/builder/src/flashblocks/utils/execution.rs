@@ -11,6 +11,8 @@ pub enum TxnExecutionResult {
     BlockDALimitExceeded(u64, u64, u64),
     #[display("TransactionGasLimitExceeded: total_gas_used={_0} tx_gas_limit={_1}")]
     TransactionGasLimitExceeded(u64, u64, u64),
+    #[display("GaslessBlockGasLimitExceeded: cumulative={_0} tx_gas_used={_1} limit={_2}")]
+    GaslessBlockGasLimitExceeded(u64, u64, u64),
     SequencerTransaction,
     NonceTooLow,
     InteropFailed,
@@ -33,6 +35,8 @@ pub struct ExecutionInfo {
     pub receipts: Vec<OpReceipt>,
     /// All gas used so far
     pub cumulative_gas_used: u64,
+    /// Cumulative gas used by gasless transactions in the current block.
+    pub cumulative_gasless_gas_used: u64,
     /// Estimated DA size
     pub cumulative_da_bytes_used: u64,
     /// Tracks fees from executed mempool transactions
@@ -51,6 +55,7 @@ impl ExecutionInfo {
             executed_senders: Vec::with_capacity(capacity),
             receipts: Vec::with_capacity(capacity),
             cumulative_gas_used: 0,
+            cumulative_gasless_gas_used: 0,
             cumulative_da_bytes_used: 0,
             total_fees: U256::ZERO,
             da_footprint_scalar: None,
