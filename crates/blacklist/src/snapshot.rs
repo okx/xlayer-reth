@@ -53,6 +53,13 @@ impl BlacklistSnapshot {
         self.set.is_empty()
     }
 
+    /// Iterate the listed addresses. Used by the failsafe (DefaultWithP2P) build path to seed a
+    /// per-block pre-balance map for check③ (it cannot read pre-balances from inside the
+    /// commit-condition closure). Order is unspecified.
+    pub fn iter(&self) -> impl Iterator<Item = &Address> + '_ {
+        self.set.iter()
+    }
+
     /// Insert an address (zero address is ignored — defensive skip).
     fn insert(&mut self, addr: Address) {
         if addr != Address::ZERO {

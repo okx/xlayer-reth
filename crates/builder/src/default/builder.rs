@@ -6,15 +6,17 @@
 //! and the payload is returned as `Freeze` (deterministic, no re-building).
 
 use crate::flashblocks::utils::cache::FlashblockPayloadsCache;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{info, warn};
 
 use alloy_consensus::{transaction::TxHashRef, Transaction, Typed2718};
 use alloy_eips::eip2718::WithEncoded;
 use alloy_evm::{block::TxResult as _, Evm as _};
-use alloy_primitives::U256;
+use alloy_primitives::{Address, U256};
 use op_alloy_consensus::OpTransaction;
 use op_revm::{constants::L1_BLOCK_CONTRACT, L1BlockInfo};
+use revm::Database as _;
 
 use reth_basic_payload_builder::*;
 use reth_chainspec::ChainSpecProvider;
@@ -327,12 +329,6 @@ where
         };
 
         // Snapshot read once at block head (caller guaranteed non-empty).
-        let snapshot = self
-            .blacklist_ctx
-            .as_ref()
-            .map(|c| c.load_snapshot())
-            .expect("build_with_gate only called when blacklist_ctx is Some");
-
         let state_provider = self.inner.client.state_by_block_hash(ctx.parent().hash())?;
         let state = StateProviderDatabase::new(&state_provider);
         let mut db = State::builder()
@@ -358,6 +354,31 @@ where
             let block_da_limit = ctx.builder_config.da_config.max_da_block_size();
             let tx_da_limit = ctx.builder_config.da_config.max_da_tx_size();
             let base_fee = builder.evm_mut().block().basefee();
+            let coinbase = builder.evm_mut().block().beneficiary();
+
+            // check③ pre-balances. The commit-condition closure sees the post-tx state diff but
+            // has no db handle, so seed each listed address's committed balance ONCE here (after
+            // pre-exec + sequencer txs) and advance it after every committed tx. O(list) once per
+            // block — fine for emergency-freeze-sized lists; this is the rare failsafe path.
+            let snapshot = self
+                .blacklist_ctx
+                .as_ref()
+                .expect("build_with_gate is only entered when blacklist_ctx is Some")
+                .load_snapshot();
+            let mut listed_balances: HashMap<Address, U256> = snapshot
+                .iter()
+                .map(|addr| {
+                    let bal = builder
+                        .evm_mut()
+                        .db_mut()
+                        .basic(*addr)
+                        .ok()
+                        .flatten()
+                        .map(|i| i.balance)
+                        .unwrap_or_default();
+                    (*addr, bal)
+                })
+                .collect();
 
             let best_attrs = ctx.best_transaction_attributes(builder.evm_mut().block());
             let best_source = self.inner.best_transactions.clone();
@@ -404,26 +425,58 @@ where
                     break;
                 }
 
-                // XLOP-1100 gate: commit the tx only if its logs do not hit the blacklist
-                // (check②). On a hit, the tx is discarded (state not committed), dropped from
-                // this build, and scheduled for physical pool removal.
+                // XLOP-1100 gate: evaluate check②(committed Transfer-class logs) + check③(native
+                // -ETH balance change, with the L2 gas fee stripped) on the tx's committed
+                // effects. On a hit the tx is discarded (state not committed), dropped from this
+                // build, and scheduled for physical pool removal. Fully-qualified to the
+                // `BlockBuilder` method (the builder also satisfies `BlockExecutor`, whose
+                // same-named method tracks no block transactions). check① (pure CALL touch with
+                // no event/balance change) is NOT covered here — no inspector on this path.
                 let tx_hash = *tx.tx_hash();
-                let mut hit: Option<xlayer_blacklist::Hit> = None;
-                // Fully-qualified to force the `BlockBuilder` method (closure sees revm
-                // `ExecutionResult` with `.logs()`); the builder also satisfies `BlockExecutor`,
-                // whose same-named method passes `&Executor::Result` instead.
+                let sender = tx.signer();
+                let effective_gas_price = tx.effective_gas_price(Some(base_fee));
                 let committed = BlockBuilder::execute_transaction_with_commit_condition(
                     &mut builder,
                     tx.clone(),
                     |result| {
-                        // `result` is the executor's `OpTxResult` (impl `TxResult`); reach the
-                        // revm `ExecutionResult` via `.result().result` to read committed logs.
-                        match blacklist_log_hit(result.result().result.logs(), &snapshot) {
-                            Some(h) => {
-                                hit = Some(h);
+                        let ras = result.result();
+                        let listed_changes: Vec<_> = ras
+                            .state
+                            .iter()
+                            .filter(|(addr, _)| snapshot.contains(addr))
+                            .map(|(addr, acct)| xlayer_blacklist_node::ListedBalanceChange {
+                                address: *addr,
+                                balance_start: listed_balances
+                                    .get(addr)
+                                    .copied()
+                                    .unwrap_or_default(),
+                                balance_end: acct.info.balance,
+                            })
+                            .collect();
+                        let fee = xlayer_blacklist_node::FeeContext {
+                            sender,
+                            coinbase,
+                            gas_used: ras.result.tx_gas_used(),
+                            effective_gas_price,
+                            base_fee,
+                        };
+                        match gate_decision(ras.result.logs(), listed_changes, &fee, &snapshot) {
+                            Some(hit) => {
+                                if let Some(bl) = self.blacklist_ctx.as_ref() {
+                                    bl.record_exec_revert(&hit);
+                                }
                                 reth_evm::block::CommitChanges::No
                             }
-                            None => reth_evm::block::CommitChanges::Yes,
+                            None => {
+                                // Committed: advance the running pre-balance for listed addresses
+                                // this tx changed, so the next tx sees the correct pre-balance.
+                                for (addr, acct) in ras.state.iter() {
+                                    if snapshot.contains(addr) {
+                                        listed_balances.insert(*addr, acct.info.balance);
+                                    }
+                                }
+                                reth_evm::block::CommitChanges::Yes
+                            }
                         }
                     },
                 )
@@ -439,10 +492,7 @@ where
                         info.total_fees += U256::from(miner_fee) * U256::from(gas_used);
                     }
                     None => {
-                        // Blacklist hit (or closure said No): exclude from the block.
-                        if let (Some(h), Some(bl)) = (hit.as_ref(), self.blacklist_ctx.as_ref()) {
-                            bl.record_exec_revert(h);
-                        }
+                        // Blacklist hit: excluded from the block (metric recorded above).
                         best_txs.mark_invalid(tx.signer(), tx.nonce());
                         txs_to_evict.push(tx_hash);
                         continue;
@@ -538,69 +588,196 @@ where
     Ok(())
 }
 
-/// XLOP-1100 (FR-2 面2): per-tx blacklist decision used by `build_with_gate`.
+/// XLOP-1100 (FR-2 面2): the normal-L2 blacklist decision used by `build_with_gate`.
 ///
-/// check② only (committed Transfer-event logs) — the commit-condition closure can only see the
-/// tx result's logs, not call frames (check①) or the state diff (check③). Returns the hit
-/// (caller excludes the tx) or `None` (caller commits). Pure wrapper over the shared evaluator
-/// with an empty inspector so only the log check can fire.
-fn blacklist_log_hit(
+/// check②(committed Transfer-class logs) + check③(native-ETH balance change), the latter with
+/// the L2 gas fee stripped via [`reconstruct_balance_candidates`] (so a listed sender's gas
+/// payment or a listed coinbase's fee receipt is not mistaken for a transfer). check① (pure
+/// CALL touch) is out of scope on this path (no inspector). Pure → unit-tested below.
+///
+/// metric caveat: `selfdestruct_targets` is passed empty here (no inspector on this path), so a
+/// selfdestruct-funded hit to a listed address is still DROPPED but recorded under the
+/// `eth_balance` hook bucket rather than `selfdestruct` (unlike the flashblocks path). Interception
+/// is unchanged; only the metric category label differs. The `selfdestruct` categorization is
+/// covered by the lower-level `xlayer_blacklist::eval` tests.
+fn gate_decision(
     logs: &[alloy_primitives::Log],
+    listed_changes: Vec<xlayer_blacklist_node::ListedBalanceChange>,
+    fee: &xlayer_blacklist_node::FeeContext,
     snapshot: &xlayer_blacklist::BlacklistSnapshot,
 ) -> Option<xlayer_blacklist::Hit> {
-    xlayer_blacklist::BlacklistEvaluator::evaluate(
-        &xlayer_blacklist::BlacklistInspector::new(),
-        logs,
-        snapshot,
-    )
+    let mut insp = xlayer_blacklist::BlacklistInspector::new();
+    for cand in xlayer_blacklist_node::reconstruct_balance_candidates(listed_changes, fee, &[]) {
+        insp.record_balance_candidate(cand);
+    }
+    xlayer_blacklist::BlacklistEvaluator::evaluate(&insp, logs, snapshot)
 }
 
 #[cfg(test)]
-mod blacklist_gate_tests {
-    use super::blacklist_log_hit;
-    use alloy_primitives::{address, Address, Log, LogData};
+mod gate_tests {
+    use super::gate_decision;
+    use alloy_primitives::{address, Address, Log, LogData, U256};
     use xlayer_blacklist::{eval::TRANSFER_TOPIC0, BlacklistSnapshot, HitCategory};
+    use xlayer_blacklist_node::{FeeContext, ListedBalanceChange};
 
-    const AAA: Address = address!("00000000000000000000000000000000000000aa");
-    const BBB: Address = address!("00000000000000000000000000000000000000bb");
+    const VICTIM: Address = address!("00000000000000000000000000000000000000aa");
+    const SENDER: Address = address!("00000000000000000000000000000000000000b0");
+    const COINBASE: Address = address!("00000000000000000000000000000000000000cb");
     const TOKEN: Address = address!("00000000000000000000000000000000000000dd");
 
     fn snap(addrs: &[Address]) -> BlacklistSnapshot {
         addrs.iter().copied().collect()
     }
 
-    /// ERC20 `Transfer(from, to, value)` log: topics = [topic0, from, to].
+    fn fee(sender: Address, coinbase: Address, gas_used: u64, egp: u128, base: u64) -> FeeContext {
+        FeeContext { sender, coinbase, gas_used, effective_gas_price: egp, base_fee: base }
+    }
+
     fn transfer_log(from: Address, to: Address) -> Log {
         let topics = vec![*TRANSFER_TOPIC0, from.into_word(), to.into_word()];
         Log { address: TOKEN, data: LogData::new(topics, Default::default()).expect("log data") }
     }
 
     #[test]
-    fn transfer_to_blacklisted_is_hit() {
-        // forwarder/proxy case: tx top-level clean, internal Transfer to a listed address.
-        let hit = blacklist_log_hit(&[transfer_log(BBB, AAA)], &snap(&[AAA])).expect("hit");
+    fn balance_inflow_to_listed_hits() {
+        // C7 (forwarder inner CALL value) and C15 (selfdestruct beneficiary): a listed addr
+        // (neither sender nor coinbase) gains ETH with NO Transfer event → only check③ catches
+        // it. NOTE: this path has no inspector, so a selfdestruct-funded hit is categorized as
+        // `EthBalance` here (not `SelfDestruct`) — interception is unchanged, only the metric
+        // label differs (see `gate_decision` doc). The `SelfDestruct` category is asserted by the
+        // lower-level `xlayer_blacklist::eval` tests.
+        let changes = vec![ListedBalanceChange {
+            address: VICTIM,
+            balance_start: U256::ZERO,
+            balance_end: U256::from(1u64),
+        }];
+        let hit =
+            gate_decision(&[], changes, &fee(SENDER, COINBASE, 21_000, 10, 7), &snap(&[VICTIM]))
+                .expect("hit");
+        assert_eq!(hit.category, HitCategory::EthBalance);
+        assert_eq!(hit.address, VICTIM);
+    }
+
+    #[test]
+    fn balance_outflow_from_listed_hits() {
+        // check③ also catches ETH leaving a listed address (e.g. drained via a contract) when
+        // that address is neither sender nor coinbase (no fee to strip) → net != 0 → hit.
+        let changes = vec![ListedBalanceChange {
+            address: VICTIM,
+            balance_start: U256::from(100u64),
+            balance_end: U256::from(40u64),
+        }];
+        let hit =
+            gate_decision(&[], changes, &fee(SENDER, COINBASE, 21_000, 10, 7), &snap(&[VICTIM]))
+                .expect("hit");
+        assert_eq!(hit.category, HitCategory::EthBalance);
+        assert_eq!(hit.address, VICTIM);
+    }
+
+    #[test]
+    fn multiple_listed_changed_one_tx_hits() {
+        // A tx touching several listed addresses still yields a hit (which one is returned is
+        // unspecified — `evaluate` returns the first balance candidate; both are listed).
+        let other = address!("00000000000000000000000000000000000000a1");
+        let changes = vec![
+            ListedBalanceChange {
+                address: VICTIM,
+                balance_start: U256::ZERO,
+                balance_end: U256::from(1u64),
+            },
+            ListedBalanceChange {
+                address: other,
+                balance_start: U256::ZERO,
+                balance_end: U256::from(2u64),
+            },
+        ];
+        let hit = gate_decision(
+            &[],
+            changes,
+            &fee(SENDER, COINBASE, 21_000, 10, 7),
+            &snap(&[VICTIM, other]),
+        )
+        .expect("hit");
+        assert_eq!(hit.category, HitCategory::EthBalance);
+    }
+
+    #[test]
+    fn empty_snapshot_fail_open() {
+        // Disabled chain / empty list → never a hit (try_build also short-circuits before the
+        // gate, but the decision itself must be fail-open too).
+        let changes = vec![ListedBalanceChange {
+            address: VICTIM,
+            balance_start: U256::ZERO,
+            balance_end: U256::from(1u64),
+        }];
+        assert!(gate_decision(
+            &[transfer_log(SENDER, VICTIM)],
+            changes,
+            &fee(SENDER, COINBASE, 21_000, 10, 7),
+            &BlacklistSnapshot::empty()
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn transfer_event_to_listed_hits() {
+        // check②: internal Transfer to a listed address (forwarder/proxy), clean top-level.
+        let hit = gate_decision(
+            &[transfer_log(SENDER, VICTIM)],
+            vec![],
+            &fee(SENDER, COINBASE, 21_000, 10, 7),
+            &snap(&[VICTIM]),
+        )
+        .expect("hit");
         assert_eq!(hit.category, HitCategory::Log);
-        assert_eq!(hit.address, AAA);
     }
 
     #[test]
-    fn transfer_from_blacklisted_is_hit() {
-        assert!(blacklist_log_hit(&[transfer_log(AAA, BBB)], &snap(&[AAA])).is_some());
+    fn listed_coinbase_fee_only_not_hit() {
+        // A listed coinbase collecting only the block priority fee must NOT be flagged.
+        let (gas_used, egp, base) = (100u64, 10u128, 7u64);
+        let reward = U256::from(gas_used) * U256::from(egp - base as u128); // 100 × 3 = 300
+        let changes = vec![ListedBalanceChange {
+            address: VICTIM, // == coinbase below
+            balance_start: U256::ZERO,
+            balance_end: reward,
+        }];
+        assert!(gate_decision(
+            &[],
+            changes,
+            &fee(SENDER, VICTIM, gas_used, egp, base),
+            &snap(&[VICTIM])
+        )
+        .is_none());
     }
 
     #[test]
-    fn clean_transfer_no_hit() {
-        assert!(blacklist_log_hit(&[transfer_log(BBB, BBB)], &snap(&[AAA])).is_none());
+    fn listed_sender_gas_only_not_hit() {
+        // A listed sender paying only gas (no transfer) must NOT be flagged.
+        let (gas_used, egp) = (100u64, 10u128);
+        let cost = U256::from(gas_used) * U256::from(egp); // 1000
+        let changes = vec![ListedBalanceChange {
+            address: VICTIM, // == sender below
+            balance_start: U256::from(1000u64),
+            balance_end: U256::from(1000u64) - cost, // 0
+        }];
+        assert!(gate_decision(
+            &[],
+            changes,
+            &fee(VICTIM, COINBASE, gas_used, egp, 7),
+            &snap(&[VICTIM])
+        )
+        .is_none());
     }
 
     #[test]
-    fn empty_snapshot_no_hit() {
-        // disabled chain / empty list → fail-open (caller delegates upstream anyway).
-        assert!(blacklist_log_hit(&[transfer_log(BBB, AAA)], &BlacklistSnapshot::empty()).is_none());
-    }
-
-    #[test]
-    fn no_logs_no_hit() {
-        assert!(blacklist_log_hit(&[], &snap(&[AAA])).is_none());
+    fn clean_tx_not_hit() {
+        assert!(gate_decision(
+            &[],
+            vec![],
+            &fee(SENDER, COINBASE, 21_000, 10, 7),
+            &snap(&[VICTIM])
+        )
+        .is_none());
     }
 }
