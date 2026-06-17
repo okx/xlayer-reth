@@ -85,9 +85,9 @@ impl BlacklistRuntimeCtx {
         BlacklistMetrics::increment_exec_revert(hit.category);
     }
 
-    /// Observe a block-head snapshot read duration into the histogram. [DM-7.3]
-    pub fn record_snapshot_read(&self, seconds: f64) {
-        self.metrics.snapshot_read_duration_seconds.record(seconds);
+    /// Observe a block-head snapshot read duration (nanoseconds) into the histogram. [DM-7.3]
+    pub fn record_snapshot_read(&self, nanoseconds: f64) {
+        self.metrics.snapshot_read_duration_nanoseconds.record(nanoseconds);
     }
 }
 

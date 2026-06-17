@@ -922,8 +922,9 @@ pub mod metrics {
     pub struct BlacklistMetrics {
         /// Current block snapshot size → `xlayer_blacklist_cache_size`.
         pub cache_size: Gauge,
-        /// Block-head snapshot read duration → `xlayer_blacklist_snapshot_read_duration_seconds`.
-        pub snapshot_read_duration_seconds: Histogram,
+        /// Block-head snapshot read duration → `xlayer_blacklist_snapshot_read_duration_nanoseconds`
+        /// (named by its real unit, cross-client with op-geth).
+        pub snapshot_read_duration_nanoseconds: Histogram,
     }
 
     /// Metric name for the category-labelled execution-gate revert counter.

@@ -968,7 +968,7 @@ where
             let mut evm = ctx.evm_config.evm_with_env(&mut *state, ctx.evm_env.clone());
             xlayer_blacklist::read_blacklist_snapshot(&mut evm, mirror)
         };
-        bl_ctx.record_snapshot_read(start.elapsed().as_secs_f64());
+        bl_ctx.record_snapshot_read(start.elapsed().as_nanos() as f64);
         bl_ctx.store_snapshot(snapshot);
     }
 

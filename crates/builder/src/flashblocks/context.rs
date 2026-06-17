@@ -780,13 +780,13 @@ impl FlashblocksBuilderCtx {
             }
 
             // XLayer chain-level blacklist (XLOP-1100, FR-2/3 builder face — L2-normal drop).
-            // Full three-check (priority call > log > balance) on committed effects, mirroring
-            // the bridge-intercept disposition: a committed hit on a non-deposit L2 tx is
-            // dropped (`mark_invalid`) before its state is committed, and the revert is metered.
-            //   - check① committed CALL touch  : from the mounted inspector's frame tree
+            // Two-check gate (priority log > balance) on committed effects, mirroring the
+            // bridge-intercept disposition: a committed hit on a non-deposit L2 tx is dropped
+            // (`mark_invalid`) before its state is committed, and the revert is metered.
             //   - check② committed Transfer log : from `result.logs()`
             //   - check③ committed ETH balance  : reconstructed from the state diff (listed
             //     addresses changed by this tx), with the op-geth fee set stripped
+            // No revm inspector is mounted (check① removed cross-client).
             // An empty snapshot / disabled chain is a no-op (fail-open) — `bl_active` is false.
             if bl_active {
                 let snapshot = bl_snapshot.as_deref().expect("bl_active implies snapshot");
