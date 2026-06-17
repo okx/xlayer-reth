@@ -194,7 +194,7 @@ pub(super) struct FlashblocksBuilder<Pool, Client> {
     /// Configuration for bridge transaction interception.
     pub bridge_intercept_config: xlayer_bridge_intercept::BridgeInterceptConfig,
     /// Chain-level blacklist runtime context (XLOP-1100, FR-2/3 builder face).
-    pub blacklist_ctx: Option<xlayer_blacklist_node::BlacklistRuntimeCtx>,
+    pub blacklist_ctx: Option<xlayer_blacklist::BlacklistRuntimeCtx>,
 }
 
 impl<Pool, Client> FlashblocksBuilder<Pool, Client> {
@@ -966,7 +966,7 @@ where
         let start = std::time::Instant::now();
         let snapshot = {
             let mut evm = ctx.evm_config.evm_with_env(&mut *state, ctx.evm_env.clone());
-            xlayer_blacklist_node::read_blacklist_snapshot(&mut evm, mirror)
+            xlayer_blacklist::read_blacklist_snapshot(&mut evm, mirror)
         };
         bl_ctx.record_snapshot_read(start.elapsed().as_secs_f64());
         bl_ctx.store_snapshot(snapshot);

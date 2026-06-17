@@ -76,7 +76,7 @@ pub struct FlashblocksBuilderCtx {
     pub bridge_intercept_config: xlayer_bridge_intercept::BridgeInterceptConfig,
     /// Chain-level blacklist runtime context (XLOP-1100, FR-2/3 builder face). `None` when
     /// the feature is disabled / the chain id has no mirror address.
-    pub blacklist_ctx: Option<xlayer_blacklist_node::BlacklistRuntimeCtx>,
+    pub blacklist_ctx: Option<xlayer_blacklist::BlacklistRuntimeCtx>,
 }
 
 impl FlashblocksBuilderCtx {
@@ -269,16 +269,12 @@ impl FlashblocksBuilderCtx {
         // batch from the running tx count.
         let next_bal_index = info.executed_transactions.len() as u64 + 1;
         db.set_bal_index(next_bal_index);
-        // XLOP-1100 (FR-3): mount the blacklist inspector so a committed-hit deposit can be
-        // detected by all three checks. Inspection is off for disabled chains / empty lists.
+        // XLOP-1100 (FR-3): a committed-hit deposit is included-as-reverted. Judged on
+        // check②(Transfer logs) + check③(ETH balance, reconstructed from the post-state
+        // diff) — no revm inspector is mounted (check① was removed cross-client).
         let bl_snapshot = self.blacklist_ctx.as_ref().map(|c| c.load_snapshot());
         let bl_active = bl_snapshot.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
-        let mut evm = self.evm_config.evm_with_env_and_inspector(
-            &mut *db,
-            self.evm_env.clone(),
-            xlayer_blacklist_node::XLayerRevmInspector::new(),
-        );
-        evm.set_inspector_enabled(bl_active);
+        let mut evm = self.evm_config.evm_with_env(&mut *db, self.evm_env.clone());
 
         for sequencer_tx in &self.attributes().transactions {
             // A sequencer's block should never contain blob transactions.
@@ -314,9 +310,6 @@ impl FlashblocksBuilderCtx {
                     ))
                 })?;
 
-            if bl_active {
-                evm.inspector_mut().reset();
-            }
             let ResultAndState { result, state } = match evm.transact(&sequencer_tx) {
                 Ok(res) => res,
                 Err(err) => {
@@ -341,16 +334,10 @@ impl FlashblocksBuilderCtx {
                 && !xlayer_blacklist::deposit::is_exempt_sender(&sequencer_tx.signer())
             {
                 let snapshot = bl_snapshot.as_deref().expect("bl_active implies snapshot");
-                // Cross-client decision B: deposits are judged on check②(logs) + check③(balance)
-                // ONLY — NOT check①(committed CALL touch). The follower validation EVM cannot
-                // mount an inspector, so to keep sequencer/follower/op-geth byte-identical the
-                // sequencer must also skip check① for deposits. Hence start from an EMPTY
-                // inspector (no call frames) and feed only the reconstructed balance candidates;
-                // do NOT use `evm.inspector().observations()` here (that carries CALL frames and
-                // would re-introduce check①, diverging from the follower). [op-geth
-                // EvaluateDeposit(skipCallTouch=true)]
+                // Deposits are judged on check②(Transfer logs) + check③(ETH balance only,
+                // reconstructed from the post-state diff). No CALL-frame check (removed
+                // cross-client) and no selfdestruct category — byte-identical with the follower.
                 let mut obs = xlayer_blacklist::BlacklistInspector::new();
-                let sd_targets = evm.inspector().selfdestruct_targets().to_vec();
                 let listed_changes: Vec<_> = state
                     .iter()
                     .filter_map(|(addr, acct)| {
@@ -363,7 +350,7 @@ impl FlashblocksBuilderCtx {
                             .flatten()
                             .map(|i| i.balance)
                             .unwrap_or_default();
-                        Some(xlayer_blacklist_node::ListedBalanceChange {
+                        Some(xlayer_blacklist::ListedBalanceChange {
                             address: *addr,
                             balance_start,
                             balance_end: acct.info.balance,
@@ -372,18 +359,16 @@ impl FlashblocksBuilderCtx {
                     .collect();
                 // Deposits pay no L2 execution gas fee, so the sender/coinbase fee-strip is
                 // moot here (effective_gas_price = 0).
-                let fee = xlayer_blacklist_node::FeeContext {
+                let fee = xlayer_blacklist::FeeContext {
                     sender: sequencer_tx.signer(),
                     coinbase: self.evm_env.block_env.beneficiary,
                     gas_used,
                     effective_gas_price: 0,
                     base_fee: self.base_fee(),
                 };
-                for cand in xlayer_blacklist_node::reconstruct_balance_candidates(
-                    listed_changes,
-                    &fee,
-                    &sd_targets,
-                ) {
+                for cand in
+                    xlayer_blacklist::reconstruct_balance_candidates(listed_changes, &fee, &[])
+                {
                     obs.record_balance_candidate(cand);
                 }
                 if let Some(hit) =
@@ -427,7 +412,7 @@ impl FlashblocksBuilderCtx {
                         .ok()
                         .flatten()
                         .unwrap_or_default();
-                    let delta = xlayer_blacklist_node::reverted_deposit_state(
+                    let delta = xlayer_blacklist::reverted_deposit_state(
                         sequencer_tx.signer(),
                         pre_info,
                         &outcome,
@@ -632,19 +617,14 @@ impl FlashblocksBuilderCtx {
         // batch from the running tx count.
         let next_bal_index = info.executed_transactions.len() as u64 + 1;
         db.set_bal_index(next_bal_index);
-        // XLOP-1100 (FR-2): mount the blacklist inspector so check①(committed CALL touch)
-        // and check③(ETH balance) observations are captured on the build path. Inspection is
-        // toggled OFF for disabled chains / empty lists, so they run the non-inspecting EVM
-        // path with zero overhead (AC5). The block-head snapshot was loaded once in
+        // XLOP-1100 (FR-2): a committed blacklist hit on a normal L2 tx is dropped on the
+        // build path. Judged on check②(Transfer logs) + check③(ETH balance, reconstructed
+        // from the post-state diff) — no revm inspector is mounted (check① was removed
+        // cross-client; zero EVM overhead). The block-head snapshot was loaded once in
         // `execute_pre_steps`; reuse it here for the whole tx loop.
         let bl_snapshot = self.blacklist_ctx.as_ref().map(|c| c.load_snapshot());
         let bl_active = bl_snapshot.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
-        let mut evm = self.evm_config.evm_with_env_and_inspector(
-            &mut *db,
-            self.evm_env.clone(),
-            xlayer_blacklist_node::XLayerRevmInspector::new(),
-        );
-        evm.set_inspector_enabled(bl_active);
+        let mut evm = self.evm_config.evm_with_env(&mut *db, self.evm_env.clone());
 
         debug!(
             target: "payload_builder",
@@ -731,11 +711,6 @@ impl FlashblocksBuilderCtx {
                 return Ok(Some(()));
             }
 
-            // Per-tx reset: the EVM (and its inspector) is built once outside the loop, so
-            // clear the prior tx's observations before executing this one.
-            if bl_active {
-                evm.inspector_mut().reset();
-            }
             let tx_simulation_start_time = Instant::now();
             let ResultAndState { result, state } = match evm.transact(&tx) {
                 Ok(res) => res,
@@ -815,9 +790,7 @@ impl FlashblocksBuilderCtx {
             // An empty snapshot / disabled chain is a no-op (fail-open) — `bl_active` is false.
             if bl_active {
                 let snapshot = bl_snapshot.as_deref().expect("bl_active implies snapshot");
-                // Clone the call-frame observations before borrowing the db for balances.
-                let mut obs = evm.inspector().observations().clone();
-                let sd_targets = evm.inspector().selfdestruct_targets().to_vec();
+                let mut obs = xlayer_blacklist::BlacklistInspector::new();
                 // check③ candidates: listed addresses changed by this tx (committed pre-tx
                 // balance from the pre-commit db, post-tx balance from the state diff).
                 let listed_changes: Vec<_> = state
@@ -832,25 +805,23 @@ impl FlashblocksBuilderCtx {
                             .flatten()
                             .map(|i| i.balance)
                             .unwrap_or_default();
-                        Some(xlayer_blacklist_node::ListedBalanceChange {
+                        Some(xlayer_blacklist::ListedBalanceChange {
                             address: *addr,
                             balance_start,
                             balance_end: acct.info.balance,
                         })
                     })
                     .collect();
-                let fee = xlayer_blacklist_node::FeeContext {
+                let fee = xlayer_blacklist::FeeContext {
                     sender: tx.signer(),
                     coinbase: self.evm_env.block_env.beneficiary,
                     gas_used,
                     effective_gas_price: tx.effective_gas_price(Some(base_fee)),
                     base_fee,
                 };
-                for cand in xlayer_blacklist_node::reconstruct_balance_candidates(
-                    listed_changes,
-                    &fee,
-                    &sd_targets,
-                ) {
+                for cand in
+                    xlayer_blacklist::reconstruct_balance_candidates(listed_changes, &fee, &[])
+                {
                     obs.record_balance_candidate(cand);
                 }
                 if let Some(hit) =

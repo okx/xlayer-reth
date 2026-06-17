@@ -25,11 +25,7 @@ use reth_provider::CanonStateSubscriptions;
 use reth_rpc_builder::config::RethRpcServerConfig;
 use reth_rpc_server_types::RethRpcModule;
 
-use reth_optimism_node::node::OpPoolBuilder;
-use xlayer_blacklist_node::{
-    BlacklistRuntimeCtx, XLayerBlacklistPoolBuilder, XLayerDepositBlacklistHook,
-    XLayerExecutorBuilder,
-};
+use xlayer_blacklist::{BlacklistRuntimeCtx, XLayerDepositBlacklistHook, XLayerExecutorBuilder};
 use xlayer_chainspec::XLayerChainSpecParser;
 use xlayer_flashblocks::{
     FlashblockSequenceValidator, FlashblockStateCache, FlashblocksPersistCtx, FlashblocksPubSub,
@@ -191,13 +187,7 @@ fn main() {
                     op_node
                         .components()
                         .payload(payload_builder)
-                        .executor(XLayerExecutorBuilder::new(bl_ctx.clone()))
-                        // XLOP-1100 (FR-1): blacklist ingress filter on the standard
-                        // OpTransactionValidator (same pool type → add-ons unaffected).
-                        .pool(XLayerBlacklistPoolBuilder::new(
-                            OpPoolBuilder::default(),
-                            bl_ctx.clone(),
-                        )),
+                        .executor(XLayerExecutorBuilder::new(bl_ctx.clone())),
                 )
                 .with_add_ons(add_ons)
                 .extend_rpc_modules(move |ctx| {

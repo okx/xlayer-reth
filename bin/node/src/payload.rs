@@ -6,7 +6,7 @@ use reth_node_builder::{components::BasicPayloadServiceBuilder, BuilderContext};
 use reth_optimism_evm::OpEvmConfig;
 use reth_optimism_node::node::OpPayloadBuilder;
 use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
-use xlayer_blacklist_node::BlacklistRuntimeCtx;
+use xlayer_blacklist::BlacklistRuntimeCtx;
 use xlayer_bridge_intercept::BridgeInterceptConfig;
 use xlayer_builder::{
     args::BuilderArgs,

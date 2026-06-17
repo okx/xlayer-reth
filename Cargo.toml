@@ -15,7 +15,6 @@ resolver = "2"
 exclude = ["deps"]
 members = [
     "crates/blacklist",
-    "crates/blacklist-node",
     "crates/builder",
     "crates/chainspec",
     "crates/flashblocks",
@@ -69,7 +68,6 @@ codegen-units = 1
 
 xlayer-bridge-intercept = { path = "crates/intercept" }
 xlayer-blacklist = { path = "crates/blacklist" }
-xlayer-blacklist-node = { path = "crates/blacklist-node" }
 xlayer-builder = { path = "crates/builder" }
 xlayer-chainspec = { path = "crates/chainspec" }
 xlayer-flashblocks = { path = "crates/flashblocks" }

@@ -62,7 +62,7 @@ pub struct DefaultPayloadBuilder<Pool, Client, Evm, Txs, Attrs> {
     /// XLOP-1100 (FR-2 面2): chain-level blacklist runtime context. When present AND the
     /// snapshot is non-empty, the cache-miss build path runs the normal-L2 commit-condition
     /// gate (check②). `None` / empty snapshot → fail-open, delegate to the upstream builder.
-    blacklist_ctx: Option<xlayer_blacklist_node::BlacklistRuntimeCtx>,
+    blacklist_ctx: Option<xlayer_blacklist::BlacklistRuntimeCtx>,
 }
 
 impl<Pool, Client, Evm, Txs, Attrs> DefaultPayloadBuilder<Pool, Client, Evm, Txs, Attrs> {
@@ -70,7 +70,7 @@ impl<Pool, Client, Evm, Txs, Attrs> DefaultPayloadBuilder<Pool, Client, Evm, Txs
     pub fn new(
         inner: reth_optimism_payload_builder::OpPayloadBuilder<Pool, Client, Evm, Txs, Attrs>,
         p2p_cache: FlashblockPayloadsCache,
-        blacklist_ctx: Option<xlayer_blacklist_node::BlacklistRuntimeCtx>,
+        blacklist_ctx: Option<xlayer_blacklist::BlacklistRuntimeCtx>,
     ) -> Self {
         Self { inner, p2p_cache, blacklist_ctx }
     }
@@ -444,7 +444,7 @@ where
                             .state
                             .iter()
                             .filter(|(addr, _)| snapshot.contains(addr))
-                            .map(|(addr, acct)| xlayer_blacklist_node::ListedBalanceChange {
+                            .map(|(addr, acct)| xlayer_blacklist::ListedBalanceChange {
                                 address: *addr,
                                 balance_start: listed_balances
                                     .get(addr)
@@ -453,7 +453,7 @@ where
                                 balance_end: acct.info.balance,
                             })
                             .collect();
-                        let fee = xlayer_blacklist_node::FeeContext {
+                        let fee = xlayer_blacklist::FeeContext {
                             sender,
                             coinbase,
                             gas_used: ras.result.tx_gas_used(),
@@ -602,12 +602,12 @@ where
 /// covered by the lower-level `xlayer_blacklist::eval` tests.
 fn gate_decision(
     logs: &[alloy_primitives::Log],
-    listed_changes: Vec<xlayer_blacklist_node::ListedBalanceChange>,
-    fee: &xlayer_blacklist_node::FeeContext,
+    listed_changes: Vec<xlayer_blacklist::ListedBalanceChange>,
+    fee: &xlayer_blacklist::FeeContext,
     snapshot: &xlayer_blacklist::BlacklistSnapshot,
 ) -> Option<xlayer_blacklist::Hit> {
     let mut insp = xlayer_blacklist::BlacklistInspector::new();
-    for cand in xlayer_blacklist_node::reconstruct_balance_candidates(listed_changes, fee, &[]) {
+    for cand in xlayer_blacklist::reconstruct_balance_candidates(listed_changes, fee, &[]) {
         insp.record_balance_candidate(cand);
     }
     xlayer_blacklist::BlacklistEvaluator::evaluate(&insp, logs, snapshot)
@@ -618,7 +618,7 @@ mod gate_tests {
     use super::gate_decision;
     use alloy_primitives::{address, Address, Log, LogData, U256};
     use xlayer_blacklist::{eval::TRANSFER_TOPIC0, BlacklistSnapshot, HitCategory};
-    use xlayer_blacklist_node::{FeeContext, ListedBalanceChange};
+    use xlayer_blacklist::{FeeContext, ListedBalanceChange};
 
     const VICTIM: Address = address!("00000000000000000000000000000000000000aa");
     const SENDER: Address = address!("00000000000000000000000000000000000000b0");

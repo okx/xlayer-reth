@@ -36,7 +36,7 @@ pub struct DefaultBuilderServiceBuilder {
     /// XLOP-1100 (FR-2 面2): chain-level blacklist runtime context, threaded into the
     /// failsafe builder's cache-miss build path so it runs the normal-L2 commit-condition
     /// gate. `None` when the feature is off / chain has no mirror (fail-open).
-    pub blacklist_ctx: Option<xlayer_blacklist_node::BlacklistRuntimeCtx>,
+    pub blacklist_ctx: Option<xlayer_blacklist::BlacklistRuntimeCtx>,
 }
 
 impl<Node, Pool> PayloadServiceBuilder<Node, Pool, OpEvmConfig> for DefaultBuilderServiceBuilder

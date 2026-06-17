@@ -1,38 +1,30 @@
-//! XLayer chain-level blacklist interception — cross-client consensus core (op-reth).
+//! XLayer chain-level blacklist interception (XLOP-1100) — single crate, two layers.
 //!
-//! This crate is the single source of truth for the cross-client constants and the
-//! pure decision logic of the "emergency freeze" blacklist feature (XLOP-1100). It is
-//! consumed by the three execution faces (builder / follower newPayload / flashblocks)
-//! and the ingress mempool validator. Every value the PRD/TD marks `跨端常量`
-//! (cross-client constant) is defined here exactly once so the op-reth and op-geth
-//! clients stay byte-for-byte consistent.
+//! - [`rules`]   — cross-client consensus pure logic (zero reth/revm coupling): the single
+//!   source of truth for every 跨端常量 (cross-client constant) and the decision logic, kept
+//!   byte-for-byte consistent with op-geth.
+//! - [`runtime`] — node/revm/reth adapters: runtime context (chain-id dispatch + snapshot
+//!   handle + metrics), block-head snapshot read, ETH-balance reconstruction, deposit state
+//!   surgery, the follower-face deposit hook, and the executor builder that installs it.
 //!
-//! The crate is deliberately **standalone** (no reth/op-reth/revm coupling), mirroring
-//! [`xlayer-bridge-intercept`]. The revm `Inspector` trait impl, the EVM-config /
-//! executor wrappers, and the mempool validator wrapper are thin adapters wired in the
-//! node/builder crates; they call into the pure logic exposed here.
-//!
-//! Module map (TD §3.3):
-//! - [`mirror`]   — `chain_id → hardcoded mirror address` dispatch (FR-6)
-//! - [`abi`]      — `getBlacklist(uint256,uint256)` selector + encode/decode (FR-4)
-//! - [`snapshot`] — block-head paginated enumeration + fail-open (FR-4)
-//! - [`inspector`]— execution-time observation accumulator (call frames / balance / selfdestruct) (FR-2)
-//! - [`eval`]     — three-check evaluator `call > log > balance` (FR-2)
-//! - [`deposit`]  — included-as-reverted receipt/state field rules + exempt senders (FR-3)
-//! - [`metrics`]  — Prometheus metrics (FR-7)
-//! - [`error`]    — pool reject code + fixed message (FR-7)
+//! The blacklist feature was reduced cross-client to a two-check execution gate (Transfer
+//! logs + native-ETH balance), with no ingress mempool filter (the execution gate is the
+//! sole interception point); see the PRD/IMPL.
 
-pub mod abi;
-pub mod deposit;
-pub mod error;
-pub mod eval;
-pub mod inspector;
-pub mod metrics;
-pub mod mirror;
-pub mod snapshot;
+pub mod rules;
+pub mod runtime;
 
-pub use error::{POOL_REJECT_CODE, POOL_REJECT_MESSAGE};
-pub use eval::{BlacklistEvaluator, Hit, HitCategory};
-pub use inspector::{BalanceCandidate, BlacklistInspector, CallFrameRecord};
-pub use mirror::mirror_address_for_chain;
-pub use snapshot::{read_snapshot_at, BlacklistSnapshot, MirrorViewCaller, ViewCallError};
+// Cross-client core (`rules`) re-exports — stable public API for the node/builder crates.
+pub use rules::eval::{BlacklistEvaluator, Hit, HitCategory};
+pub use rules::inspector::{BalanceCandidate, BlacklistInspector};
+pub use rules::mirror::mirror_address_for_chain;
+pub use rules::snapshot::{read_snapshot_at, BlacklistSnapshot, MirrorViewCaller, ViewCallError};
+pub use rules::{abi, deposit, eval, inspector, metrics, mirror, snapshot};
+
+// Node-adapter (`runtime`) re-exports.
+pub use runtime::balance::{reconstruct_balance_candidates, FeeContext, ListedBalanceChange};
+pub use runtime::deposit_apply::reverted_deposit_state;
+pub use runtime::executor_builder::XLayerExecutorBuilder;
+pub use runtime::follower_hook::XLayerDepositBlacklistHook;
+pub use runtime::view::{read_blacklist_snapshot, RethMirrorViewCaller};
+pub use runtime::{BlacklistRuntimeCtx, SnapshotHandle};

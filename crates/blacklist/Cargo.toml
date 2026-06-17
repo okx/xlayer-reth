@@ -9,12 +9,30 @@ repository.workspace = true
 [lints]
 workspace = true
 
-# Standalone cross-client consensus core for the XLayer chain-level blacklist
-# interception feature (XLOP-1100). Mirrors the zero-internal-dependency form of
-# `crates/intercept`: depends only on alloy-primitives + metrics + thiserror +
-# tracing so it compiles in isolation without the op-reth dependency tree.
+# XLayer chain-level blacklist interception (XLOP-1100). Single crate, two layers:
+# `rules` (cross-client consensus pure logic) + `runtime` (node/revm/reth adapters).
 [dependencies]
+# cross-client core (rules)
 alloy-primitives.workspace = true
+alloy-sol-types.workspace = true
+
+# node / revm / reth adapters (runtime)
+alloy-evm.workspace = true
+alloy-op-evm.workspace = true
+alloy-rpc-types-eth.workspace = true
+op-alloy-rpc-types.workspace = true
+op-revm.workspace = true
+reth-evm.workspace = true
+reth-node-builder.workspace = true
+reth-node-api.workspace = true
+reth-optimism-evm.workspace = true
+reth-optimism-forks.workspace = true
+reth-optimism-primitives.workspace = true
+revm.workspace = true
+arc-swap.workspace = true
+eyre.workspace = true
+
+# support
 reth-metrics.workspace = true
 metrics.workspace = true
 thiserror.workspace = true
