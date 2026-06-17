@@ -297,7 +297,11 @@ fn task_manager() -> TaskManager {
 fn pool_component(rollup_args: &RollupArgs) -> OpPoolBuilder {
     OpPoolBuilder::default()
         .with_enable_tx_conditional(rollup_args.enable_tx_conditional)
-        .with_gasless(rollup_args.allow_gasless, 0.1)
+        .with_gasless(
+            rollup_args.allow_gasless,
+            0.1,
+            std::time::Duration::from_secs(rollup_args.gasless_pending_lifetime_secs),
+        )
         .with_supervisor(rollup_args.supervisor_http.clone(), rollup_args.supervisor_safety_level)
 }
 

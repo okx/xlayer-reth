@@ -37,6 +37,8 @@ pub struct ExecutionInfo {
     pub cumulative_gas_used: u64,
     /// Cumulative gas used by gasless transactions in the current block.
     pub cumulative_gasless_gas_used: u64,
+    /// Set once a gasless tx is rejected for exceeding the per-block gasless budget.
+    pub gasless_budget_exhausted: bool,
     /// Estimated DA size
     pub cumulative_da_bytes_used: u64,
     /// Tracks fees from executed mempool transactions
@@ -56,6 +58,7 @@ impl ExecutionInfo {
             receipts: Vec::with_capacity(capacity),
             cumulative_gas_used: 0,
             cumulative_gasless_gas_used: 0,
+            gasless_budget_exhausted: false,
             cumulative_da_bytes_used: 0,
             total_fees: U256::ZERO,
             da_footprint_scalar: None,

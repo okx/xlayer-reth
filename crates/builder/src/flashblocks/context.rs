@@ -635,6 +635,18 @@ impl FlashblocksBuilderCtx {
                 return Ok(Some(()));
             }
 
+            // Once the per-block gasless budget is spent, skip further gasless candidates without
+            // simulating them.
+            if info.gasless_budget_exhausted && tx.max_fee_per_gas() == 0 {
+                log_txn(TxnExecutionResult::GaslessBlockGasLimitExceeded(
+                    info.cumulative_gasless_gas_used,
+                    0,
+                    self.gasless_block_gas_limit.unwrap_or(0),
+                ));
+                best_txs.mark_invalid(tx.signer(), tx.nonce());
+                continue;
+            }
+
             let tx_simulation_start_time = Instant::now();
             // Gasless: zero-priced, whitelisted txs are executed with the base-fee check relaxed
             // (gated on the chain's gasless contract approving the tx). Non-gasless txs are
@@ -701,6 +713,8 @@ impl FlashblocksBuilderCtx {
                     gas_used,
                     limit,
                 ));
+                // Stop simulating further gasless candidates in this block (accross flashblocks).
+                info.gasless_budget_exhausted = true;
                 best_txs.mark_invalid(tx.signer(), tx.nonce());
                 continue;
             }
