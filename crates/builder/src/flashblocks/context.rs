@@ -713,6 +713,15 @@ impl FlashblocksBuilderCtx {
                     gas_used,
                     limit,
                 ));
+                if !info.gasless_budget_exhausted {
+                    debug!(
+                        target: "payload_builder",
+                        id = ?self.payload_id(),
+                        gasless_gas_used = info.cumulative_gasless_gas_used,
+                        limit,
+                        "gasless block gas budget exhausted; skipping remaining gasless txs",
+                    );
+                }
                 // Stop simulating further gasless candidates in this block (accross flashblocks).
                 info.gasless_budget_exhausted = true;
                 best_txs.mark_invalid(tx.signer(), tx.nonce());
