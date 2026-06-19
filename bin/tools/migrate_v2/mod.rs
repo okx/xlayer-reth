@@ -35,8 +35,9 @@ use reth_db_api::{
 use reth_node_builder::NodeTypesWithDBAdapter;
 use reth_optimism_chainspec::OpChainSpec;
 use reth_provider::{
-    providers::ProviderNodeTypes, DBProvider, DatabaseProviderFactory, MetadataProvider,
-    MetadataWriter, ProviderFactory, PruneCheckpointReader, StageCheckpointWriter,
+    providers::{ProviderNodeTypes, RocksDBProvider},
+    DBProvider, DatabaseProviderFactory, MetadataProvider, MetadataWriter, ProviderFactory,
+    PruneCheckpointReader, RocksDBProviderFactory, StageCheckpointWriter,
     StaticFileProviderFactory, StaticFileWriter, StorageSettings,
 };
 use reth_prune_types::PruneSegment;
@@ -118,6 +119,16 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> MigrateV2Command<C> {
             tip,
             genesis_block,
         )?;
+
+        // === Phase 2.5: Copy index tables MDBX → RocksDB ===
+        // Mirrors upstream `migrate_to_rocksdb`: copy the already-computed index
+        // tables (TransactionHashNumbers, AccountsHistory, StoragesHistory)
+        // straight from MDBX into RocksDB so the pipeline skips recomputing them
+        // on restart. MUST run after the receipt migration and before the Phase-3
+        // metadata flip and the Phase-4 MDBX clear: a mid-copy failure must leave
+        // storage at v1 (re-runnable) and the source MDBX tables must still exist
+        // when the copy reads them (migration atomicity).
+        Self::migrate_indices_to_rocksdb(&provider_factory)?;
 
         // === Phase 3: Flip metadata to v2 ===
         info!(target: "reth::cli", "Writing StorageSettings v2 metadata");
@@ -323,6 +334,71 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> MigrateV2Command<C> {
         Ok(())
     }
 
+    /// Copies the three recomputable index tables from MDBX into RocksDB
+    /// (Phase 2.5), so the pipeline does not have to recompute them on restart.
+    ///
+    /// Mirrors upstream reth's `migrate_to_rocksdb`: for each table, clear the
+    /// RocksDB target first (idempotent re-run) then stream every MDBX entry
+    /// into a RocksDB batch and durably persist it. Runs before the Phase-3 v2
+    /// metadata flip so a failure here leaves storage at v1 and re-runnable.
+    fn migrate_indices_to_rocksdb<N: ProviderNodeTypes>(
+        factory: &ProviderFactory<N>,
+    ) -> Result<()> {
+        info!(target: "reth::cli", "Copying index tables MDBX → RocksDB");
+        let rocksdb = factory.rocksdb_provider();
+
+        let count =
+            Self::copy_table_to_rocksdb::<N, tables::TransactionHashNumbers>(factory, &rocksdb)?;
+        info!(target: "reth::cli", count, "TransactionHashNumbers copied → RocksDB");
+
+        let count = Self::copy_table_to_rocksdb::<N, tables::AccountsHistory>(factory, &rocksdb)?;
+        info!(target: "reth::cli", count, "AccountsHistory copied → RocksDB");
+
+        let count = Self::copy_table_to_rocksdb::<N, tables::StoragesHistory>(factory, &rocksdb)?;
+        info!(target: "reth::cli", count, "StoragesHistory copied → RocksDB");
+
+        Ok(())
+    }
+
+    /// Copies every entry of a single index table `T` from MDBX into RocksDB,
+    /// returning the number of entries copied.
+    ///
+    /// 1. `clear::<T>()` the RocksDB target first — a re-run after a pre-flip
+    ///    failure repopulates exactly the current MDBX entries (no stale rows).
+    /// 2. Walk the full MDBX table (`walk(None)`, ascending key order) — only
+    ///    entries that already exist are copied, so the copy is genesis-agnostic.
+    /// 3. Stream each verbatim key/value into an auto-committing RocksDB batch,
+    ///    then `commit()` the tail and `flush()` the table for durability before
+    ///    the Phase-3 metadata flip.
+    fn copy_table_to_rocksdb<N, T>(
+        factory: &ProviderFactory<N>,
+        rocksdb: &RocksDBProvider,
+    ) -> Result<u64>
+    where
+        N: ProviderNodeTypes,
+        T: Table,
+    {
+        // FR-4: clear the target first so a re-run leaves no stale/duplicate rows.
+        rocksdb.clear::<T>()?;
+
+        let provider = factory.provider()?.disable_long_read_transaction_safety();
+        let mut cursor = provider.tx_ref().cursor_read::<T>()?;
+
+        let mut batch = rocksdb.batch_with_auto_commit();
+        let mut count = 0u64;
+        for entry in cursor.walk(None)? {
+            let (key, value) = entry?;
+            batch.put::<T>(key, &value)?;
+            count += 1;
+        }
+        // Commit the final (sub-threshold) batch, then flush the column family +
+        // WAL so the copy is durably persisted before the v2 metadata flip.
+        batch.commit()?;
+        rocksdb.flush(&[<T as Table>::NAME])?;
+
+        Ok(count)
+    }
+
     /// Clears tables that can be recomputed by the pipeline and resets their
     /// stage checkpoints.
     fn clear_recomputable_tables<N: ProviderNodeTypes>(
@@ -372,14 +448,12 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> MigrateV2Command<C> {
         let reset_to = genesis_block.saturating_sub(1);
         info!(target: "reth::cli", reset_to, "Resetting stage checkpoints");
         let provider_rw = factory.database_provider_rw()?;
-        for stage in [
-            StageId::SenderRecovery,
-            StageId::TransactionLookup,
-            StageId::IndexAccountHistory,
-            StageId::IndexStorageHistory,
-            StageId::MerkleExecute,
-            StageId::MerkleUnwind,
-        ] {
+        // NOTE: the index stages (TransactionLookup, IndexAccountHistory,
+        // IndexStorageHistory) are intentionally NOT reset. Their data is copied
+        // directly into RocksDB in Phase 2.5, so they are left at their existing
+        // (tip) checkpoint and the pipeline treats them as complete — no recompute.
+        // Only SenderRecovery + the Merkle stages are rebuilt from genesis.
+        for stage in [StageId::SenderRecovery, StageId::MerkleExecute, StageId::MerkleUnwind] {
             provider_rw.save_stage_checkpoint(stage, StageCheckpoint::new(reset_to))?;
             info!(target: "reth::cli", %stage, reset_to, "Checkpoint reset");
         }
