@@ -193,8 +193,8 @@ pub(super) struct FlashblocksBuilder<Pool, Client> {
     pub task_metrics: Arc<FlashblocksTaskMetrics>,
     /// Configuration for bridge transaction interception.
     pub bridge_intercept_config: xlayer_bridge_intercept::BridgeInterceptConfig,
-    /// Chain-level blacklist runtime context (XLOP-1100, FR-2/3 builder face).
-    pub blacklist_ctx: Option<xlayer_blacklist_node::BlacklistRuntimeCtx>,
+    /// Chain-level blacklist runtime context.
+    pub blacklist_ctx: Option<xlayer_blacklist::BlacklistRuntimeCtx>,
 }
 
 impl<Pool, Client> FlashblocksBuilder<Pool, Client> {
@@ -699,6 +699,10 @@ where
         ctx.metrics.transaction_pool_fetch_gauge.set(transaction_pool_fetch_time);
 
         let tx_execution_start_time = Instant::now();
+        // collects tx hashes that hit a chain-level interception
+        // (bridge / blacklist) during this build so they can be physically evicted from the
+        // pool below — otherwise they linger and are re-executed every block.
+        let mut txs_to_evict = Vec::new();
         ctx.execute_best_transactions(
             info,
             state,
@@ -706,8 +710,17 @@ where
             target_gas_for_batch.min(ctx.block_gas_limit()),
             target_da_for_batch,
             target_da_footprint_for_batch,
+            &mut txs_to_evict,
         )
         .wrap_err("failed to execute best transactions")?;
+
+        // Physically remove interception-hit txs from the pool. Only the hit tx is removed
+        // (not descendants), so
+        // an innocent sender's later-nonce txs are left as nonce-gapped queued (harmless, not
+        // re-executed). `remove_transactions` takes `&self` (pool is internally synchronized).
+        if !txs_to_evict.is_empty() {
+            let _ = self.pool.remove_transactions(txs_to_evict);
+        }
 
         // Extract last transactions
         let new_transactions = fb_state
@@ -942,6 +955,23 @@ fn execute_pre_steps<DB>(
 where
     DB: Database<Error = ProviderError> + std::fmt::Debug,
 {
+    // Read the block-head blacklist snapshot ONCE per block from the
+    // parent state — before any pre-execution change or tx — and store it into the shared
+    // runtime ctx for the sequencer + best-tx execution gates to reuse. `state` is the pure
+    // parent state at this point (no in-block delta), so an `add` landing in block N is only
+    // visible from N+1. A disabled chain / unresolved mirror is a no-op (empty snapshot).
+    if let Some(bl_ctx) = &ctx.blacklist_ctx
+        && let Some(mirror) = bl_ctx.mirror()
+    {
+        let start = std::time::Instant::now();
+        let snapshot = {
+            let mut evm = ctx.evm_config.evm_with_env(&mut *state, ctx.evm_env.clone());
+            xlayer_blacklist::read_blacklist_snapshot(&mut evm, mirror)
+        };
+        bl_ctx.record_snapshot_read(start.elapsed().as_nanos() as f64);
+        bl_ctx.store_snapshot(snapshot);
+    }
+
     // 1. apply pre-execution changes
     ctx.evm_config
         .builder_for_next_block(state, ctx.parent(), ctx.block_env_attributes.clone())

@@ -6,7 +6,7 @@ use reth_node_builder::{components::BasicPayloadServiceBuilder, BuilderContext};
 use reth_optimism_evm::OpEvmConfig;
 use reth_optimism_node::node::OpPayloadBuilder;
 use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
-use xlayer_blacklist_node::BlacklistRuntimeCtx;
+use xlayer_blacklist::BlacklistRuntimeCtx;
 use xlayer_bridge_intercept::BridgeInterceptConfig;
 use xlayer_builder::{
     args::BuilderArgs,
@@ -76,6 +76,7 @@ impl XLayerPayloadServiceBuilder {
                         da_config,
                         gas_limit_config,
                         peer_status_sink: peer_status.clone(),
+                        blacklist_ctx: None,
                     },
                 ))
             }
@@ -106,19 +107,27 @@ impl XLayerPayloadServiceBuilder {
         self
     }
 
-    /// Apply the chain-level blacklist runtime context (XLOP-1100, FR-2/3 builder face).
+    /// Apply the chain-level blacklist runtime context (builder face).
     ///
-    /// Only the flashblocks sequencer builder applies the blacklist execution gate — like
-    /// bridge intercept, the `DefaultWithP2P` failsafe path and the RPC-node `Default` path
-    /// run unmodified upstream logic and are intentionally not gated. The context carries the
-    /// chain-keyed snapshot handle + metrics; it is a no-op (fail-open) when the chain id does
-    /// not resolve to a mirror address.
+    /// - Flashblocks: threads the ctx into the in-loop two-check gate (normal-L2 drop included).
+    /// - DefaultWithP2P (failsafe sequencer): threads the ctx so the cache-miss build path runs
+    ///   the normal-L2 commit-condition gate on top of what the executor-factory hook already
+    ///   provides (snapshot refresh; deposit included-as-reverted).
+    /// - Default (RPC/follower): does NOT build sequencer blocks; snapshot/deposit come from the
+    ///   executor-factory hook on the import path, so the ctx is not threaded here.
+    ///
+    /// The ctx is a no-op (fail-open) when the chain id does not resolve to a mirror address or
+    /// the snapshot is empty.
     pub fn with_blacklist_ctx(mut self, ctx: BlacklistRuntimeCtx) -> Self {
         match &mut self.builder {
             XLayerPayloadServiceBuilderInner::Flashblocks(fb) => {
                 fb.with_blacklist_ctx(ctx);
             }
-            XLayerPayloadServiceBuilderInner::DefaultWithP2P(_) => {}
+            XLayerPayloadServiceBuilderInner::DefaultWithP2P(dp) => {
+                dp.blacklist_ctx = Some(ctx);
+            }
+            // RPC/follower: snapshot/ingress/deposit come from the executor-factory hook on the
+            // import path, not from threading the ctx into the builder.
             XLayerPayloadServiceBuilderInner::Default(_) => {}
         }
         self

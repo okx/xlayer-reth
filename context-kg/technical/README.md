@@ -15,7 +15,7 @@
 - [modules/module-flashblocks.md](modules/module-flashblocks.md) — Flashblocks crate: cache management, execution pipeline, engine validation, subscriptions
 - [modules/module-chainspec.md](modules/module-chainspec.md) — Chain specification: network configs, hardfork schedules
 - [modules/module-intercept.md](modules/module-intercept.md) — Bridge transaction interception
-- [modules/module-blacklist.md](modules/module-blacklist.md) — Chain-level blacklist interception (xlayer-blacklist / -node crates, XLOP-1100)
+- [modules/module-blacklist.md](modules/module-blacklist.md) — Chain-level blacklist interception (xlayer-blacklist / -node crates)
 - [modules/module-legacy-rpc.md](modules/module-legacy-rpc.md) — Legacy RPC routing middleware
 - [modules/module-monitor.md](modules/module-monitor.md) — Full-link transaction monitoring
 - [modules/module-rpc.md](modules/module-rpc.md) — X Layer RPC extensions with flashblock cache overlay

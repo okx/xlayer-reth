@@ -14300,40 +14300,26 @@ dependencies = [
 name = "xlayer-blacklist"
 version = "0.0.6"
 dependencies = [
+ "alloy-evm",
+ "alloy-op-evm",
  "alloy-primitives",
- "metrics",
- "reth-metrics",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
-name = "xlayer-blacklist-node"
-version = "0.0.6"
-dependencies = [
- "alloy-consensus",
- "alloy-primitives",
+ "alloy-rpc-types-eth",
+ "alloy-sol-types",
  "arc-swap",
  "eyre",
  "metrics",
- "reth-chainspec",
+ "op-alloy-rpc-types",
+ "op-revm",
  "reth-evm",
  "reth-metrics",
  "reth-node-api",
  "reth-node-builder",
  "reth-optimism-evm",
  "reth-optimism-forks",
- "reth-optimism-node",
  "reth-optimism-primitives",
- "reth-optimism-txpool",
- "reth-primitives-traits",
- "reth-provider",
- "reth-revm",
- "reth-transaction-pool",
  "revm",
  "thiserror 2.0.18",
  "tracing",
- "xlayer-blacklist",
 ]
 
 [[package]]
@@ -14450,7 +14436,6 @@ dependencies = [
  "tracing-subscriber 0.3.23",
  "url",
  "xlayer-blacklist",
- "xlayer-blacklist-node",
  "xlayer-bridge-intercept",
  "xlayer-trace-monitor",
 ]
@@ -14664,7 +14649,6 @@ dependencies = [
  "tracing",
  "url",
  "xlayer-blacklist",
- "xlayer-blacklist-node",
  "xlayer-bridge-intercept",
  "xlayer-builder",
  "xlayer-chainspec",

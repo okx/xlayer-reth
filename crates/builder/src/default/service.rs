@@ -33,6 +33,10 @@ pub struct DefaultBuilderServiceBuilder {
     pub da_config: OpDAConfig,
     pub gas_limit_config: OpGasLimitConfig,
     pub peer_status_sink: Arc<OnceLock<crate::broadcast::PeerStatusTracker>>,
+    /// Chain-level blacklist runtime context, threaded into the
+    /// failsafe builder's cache-miss build path so it runs the normal-L2 commit-condition
+    /// gate. `None` when the feature is off / chain has no mirror (fail-open).
+    pub blacklist_ctx: Option<xlayer_blacklist::BlacklistRuntimeCtx>,
 }
 
 impl<Node, Pool> PayloadServiceBuilder<Node, Pool, OpEvmConfig> for DefaultBuilderServiceBuilder
@@ -44,7 +48,14 @@ where
         self,
         ctx: &BuilderContext<Node>,
         pool: Pool,
-        _: OpEvmConfig,
+        // Use the component-layer EVM config (produced by XLayerExecutorBuilder with
+        // the blacklist deposit hook on its executor_factory) instead of discarding it. This is
+        // what makes the blacklist active on the DefaultWithP2P (failsafe) sequencer path:
+        // OpPayloadBuilder build → builder_for_next_block → OpBlockExecutor.apply_pre_execution_changes
+        // refreshes the shared snapshot (→ ingress filter works) and commit_transaction applies
+        // deposit included-as-reverted. Previously this arg was `_`-discarded and a fresh,
+        // hook-less `OpEvmConfig::optimism(...)` was constructed below, leaving the gate inert.
+        evm_config: OpEvmConfig,
     ) -> eyre::Result<PayloadBuilderHandle<<Node::Types as NodeTypes>::Payload>> {
         let cancel = tokio_util::sync::CancellationToken::new();
 
@@ -122,11 +133,14 @@ where
         let default_builder = reth_optimism_payload_builder::OpPayloadBuilder::with_builder_config(
             pool,
             ctx.provider().clone(),
-            OpEvmConfig::optimism(ctx.chain_spec()),
+            // The hook-carrying config from the component layer (see fn arg), not a
+            // fresh hook-less `OpEvmConfig::optimism(...)`.
+            evm_config,
             OpBuilderConfig { da_config: self.da_config, gas_limit_config: self.gas_limit_config },
         )
         .set_compute_pending_block(self.compute_pending_block);
-        let payload_builder = DefaultPayloadBuilder::new(default_builder, p2p_cache.clone());
+        let payload_builder =
+            DefaultPayloadBuilder::new(default_builder, p2p_cache.clone(), self.blacklist_ctx);
         let payload_job_config = BasicPayloadJobGeneratorConfig::default()
             .interval(conf.interval)
             .deadline(conf.deadline)

@@ -24,7 +24,7 @@
 - `FlashblocksBuilderCtx`: EVM execution context with hardfork-aware configuration. Carries
   per-feature config as plain fields threaded `payload.rs → service.rs → builder.rs → context.rs`:
   `bridge_intercept_config` (bridge intercept) and `blacklist_ctx: Option<BlacklistRuntimeCtx>`
-  (chain-level blacklist, XLOP-1100 — see module-blacklist). This field-threading is the sanctioned
+  (chain-level blacklist — see module-blacklist). This field-threading is the sanctioned
   way to add per-tx interception; wrapping node components does not compile (see
   pitfalls/upstream-component-type-pinning).
 - `FlashblocksPayloadHandler`: Processes built flashblock payloads, handles external flashblock execution
@@ -66,7 +66,7 @@
 6. **Non-blocking stream connections**: P2P `open_stream` operations are non-blocking with configurable retry intervals (DEFAULT_PEER_RETRY_INTERVAL=1s). Failed peers are evicted and reconnected on next retry tick.
 
 7. **Three transaction loops in `flashblocks/context.rs` have different deposit semantics** — do not
-   confuse them when adding per-tx logic (this caused an adversarial-review Blocker on XLOP-1100):
+   confuse them when adding per-tx logic (this caused an adversarial-review Blocker):
    - `execute_sequencer_transactions` (≈`:256`, iterates `self.attributes().transactions`) is the
      **only** loop on the builder path that actually executes deposits (decision point `:303`
      `evm.transact(&sequencer_tx)`, commit barrier `:336`; pre-exec `depositor_nonce` captured at

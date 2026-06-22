@@ -25,7 +25,7 @@ use reth_provider::CanonStateSubscriptions;
 use reth_rpc_builder::config::RethRpcServerConfig;
 use reth_rpc_server_types::RethRpcModule;
 
-use xlayer_blacklist_node::BlacklistRuntimeCtx;
+use xlayer_blacklist::{BlacklistRuntimeCtx, XLayerDepositBlacklistHook, XLayerExecutorBuilder};
 use xlayer_chainspec::XLayerChainSpecParser;
 use xlayer_flashblocks::{
     FlashblockSequenceValidator, FlashblockStateCache, FlashblocksPersistCtx, FlashblocksPubSub,
@@ -90,8 +90,8 @@ fn main() {
             let genesis_block = builder.config().chain.genesis().number.unwrap_or_default();
             info!("X Layer genesis block = {}", genesis_block);
 
-            // XLOP-1100: chain-level blacklist runtime context (FR-6 chain-id dispatch).
-            // Threaded into the sequencer payload-builder face (FR-2/3) so the block builder
+            // Chain-level blacklist runtime context (chain-id dispatch).
+            // Threaded into the sequencer payload-builder face so the block builder
             // can drop / revert transactions touching blacklisted addresses and emit metrics.
             // The feature is active iff the running chain id resolves to a mirror address;
             // otherwise every read is a no-op (fail-open).
@@ -154,7 +154,7 @@ fn main() {
                 fb_p2p_status.clone(),
             )?
             .with_bridge_config(bridge_config)
-            .with_blacklist_ctx(bl_ctx);
+            .with_blacklist_ctx(bl_ctx.clone());
 
             // Get the engine validator for flashblocks RPC.
             let engine_validator = Arc::new(OnceLock::new());
@@ -180,7 +180,15 @@ fn main() {
 
             let NodeHandle { node, node_exit_future } = builder
                 .with_types_and_provider::<OpNode, BlockchainProvider<_>>()
-                .with_components(op_node.components().payload(payload_builder))
+                // Install the blacklist deposit hook on the follower / newPayload
+                // executor face via a builder that produces the SAME `OpEvmConfig` type as the
+                // upstream default (no type change → add-ons/engine/RPC stack unaffected).
+                .with_components(
+                    op_node
+                        .components()
+                        .payload(payload_builder)
+                        .executor(XLayerExecutorBuilder::new(bl_ctx.clone())),
+                )
                 .with_add_ons(add_ons)
                 .extend_rpc_modules(move |ctx| {
                     let new_op_eth_api = Arc::new(ctx.registry.eth_api().clone());
@@ -200,9 +208,18 @@ fn main() {
                         );
 
                         // Initialize the flashblocks validator
+                        // Attach the deposit hook to the flashblocks-validation
+                        // EVM config (same `OpEvmConfig` type, hook set on its factory field).
+                        let fb_evm_config = {
+                            let mut cfg = OpEvmConfig::optimism(ctx.provider().chain_spec());
+                            cfg.executor_factory = cfg.executor_factory.with_blacklist_hook(Some(
+                                Arc::new(XLayerDepositBlacklistHook::new(bl_ctx.clone())),
+                            ));
+                            cfg
+                        };
                         engine_validator.set_flashblocks(
                             FlashblockSequenceValidator::new(
-                                OpEvmConfig::optimism(ctx.provider().chain_spec()),
+                                fb_evm_config,
                                 ctx.provider().clone(),
                                 ctx.provider().chain_spec(),
                                 flashblocks_state.clone(),

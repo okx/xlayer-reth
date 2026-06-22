@@ -18,7 +18,7 @@ compiled without OOM. Signatures and injection points are therefore read from **
 docs**, never compile-verified. A citation that is line-accurate can still be type-incorrect (see
 [[upstream-component-type-pinning]]).
 
-**Mechanism**: The TD §4.0 matrix for XLOP-1100 explicitly carried an "上游可读性声明 / R-1" caveat
+**Mechanism**: The design matrix explicitly carried an upstream-readability caveat
 that wrapper trait signatures were unverified; the wiring-plan's component-wrapper snippets were
 authored but never compiled. The structural blockers only appeared once a build-capable review
 stage compiled the node.
@@ -27,10 +27,9 @@ stage compiled the node.
 type** as *unverified* until compiled on a build-capable host. When the design stage cannot compile:
 1. Prefer extending via a **proven, already-shipped precedent** (e.g. the bridge-intercept
    field-threading pattern) over a novel type-cascade.
-2. Flag type-cascade injection points as `R-1`-style risks and do **not** let downstream stages
+2. Flag type-cascade injection points as explicit risks and do **not** let downstream stages
    treat them as settled.
 3. Scope verification commands to a single changed crate (`cargo check -p <crate>`); never
    `--workspace` clippy/test (OOM).
 
-**Source**: review-finding F-02 (A-09 Test & Fix Report §2; A-05 Code Implementation verification
-table, XLOP-1100). **Date**: 2026-06-11. **Hit count**: 1.
+**Source**: internal review. **Date**: 2026-06-11. **Hit count**: 1.

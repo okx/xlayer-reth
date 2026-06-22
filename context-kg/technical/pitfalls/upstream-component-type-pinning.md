@@ -34,10 +34,20 @@ node components (pool/executor/EVM type). Instead **thread your config/runtime c
 builder field**, mirroring the shipped `xlayer_bridge_intercept` pattern: a config field on
 `FlashblocksBuilderCtx` (`bridge_intercept_config`), set via a `with_*` builder method
 (`with_bridge_config`), and consumed at a single post-execution hook in
-`crates/builder/src/flashblocks/context.rs`. XLOP-1100 followed this: `blacklist_ctx:
+`crates/builder/src/flashblocks/context.rs`. The blacklist followed this: `blacklist_ctx:
 Option<BlacklistRuntimeCtx>` threaded `payload.rs → service.rs → builder.rs → context.rs`, consumed
 right after the bridge check in `execute_best_transactions`. This compiles and ships; the
 component-wrapper approach does not. See [[module-blacklist]] and the bridge-intercept flow.
 
-**Source**: review-finding F-01 (A-09 Test & Fix Report §2/§3, XLOP-1100). **Date**: 2026-06-11.
+**Later simplification.** The blacklist was simplified: the ingress mempool filter was removed
+entirely (the execution gate is the sole interception point — no `OpTransactionValidator` wrapper
+or pool-builder needed), and the two blacklist crates were merged into one (`crates/blacklist`,
+`rules` + `runtime` modules). The follower deposit face still reaches the executor via the
+controlled deps/optimism fork, but the `DepositBlacklistHook` trait now returns the full
+included-as-reverted plan (computed by the shared `rules::deposit` core); the submodule executor
+only *applies* it, so no consensus field logic lives in the fork. This stays within the "optional
+field + hook, default no-op, no public assoc-type change" controlled exception; wrapping node
+component types is still forbidden.
+
+**Source**: internal review. **Date**: 2026-06-11.
 **Hit count**: 1.
