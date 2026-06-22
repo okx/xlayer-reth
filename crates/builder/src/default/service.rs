@@ -33,7 +33,7 @@ pub struct DefaultBuilderServiceBuilder {
     pub da_config: OpDAConfig,
     pub gas_limit_config: OpGasLimitConfig,
     pub peer_status_sink: Arc<OnceLock<crate::broadcast::PeerStatusTracker>>,
-    /// XLOP-1100 (FR-2 面2): chain-level blacklist runtime context, threaded into the
+    /// Chain-level blacklist runtime context, threaded into the
     /// failsafe builder's cache-miss build path so it runs the normal-L2 commit-condition
     /// gate. `None` when the feature is off / chain has no mirror (fail-open).
     pub blacklist_ctx: Option<xlayer_blacklist::BlacklistRuntimeCtx>,
@@ -48,7 +48,7 @@ where
         self,
         ctx: &BuilderContext<Node>,
         pool: Pool,
-        // XLOP-1100: use the component-layer EVM config (produced by XLayerExecutorBuilder with
+        // Use the component-layer EVM config (produced by XLayerExecutorBuilder with
         // the blacklist deposit hook on its executor_factory) instead of discarding it. This is
         // what makes the blacklist active on the DefaultWithP2P (failsafe) sequencer path:
         // OpPayloadBuilder build → builder_for_next_block → OpBlockExecutor.apply_pre_execution_changes
@@ -133,7 +133,7 @@ where
         let default_builder = reth_optimism_payload_builder::OpPayloadBuilder::with_builder_config(
             pool,
             ctx.provider().clone(),
-            // XLOP-1100: the hook-carrying config from the component layer (see fn arg), not a
+            // The hook-carrying config from the component layer (see fn arg), not a
             // fresh hook-less `OpEvmConfig::optimism(...)`.
             evm_config,
             OpBuilderConfig { da_config: self.da_config, gas_limit_config: self.gas_limit_config },

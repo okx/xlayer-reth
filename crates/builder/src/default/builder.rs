@@ -59,9 +59,9 @@ pub struct DefaultPayloadBuilder<Pool, Client, Evm, Txs, Attrs> {
     inner: reth_optimism_payload_builder::OpPayloadBuilder<Pool, Client, Evm, Txs, Attrs>,
     /// Cache of flashblock payloads received via P2P, keyed by parent hash.
     p2p_cache: FlashblockPayloadsCache,
-    /// XLOP-1100 (FR-2 面2): chain-level blacklist runtime context. When present AND the
+    /// chain-level blacklist runtime context. When present AND the
     /// snapshot is non-empty, the cache-miss build path runs the normal-L2 commit-condition
-    /// gate (check②). `None` / empty snapshot → fail-open, delegate to the upstream builder.
+    /// gate (the Transfer-log check). `None` / empty snapshot → fail-open, delegate to the upstream builder.
     blacklist_ctx: Option<xlayer_blacklist::BlacklistRuntimeCtx>,
 }
 
@@ -128,9 +128,9 @@ where
             return self.build_with_cached_txs(args, cached_txs);
         }
 
-        // Cache miss. XLOP-1100 (FR-2 面2): when the blacklist is active (chain has a mirror AND
+        // Cache miss. when the blacklist is active (chain has a mirror AND
         // the block-head snapshot is non-empty), build via the gated path so normal-L2 txs that
-        // hit a blacklisted address via a Transfer event (check②) are excluded. Otherwise (feature
+        // hit a blacklisted address via a Transfer event (the Transfer-log check) are excluded. Otherwise (feature
         // off / empty list) delegate unchanged to the upstream builder — zero behavior change.
         let bl_active =
             self.blacklist_ctx.as_ref().map(|c| !c.load_snapshot().is_empty()).unwrap_or(false);
@@ -287,15 +287,15 @@ where
         Ok(BuildOutcomeKind::Freeze(payload).with_cached_reads(cached_reads))
     }
 
-    /// XLOP-1100 (FR-2 面2): cache-miss build with the normal-L2 blacklist gate.
+    /// cache-miss build with the normal-L2 blacklist gate.
     ///
     /// Mirrors the upstream `OpBuilder::build` flow (block_builder, apply_pre_execution_changes,
     /// execute_sequencer_transactions, best-txs, finish), keeping deposit included-as-reverted and
     /// snapshot refresh on the (hooked) executor. Only the pool best-txs loop is replaced by a
     /// gated one: each tx runs via `execute_transaction_with_commit_condition`, and a tx whose
-    /// committed logs hit the blacklist (check②, Transfer event) is discarded (CommitChanges::No),
+    /// committed logs hit the blacklist (the Transfer-log check, Transfer event) is discarded (CommitChanges::No),
     /// marked invalid for this build, and scheduled for physical pool removal. Only reached when the
-    /// blacklist is active (caller-checked); check①/③ are out of scope on this path (see plan).
+    /// blacklist is active (caller-checked); the CALL-touch and ETH-balance checks are out of scope on this path.
     ///
     /// NOTE: keep the per-tx gate in sync with
     /// `crate::flashblocks::context::FlashblocksBuilderCtx::execute_best_transactions`.
@@ -356,7 +356,7 @@ where
             let base_fee = builder.evm_mut().block().basefee();
             let coinbase = builder.evm_mut().block().beneficiary();
 
-            // check③ pre-balances. The commit-condition closure sees the post-tx state diff but
+            // the ETH-balance check pre-balances. The commit-condition closure sees the post-tx state diff but
             // has no db handle, so seed each listed address's committed balance ONCE here (after
             // pre-exec + sequencer txs) and advance it after every committed tx. O(list) once per
             // block — fine for emergency-freeze-sized lists; this is the rare failsafe path.
@@ -425,13 +425,11 @@ where
                     break;
                 }
 
-                // XLOP-1100 gate: evaluate check②(committed Transfer-class logs) + check③(native
-                // -ETH balance change, with the L2 gas fee stripped) on the tx's committed
+                // gate: evaluate the Transfer-log check + the ETH-balance check on the tx's committed
                 // effects. On a hit the tx is discarded (state not committed), dropped from this
                 // build, and scheduled for physical pool removal. Fully-qualified to the
                 // `BlockBuilder` method (the builder also satisfies `BlockExecutor`, whose
-                // same-named method tracks no block transactions). check① (pure CALL touch with
-                // no event/balance change) is NOT covered here — no inspector on this path.
+                // same-named method tracks no block transactions). the CALL-touch check is NOT covered here — no inspector on this path.
                 let tx_hash = *tx.tx_hash();
                 let sender = tx.signer();
                 let effective_gas_price = tx.effective_gas_price(Some(base_fee));
@@ -588,12 +586,11 @@ where
     Ok(())
 }
 
-/// XLOP-1100 (FR-2 面2): the normal-L2 blacklist decision used by `build_with_gate`.
+/// the normal-L2 blacklist decision used by `build_with_gate`.
 ///
-/// check②(committed Transfer-class logs) + check③(native-ETH balance change), the latter with
+/// the Transfer-log check + the ETH-balance check, the latter with
 /// the L2 gas fee stripped via [`reconstruct_balance_candidates`] (so a listed sender's gas
-/// payment or a listed coinbase's fee receipt is not mistaken for a transfer). check① (pure
-/// CALL touch) is out of scope on this path (no inspector). Pure → unit-tested below.
+/// payment or a listed coinbase's fee receipt is not mistaken for a transfer). the CALL-touch check is out of scope on this path (no inspector). Pure → unit-tested below.
 ///
 /// metric caveat: `selfdestruct_targets` is passed empty here (no inspector on this path), so a
 /// selfdestruct-funded hit to a listed address is still DROPPED but recorded under the
@@ -641,7 +638,7 @@ mod gate_tests {
     #[test]
     fn balance_inflow_to_listed_hits() {
         // C7 (forwarder inner CALL value) and C15 (selfdestruct beneficiary): a listed addr
-        // (neither sender nor coinbase) gains ETH with NO Transfer event → only check③ catches
+        // (neither sender nor coinbase) gains ETH with NO Transfer event → only the ETH-balance check catches
         // it. NOTE: this path has no inspector, so a selfdestruct-funded hit is categorized as
         // `EthBalance` here (not `SelfDestruct`) — interception is unchanged, only the metric
         // label differs (see `gate_decision` doc). The `SelfDestruct` category is asserted by the
@@ -660,7 +657,7 @@ mod gate_tests {
 
     #[test]
     fn balance_outflow_from_listed_hits() {
-        // check③ also catches ETH leaving a listed address (e.g. drained via a contract) when
+        // the ETH-balance check also catches ETH leaving a listed address (e.g. drained via a contract) when
         // that address is neither sender nor coinbase (no fee to strip) → net != 0 → hit.
         let changes = vec![ListedBalanceChange {
             address: VICTIM,
@@ -721,7 +718,7 @@ mod gate_tests {
 
     #[test]
     fn transfer_event_to_listed_hits() {
-        // check②: internal Transfer to a listed address (forwarder/proxy), clean top-level.
+        // the Transfer-log check: internal Transfer to a listed address (forwarder/proxy), clean top-level.
         let hit = gate_decision(
             &[transfer_log(SENDER, VICTIM)],
             vec![],

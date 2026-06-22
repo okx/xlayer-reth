@@ -26,7 +26,7 @@ use reth_provider::CanonStateSubscriptions;
 pub struct FlashblocksServiceBuilder {
     pub config: BuilderConfig,
     pub bridge_intercept: xlayer_bridge_intercept::BridgeInterceptConfig,
-    /// Chain-level blacklist runtime context (XLOP-1100, FR-2/3 builder face). `None` when
+    /// Chain-level blacklist runtime context. `None` when
     /// the feature is disabled / the chain id has no mirror address.
     pub blacklist_ctx: Option<xlayer_blacklist::BlacklistRuntimeCtx>,
     pub peer_status_sink: Arc<OnceLock<crate::broadcast::PeerStatusTracker>>,

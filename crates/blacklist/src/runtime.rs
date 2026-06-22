@@ -1,9 +1,9 @@
-//! Node/revm/reth adapter layer for the XLayer chain-level blacklist (XLOP-1100).
+//! Node/revm/reth adapter layer for the chain-level blacklist.
 //!
-//! Connects the pure cross-client core ([`crate::rules`]) to op-reth's runtime: the shared
-//! runtime context (chain-id dispatch + snapshot handle + metrics, FR-6/7), the block-head
-//! snapshot read (FR-4), the ETH-balance reconstruction + deposit state surgery (FR-2/3),
-//! the follower-face deposit hook (FR-3/5), and the executor builder that installs it. The
+//! Connects the pure core ([`crate::rules`]) to op-reth's runtime: the shared runtime
+//! context (chain-id dispatch + snapshot handle + metrics), the block-head snapshot read,
+//! the ETH-balance reconstruction + deposit state surgery, the follower-face deposit hook,
+//! and the executor builder that installs it. The
 //! `BlacklistRuntimeCtx` lives at the top level; the reth-coupled adapters are inner modules.
 
 use crate::rules::eval::Hit;
@@ -39,7 +39,7 @@ impl core::fmt::Debug for BlacklistRuntimeCtx {
 
 impl BlacklistRuntimeCtx {
     /// Build a runtime context for the given chain id. Enabled iff the chain id resolves to a
-    /// mirror address (FR-6); otherwise every read is a no-op.
+    /// mirror address; otherwise every read is a no-op.
     pub fn new(chain_id: u64) -> Self {
         Self {
             chain_id,
@@ -49,7 +49,7 @@ impl BlacklistRuntimeCtx {
         }
     }
 
-    /// Whether the feature is active on this chain (mirror address resolved). [FR-6]
+    /// Whether the feature is active on this chain (mirror address resolved).
     pub fn is_enabled(&self) -> bool {
         self.mirror.is_some()
     }
@@ -80,12 +80,12 @@ impl BlacklistRuntimeCtx {
         self.snapshot.store(Arc::new(snapshot));
     }
 
-    /// `xlayer_blacklist_exec_revert_total{hook=<category>} += 1` (exec-gate hit). [DM-7.2/7.4]
+    /// `xlayer_blacklist_exec_revert_total{hook=<category>} += 1` (exec-gate hit).
     pub fn record_exec_revert(&self, hit: &Hit) {
         BlacklistMetrics::increment_exec_revert(hit.category);
     }
 
-    /// Observe a block-head snapshot read duration (nanoseconds) into the histogram. [DM-7.3]
+    /// Observe a block-head snapshot read duration (nanoseconds) into the histogram.
     pub fn record_snapshot_read(&self, nanoseconds: f64) {
         self.metrics.snapshot_read_duration_nanoseconds.record(nanoseconds);
     }
@@ -114,7 +114,7 @@ mod tests {
 }
 
 pub mod balance {
-    //! FR-2 check③ — ETH-balance candidate reconstruction (no-fork, decision B).
+    //! ETH-balance candidate reconstruction.
 
     use crate::rules::inspector::BalanceCandidate;
     use alloy_primitives::{Address, I256, U256};
@@ -145,7 +145,7 @@ pub mod balance {
         pub balance_end: U256,
     }
 
-    /// Build the [`BalanceCandidate`] set for check③ from observed listed balance changes.
+    /// Build the [`BalanceCandidate`] set (the ETH-balance check) from observed listed balance changes.
     pub fn reconstruct_balance_candidates(
         changes: impl IntoIterator<Item = ListedBalanceChange>,
         fee: &FeeContext,
@@ -163,7 +163,7 @@ pub mod balance {
             .collect()
     }
 
-    /// Signed fee-only delta for `addr` (op-geth reason {5,6,7} equivalent).
+    /// Signed fee-only delta for `addr` (gas pre-charge/refund on the sender, tx-fee reward on the coinbase).
     fn fee_delta_for(addr: Address, fee: &FeeContext) -> I256 {
         let gas_used = U256::from(fee.gas_used);
         let mut delta = I256::ZERO;
@@ -324,7 +324,7 @@ pub mod balance {
 }
 
 pub mod deposit_apply {
-    //! FR-3 — included-as-reverted state surgery for an intercepted deposit (sender delta).
+    //! Included-as-reverted state surgery for an intercepted deposit (sender delta).
 
     use crate::rules::deposit::RevertedDepositOutcome;
     use alloy_primitives::Address;
@@ -395,7 +395,7 @@ pub mod deposit_apply {
 }
 
 pub mod view {
-    //! FR-4 — live `MirrorViewCaller` adapter: read-only 50M-gas call to the mirror.
+    //! Live `MirrorViewCaller` adapter: read-only 50M-gas call to the mirror.
 
     use crate::rules::snapshot::{
         read_snapshot_at, BlacklistSnapshot, MirrorViewCaller, ViewCallError, SYSTEM_ADDRESS,
@@ -474,7 +474,7 @@ pub mod view {
     }
 
     /// Read the full block-head blacklist snapshot from `mirror` via the given read-only
-    /// `OpEvm` (built over the parent state), using the cross-client pagination.
+    /// `OpEvm` (built over the parent state), using the paginated enumeration.
     pub fn read_blacklist_snapshot<DB: Database + core::fmt::Debug>(
         evm: &mut OpEvm<DB, NoOpInspector, PrecompilesMap, OpTx>,
         mirror: Address,
@@ -485,11 +485,11 @@ pub mod view {
 }
 
 pub mod follower_hook {
-    //! FR-3/FR-5 — follower-face deposit interception hook (decision B).
+    //! Follower-face deposit interception hook.
     //!
     //! Implements the upstream [`DepositBlacklistHook`] (alloy-op-evm). Decision uses
-    //! committed effects only — check②(Transfer logs) + check③(ETH balance) — not check①.
-    //! The included-as-reverted field plan is computed via the shared
+    //! committed effects only — the Transfer-log check + the ETH-balance check. The
+    //! included-as-reverted field plan is computed via the shared
     //! [`apply_included_as_reverted`] (single source of truth with the builder face); the
     //! upstream executor only applies it.
 
@@ -688,8 +688,8 @@ pub mod follower_hook {
 }
 
 pub mod executor_builder {
-    //! FR-3/FR-5 (follower face) — node-builder `ExecutorBuilder` that installs the blacklist
-    //! deposit hook WITHOUT changing the EVM-config type (same `OpEvmConfig` as upstream).
+    //! Follower-face node-builder `ExecutorBuilder` that installs the blacklist deposit hook
+    //! WITHOUT changing the EVM-config type (same `OpEvmConfig` as upstream).
 
     use super::follower_hook::XLayerDepositBlacklistHook;
     use super::BlacklistRuntimeCtx;

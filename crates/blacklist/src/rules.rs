@@ -1,18 +1,17 @@
-//! Cross-client consensus pure logic (the "rules"): the single source of truth for every
-//! value the PRD/TD marks 跨端常量 (cross-client constant) and the pure decision logic of the
-//! XLayer chain-level blacklist (XLOP-1100). Zero reth/revm coupling — the node adapters in
-//! [`crate::runtime`] call into this. Organized as inner modules so each keeps its own tests:
-//! - [`abi`]      — `getBlacklist` selector + codec (FR-4)
-//! - [`snapshot`] — block-head paginated enumeration + fail-open (FR-4)
-//! - [`inspector`]— execution-time balance-candidate accumulator (check③) (FR-2)
-//! - [`eval`]     — two-check evaluator `log > balance` (FR-2)
-//! - [`deposit`]  — included-as-reverted field rules + exempt senders (FR-3)
-//! - [`mirror`]   — `chain_id → hardcoded mirror address` dispatch (FR-6)
-//! - [`metrics`]  — Prometheus metrics (FR-7)
+//! Pure decision logic (the "rules"): the single source of truth for the feature's constants
+//! and checks. Zero reth/revm coupling — the node adapters in [`crate::runtime`] call into
+//! this. Organized as inner modules so each keeps its own tests:
+//! - [`abi`]      — `getBlacklist` selector + codec
+//! - [`snapshot`] — block-head paginated enumeration + fail-open
+//! - [`inspector`]— execution-time balance-candidate accumulator
+//! - [`eval`]     — two-check evaluator `log > balance`
+//! - [`deposit`]  — included-as-reverted field rules + exempt senders
+//! - [`mirror`]   — `chain_id → hardcoded mirror address` dispatch
+//! - [`metrics`]  — Prometheus metrics
 
 pub mod abi {
-    //! FR-4 — `getBlacklist(uint256,uint256)` ABI via alloy `sol!` (standard ABI, byte-identical
-    //! to op-geth's `abi.Pack`/`Unpack`); the cross-client contract source of truth.
+    //! `getBlacklist(uint256,uint256)` ABI via alloy `sol!` (standard ABI); the contract
+    //! source of truth.
 
     use alloy_primitives::{Address, U256};
     use alloy_sol_types::{sol, SolCall};
@@ -93,11 +92,11 @@ pub mod abi {
 }
 
 pub mod inspector {
-    //! FR-2 — execution-time balance-candidate accumulator (check③). Plain data, no revm.
+    //! Execution-time balance-candidate accumulator (the ETH-balance check). Plain data, no revm.
 
     use alloy_primitives::{Address, I256, U256};
 
-    /// A candidate address for the ETH-balance check (check③).
+    /// A candidate address for the ETH-balance check.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct BalanceCandidate {
         /// The address whose net balance change is examined.
@@ -137,20 +136,20 @@ pub mod inspector {
 }
 
 pub mod snapshot {
-    //! FR-4 — block-head snapshot read: paginated `getBlacklist` enumeration + fail-open.
+    //! Block-head snapshot read: paginated `getBlacklist` enumeration + fail-open.
 
     use super::abi::{decode_get_blacklist, encode_get_blacklist};
     use alloy_primitives::{address, Address, Bytes, U256};
     use std::collections::HashSet;
     use tracing::{error, warn};
 
-    /// Per-page entry count requested from `getBlacklist`. (cross-client constant)
+    /// Per-page entry count requested from `getBlacklist`.
     pub const PAGE_SIZE: u64 = 1024;
-    /// Gas budget for each per-page staticcall. (cross-client constant)
+    /// Gas budget for each per-page staticcall.
     pub const PER_PAGE_GAS: u64 = 50_000_000;
     /// Maximum entries enumerated; beyond this the list is deterministically truncated.
     pub const MAX_ENTRIES: u64 = 300_000;
-    /// System address used as the staticcall caller (`0xff..fe`). (cross-client constant)
+    /// System address used as the staticcall caller (`0xff..fe`).
     pub const SYSTEM_ADDRESS: Address = address!("fffffffffffffffffffffffffffffffffffffffe");
 
     /// An immutable, per-block blacklist snapshot.
@@ -440,7 +439,7 @@ pub mod snapshot {
 }
 
 pub mod eval {
-    //! FR-2 — two-check evaluator with fixed priority `log > balance`.
+    //! Two-check evaluator with fixed priority `log > balance`.
 
     use super::inspector::{BalanceCandidate, BlacklistInspector};
     use super::snapshot::BlacklistSnapshot;
@@ -719,7 +718,7 @@ pub mod eval {
 }
 
 pub mod deposit {
-    //! FR-3 — L1 forced-inclusion deposit handling: included-as-reverted field rules.
+    //! L1 forced-inclusion deposit handling: included-as-reverted field rules.
 
     use alloy_primitives::{address, Address, U256};
 
@@ -732,7 +731,7 @@ pub mod deposit {
     /// Exhaustive exempt-sender set: deposits from these are never intercepted.
     pub const EXEMPT_SENDERS: [Address; 2] = [SYSTEM_ADDRESS, L1_ATTRIBUTES_DEPOSITOR];
 
-    /// `CanyonDepositReceiptVersion` — written once Canyon is active (matches op-geth).
+    /// `CanyonDepositReceiptVersion` — written once Canyon is active.
     pub const CANYON_DEPOSIT_RECEIPT_VERSION: u64 = 1;
 
     /// Whether a deposit from `from` is exempt from interception.
@@ -823,7 +822,7 @@ pub mod deposit {
 }
 
 pub mod mirror {
-    //! FR-6 — `chain_id → mirror contract address` dispatch (no CLI switch).
+    //! `chain_id → mirror contract address` dispatch (no CLI switch).
 
     use alloy_primitives::{address, Address};
 
@@ -837,13 +836,13 @@ pub mod mirror {
     /// Devnet (195) mirror address — deterministic, fixed.
     pub const DEVNET_MIRROR_ADDRESS: Address = address!("73511669fd4de447fed18bb79bafeac93ab7f31f");
 
-    /// Testnet (1952) mirror address — PLACEHOLDER (byte-identical with op-geth).
-    // TODO(XLOP-1071): replace placeholder before testnet enablement (Blocker 2).
+    /// Testnet (1952) mirror address — PLACEHOLDER.
+    // TODO: replace placeholder before testnet enablement.
     pub const TESTNET_MIRROR_ADDRESS: Address =
         address!("000000000000000000626c61636b6c6973741952");
 
-    /// Mainnet (196) mirror address — PLACEHOLDER (byte-identical with op-geth).
-    // TODO(XLOP-1071): replace placeholder before mainnet enablement (Blocker 2).
+    /// Mainnet (196) mirror address — PLACEHOLDER.
+    // TODO: replace placeholder before mainnet enablement.
     pub const MAINNET_MIRROR_ADDRESS: Address =
         address!("000000000000000000626c61636b6c6973740196");
 
@@ -885,7 +884,7 @@ pub mod mirror {
         }
 
         #[test]
-        fn placeholders_are_byte_identical_with_op_geth() {
+        fn placeholders_have_expected_bytes() {
             assert_eq!(
                 TESTNET_MIRROR_ADDRESS,
                 address!("000000000000000000626c61636b6c6973741952")
@@ -908,7 +907,7 @@ pub mod mirror {
 }
 
 pub mod metrics {
-    //! FR-7 — Prometheus metrics for the blacklist feature.
+    //! Prometheus metrics for the blacklist feature.
 
     use super::eval::HitCategory;
     use reth_metrics::{
@@ -923,7 +922,7 @@ pub mod metrics {
         /// Current block snapshot size → `xlayer_blacklist_cache_size`.
         pub cache_size: Gauge,
         /// Block-head snapshot read duration → `xlayer_blacklist_snapshot_read_duration_nanoseconds`
-        /// (named by its real unit, cross-client with op-geth).
+        /// (named by its real unit).
         pub snapshot_read_duration_nanoseconds: Histogram,
     }
 
