@@ -14,9 +14,7 @@ use alloy_consensus::{
 use alloy_eips::eip2718::WithEncoded;
 use alloy_eips::{Encodable2718, Typed2718};
 use alloy_evm::Database;
-use alloy_op_evm::{
-    block::receipt_builder::OpReceiptBuilder, block::OpTxEnv, GaslessFeeHook, OpEvm,
-};
+use alloy_op_evm::{block::receipt_builder::OpReceiptBuilder, block::OpTxEnv, OpEvm};
 use alloy_primitives::{BlockHash, Bytes, U256};
 use alloy_rpc_types_eth::Withdrawals;
 use op_alloy_consensus::OpDepositReceipt;
@@ -31,9 +29,7 @@ use reth_evm::{
 };
 use reth_node_api::PayloadBuilderError;
 use reth_optimism_chainspec::OpChainSpec;
-use reth_optimism_evm::{
-    GaslessContract, OpEvmConfig, OpNextBlockEnvAttributes, XLayerGaslessFeeHook,
-};
+use reth_optimism_evm::{GaslessContract, OpEvmConfig, OpNextBlockEnvAttributes};
 use reth_optimism_forks::OpHardforks;
 use reth_optimism_node::OpPayloadBuilderAttributes;
 use reth_optimism_payload_builder::{
@@ -274,7 +270,8 @@ impl FlashblocksBuilderCtx {
     /// Mirrors the gasless detection in the upstream block executor
     /// (`OpBlockExecutor::execute_transaction_without_commit`). The flashblocks builder executes
     /// pool transactions directly via [`Evm::transact`] rather than through the block executor, so
-    /// the detection and base-fee relaxation have to be replicated here, otherwise zero-priced
+    /// the gasless detection has to be replicated here: a detected gasless tx is flagged on its
+    /// `tx_env`, and `OpEvm::transact_raw` then zeroes the base fee for it, otherwise zero-priced
     /// (whitelisted) transactions would be rejected by base-fee validation even when gasless is
     /// enabled.
     #[allow(clippy::type_complexity)]
@@ -292,8 +289,7 @@ impl FlashblocksBuilderCtx {
         let is_gasless = self.is_gasless(evm, tx)?;
         let mut tx_env = self.evm_config.tx_env(tx);
         tx_env.set_gasless(is_gasless);
-        let result =
-            XLayerGaslessFeeHook::transact_with_gasless_fee_checks(evm, tx_env, is_gasless)?;
+        let result = evm.transact(tx_env)?;
         Ok((result, is_gasless))
     }
 
