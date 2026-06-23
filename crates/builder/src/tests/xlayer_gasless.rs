@@ -9,8 +9,8 @@
 //! Note on base fee: reth's pool best-iterator (`BestTransactionsWithFees`) only yields txs whose
 //! `max_fee_per_gas >= block base fee`, so a zero-priced tx is only yielded when the block base fee
 //! is 0. The test genesis sets base fee 0 (a fixed point under EIP-1559), so zero-priced txs flow
-//! through the builder. Gasless execution itself does *not* depend on base fee — the
-//! `GaslessFeeHook` disables the base-fee check for gasless txs — so the observable gasless
+//! through the builder. Gasless execution itself does *not* depend on base fee —
+//! `OpEvm::transact_raw` zeroes the base fee for gasless txs — so the observable gasless
 //! distinction is fee *charging*: a gasless tx pays no gas fee, so the sender's balance decreases
 //! by exactly the transferred value.
 
