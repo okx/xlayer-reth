@@ -21,7 +21,7 @@ use alloy_evm::block::ExecutableTxParts;
 use alloy_primitives::{Address, B256};
 use op_alloy_rpc_types_engine::OpFlashblockPayloadBase;
 
-use reth_chain_state::{ComputedTrieData, DeferredTrieData, ExecutedBlock, LazyOverlay};
+use reth_chain_state::{ComputedTrieData, DeferredTrieData, ExecutedBlock, StateTrieOverlayManager};
 use reth_engine_primitives::TreeConfig;
 use reth_engine_tree::tree::{
     payload_processor::{
@@ -42,7 +42,7 @@ use reth_primitives_traits::{
     transaction::TxHashRef, HeaderTy, NodePrimitives, Recovered, RecoveredBlock, SealedHeaderFor,
 };
 use reth_provider::{
-    providers::OverlayStateProviderFactory, BlockReader, DatabaseProviderROFactory,
+    providers::{OverlayBuilder, OverlayStateProviderFactory}, BlockReader, DatabaseProviderROFactory,
     HashedPostStateProvider, HeaderProvider, StateProvider, StateProviderFactory, StateReader,
 };
 use reth_revm::{
@@ -219,21 +219,30 @@ where
             transaction_count: transactions.len(),
             gas_used: 0,
             withdrawals: Some(args.withdrawals),
+            // xlayer does not produce a block access list (BAL/EIP-7928) for flashblocks.
+            decoded_bal: None,
         };
 
-        // Create lazy overlay from ancestors - this doesn't block, allowing execution to start
-        // before the trie data is ready. The overlay will be computed on first access.
-        let (lazy_overlay, anchor_hash) =
-            Self::get_parent_lazy_overlay(overlay_data.as_ref(), parent_hash);
+        // Build an overlay over the in-memory flashblock ancestor blocks for the payload
+        // processor (the StateRootTask path needs it for multiproofs). `OverlayBuilder` lazily
+        // resolves the overlay (trie updates + hashed state) for `hash` against the on-disk
+        // anchor, deriving the anchor from the in-memory block graph held by the manager. With no
+        // worker pool the overlay is computed synchronously on first access (no parallel
+        // precompute), which preserves correctness.
+        let mut overlay_builder =
+            OverlayBuilder::new(hash, self.flashblocks_state.get_changeset_cache());
+        if let Some((overlay_blocks, _anchor)) = overlay_data.as_ref()
+            && !overlay_blocks.is_empty()
+        {
+            let overlay_manager = StateTrieOverlayManager::default();
+            for block in overlay_blocks {
+                overlay_manager.insert_block(block.clone());
+            }
+            overlay_builder = overlay_builder.with_state_trie_overlay_manager(overlay_manager);
+        }
 
-        // Create overlay factory for payload processor (StateRootTask path needs it for
-        // multiproofs)
-        let overlay_factory = OverlayStateProviderFactory::new(
-            self.provider.clone(),
-            self.flashblocks_state.get_changeset_cache(),
-        )
-        .with_block_hash(Some(anchor_hash))
-        .with_lazy_overlay(lazy_overlay);
+        let overlay_factory =
+            OverlayStateProviderFactory::new(self.provider.clone(), overlay_builder);
 
         // Spawn the appropriate processor based on strategy.
         let mut handle = self.spawn_payload_processor(
@@ -481,7 +490,7 @@ where
             ExecutedBlock::new(
                 Arc::new(block),
                 output,
-                ComputedTrieData::without_trie_input(
+                ComputedTrieData::new(
                     Arc::new(hashed_state.into_sorted()),
                     Arc::new(trie_output.clone_into_sorted()),
                 ),
@@ -866,7 +875,7 @@ where
         env: ExecutionEnv<EvmConfig>,
         txs: Vec<WithEncoded<Recovered<N::SignedTx>>>,
         provider_builder: StateProviderBuilder<N, Provider>,
-        overlay_factory: OverlayStateProviderFactory<Provider>,
+        overlay_factory: OverlayStateProviderFactory<Provider, N>,
         strategy: StateRootStrategy,
         bal: Option<Arc<BlockAccessList>>,
     ) -> eyre::Result<
@@ -884,16 +893,11 @@ where
                 provider_builder,
                 overlay_factory,
                 &self.tree_config,
-                // TODO: BAL is intentionally NOT fed into the StateRootTask pipeline — pass `None`
-                // until upstream BAL+sparse-trie integration stabilizes.
-                //
-                // Upstream WIP branch: https://github.com/paradigmxyz/reth/tree/bal-devnet-3
-                None,
                 self.state_root_handle.take(),
             )),
             StateRootStrategy::Parallel | StateRootStrategy::Synchronous => Ok(self
                 .payload_processor
-                .spawn_cache_exclusive(env, tx_iter, provider_builder, bal)),
+                .spawn_cache_exclusive(env, tx_iter, provider_builder)),
         }
     }
 
@@ -913,7 +917,7 @@ where
     fn await_state_root_with_timeout<Tx, Err, R: Send + Sync + 'static>(
         &self,
         handle: &mut PayloadHandle<Tx, Err, R>,
-        overlay_factory: OverlayStateProviderFactory<Provider>,
+        overlay_factory: OverlayStateProviderFactory<Provider, N>,
         hashed_state: &HashedPostState,
         execute_height: u64,
     ) -> eyre::Result<Result<StateRootComputeOutcome, ParallelStateRootError>> {
@@ -991,7 +995,7 @@ where
     /// Returns `Err(_)` if error was encountered during computation.
     fn compute_state_root_parallel(
         &self,
-        overlay_factory: OverlayStateProviderFactory<Provider>,
+        overlay_factory: OverlayStateProviderFactory<Provider, N>,
         hashed_state: &HashedPostState,
     ) -> eyre::Result<(B256, TrieUpdates), ParallelStateRootError> {
         // The `hashed_state` argument will be taken into account as part of the overlay, but we
@@ -1010,7 +1014,7 @@ where
     /// [`HashedPostState`] containing the changes of this block, to compute the state root and
     /// trie updates for this block.
     fn compute_state_root_serial(
-        overlay_factory: OverlayStateProviderFactory<Provider>,
+        overlay_factory: OverlayStateProviderFactory<Provider, N>,
         hashed_state: &HashedPostState,
     ) -> eyre::Result<(B256, TrieUpdates)> {
         // The `hashed_state` argument will be taken into account as part of the overlay, but we
@@ -1091,37 +1095,6 @@ where
         Err(eyre::eyre!("no state found for block {hash}"))
     }
 
-    /// Creates a [`LazyOverlay`] for the parent block without blocking.
-    ///
-    /// Returns a lazy overlay that will compute the trie input on first access, and the anchor
-    /// block hash (the highest persisted ancestor). This allows execution to start immediately
-    /// while the trie input computation is deferred until the overlay is actually needed.
-    ///
-    /// If parent is on disk (no in-memory blocks), returns `(None, tip_hash)`.
-    fn get_parent_lazy_overlay(
-        overlay_data: Option<&(Vec<ExecutedBlock<N>>, B256)>,
-        tip_hash: B256,
-    ) -> (Option<LazyOverlay>, B256) {
-        let Some((blocks, anchor)) = overlay_data else {
-            return (None, tip_hash);
-        };
-        let anchor_hash = *anchor;
-
-        if blocks.is_empty() {
-            debug!(target: "flashblocks::validator", "Parent found on disk, no lazy overlay needed");
-            return (None, anchor_hash);
-        }
-
-        // Extract deferred trie data handles (non-blocking)
-        debug!(
-            target: "flashblocks::validator",
-            %anchor_hash,
-            num_blocks = blocks.len(),
-            "Creating lazy overlay for flashblock state cache in-memory blocks"
-        );
-        let handles: Vec<DeferredTrieData> = blocks.iter().map(|b| b.trie_data_handle()).collect();
-        (Some(LazyOverlay::new(anchor_hash, handles)), anchor_hash)
-    }
 
     /// Spawns a background task to compute and sort trie data for the executed block.
     ///
@@ -1159,7 +1132,7 @@ where
 
         // Create deferred handle with fallback inputs in case the background task hasn't completed.
         let deferred_trie_data =
-            DeferredTrieData::pending(Arc::new(hashed_state), trie_output, anchor_hash, ancestors);
+            DeferredTrieData::pending(Arc::new(hashed_state), trie_output);
         let deferred_handle_task = deferred_trie_data.clone();
 
         // Capture block info and cache handle for changeset computation

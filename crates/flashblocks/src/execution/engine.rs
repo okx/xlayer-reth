@@ -16,7 +16,7 @@ use reth_engine_tree::tree::{
     payload_processor::multiproof::StateRootHandle,
     payload_validator::{TreeCtx, ValidationOutcome},
     BasicEngineValidator, CacheWaitDurations, EngineApiTreeState, EngineValidator,
-    PayloadProcessor, SavedCache, WaitForCaches,
+    PayloadProcessor, SavedCache, ValidationOutput, WaitForCaches,
 };
 use reth_evm::{ConfigureEngineEvm, ConfigureEvm};
 use reth_node_api::{
@@ -26,13 +26,15 @@ use reth_node_builder::rpc::{
     BasicEngineValidatorBuilder, EngineValidatorBuilder, PayloadValidatorBuilder,
 };
 use reth_optimism_forks::OpHardforks;
-use reth_payload_primitives::{BuiltPayload, InvalidPayloadAttributesError, NewPayloadError};
+use reth_payload_primitives::{
+    BuiltPayload, BuiltPayloadExecutedBlock, InvalidPayloadAttributesError, NewPayloadError,
+};
 use reth_primitives_traits::{
     transaction::{signed::SignedTransaction, TxHashRef},
     Block as BlockTrait, BlockBody, NodePrimitives, Recovered, SealedBlock, WithEncoded,
 };
 use reth_provider::{
-    BlockReader, CanonStateSubscriptions, HashedPostStateProvider, HeaderProvider,
+    BlockReader, CanonStateSubscriptions, HashedPostStateProvider, HeaderProvider, ProviderResult,
     StateProviderFactory, StateReader,
 };
 use reth_trie_db::ChangesetCache;
@@ -167,7 +169,7 @@ where
         let mut guard = self.inner.blocking_lock();
 
         if let Some(executed_block) = guard.try_flashblocks_cache_hit(&num_hash) {
-            return Ok((executed_block, None));
+            return Ok(ValidationOutput::new(executed_block, None));
         }
 
         // Hot path: use pending FB sequence state and the warm FB sequence validator
@@ -175,7 +177,7 @@ where
             && let Some(args) = guard.try_get_flashblocks_buildable_args(block)
             && let Some(executed_block) = guard.engine_execute_sequence(args, num_hash.hash)
         {
-            return Ok((executed_block, None));
+            return Ok(ValidationOutput::new(executed_block, None));
         }
 
         info!(
@@ -189,9 +191,9 @@ where
         // preserved sparse trie is released
         guard.drop_flashblocks_state_root_handle();
 
-        let (executed_block, timing) = guard.engine_validator.validate_payload(payload, ctx)?;
-        guard.try_advance_flashblocks_state(&executed_block);
-        Ok((executed_block, timing))
+        let output = guard.engine_validator.validate_payload(payload, ctx)?;
+        guard.try_advance_flashblocks_state(&output.executed_block);
+        Ok(output)
     }
 
     fn validate_block(
@@ -205,14 +207,14 @@ where
         let mut guard = self.inner.blocking_lock();
 
         if let Some(executed_block) = guard.try_flashblocks_cache_hit(&num_hash) {
-            return Ok((executed_block, None));
+            return Ok(ValidationOutput::new(executed_block, None));
         }
 
         // Hot path: use pending FB sequence state and the warm FB sequence validator
         if let Some(args) = guard.try_get_flashblocks_buildable_args(&block)
             && let Some(executed_block) = guard.engine_execute_sequence(args, num_hash.hash)
         {
-            return Ok((executed_block, None));
+            return Ok(ValidationOutput::new(executed_block, None));
         }
 
         // If flashblocks is enabled and engine validator is validating this new block,
@@ -234,15 +236,19 @@ where
         // preserved sparse trie is released
         guard.drop_flashblocks_state_root_handle();
 
-        let (executed_block, timing) = guard.engine_validator.validate_block(block, ctx)?;
-        guard.try_advance_flashblocks_state(&executed_block);
-        Ok((executed_block, timing))
+        let output = guard.engine_validator.validate_block(block, ctx)?;
+        guard.try_advance_flashblocks_state(&output.executed_block);
+        Ok(output)
     }
 
-    fn on_inserted_executed_block(&self, block: ExecutedBlock<N>) {
+    fn on_inserted_executed_block(
+        &self,
+        block: BuiltPayloadExecutedBlock<N>,
+        state: &EngineApiTreeState<N>,
+    ) -> ProviderResult<ExecutedBlock<N>> {
         // SAFETY: Called from the engine tree's dedicated OS thread. See comment in
         // `validate_payload` above for details.
-        self.inner.blocking_lock().engine_validator.on_inserted_executed_block(block);
+        self.inner.blocking_lock().engine_validator.on_inserted_executed_block(block, state)
     }
 
     fn cache_for(&self, block_hash: alloy_primitives::B256) -> Option<SavedCache> {
@@ -321,7 +327,6 @@ where
     }
 }
 
-#[derive(Debug)]
 struct XLayerEngineValidatorInner<Provider, Evm, V, N, ChainSpec>
 where
     Evm: ConfigureEvm,
@@ -334,6 +339,20 @@ where
     fb_validator: Option<FlashblockSequenceValidator<N, Evm, Provider, ChainSpec>>,
     /// Flashblocks state cache, if flashblocks is enabled.
     fb_state: Option<FlashblockStateCache<N>>,
+}
+
+// Manual `Debug` impl: `BasicEngineValidator` no longer implements `Debug` (it now holds a
+// boxed state-root-input closure), so we can't `#[derive(Debug)]` here.
+impl<Provider, Evm, V, N, ChainSpec> std::fmt::Debug
+    for XLayerEngineValidatorInner<Provider, Evm, V, N, ChainSpec>
+where
+    Evm: ConfigureEvm,
+    N: NodePrimitives,
+    ChainSpec: OpHardforks,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("XLayerEngineValidatorInner").finish_non_exhaustive()
+    }
 }
 
 impl<Provider, Evm, V, N, ChainSpec> XLayerEngineValidatorInner<Provider, Evm, V, N, ChainSpec>

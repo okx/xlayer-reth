@@ -552,12 +552,17 @@ where
                 .eth_api
                 .spawn_blocking_io_fut(move |this| async move {
                     let evm_env = this.evm_env_for_header(&header)?;
-                    this.estimate_gas_with(evm_env, transaction, state, overrides)
+                    this.estimate_gas_with(
+                        evm_env,
+                        transaction,
+                        state,
+                        EvmOverrides::new(overrides, None),
+                    )
                 })
                 .await
                 .map_err(|e| -> jsonrpsee_types::error::ErrorObject<'static> { e.into() });
         }
-        EthApiServer::estimate_gas(&self.eth_api, transaction, block_number, overrides).await
+        EthApiServer::estimate_gas(&self.eth_api, transaction, block_number, overrides, None).await
     }
 
     /// Handler for: `eth_getBalance`
