@@ -134,6 +134,7 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter", "json"] }
 testcontainers = "0.27.2"
 
 [dev-dependencies]
+alloy-genesis = { workspace = true }
 alloy-provider = { workspace = true, default-features = true, features = [
     "txpool-api",
 ] }

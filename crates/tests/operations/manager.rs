@@ -1,5 +1,7 @@
 //! Test network configuration
 
+use alloy_op_evm::XLAYER_DEVNET_GASLESS_CONTRACT;
+use alloy_primitives::Address;
 use std::time::Duration;
 
 // L1 Configuration
@@ -41,6 +43,13 @@ pub const DEFAULT_L2_METRICS_URL: &str = "http://127.0.0.1:9092/debug/metrics";
 
 /// Default Bridge address for testing
 pub const BRIDGE_ADDR: &str = "0x4B24266C13AFEf2bb60e2C69A4C08A482d81e3CA";
+
+/// XLayer gasless whitelist predeploy address on the L2 (devnet).
+pub const DEFAULT_L2_GASLESS_WHITELIST_ADDRESS: Address = XLAYER_DEVNET_GASLESS_CONTRACT;
+
+/// Per-tx gas allowance registered for a gasless target. Must not exceed the whitelist contract's
+/// `maxGasLimit` (16_777_216 in the current `XlayerGaslessWhitelistLatest`).
+pub const DEFAULT_GASLESS_GAS_LIMIT: u64 = 16_777_216;
 
 /// Default timeout for a transaction to be mined for testing
 pub const DEFAULT_TIMEOUT_TX_TO_BE_MINED: Duration = Duration::from_secs(60);

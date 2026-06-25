@@ -311,6 +311,11 @@ where
             metrics: self.metrics.clone(),
             max_gas_per_txn: self.config.max_gas_per_txn,
             bridge_intercept_config: self.bridge_intercept_config.clone(),
+            // Chain-derived (consensus-uniform with the block executor); see
+            // `OpEvmConfig::gasless_contract`. Gasless application is gated on this contract
+            // approving the tx.
+            gasless_contract: self.evm_config.gasless_contract(),
+            gasless_block_gas_limit: self.config.gasless_block_gas_limit,
         })
     }
 
