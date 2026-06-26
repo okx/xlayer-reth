@@ -104,26 +104,13 @@ test include_e2e="false" include_flashblocks="false":
         cargo $CMD -p xlayer-e2e-test --test flashblocks_tests $E2E_FLAGS
     fi
 
+# Format only workspace members. `cargo fmt --all` ALSO descends into local submodules.
 check-format:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    # Format only workspace members. `cargo fmt --all` ALSO descends into local
-    # path dependencies, which here means the workspace-excluded `deps/` submodule
-    # (vendored optimism, maintained upstream with its own rustfmt config).
-    fail=0
-    for p in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name'); do
-        cargo +nightly fmt -p "$p" -- --check || fail=1
-    done
-    exit $fail
+    bash -c 'set -uo pipefail; fail=0; for p in $(cargo metadata --no-deps --format-version 1 | jq -r ".packages[].name"); do cargo +nightly fmt -p "$p" -- --check || fail=1; done; exit $fail'
 
 fix-format:
-    #!/usr/bin/env bash
-    set -euo pipefail
     cargo fix --allow-dirty --allow-staged
-    # Member-scoped (see check-format): never reformat the excluded `deps/` submodule.
-    for p in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name'); do
-        cargo +nightly fmt -p "$p"
-    done
+    bash -c 'set -euo pipefail; for p in $(cargo metadata --no-deps --format-version 1 | jq -r ".packages[].name"); do cargo +nightly fmt -p "$p"; done'
 
 check-clippy:
     cargo clippy --all-targets --workspace -- -D warnings
