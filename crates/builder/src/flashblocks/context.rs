@@ -14,9 +14,7 @@ use alloy_consensus::{
 use alloy_eips::eip2718::WithEncoded;
 use alloy_eips::{Encodable2718, Typed2718};
 use alloy_evm::Database;
-use alloy_op_evm::{
-    block::receipt_builder::OpReceiptBuilder, block::OpTxEnv, OpEvm,
-};
+use alloy_op_evm::{block::receipt_builder::OpReceiptBuilder, block::OpTxEnv, OpEvm};
 use alloy_primitives::{BlockHash, Bytes, U256};
 use alloy_rpc_types_eth::Withdrawals;
 use core::fmt::Debug;
@@ -26,14 +24,12 @@ use op_revm::{L1BlockInfo, OpSpecId};
 use reth_basic_payload_builder::PayloadConfig;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_evm::{
-    eth::receipt_builder::ReceiptBuilderCtx, precompiles::PrecompilesMap, ConfigureEvm, Evm, EvmEnv,
-    EvmError, InvalidTxError,
+    eth::receipt_builder::ReceiptBuilderCtx, precompiles::PrecompilesMap, ConfigureEvm, Evm,
+    EvmEnv, EvmError, InvalidTxError,
 };
 use reth_node_api::PayloadBuilderError;
 use reth_optimism_chainspec::OpChainSpec;
-use reth_optimism_evm::{
-    GaslessContract, OpEvmConfig, OpNextBlockEnvAttributes,
-};
+use reth_optimism_evm::{GaslessContract, OpEvmConfig, OpNextBlockEnvAttributes};
 use reth_optimism_forks::OpHardforks;
 use reth_optimism_node::OpPayloadBuilderAttributes;
 use reth_optimism_payload_builder::{

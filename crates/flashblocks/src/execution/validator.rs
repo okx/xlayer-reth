@@ -21,7 +21,9 @@ use alloy_evm::block::ExecutableTxParts;
 use alloy_primitives::{Address, B256};
 use op_alloy_rpc_types_engine::OpFlashblockPayloadBase;
 
-use reth_chain_state::{ComputedTrieData, DeferredTrieData, ExecutedBlock, StateTrieOverlayManager};
+use reth_chain_state::{
+    ComputedTrieData, DeferredTrieData, ExecutedBlock, StateTrieOverlayManager,
+};
 use reth_engine_primitives::TreeConfig;
 use reth_engine_tree::tree::{
     payload_processor::{
@@ -42,8 +44,9 @@ use reth_primitives_traits::{
     transaction::TxHashRef, HeaderTy, NodePrimitives, Recovered, RecoveredBlock, SealedHeaderFor,
 };
 use reth_provider::{
-    providers::{OverlayBuilder, OverlayStateProviderFactory}, BlockReader, DatabaseProviderROFactory,
-    HashedPostStateProvider, HeaderProvider, StateProvider, StateProviderFactory, StateReader,
+    providers::{OverlayBuilder, OverlayStateProviderFactory},
+    BlockReader, DatabaseProviderROFactory, HashedPostStateProvider, HeaderProvider, StateProvider,
+    StateProviderFactory, StateReader,
 };
 use reth_revm::{
     cached::CachedReads,
@@ -877,7 +880,8 @@ where
         provider_builder: StateProviderBuilder<N, Provider>,
         overlay_factory: OverlayStateProviderFactory<Provider, N>,
         strategy: StateRootStrategy,
-        bal: Option<Arc<BlockAccessList>>,
+        // TODO(BAL): not yet threaded into the payload processor; prefixed to satisfy `-D warnings`.
+        _bal: Option<Arc<BlockAccessList>>,
     ) -> eyre::Result<
         PayloadHandle<
             impl ExecutableTxFor<EvmConfig> + use<N, Provider, EvmConfig, ChainSpec>,
@@ -895,9 +899,9 @@ where
                 &self.tree_config,
                 self.state_root_handle.take(),
             )),
-            StateRootStrategy::Parallel | StateRootStrategy::Synchronous => Ok(self
-                .payload_processor
-                .spawn_cache_exclusive(env, tx_iter, provider_builder)),
+            StateRootStrategy::Parallel | StateRootStrategy::Synchronous => {
+                Ok(self.payload_processor.spawn_cache_exclusive(env, tx_iter, provider_builder))
+            }
         }
     }
 
@@ -1095,7 +1099,6 @@ where
         Err(eyre::eyre!("no state found for block {hash}"))
     }
 
-
     /// Spawns a background task to compute and sort trie data for the executed block.
     ///
     /// This function creates a [`DeferredTrieData`] handle with fallback inputs and spawns a
@@ -1122,17 +1125,18 @@ where
         changeset_provider: impl TrieCursorFactory + Send + 'static,
     ) -> ExecutedBlock<N> {
         // Capture parent hash and ancestor overlays for deferred trie input construction.
-        let (overlay_blocks, anchor_hash) =
+        // TODO(BAL): `anchor_hash`/`ancestors` are computed but not yet fed to
+        // `compute_trie_input_task`; prefixed to satisfy `-D warnings` until wired up.
+        let (overlay_blocks, _anchor_hash) =
             overlay_data.unwrap_or_else(|| (Vec::new(), block.parent_hash()));
 
         // Collect lightweight ancestor trie data handles. We don't call trie_data() here;
         // the merge and any fallback sorting happens in the compute_trie_input_task.
-        let ancestors: Vec<DeferredTrieData> =
+        let _ancestors: Vec<DeferredTrieData> =
             overlay_blocks.iter().rev().map(|b| b.trie_data_handle()).collect();
 
         // Create deferred handle with fallback inputs in case the background task hasn't completed.
-        let deferred_trie_data =
-            DeferredTrieData::pending(Arc::new(hashed_state), trie_output);
+        let deferred_trie_data = DeferredTrieData::pending(Arc::new(hashed_state), trie_output);
         let deferred_handle_task = deferred_trie_data.clone();
 
         // Capture block info and cache handle for changeset computation
