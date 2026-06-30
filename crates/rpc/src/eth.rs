@@ -82,7 +82,7 @@ pub trait FlashblocksEthApiOverride {
     #[method(name = "getBlockReceipts")]
     async fn block_receipts(
         &self,
-        block_id: BlockNumberOrTag,
+        block_id: BlockId,
     ) -> RpcResult<Option<Vec<RpcReceipt<Optimism>>>>;
 
     /// Returns the number of transactions in a block by block number, with the flashblock state
@@ -287,13 +287,13 @@ where
     /// Handler for: `eth_getBlockReceipts`
     async fn block_receipts(
         &self,
-        block_id: BlockNumberOrTag,
+        block_id: BlockId,
     ) -> RpcResult<Option<Vec<RpcReceipt<Optimism>>>> {
         trace!(target: "rpc::eth", ?block_id, "Serving eth_getBlockReceipts");
-        if let Some(bar) = self.flashblocks_state.get_rpc_block(block_id) {
+        if let Some(bar) = self.flashblocks_state.get_rpc_block_by_id(Some(block_id)) {
             return to_block_receipts(&bar, &self.converter).map(Some).map_err(Into::into);
         }
-        EthApiServer::block_receipts(&self.eth_api, block_id.into()).await
+        EthApiServer::block_receipts(&self.eth_api, block_id).await
     }
 
     /// Handler for: `eth_getBlockTransactionCountByNumber`
@@ -552,12 +552,17 @@ where
                 .eth_api
                 .spawn_blocking_io_fut(move |this| async move {
                     let evm_env = this.evm_env_for_header(&header)?;
-                    this.estimate_gas_with(evm_env, transaction, state, overrides)
+                    this.estimate_gas_with(
+                        evm_env,
+                        transaction,
+                        state,
+                        EvmOverrides::new(overrides, None),
+                    )
                 })
                 .await
                 .map_err(|e| -> jsonrpsee_types::error::ErrorObject<'static> { e.into() });
         }
-        EthApiServer::estimate_gas(&self.eth_api, transaction, block_number, overrides).await
+        EthApiServer::estimate_gas(&self.eth_api, transaction, block_number, overrides, None).await
     }
 
     /// Handler for: `eth_getBalance`

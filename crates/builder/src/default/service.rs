@@ -123,7 +123,7 @@ where
             pool,
             ctx.provider().clone(),
             OpEvmConfig::optimism(ctx.chain_spec()),
-            OpBuilderConfig { da_config: self.da_config, gas_limit_config: self.gas_limit_config },
+            OpBuilderConfig::new(self.da_config, self.gas_limit_config),
         )
         .set_compute_pending_block(self.compute_pending_block);
         let payload_builder = DefaultPayloadBuilder::new(default_builder, p2p_cache.clone());

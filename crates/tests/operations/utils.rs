@@ -20,6 +20,74 @@ use alloy_sol_types::{sol, SolCall, SolValue};
 
 static DEPLOYED_CONTRACTS: OnceLock<DeployedContracts> = OnceLock::new();
 
+/// Ensures the on-chain gasless precondition is established exactly once per test process, so the
+/// gasless e2e tests own their setup instead of relying on devnet bootstrap. The `OnceCell`
+/// serializes the owner txs (avoiding nonce races between parallel tests) and skips repeat work.
+static GASLESS_WHITELIST_READY: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
+// Subset of `contracts-bedrock/src/L2/XlayerGaslessWhitelist.sol` (GaslessWhitelist) needed to set
+// up the gasless precondition from the owner account.
+sol! {
+    function setGaslessEnabled(bool enabled) external;
+    function setFullyGaslessTarget(address target, bool allowed, uint64 gasLimit) external;
+}
+
+/// 4-byte probe calldata carried by gasless txs. The whitelist's `getGaslessAllowance` returns
+/// `(false, 0)` for calldata shorter than a 4-byte selector, so a plain native transfer (empty
+/// input) can never be gasless; a fully-gasless target matches on any selector once the length
+/// guard passes.
+const GASLESS_PROBE_INPUT: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
+
+/// Gas limit for a gasless transfer carrying [`GASLESS_PROBE_INPUT`].
+const GASLESS_TX_GAS_LIMIT: u64 = 50_000;
+
+/// Ensures gasless is enabled on-chain and `target` is registered as a fully-gasless target,
+/// running the owner txs at most once per test process.
+pub async fn ensure_gasless_whitelist(endpoint_url: &str, target: Address) -> Result<()> {
+    GASLESS_WHITELIST_READY
+        .get_or_try_init(|| setup_gasless_whitelist(endpoint_url, target))
+        .await
+        .map(|_| ())
+}
+
+/// Sends the owner txs that enable gasless and whitelist `target` as a fully-gasless target.
+/// The rich account is the whitelist owner seeded in genesis.
+async fn setup_gasless_whitelist(endpoint_url: &str, target: Address) -> Result<()> {
+    let signer = PrivateKeySigner::from_str(DEFAULT_RICH_PRIVATE_KEY.trim_start_matches("0x"))?;
+    let wallet = EthereumWallet::from(signer.clone());
+    let provider = ProviderBuilder::new().wallet(wallet).connect_http(endpoint_url.parse()?);
+
+    let from = signer.address();
+    let whitelist = DEFAULT_L2_GASLESS_WHITELIST_ADDRESS;
+    let gas_price = provider.get_gas_price().await?;
+
+    let calls = [
+        setGaslessEnabledCall { enabled: true }.abi_encode(),
+        setFullyGaslessTargetCall { target, allowed: true, gasLimit: DEFAULT_GASLESS_GAS_LIMIT }
+            .abi_encode(),
+    ];
+    for calldata in calls {
+        let nonce = provider.get_transaction_count(from).pending().await?;
+        let tx = TransactionRequest::default()
+            .with_from(from)
+            .with_to(whitelist)
+            .with_input(calldata)
+            .with_nonce(nonce)
+            .with_chain_id(DEFAULT_L2_CHAIN_ID)
+            .with_gas_limit(200_000)
+            .with_gas_price(gas_price);
+        let pending_tx = provider.send_transaction(tx).await?;
+        let tx_hash = format!("{:#x}", *pending_tx.tx_hash());
+        let receipt = wait_for_tx_mined(endpoint_url, &tx_hash).await?;
+        let status = receipt["status"].as_str().unwrap_or_default();
+        if status != "0x1" {
+            return Err(eyre!("gasless whitelist setup tx {tx_hash} failed (status {status})"));
+        }
+    }
+    println!("Gasless whitelist ready: target {target:#x} registered, gasless enabled");
+    Ok(())
+}
+
 /// Holds addresses of all deployed test contracts
 #[derive(Debug, Clone)]
 pub struct DeployedContracts {
@@ -112,6 +180,46 @@ pub async fn sign_raw_transaction(
 
     let envelope = tx.build(&wallet).await?;
     Ok(format!("0x{}", hex::encode(envelope.encoded_2718())))
+}
+
+/// Sends a zero-priced (`max_fee_per_gas == 0`, `max_priority_fee_per_gas == 0`) EIP-1559 native
+/// transfer from the rich account and waits for it to be mined, returning the tx hash.
+///
+/// The fee fields are set explicitly to `0` so the gas filler does not populate them. Such a tx is
+/// only accepted by the mempool (and executed without charging fees) when the target node runs the
+/// XLayer gasless mempool: the `XLayerV1` hardfork is active and the on-chain gasless whitelist
+/// contract approves the transfer.
+pub async fn gasless_zero_price_transfer(
+    endpoint_url: &str,
+    amount: U256,
+    to_address: &str,
+) -> Result<String> {
+    let to = Address::from_str(to_address)?;
+    // Test owns its precondition: make sure `to` is whitelisted and gasless is enabled on-chain.
+    ensure_gasless_whitelist(endpoint_url, to).await?;
+
+    let signer = PrivateKeySigner::from_str(DEFAULT_RICH_PRIVATE_KEY.trim_start_matches("0x"))?;
+    let wallet = EthereumWallet::from(signer.clone());
+    let provider = ProviderBuilder::new().wallet(wallet).connect_http(endpoint_url.parse()?);
+
+    let from = signer.address();
+    let nonce = provider.get_transaction_count(from).pending().await?;
+    let tx = TransactionRequest::default()
+        .with_from(from)
+        .with_to(to)
+        .with_value(amount)
+        // Non-empty calldata so the whitelist's length guard passes (see GASLESS_PROBE_INPUT).
+        .with_input(Bytes::from_static(&GASLESS_PROBE_INPUT))
+        .with_nonce(nonce)
+        .with_chain_id(DEFAULT_L2_CHAIN_ID)
+        .with_gas_limit(GASLESS_TX_GAS_LIMIT)
+        .with_max_fee_per_gas(0)
+        .with_max_priority_fee_per_gas(0);
+    let pending_tx = provider.send_transaction(tx).await?;
+    let tx_hash = *pending_tx.tx_hash();
+
+    wait_for_tx_mined(endpoint_url, &format!("{tx_hash:#x}")).await?;
+    Ok(format!("{tx_hash:#x}"))
 }
 
 /// Funds an address with native tokens and waits for the balance to be available
@@ -275,6 +383,23 @@ pub async fn wait_for_blocks(client: &HttpClient, min_blocks: u64) -> u64 {
     block_number
 }
 
+/// Returns the canonical (sealed) block hash for `block_number`.
+///
+/// Under flashblocks a tx receipt's `blockHash` read during the preconfirmation window is the
+/// in-progress flashblock hash, which differs from the final sealed block hash. Querying by that
+/// transient hash (e.g. `eth_getLogs`/`eth_getBlockByHash`) fails with "unknown block". This waits
+/// for the block to seal (a later block to exist) and then reads the stable canonical hash by
+/// number.
+pub async fn canonical_block_hash(client: &HttpClient, block_number: u64) -> Result<String> {
+    wait_for_blocks(client, block_number).await;
+    let block =
+        eth_get_block_by_number_or_hash(client, BlockId::Number(block_number), false).await?;
+    block["hash"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| eyre!("block {block_number} missing canonical hash"))
+}
+
 /// Setup the test environment by waiting for blocks and returning a valid block hash and number
 pub async fn setup_test_environment(client: &HttpClient) -> Result<(String, u64)> {
     // Wait for at least one block to be available
@@ -425,10 +550,7 @@ pub async fn transfer_erc20_token_batch(
         .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
         .ok_or_else(|| eyre!("Failed to parse block number from receipt"))?;
 
-    let block_hash = receipt["blockHash"]
-        .as_str()
-        .ok_or_else(|| eyre!("Failed to get block hash from receipt"))?
-        .to_string();
+    let block_hash = canonical_block_hash(&client, block_number).await?;
 
     Ok((tx_hashes, block_number, block_hash))
 }
