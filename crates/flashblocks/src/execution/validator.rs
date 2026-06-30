@@ -486,7 +486,6 @@ where
                 output,
                 hashed_state,
                 trie_output,
-                overlay_data,
                 changeset_provider,
             )
         } else {
@@ -1121,20 +1120,8 @@ where
         execution_outcome: Arc<BlockExecutionOutput<N::Receipt>>,
         hashed_state: HashedPostState,
         trie_output: Arc<TrieUpdates>,
-        overlay_data: Option<(Vec<ExecutedBlock<N>>, B256)>,
         changeset_provider: impl TrieCursorFactory + Send + 'static,
     ) -> ExecutedBlock<N> {
-        // Capture parent hash and ancestor overlays for deferred trie input construction.
-        // TODO(BAL): `anchor_hash`/`ancestors` are computed but not yet fed to
-        // `compute_trie_input_task`; prefixed to satisfy `-D warnings` until wired up.
-        let (overlay_blocks, _anchor_hash) =
-            overlay_data.unwrap_or_else(|| (Vec::new(), block.parent_hash()));
-
-        // Collect lightweight ancestor trie data handles. We don't call trie_data() here;
-        // the merge and any fallback sorting happens in the compute_trie_input_task.
-        let _ancestors: Vec<DeferredTrieData> =
-            overlay_blocks.iter().rev().map(|b| b.trie_data_handle()).collect();
-
         // Create deferred handle with fallback inputs in case the background task hasn't completed.
         let deferred_trie_data = DeferredTrieData::pending(Arc::new(hashed_state), trie_output);
         let deferred_handle_task = deferred_trie_data.clone();
