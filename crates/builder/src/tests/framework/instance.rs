@@ -37,10 +37,11 @@ use reth::{
     core::exit::NodeExitFuture,
     tasks::Runtime,
 };
-
+use reth_chainspec::EthChainSpec;
 use reth_node_builder::{NodeBuilder, NodeConfig};
 use reth_optimism_chainspec::OpChainSpec;
 use reth_optimism_cli::commands::Commands;
+use reth_optimism_evm::xlayer_gasless_contract;
 use reth_optimism_node::{
     args::RollupArgs,
     node::{OpAddOns, OpAddOnsBuilder, OpEngineValidatorBuilder, OpPoolBuilder},
@@ -83,10 +84,13 @@ impl LocalInstance {
     ) -> eyre::Result<Self> {
         let mut args = args;
         let runtime = runtime();
+        let allow_gasless = xlayer_gasless_contract(config.chain.chain().id()).is_some();
         let rollup_args = reth_optimism_node::args::RollupArgs {
             enable_tx_conditional: true,
+            allow_gasless,
             ..Default::default()
         };
+
         let op_node = OpNode::new(rollup_args.clone());
         let reverted_cache = Cache::builder().max_capacity(100).build();
         let reverted_cache_clone = reverted_cache.clone();
@@ -298,7 +302,11 @@ fn runtime() -> Runtime {
 fn pool_component(rollup_args: &RollupArgs) -> OpPoolBuilder {
     OpPoolBuilder::default()
         .with_enable_tx_conditional(rollup_args.enable_tx_conditional)
-        .with_supervisor(rollup_args.supervisor_http.clone(), rollup_args.supervisor_safety_level)
+        .with_gasless(
+            rollup_args.allow_gasless,
+            0.1,
+            std::time::Duration::from_secs(rollup_args.gasless_pending_lifetime_secs),
+        )
 }
 
 /// A flashblock payload with its receive timestamp

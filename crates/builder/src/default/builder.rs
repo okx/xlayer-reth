@@ -12,8 +12,8 @@ use tracing::{info, warn};
 use alloy_consensus::{transaction::TxHashRef, Transaction, Typed2718};
 use alloy_eips::eip2718::WithEncoded;
 use alloy_evm::Evm as _;
-use alloy_primitives::U256;
-use op_alloy_consensus::OpTransaction;
+use alloy_primitives::{Sealed, U256};
+use op_alloy_consensus::{OpTransaction, TxPostExec};
 use op_revm::constants::L1_BLOCK_CONTRACT;
 
 use reth_basic_payload_builder::*;
@@ -23,6 +23,7 @@ use reth_evm::{
     ConfigureEvm,
 };
 use reth_execution_types::BlockExecutionOutput;
+use reth_optimism_evm::ConfigurePostExecEvm;
 use reth_optimism_forks::OpHardforks;
 use reth_optimism_node::OpPayloadBuilderAttributes;
 use reth_optimism_payload_builder::{
@@ -78,7 +79,8 @@ where
     N: OpPayloadPrimitives,
     Client: StateProviderFactory + ChainSpecProvider<ChainSpec: OpHardforks> + Clone,
     Pool: TransactionPool<Transaction: OpPooledTx<Consensus = N::SignedTx>>,
-    Evm: ConfigureEvm<
+    N::SignedTx: From<Sealed<TxPostExec>>,
+    Evm: ConfigurePostExecEvm<
         Primitives = N,
         NextBlockEnvCtx: BuildNextEnv<
             OpPayloadBuilderAttributes<N::SignedTx>,
@@ -137,7 +139,8 @@ where
     N: OpPayloadPrimitives,
     Client: StateProviderFactory + ChainSpecProvider<ChainSpec: OpHardforks> + Clone,
     Pool: TransactionPool<Transaction: OpPooledTx<Consensus = N::SignedTx>>,
-    Evm: ConfigureEvm<
+    N::SignedTx: From<Sealed<TxPostExec>>,
+    Evm: ConfigurePostExecEvm<
         Primitives = N,
         NextBlockEnvCtx: BuildNextEnv<
             OpPayloadBuilderAttributes<N::SignedTx>,
@@ -201,7 +204,7 @@ where
         })?;
 
         // 2. Execute sequencer transactions from payload attributes
-        let mut info = ctx.execute_sequencer_transactions(&mut builder)?;
+        let mut info = ctx.execute_sequencer_transactions(&mut builder, None)?;
 
         // 3. Execute cached transactions (replaces execute_best_transactions)
         let mut block_gas_limit = builder.evm_mut().block().gas_limit();
@@ -233,8 +236,13 @@ where
         });
 
         // 4. Finish: compute state root, transaction root, receipt root
-        let BlockBuilderOutcome { execution_result, hashed_state, trie_updates, block } =
-            builder.finish(&state_provider, None)?;
+        let BlockBuilderOutcome {
+            execution_result,
+            hashed_state,
+            trie_updates,
+            block,
+            block_access_list: _,
+        } = builder.finish(&state_provider, None)?;
 
         let sealed_block = Arc::new(block.sealed_block().clone());
 
@@ -244,8 +252,8 @@ where
         let executed: BuiltPayloadExecutedBlock<N> = BuiltPayloadExecutedBlock {
             recovered_block: Arc::new(block),
             execution_output: Arc::new(execution_outcome),
-            hashed_state: either::Either::Left(Arc::new(hashed_state)),
-            trie_updates: either::Either::Left(Arc::new(trie_updates)),
+            hashed_state: Arc::new(hashed_state),
+            trie_updates: Arc::new(trie_updates),
         };
 
         let payload =
@@ -308,18 +316,22 @@ where
         }
 
         // Ensure transaction execution is valid
-        let gas_used = builder
+        let gas_output = builder
             .execute_transaction(recovered_tx.clone())
             .map_err(|err| PayloadBuilderError::EvmExecutionError(Box::new(err)))?;
 
-        info.cumulative_gas_used += gas_used;
+        // `execute_transaction` now returns `GasOutput`; `tx_gas_used()` is the canonical
+        // receipt gas. With SDM refunds off this equals the pre-refund EVM gas, so we feed it
+        // to both counters (mirrors op-reth's sequencer-tx handling).
+        let tx_gas_used = gas_output.tx_gas_used();
+        info.accumulate_gas(tx_gas_used, tx_gas_used);
         info.cumulative_da_bytes_used += tx_da_size;
 
         // Track fees for payload metadata
         let miner_fee = recovered_tx
             .effective_tip_per_gas(base_fee)
             .expect("fee is always valid; execution succeeded");
-        info.total_fees += U256::from(miner_fee) * U256::from(gas_used);
+        info.total_fees += U256::from(miner_fee) * U256::from(tx_gas_used);
     }
 
     Ok(())

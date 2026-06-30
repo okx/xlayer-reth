@@ -138,12 +138,20 @@ where
                 if let Some(t) = to
                     && t > pending_height
                 {
-                    return Err(EthFilterError::BlockRangeExceedsHead.into());
+                    return Err(EthFilterError::BlockRangeExceedsHead {
+                        requested: t,
+                        head: pending_height,
+                    }
+                    .into());
                 }
                 if let Some(f) = from
                     && f > pending_height
                 {
-                    return Err(EthFilterError::BlockRangeExceedsHead.into());
+                    return Err(EthFilterError::BlockRangeExceedsHead {
+                        requested: f,
+                        head: pending_height,
+                    }
+                    .into());
                 }
 
                 let (from_block_number, to_block_number) =
@@ -245,7 +253,10 @@ fn get_filter_block_range(
     }
     // we cannot query blocks that don't exist yet
     if to_block_number > default_end_block {
-        return Err(FilterBlockRangeError::BlockRangeExceedsHead);
+        return Err(FilterBlockRangeError::BlockRangeExceedsHead {
+            requested: to_block_number,
+            head: default_end_block,
+        });
     }
     Ok((from_block_number, to_block_number))
 }

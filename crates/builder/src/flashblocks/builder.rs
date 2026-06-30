@@ -311,6 +311,11 @@ where
             metrics: self.metrics.clone(),
             max_gas_per_txn: self.config.max_gas_per_txn,
             bridge_intercept_config: self.bridge_intercept_config.clone(),
+            // Chain-derived (consensus-uniform with the block executor); see
+            // `OpEvmConfig::gasless_contract`. Gasless application is gated on this contract
+            // approving the tx.
+            gasless_contract: self.evm_config.gasless_contract(),
+            gasless_block_gas_limit: self.config.gasless_block_gas_limit,
         })
     }
 
@@ -1147,10 +1152,10 @@ where
     let executed = BuiltPayloadExecutedBlock {
         recovered_block: Arc::new(recovered_block),
         execution_output: Arc::new(execution_output),
-        trie_updates: either::Either::Left(
-            trie_updates_to_cache.clone().unwrap_or_else(|| Arc::new(TrieUpdates::default())),
-        ),
-        hashed_state: either::Either::Left(Arc::new(hashed_state)),
+        trie_updates: trie_updates_to_cache
+            .clone()
+            .unwrap_or_else(|| Arc::new(TrieUpdates::default())),
+        hashed_state: Arc::new(hashed_state),
     };
     debug!(
         target: "payload_builder",
@@ -1270,8 +1275,8 @@ fn resolve_zero_state_root(
     let executed = BuiltPayloadExecutedBlock {
         recovered_block: Arc::new(recovered_block),
         execution_output: executed_block.execution_output.clone(),
-        trie_updates: either::Either::Left(Arc::new(trie_updates)),
-        hashed_state: either::Either::Left(Arc::new(hashed_state)),
+        trie_updates: Arc::new(trie_updates),
+        hashed_state: Arc::new(hashed_state),
     };
     let updated_payload = OpBuiltPayload::new(payload_id, sealed_block, fees, Some(executed));
 
