@@ -144,6 +144,10 @@ pub struct BuilderConfig {
     /// Maximum gas a transaction can use before being excluded.
     pub max_gas_per_txn: Option<u64>,
 
+    /// Per-block gas budget for gasless transactions (in gas units).
+    /// `None` = unlimited. Set via `--builder.gasless-block-gas-limit` (default 60,000,000).
+    pub gasless_block_gas_limit: Option<u64>,
+
     /// Configuration values that are specific to the flashblocks builder.
     pub flashblocks: FlashblocksConfig,
 }
@@ -164,6 +168,7 @@ impl core::fmt::Debug for BuilderConfig {
             .field("gas_limit_config", &self.gas_limit_config)
             .field("flashblocks", &self.flashblocks)
             .field("max_gas_per_txn", &self.max_gas_per_txn)
+            .field("gasless_block_gas_limit", &self.gasless_block_gas_limit)
             .finish()
     }
 }
@@ -176,8 +181,9 @@ impl Default for BuilderConfig {
             block_time_leeway: Duration::from_millis(500),
             da_config: OpDAConfig::default(),
             gas_limit_config: OpGasLimitConfig::default(),
-            flashblocks: FlashblocksConfig::default(),
             max_gas_per_txn: None,
+            gasless_block_gas_limit: None,
+            flashblocks: FlashblocksConfig::default(),
         }
     }
 }
@@ -204,6 +210,7 @@ impl TryFrom<BuilderArgs> for BuilderConfig {
             da_config: Default::default(),
             gas_limit_config: Default::default(),
             max_gas_per_txn: args.max_gas_per_txn,
+            gasless_block_gas_limit: args.gasless_block_gas_limit(),
             flashblocks: FlashblocksConfig {
                 ws_addr,
                 interval,

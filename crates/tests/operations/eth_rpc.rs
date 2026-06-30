@@ -96,6 +96,23 @@ pub async fn eth_call(
     Ok(result)
 }
 
+/// For eth_simulateV1. `payload` is the full simulation payload object (`blockStateCalls`,
+/// `validation`, `traceTransfers`, ...). Returns the raw array of per-block results; a JSON-RPC
+/// error (e.g. a base-fee rejection) propagates as `Err`.
+pub async fn eth_simulate_v1(
+    client_rpc: &HttpClient,
+    payload: Value,
+    block_id: Option<BlockId>,
+) -> Result<Value> {
+    let block_id = block_id.unwrap_or(BlockId::Latest).to_rpc_param();
+    let result: Value = tokio::time::timeout(
+        RPC_TIMEOUT,
+        client_rpc.request("eth_simulateV1", jsonrpsee::rpc_params![payload, block_id]),
+    )
+    .await??;
+    Ok(result)
+}
+
 /// For eth_estimateGas
 pub async fn estimate_gas(
     client_rpc: &HttpClient,

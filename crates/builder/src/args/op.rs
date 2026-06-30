@@ -42,8 +42,25 @@ pub struct BuilderArgs {
         env = "PLAYGROUND_DIR",
     )]
     pub playground: Option<PathBuf>,
+    /// Per-block gas budget for gasless transactions (in gas units).
+    /// Default 60,000,000 gas. Set to 0 for unlimited (backward-compatible).
+    #[arg(
+        long = "builder.gasless-block-gas-limit",
+        env = "BUILDER_GASLESS_BLOCK_GAS_LIMIT",
+        default_value = "60000000"
+    )]
+    pub gasless_block_gas_limit_raw: Option<u64>,
+
     #[command(flatten)]
     pub flashblocks: FlashblocksArgs,
+}
+
+impl BuilderArgs {
+    /// Returns the per-block gasless gas budget in raw gas.
+    /// Returns `None` when 0 or unset (= unlimited).
+    pub fn gasless_block_gas_limit(&self) -> Option<u64> {
+        self.gasless_block_gas_limit_raw.filter(|&v| v > 0)
+    }
 }
 
 impl Default for BuilderArgs {

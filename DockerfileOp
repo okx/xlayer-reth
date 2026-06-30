@@ -12,6 +12,15 @@ RUN --mount=type=secret,id=copilot,target=/tmp/copilot.pem,required=false \
     fi
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 
+# Pre-install the toolchain pinned by rust-toolchain.toml as its own cached
+# layer. The base image ships a close-but-not-identical rust 1.94, so rustup
+# would otherwise re-download the exact 1.94.0 + components on every build
+# (the planner/builder cargo invocations run after `COPY . .`, which is
+# invalidated by any source change). Keyed only on rust-toolchain.toml, this
+# layer is reused until the pinned toolchain actually changes.
+COPY rust-toolchain.toml .
+RUN rustup show
+
 # Builds a cargo-chef plan
 FROM chef AS planner
 COPY . .
@@ -22,6 +31,12 @@ RUN cargo chef prepare --recipe-path recipe.json --bin xlayer-reth-node
 FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
 COPY deps/ deps/
+# Copy .cargo/config.toml before `cargo chef cook` so the dependency build uses
+# the same rustflags (e.g. -fuse-ld=mold) as the final `cargo build`. cargo bakes
+# rustflags into each unit's fingerprint, so if cook ran without this config the
+# build step would re-fingerprint and recompile every dependency, defeating
+# cargo-chef's dependency caching.
+COPY .cargo/ .cargo/
 
 ARG BUILD_PROFILE=release
 ENV BUILD_PROFILE=$BUILD_PROFILE

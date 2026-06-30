@@ -1,0 +1,6 @@
+stages:
+  - build
+
+variables:
+  # 拉取所有 submodule，包括嵌套 submodule
+  GIT_SUBMODULE_STRATEGY: recursive
