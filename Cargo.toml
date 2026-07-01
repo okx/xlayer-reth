@@ -16,6 +16,7 @@ members = [
     "crates/builder",
     "crates/chainspec",
     "crates/flashblocks",
+    "crates/kms",
     "crates/legacy-rpc",
     "crates/monitor",
     "crates/rpc",
@@ -64,6 +65,7 @@ codegen-units = 1
 
 xlayer-builder = { path = "crates/builder" }
 xlayer-chainspec = { path = "crates/chainspec" }
+xlayer-kms = { path = "crates/kms" }
 xlayer-flashblocks = { path = "crates/flashblocks" }
 xlayer-legacy-rpc = { path = "crates/legacy-rpc" }
 xlayer-monitor = { path = "crates/monitor" }

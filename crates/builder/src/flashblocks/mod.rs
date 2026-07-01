@@ -63,6 +63,10 @@ pub struct FlashblocksConfig {
     /// Optional hex-encoded private key file path for the p2p node
     pub p2p_private_key_file: Option<String>,
 
+    /// Override for P2P private key hex (from KMS).
+    /// When set, takes precedence over p2p_private_key_file.
+    pub p2p_private_key_override: Option<String>,
+
     /// Comma-separated list of multiaddresses of known peers to connect to
     pub p2p_known_peers: Option<String>,
 
@@ -95,6 +99,7 @@ impl Default for FlashblocksConfig {
             p2p_enabled: false,
             p2p_port: 9009,
             p2p_private_key_file: None,
+            p2p_private_key_override: None,
             p2p_known_peers: None,
             p2p_max_peer_count: 50,
             p2p_send_full_payload: false,
@@ -204,7 +209,10 @@ impl TryFrom<BuilderArgs> for BuilderConfig {
         let number_contract_address = args.flashblocks.flashblocks_number_contract_address;
 
         Ok(Self {
-            builder_signer: args.builder_signer,
+            // A `kms:` reference resolves to `None` here and is injected after
+            // the payload builder is constructed (see node startup); a literal
+            // key is used directly.
+            builder_signer: args.builder_signer.as_ref().and_then(|k| k.literal()),
             block_time: Duration::from_millis(args.chain_block_time),
             block_time_leeway: Duration::from_secs(args.extra_block_deadline_secs),
             da_config: Default::default(),
@@ -222,6 +230,7 @@ impl TryFrom<BuilderArgs> for BuilderConfig {
                 p2p_enabled: args.flashblocks.p2p.p2p_enabled,
                 p2p_port: args.flashblocks.p2p.p2p_port,
                 p2p_private_key_file: args.flashblocks.p2p.p2p_private_key_file,
+                p2p_private_key_override: None,
                 p2p_known_peers: args.flashblocks.p2p.p2p_known_peers,
                 p2p_max_peer_count: args.flashblocks.p2p.p2p_max_peer_count,
                 p2p_send_full_payload: args.flashblocks.p2p.p2p_send_full_payload,

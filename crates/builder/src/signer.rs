@@ -69,6 +69,54 @@ impl FromStr for Signer {
     }
 }
 
+/// Builder secret key input parsed from `--rollup.builder-secret-key` /
+/// `BUILDER_SECRET_KEY`.
+///
+/// Accepts either a literal secp256k1 secret key hex, or a `kms:<key-name>`
+/// reference that is resolved from KMS at node startup (so no new flag is
+/// required to source the builder key from KMS).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuilderSecretKey {
+    /// Literal secret key provided directly on the command line / env.
+    Literal(Signer),
+    /// `kms:<key-name>` reference, resolved from KMS at startup.
+    Kms(String),
+}
+
+impl BuilderSecretKey {
+    /// Returns the literal [`Signer`] when this is not a KMS reference.
+    pub fn literal(&self) -> Option<Signer> {
+        match self {
+            Self::Literal(signer) => Some(*signer),
+            Self::Kms(_) => None,
+        }
+    }
+
+    /// Returns the KMS key name when this is a `kms:` reference.
+    pub fn kms_ref(&self) -> Option<&str> {
+        match self {
+            Self::Kms(name) => Some(name),
+            Self::Literal(_) => None,
+        }
+    }
+}
+
+impl FromStr for BuilderSecretKey {
+    type Err = eyre::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Some(name) = s.trim().strip_prefix("kms:") {
+            let name = name.trim();
+            if name.is_empty() {
+                eyre::bail!("empty KMS key name in 'kms:' builder secret key reference");
+            }
+            Ok(Self::Kms(name.to_string()))
+        } else {
+            Ok(Self::Literal(Signer::from_str(s)?))
+        }
+    }
+}
+
 /// Converts a public key to an Ethereum address
 pub fn public_key_to_address(public_key: &PublicKey) -> Address {
     // Get uncompressed public key (65 bytes: 0x04 + 64 bytes)
