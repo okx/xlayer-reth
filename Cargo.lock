@@ -6416,6 +6416,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ok-kms-rust"
+version = "0.1.0"
+source = "git+ssh://git@gitlab.okg.com/okcoin-commons/ok-kms-rust.git?tag=v1.0.0#dda1c2b207877a605163fd3d80b406c0dce8b35b"
+dependencies = [
+ "libloading",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14229,6 +14238,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "xlayer-kms"
+version = "0.1.0"
+dependencies = [
+ "ok-kms-rust",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "xlayer-legacy-rpc"
 version = "0.1.0"
 dependencies = [
@@ -14275,6 +14292,7 @@ dependencies = [
  "clap",
  "either",
  "eyre",
+ "hex",
  "humantime",
  "op-alloy-network",
  "reth",
@@ -14292,6 +14310,7 @@ dependencies = [
  "xlayer-builder",
  "xlayer-chainspec",
  "xlayer-flashblocks",
+ "xlayer-kms",
  "xlayer-legacy-rpc",
  "xlayer-monitor",
  "xlayer-rpc",

@@ -16,6 +16,7 @@ workspace = true
 xlayer-builder.workspace = true
 xlayer-flashblocks.workspace = true
 xlayer-chainspec.workspace = true
+xlayer-kms.workspace = true
 xlayer-legacy-rpc.workspace = true
 xlayer-monitor.workspace = true
 xlayer-rpc.workspace = true
@@ -43,6 +44,7 @@ clap.workspace = true
 tracing.workspace = true
 url.workspace = true
 eyre.workspace = true
+hex.workspace = true
 humantime.workspace = true
 either.workspace = true
 

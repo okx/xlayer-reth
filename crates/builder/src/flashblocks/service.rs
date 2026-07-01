@@ -45,7 +45,9 @@ impl FlashblocksServiceBuilder {
         let (incoming_message_rx, outgoing_message_tx) = if self.0.flashblocks.p2p_enabled {
             let mut builder = crate::p2p::NodeBuilder::new();
 
-            if let Some(ref private_key_file) = self.0.flashblocks.p2p_private_key_file
+            if let Some(ref override_hex) = self.0.flashblocks.p2p_private_key_override {
+                builder = builder.with_keypair_hex_string(override_hex.clone());
+            } else if let Some(ref private_key_file) = self.0.flashblocks.p2p_private_key_file
                 && !private_key_file.is_empty()
             {
                 let private_key_hex = std::fs::read_to_string(private_key_file)

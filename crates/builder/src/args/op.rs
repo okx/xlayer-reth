@@ -2,7 +2,7 @@
 //!
 //! Builder-specific configuration for the flashblock payload builder.
 
-use crate::signer::Signer;
+use crate::signer::BuilderSecretKey;
 use alloy_primitives::Address;
 use anyhow::{anyhow, Result};
 use clap::Parser;
@@ -13,9 +13,11 @@ use reth_optimism_cli::commands::Commands;
 /// Parameters for the flashblock builder configuration.
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
 pub struct BuilderArgs {
-    /// Builder secret key for signing last transaction in block
+    /// Builder secret key for signing last transaction in block.
+    /// Accepts a literal hex secret key, or a `kms:<key-name>` reference
+    /// resolved from KMS at startup.
     #[arg(long = "rollup.builder-secret-key", env = "BUILDER_SECRET_KEY")]
-    pub builder_signer: Option<Signer>,
+    pub builder_signer: Option<BuilderSecretKey>,
 
     /// chain block time in milliseconds
     #[arg(long = "rollup.chain-block-time", default_value = "1000", env = "CHAIN_BLOCK_TIME")]

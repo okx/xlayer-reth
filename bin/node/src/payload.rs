@@ -7,6 +7,7 @@ use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
 use xlayer_builder::{
     args::BuilderArgs,
     flashblocks::{BuilderConfig, FlashblocksServiceBuilder},
+    signer::Signer,
     traits::{NodeBounds, PoolBounds},
 };
 
@@ -35,6 +36,19 @@ impl XLayerPayloadServiceBuilder {
             OpDAConfig::default(),
             OpGasLimitConfig::default(),
         )
+    }
+
+    pub fn set_p2p_key_override(&mut self, hex: String) {
+        if let XLayerPayloadServiceBuilderInner::Flashblocks(ref mut builder) = self.builder {
+            builder.0.flashblocks.p2p_private_key_override = Some(hex);
+        }
+    }
+
+    /// Inject the builder signer resolved from KMS (flashblocks mode only).
+    pub fn set_builder_signer(&mut self, signer: Signer) {
+        if let XLayerPayloadServiceBuilderInner::Flashblocks(ref mut builder) = self.builder {
+            builder.0.builder_signer = Some(signer);
+        }
     }
 
     pub fn with_config(
