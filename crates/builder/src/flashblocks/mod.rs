@@ -7,6 +7,8 @@ use core::{
     time::Duration,
 };
 use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
+use std::sync::Arc;
+use xlayer_filter::{FilterConfig, FilterHandle, ReqwestRcsClient, SystemClock};
 
 mod best_txs;
 mod builder;
@@ -155,6 +157,10 @@ pub struct BuilderConfig {
 
     /// Configuration values that are specific to the flashblocks builder.
     pub flashblocks: FlashblocksConfig,
+
+    /// XLayer Filter handle (FR-1/FR-9). `None` when the master switch is off, in which case
+    /// the block-building hot path performs no screening (full bypass).
+    pub xlayer_filter: Option<Arc<FilterHandle>>,
 }
 
 impl core::fmt::Debug for BuilderConfig {
@@ -174,6 +180,7 @@ impl core::fmt::Debug for BuilderConfig {
             .field("flashblocks", &self.flashblocks)
             .field("max_gas_per_txn", &self.max_gas_per_txn)
             .field("gasless_block_gas_limit", &self.gasless_block_gas_limit)
+            .field("xlayer_filter_enabled", &self.xlayer_filter.is_some())
             .finish()
     }
 }
@@ -189,6 +196,7 @@ impl Default for BuilderConfig {
             max_gas_per_txn: None,
             gasless_block_gas_limit: None,
             flashblocks: FlashblocksConfig::default(),
+            xlayer_filter: None,
         }
     }
 }
@@ -207,6 +215,8 @@ impl TryFrom<BuilderArgs> for BuilderConfig {
         let disable_async_calculate_state_root =
             args.flashblocks.flashblocks_disable_async_calculate_state_root;
         let number_contract_address = args.flashblocks.flashblocks_number_contract_address;
+
+        let xlayer_filter = build_xlayer_filter_handle(&args.xlayer_filter)?;
 
         Ok(Self {
             // A `kms:` reference resolves to `None` here and is injected after
@@ -238,8 +248,42 @@ impl TryFrom<BuilderArgs> for BuilderConfig {
                 ws_subscriber_limit: args.flashblocks.ws_subscriber_limit,
                 replay_from_persistence_file: args.flashblocks.replay_from_persistence_file,
             },
+            xlayer_filter,
         })
     }
+}
+
+/// Builds the XLayer Filter handle from CLI args (FR-9/FR-2). Returns `Ok(None)` when the
+/// master switch is off (full bypass). When enabled, `rcs_base_url` is required (startup
+/// error otherwise) and the background workers are spawned on the current tokio runtime.
+fn build_xlayer_filter_handle(
+    args: &crate::args::XLayerFilterArgs,
+) -> eyre::Result<Option<Arc<FilterHandle>>> {
+    if !args.enabled {
+        return Ok(None);
+    }
+    let rcs_base_url = args.rcs_base_url.clone().ok_or_else(|| {
+        eyre::eyre!("xlayer-filter enabled but --xlayer-filter.rcs-base-url is missing")
+    })?;
+
+    let config = FilterConfig {
+        enabled: true,
+        rcs_base_url: rcs_base_url.clone(),
+        batch_window: Duration::from_millis(args.batch_window_ms),
+        submitted_confirmation_timeout: Duration::from_secs(
+            args.submitted_confirmation_timeout_seconds,
+        ),
+        risk_module_unresponsive_timeout: Duration::from_secs(
+            args.risk_module_unresponsive_timeout_seconds,
+        ),
+        total_retry_timeout: Duration::from_secs(args.total_retry_timeout_seconds),
+        rules_version_poll_interval: Duration::from_millis(args.rules_version_poll_interval_ms),
+    };
+
+    let client =
+        Arc::new(ReqwestRcsClient::new(rcs_base_url).map_err(|e| eyre::eyre!(e.to_string()))?);
+    let clock = Arc::new(SystemClock);
+    Ok(Some(FilterHandle::spawn(config, client, clock)))
 }
 
 impl BuilderConfig {

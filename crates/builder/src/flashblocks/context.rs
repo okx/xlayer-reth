@@ -55,6 +55,7 @@ use revm::{
     context::result::ResultAndState, inspector::NoOpInspector, interpreter::as_u64_saturated,
     DatabaseCommit,
 };
+use xlayer_filter::{FilterHandle, Screen, ScreenInput};
 
 /// Container type that holds all necessities to build a new payload.
 #[derive(Debug)]
@@ -87,6 +88,9 @@ pub struct FlashblocksBuilderCtx {
     pub gasless_contract: Option<GaslessContract>,
     /// Per-block gas budget for gasless transactions (in gas units). `None` = unlimited.
     pub gasless_block_gas_limit: Option<u64>,
+    /// XLayer Filter handle (FR-1). `None` when the risk-control master switch is off, in
+    /// which case `screen_tx` is never called and the hot path pays zero extra cost.
+    pub filter: Option<Arc<FilterHandle>>,
 }
 
 impl FlashblocksBuilderCtx {
@@ -717,6 +721,37 @@ impl FlashblocksBuilderCtx {
                 info.gasless_budget_exhausted = true;
                 best_txs.mark_invalid(tx.signer(), tx.nonce());
                 continue;
+            }
+
+            // XLayer Filter (FR-1): rule-driven screening on the successful execution
+            // result, just before this tx would be committed. Runs only when the master
+            // switch is on (`filter` is `Some`); disabled → zero hot-path cost. `Deny` and
+            // `AuditPending` skip commit/receipt/fee entirely so the same-block execution
+            // baseline is never polluted (TD §4.2, FR-1 AC3).
+            if let Some(filter) = self.filter.as_ref() {
+                let decision = filter.screen_tx(&ScreenInput {
+                    tx_hash,
+                    origin: tx.signer(),
+                    tx_to: tx.to(),
+                    nonce: tx.nonce(),
+                    value: tx.value(),
+                    block_height: self.block_number(),
+                    logs: result.logs(),
+                });
+                match decision {
+                    // Allow / already-approved-and-consistent → fall through to normal commit.
+                    Screen::Allow | Screen::AuditApproved => {}
+                    Screen::Deny => {
+                        best_txs.mark_invalid(tx.signer(), tx.nonce());
+                        continue;
+                    }
+                    Screen::AuditPending => {
+                        // Skip commit/receipt/fee; do NOT mark_invalid (tx stays in the pool
+                        // for a later round). Adjudication state lives in the filter's
+                        // BufferPool across rounds.
+                        continue;
+                    }
+                }
             }
 
             info.cumulative_gas_used += gas_used;

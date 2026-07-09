@@ -95,6 +95,10 @@ impl FlashblockHandlerContext {
             max_gas_per_txn: self.max_gas_per_txn,
             gasless_contract: self.gasless_contract,
             gasless_block_gas_limit: None,
+            // Filter screening applies on the sequencer's building path (wired via
+            // `BuilderConfig` in builder.rs). This handler/replay context is not that path,
+            // so screening is disabled here.
+            filter: None,
         }
     }
 }

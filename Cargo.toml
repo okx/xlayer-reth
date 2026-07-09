@@ -17,6 +17,7 @@ members = [
     "crates/chainspec",
     "crates/flashblocks",
     "crates/kms",
+    "crates/xlayer-filter",
     "crates/legacy-rpc",
     "crates/monitor",
     "crates/rpc",
@@ -67,6 +68,7 @@ xlayer-builder = { path = "crates/builder" }
 xlayer-chainspec = { path = "crates/chainspec" }
 xlayer-kms = { path = "crates/kms" }
 xlayer-flashblocks = { path = "crates/flashblocks" }
+xlayer-filter = { path = "crates/xlayer-filter" }
 xlayer-legacy-rpc = { path = "crates/legacy-rpc" }
 xlayer-monitor = { path = "crates/monitor" }
 xlayer-reth-node = { path = "bin/node" }
@@ -164,6 +166,8 @@ alloy-rpc-types-engine = { version = "1.4.3", default-features = false }
 alloy-rpc-types-eth = { version = "1.4.3" }
 alloy-signer-local = { version = "1.4.3", default-features = false }
 alloy-sol-types = { version = "1.5.0", default-features = false }
+# Dynamic ABI decoding + topic0 keccak for XLayer Filter event matching (already in Cargo.lock transitively).
+alloy-dyn-abi = { version = "1.5" }
 
 # op-alloy
 alloy-op-evm = { version = "0.26.3", default-features = false }
