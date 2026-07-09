@@ -53,6 +53,9 @@ pub struct BuilderArgs {
 
     #[command(flatten)]
     pub flashblocks: FlashblocksArgs,
+
+    #[command(flatten)]
+    pub xlayer_filter: XLayerFilterArgs,
 }
 
 impl BuilderArgs {
@@ -185,6 +188,52 @@ impl Default for FlashblocksArgs {
         let Commands::Node(node_command) = args.command else { unreachable!() };
         node_command.ext.flashblocks
     }
+}
+
+/// XLayer Filter (rule-driven transaction risk-control interception) configuration
+/// (TD §4.3, XLOP-1142). Flattened into [`BuilderArgs`]. All keys are new; the master
+/// switch and timeouts are read once at startup (no runtime hot-switch).
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
+pub struct XLayerFilterArgs {
+    /// FR-9 master switch. `false` = full bypass (no filter handle, zero hot-path cost);
+    /// `true` = enter the FR-2 blocking rule load.
+    #[arg(
+        id = "xlayer-filter.enabled",
+        long = "xlayer-filter.enabled",
+        default_value = "false",
+        env = "XLAYER_FILTER_ENABLED"
+    )]
+    pub enabled: bool,
+
+    /// RCS REST base URL (FR-2/FR-5). Required when the switch is enabled; a missing value
+    /// is a startup error.
+    #[arg(
+        id = "xlayer-filter.rcs-base-url",
+        long = "xlayer-filter.rcs-base-url",
+        env = "RCS_BASE_URL"
+    )]
+    pub rcs_base_url: Option<String>,
+
+    /// Batch-submit accumulation window in milliseconds (FR-5).
+    #[arg(long = "xlayer-filter.batch-window-ms", default_value = "200")]
+    pub batch_window_ms: u64,
+
+    /// `Submitted → NotSubmitted` confirmation timeout in seconds (FR-6).
+    #[arg(long = "xlayer-filter.submitted-confirmation-timeout-seconds", default_value = "8")]
+    pub submitted_confirmation_timeout_seconds: u64,
+
+    /// `Pending → NotSubmitted` risk-module unresponsive timeout in seconds (FR-6).
+    #[arg(long = "xlayer-filter.risk-module-unresponsive-timeout-seconds", default_value = "20")]
+    pub risk_module_unresponsive_timeout_seconds: u64,
+
+    /// Cumulative fail-open/fail-close fallback timeout in seconds (FR-6). Must exceed the
+    /// RCS active/standby switch grace period (deployment invariant, TD §7 R-1).
+    #[arg(long = "xlayer-filter.total-retry-timeout-seconds", default_value = "90")]
+    pub total_retry_timeout_seconds: u64,
+
+    /// `GET /rules/version` poll interval in milliseconds (FR-3).
+    #[arg(long = "xlayer-filter.rules-version-poll-interval-ms", default_value = "2000")]
+    pub rules_version_poll_interval_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]

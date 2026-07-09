@@ -14507,6 +14507,7 @@ dependencies = [
  "tracing-subscriber 0.3.23",
  "url",
  "xlayer-bridge-intercept",
+ "xlayer-filter",
  "xlayer-trace-monitor",
 ]
 
@@ -14552,6 +14553,22 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite",
+]
+
+[[package]]
+name = "xlayer-filter"
+version = "0.1.0"
+dependencies = [
+ "alloy-dyn-abi",
+ "alloy-primitives",
+ "alloy-sol-types",
+ "async-trait",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

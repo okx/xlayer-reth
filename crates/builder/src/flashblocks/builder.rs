@@ -316,6 +316,7 @@ where
             // approving the tx.
             gasless_contract: self.evm_config.gasless_contract(),
             gasless_block_gas_limit: self.config.gasless_block_gas_limit,
+            filter: self.config.xlayer_filter.clone(),
         })
     }
 
