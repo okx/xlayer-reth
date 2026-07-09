@@ -6,7 +6,7 @@ use crate::{
 };
 use std::{sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 use alloy_consensus::{
     conditional::BlockConditionalAttributes, transaction::Recovered, Eip658Value, Transaction,
@@ -315,6 +315,10 @@ impl FlashblocksBuilderCtx {
         }
     }
 
+    /// Executes the sequencer-provided txs (`attributes().transactions`) via `transact_maybe_gasless`,
+    /// so gasless txs get `is_gasless` set (a plain `evm.transact` would skip them at the base-fee
+    /// check). Does NOT apply the per-block gasless gas budget — same reason as
+    /// `execute_cached_flashblocks_transactions`.
     pub(super) fn execute_sequencer_transactions(
         &self,
         db: &mut State<impl Database>,
@@ -357,7 +361,9 @@ impl FlashblocksBuilderCtx {
                     ))
                 })?;
 
-            let ResultAndState { result, state } = match evm.transact(&sequencer_tx) {
+            let (ResultAndState { result, state }, _is_gasless) = match self
+                .transact_maybe_gasless(&mut evm, &sequencer_tx)
+            {
                 Ok(res) => res,
                 Err(err) => {
                     if err.is_invalid_tx_err() {
@@ -710,7 +716,7 @@ impl FlashblocksBuilderCtx {
                     limit,
                 ));
                 if !info.gasless_budget_exhausted {
-                    debug!(
+                    warn!(
                         target: "payload_builder",
                         id = ?self.payload_id(),
                         gasless_gas_used = info.cumulative_gasless_gas_used,
