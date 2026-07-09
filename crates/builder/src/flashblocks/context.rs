@@ -6,7 +6,7 @@ use crate::{
 };
 use std::{sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, trace};
 
 use alloy_consensus::{
     conditional::BlockConditionalAttributes, transaction::Recovered, Eip658Value, Transaction,
@@ -317,8 +317,10 @@ impl FlashblocksBuilderCtx {
 
     /// Executes the sequencer-provided txs (`attributes().transactions`) via `transact_maybe_gasless`,
     /// so gasless txs get `is_gasless` set (a plain `evm.transact` would skip them at the base-fee
-    /// check). Does NOT apply the per-block gasless gas budget — same reason as
-    /// `execute_cached_flashblocks_transactions`.
+    /// check). Does NOT apply the per-block gasless gas budget: that budget is a builder-side
+    /// mempool-selection policy (`execute_best_transactions`), not a consensus rule (the
+    /// executor/validation never checks it); these txs are predetermined by the attributes, so
+    /// re-capping could drop a canonical tx and diverge.
     pub(super) fn execute_sequencer_transactions(
         &self,
         db: &mut State<impl Database>,
@@ -417,8 +419,14 @@ impl FlashblocksBuilderCtx {
     }
 
     /// Executes cached transactions received via P2P, used to replay previously sequenced flashblock
-    /// transactions when the builder changes before the full block is built.
-    /// Detects whether `tx` should execute gaslessly and runs it through the gasless fee hook.
+    /// transactions when the builder changes before the full block is built. (Same path — identical
+    /// name and behavior — as on `main`; not introduced by this change.)
+    ///
+    /// Runs each tx through `transact_maybe_gasless` so gasless txs get `is_gasless` set. Like
+    /// `execute_sequencer_transactions`, it does NOT apply the per-block gasless gas budget: these
+    /// txs are a predetermined verbatim replay, so re-capping could drop a canonical tx and break
+    /// failover reproduction (the budget is a builder-side mempool-selection policy, enforced only
+    /// in `execute_best_transactions`).
     pub(super) fn execute_cached_flashblocks_transactions(
         &self,
         info: &mut ExecutionInfo,
@@ -716,7 +724,7 @@ impl FlashblocksBuilderCtx {
                     limit,
                 ));
                 if !info.gasless_budget_exhausted {
-                    warn!(
+                    debug!(
                         target: "payload_builder",
                         id = ?self.payload_id(),
                         gasless_gas_used = info.cumulative_gasless_gas_used,
