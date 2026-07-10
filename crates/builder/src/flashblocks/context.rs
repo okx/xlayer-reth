@@ -491,7 +491,7 @@ impl FlashblocksBuilderCtx {
             }
 
             // Ensure transaction execution is valid.
-            let (ResultAndState { result, state }, is_gasless) =
+            let (ResultAndState { result, state }, _is_gasless) =
                 match self.transact_maybe_gasless(&mut evm, &recovered_tx) {
                     Ok(res) => res,
                     Err(err) => {
@@ -524,15 +524,11 @@ impl FlashblocksBuilderCtx {
             // Commit changes
             evm.db_mut().commit(state);
 
-            // update add to total fees. Gasless txs contribute no miner fee (see the equivalent
-            // note in `execute_best_transactions`).
-            let miner_fee = if is_gasless {
-                0
-            } else {
-                recovered_tx
-                    .effective_tip_per_gas(self.base_fee())
-                    .expect("fee is always valid; execution succeeded")
-            };
+            // update add to total fees. Gasless txs contribute no miner fee: a zero-priced gasless
+            // tx yields `None` from `effective_tip_per_gas` under a non-zero base fee, so `unwrap_or(0)`
+            // both avoids a panic and accounts zero fee for it (see the equivalent note in
+            // `execute_best_transactions`).
+            let miner_fee = recovered_tx.effective_tip_per_gas(self.base_fee()).unwrap_or(0);
             info.total_fees += U256::from(miner_fee) * U256::from(gas_used);
 
             // Append sender and transaction to the respective lists
@@ -778,14 +774,9 @@ impl FlashblocksBuilderCtx {
             evm.db_mut().commit(state);
 
             // update add to total fees. Gasless txs contribute no miner fee (they execute with an
-            // effective gas price of 0) and `effective_tip_per_gas` would return `None` for a
-            // zero-priced tx under a non-zero base fee, so skip the fee accounting for them.
-            let miner_fee = if is_gasless {
-                0
-            } else {
-                tx.effective_tip_per_gas(base_fee)
-                    .expect("fee is always valid; execution succeeded")
-            };
+            // effective gas price of 0) and `effective_tip_per_gas` returns `None` for a zero-priced
+            // tx under a non-zero base fee, so `unwrap_or(0)` accounts zero fee and avoids a panic.
+            let miner_fee = tx.effective_tip_per_gas(base_fee).unwrap_or(0);
             info.total_fees += U256::from(miner_fee) * U256::from(gas_used);
 
             // append sender and transaction to the respective lists
