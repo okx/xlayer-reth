@@ -494,7 +494,7 @@ impl FlashblocksBuilderCtx {
             }
 
             // Ensure transaction execution is valid.
-            let (ResultAndState { result, state }, is_gasless) =
+            let (ResultAndState { result, state }, _is_gasless) =
                 match self.transact_maybe_gasless(&mut evm, &recovered_tx) {
                     Ok(res) => res,
                     Err(err) => {
@@ -527,15 +527,10 @@ impl FlashblocksBuilderCtx {
             // Commit changes
             evm.db_mut().commit(state);
 
-            // update add to total fees. Gasless txs contribute no miner fee (see the equivalent
-            // note in `execute_best_transactions`).
-            let miner_fee = if is_gasless {
-                0
-            } else {
-                recovered_tx
-                    .effective_tip_per_gas(self.base_fee())
-                    .expect("fee is always valid; execution succeeded")
-            };
+            // update add to total fees. Gasless txs contribute no miner fee: they execute with an
+            // effective gas price of 0, so `effective_tip_per_gas` returns `None` and `unwrap_or(0)`
+            // yields a 0 tip for them (see the equivalent note in `execute_best_transactions`).
+            let miner_fee = recovered_tx.effective_tip_per_gas(self.base_fee()).unwrap_or(0);
             info.total_fees += U256::from(miner_fee) * U256::from(gas_used);
 
             // Append sender and transaction to the respective lists
@@ -745,7 +740,7 @@ impl FlashblocksBuilderCtx {
 
             if is_gasless
                 && let Some(limit) = self.gasless_block_gas_limit
-                && info.cumulative_gasless_gas_used + gas_used > limit
+                && info.cumulative_gasless_gas_used.saturating_add(gas_used) > limit
             {
                 log_txn(TxnExecutionResult::GaslessBlockGasLimitExceeded(
                     info.cumulative_gasless_gas_used,
@@ -800,15 +795,10 @@ impl FlashblocksBuilderCtx {
             // commit changes
             evm.db_mut().commit(state);
 
-            // update add to total fees. Gasless txs contribute no miner fee (they execute with an
-            // effective gas price of 0) and `effective_tip_per_gas` would return `None` for a
-            // zero-priced tx under a non-zero base fee, so skip the fee accounting for them.
-            let miner_fee = if is_gasless {
-                0
-            } else {
-                tx.effective_tip_per_gas(base_fee)
-                    .expect("fee is always valid; execution succeeded")
-            };
+            // update add to total fees. Gasless txs contribute no miner fee: they execute with an
+            // effective gas price of 0, so `effective_tip_per_gas` returns `None` for a zero-priced
+            // tx under a non-zero base fee and `unwrap_or(0)` yields a 0 tip for them.
+            let miner_fee = tx.effective_tip_per_gas(base_fee).unwrap_or(0);
             info.total_fees += U256::from(miner_fee) * U256::from(gas_used);
 
             // append sender and transaction to the respective lists

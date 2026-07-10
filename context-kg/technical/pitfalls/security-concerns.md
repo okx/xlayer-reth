@@ -62,3 +62,23 @@ This is called in both `parse_block_param()` and `call_eth_get_block_by_hash()` 
 **Risk**: `XLayerChainSpecParser` supports `legacyXLayerBlock` override via environment variable, which could alter chain behavior.
 
 **Mitigation**: This is a deployment configuration mechanism, not a runtime input. The environment variable is only read during chain spec parsing at startup.
+
+## 8. Integer Overflow in Gas / Fee Arithmetic
+
+**Risk**: Accumulating gas counters (`cumulative_gas_used`, `cumulative_gasless_gas_used`, per-tx `gas_limit`, block/budget limits) are `u64`. A plain `+` on attacker-influenceable or adversarial values can wrap in release builds (no panic) or panic in debug builds — either way corrupting a block-gas-limit / budget check and letting a transaction bypass the cap.
+
+**Rule (mandatory for all gas-related additions)**: NEVER use a bare `+` / `+=` when adding gas values. Always use `saturating_add` (or `checked_add` when you must detect the overflow explicitly) so the result clamps at `u64::MAX` and the `> limit` comparison still rejects the tx instead of wrapping to a small number.
+
+```rust
+// WRONG — wraps on overflow, can defeat the limit check
+if self.cumulative_gas_used + tx_gas_limit > block_gas_limit { ... }
+
+// CORRECT
+if self.cumulative_gas_used.saturating_add(tx_gas_limit) > block_gas_limit { ... }
+```
+
+**Affected/fixed code (XLOP-1138)**:
+- `crates/builder/src/flashblocks/utils/execution.rs` — block gas-limit check now uses `cumulative_gas_used.saturating_add(tx_gas_limit)`.
+- `crates/builder/src/flashblocks/context.rs` — gasless per-block budget check now uses `cumulative_gasless_gas_used.saturating_add(gas_used)`.
+
+**Related (panic-avoidance, same change-set)**: `effective_tip_per_gas(base_fee)` returns `Option`; it is `None` for a zero-priced (gasless) tx under a non-zero base fee. Use `.unwrap_or(0)` rather than `.expect(...)` so miner-fee accounting degrades to a 0 tip instead of panicking during payload building. Affected: `crates/builder/src/default/builder.rs`, `crates/builder/src/flashblocks/context.rs`.

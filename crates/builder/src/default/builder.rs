@@ -334,10 +334,10 @@ where
         info.accumulate_gas(tx_gas_used, tx_gas_used);
         info.cumulative_da_bytes_used += tx_da_size;
 
-        // Track fees for payload metadata
-        let miner_fee = recovered_tx
-            .effective_tip_per_gas(base_fee)
-            .expect("fee is always valid; execution succeeded");
+        // Track fees for payload metadata. `effective_tip_per_gas` returns `None` for a
+        // zero-priced (e.g. gasless) tx under a non-zero base fee, so fall back to a 0 tip
+        // instead of panicking.
+        let miner_fee = recovered_tx.effective_tip_per_gas(base_fee).unwrap_or(0);
         info.total_fees += U256::from(miner_fee) * U256::from(tx_gas_used);
     }
 
