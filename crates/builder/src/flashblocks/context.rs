@@ -364,19 +364,25 @@ impl FlashblocksBuilderCtx {
                     ))
                 })?;
 
-            let (ResultAndState { result, state }, _is_gasless) = match self
-                .transact_maybe_gasless(&mut evm, &sequencer_tx)
-            {
-                Ok(res) => res,
-                Err(err) => {
-                    if err.is_invalid_tx_err() {
-                        trace!(target: "payload_builder", %err, ?sequencer_tx, "Error in sequencer transaction, skipping.");
-                        continue;
+            let (ResultAndState { result, state }, _is_gasless) =
+                match self.transact_maybe_gasless(&mut evm, &sequencer_tx) {
+                    Ok(res) => res,
+                    Err(err) => {
+                        if err.is_invalid_tx_err() {
+                            warn!(
+                                target: "payload_builder",
+                                id = %self.payload_id(),
+                                block_number = self.block_number(),
+                                tx_hash = %sequencer_tx.tx_hash(),
+                                %err,
+                                "Error in sequencer transaction, skipping."
+                            );
+                            continue;
+                        }
+                        // this is an error that we should treat as fatal for this attempt
+                        return Err(PayloadBuilderError::EvmExecutionError(Box::new(err)));
                     }
-                    // this is an error that we should treat as fatal for this attempt
-                    return Err(PayloadBuilderError::EvmExecutionError(Box::new(err)));
-                }
-            };
+                };
 
             // add gas used by the transaction to cumulative gas used, before creating the receipt
             let gas_used = result.tx_gas_used();
@@ -671,31 +677,44 @@ impl FlashblocksBuilderCtx {
             // Gasless: zero-priced, whitelisted txs are executed with the base-fee check relaxed
             // (gated on the chain's gasless contract approving the tx). Non-gasless txs are
             // unaffected — see [`Self::transact_maybe_gasless`].
-            let (ResultAndState { result, state }, is_gasless) = match self
-                .transact_maybe_gasless(&mut evm, &tx)
-            {
-                Ok(res) => res,
-                Err(err) => {
-                    if let Some(err) = err.as_invalid_tx_err() {
-                        if err.is_nonce_too_low() {
-                            // if the nonce is too low, we can skip this transaction
-                            log_txn(TxnExecutionResult::NonceTooLow);
-                            trace!(target: "payload_builder", %err, ?tx, "skipping nonce too low transaction");
-                        } else {
-                            // if the transaction is invalid, we can skip it and all of its
-                            // descendants
-                            log_txn(TxnExecutionResult::InternalError(err.0.clone()));
-                            trace!(target: "payload_builder", %err, ?tx, "skipping invalid transaction and its descendants");
-                            best_txs.mark_invalid(tx.signer(), tx.nonce());
-                        }
+            let (ResultAndState { result, state }, is_gasless) =
+                match self.transact_maybe_gasless(&mut evm, &tx) {
+                    Ok(res) => res,
+                    Err(err) => {
+                        if let Some(err) = err.as_invalid_tx_err() {
+                            if err.is_nonce_too_low() {
+                                // if the nonce is too low, we can skip this transaction
+                                log_txn(TxnExecutionResult::NonceTooLow);
+                                warn!(
+                                    target: "payload_builder",
+                                    id = %self.payload_id(),
+                                    block_number = self.block_number(),
+                                    tx_hash = %tx.tx_hash(),
+                                    %err,
+                                    "skipping nonce too low transaction"
+                                );
+                            } else {
+                                // if the transaction is invalid, we can skip it and all of its
+                                // descendants
+                                log_txn(TxnExecutionResult::InternalError(err.0.clone()));
+                                warn!(
+                                    target: "payload_builder",
+                                    id = %self.payload_id(),
+                                    block_number = self.block_number(),
+                                    tx_hash = %tx.tx_hash(),
+                                    %err,
+                                    "skipping invalid transaction and its descendants"
+                                );
+                                best_txs.mark_invalid(tx.signer(), tx.nonce());
+                            }
 
-                        continue;
+                            continue;
+                        }
+                        // this is an error that we should treat as fatal for this attempt
+                        log_txn(TxnExecutionResult::EvmError);
+                        return Err(PayloadBuilderError::evm(err));
                     }
-                    // this is an error that we should treat as fatal for this attempt
-                    log_txn(TxnExecutionResult::EvmError);
-                    return Err(PayloadBuilderError::evm(err));
-                }
-            };
+                };
 
             self.metrics.tx_simulation_duration.record(tx_simulation_start_time.elapsed());
             self.metrics.tx_byte_size.record(tx.inner().size() as f64);
