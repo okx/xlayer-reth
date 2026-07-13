@@ -12,7 +12,7 @@ workspace = true
 
 [dependencies]
 xlayer-trace-monitor.workspace = true
-xlayer-filter.workspace = true
+rcs-filter.workspace = true
 
 # reth
 reth.workspace = true

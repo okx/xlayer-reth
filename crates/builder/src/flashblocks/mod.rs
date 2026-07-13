@@ -6,9 +6,9 @@ use core::{
     net::{Ipv4Addr, SocketAddr},
     time::Duration,
 };
+use rcs_filter::{FilterConfig, FilterHandle, ReqwestRcsClient, SystemClock};
 use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
 use std::sync::Arc;
-use xlayer_filter::{FilterConfig, FilterHandle, ReqwestRcsClient, SystemClock};
 
 mod best_txs;
 mod builder;
@@ -158,9 +158,9 @@ pub struct BuilderConfig {
     /// Configuration values that are specific to the flashblocks builder.
     pub flashblocks: FlashblocksConfig,
 
-    /// XLayer Filter handle (FR-1/FR-9). `None` when the master switch is off, in which case
+    /// RCS Filter handle (FR-1/FR-9). `None` when the master switch is off, in which case
     /// the block-building hot path performs no screening (full bypass).
-    pub xlayer_filter: Option<Arc<FilterHandle>>,
+    pub rcs_filter: Option<Arc<FilterHandle>>,
 }
 
 impl core::fmt::Debug for BuilderConfig {
@@ -180,7 +180,7 @@ impl core::fmt::Debug for BuilderConfig {
             .field("flashblocks", &self.flashblocks)
             .field("max_gas_per_txn", &self.max_gas_per_txn)
             .field("gasless_block_gas_limit", &self.gasless_block_gas_limit)
-            .field("xlayer_filter_enabled", &self.xlayer_filter.is_some())
+            .field("rcs_filter_enabled", &self.rcs_filter.is_some())
             .finish()
     }
 }
@@ -196,7 +196,7 @@ impl Default for BuilderConfig {
             max_gas_per_txn: None,
             gasless_block_gas_limit: None,
             flashblocks: FlashblocksConfig::default(),
-            xlayer_filter: None,
+            rcs_filter: None,
         }
     }
 }
@@ -216,7 +216,7 @@ impl TryFrom<BuilderArgs> for BuilderConfig {
             args.flashblocks.flashblocks_disable_async_calculate_state_root;
         let number_contract_address = args.flashblocks.flashblocks_number_contract_address;
 
-        let xlayer_filter = build_xlayer_filter_handle(&args.xlayer_filter)?;
+        let rcs_filter = build_rcs_filter_handle(&args.rcs_filter)?;
 
         Ok(Self {
             // A `kms:` reference resolves to `None` here and is injected after
@@ -248,22 +248,22 @@ impl TryFrom<BuilderArgs> for BuilderConfig {
                 ws_subscriber_limit: args.flashblocks.ws_subscriber_limit,
                 replay_from_persistence_file: args.flashblocks.replay_from_persistence_file,
             },
-            xlayer_filter,
+            rcs_filter,
         })
     }
 }
 
-/// Builds the XLayer Filter handle from CLI args (FR-9/FR-2). Returns `Ok(None)` when the
+/// Builds the RCS Filter handle from CLI args (FR-9/FR-2). Returns `Ok(None)` when the
 /// master switch is off (full bypass). When enabled, `rcs_base_url` is required (startup
 /// error otherwise) and the background workers are spawned on the current tokio runtime.
-fn build_xlayer_filter_handle(
-    args: &crate::args::XLayerFilterArgs,
+fn build_rcs_filter_handle(
+    args: &crate::args::RcsFilterArgs,
 ) -> eyre::Result<Option<Arc<FilterHandle>>> {
     if !args.enabled {
         return Ok(None);
     }
     let rcs_base_url = args.rcs_base_url.clone().ok_or_else(|| {
-        eyre::eyre!("xlayer-filter enabled but --xlayer-filter.rcs-base-url is missing")
+        eyre::eyre!("rcs-filter enabled but --rcs-filter.rcs-base-url is missing")
     })?;
 
     let config = FilterConfig {

@@ -7556,6 +7556,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "rcs-filter"
+version = "0.1.0"
+dependencies = [
+ "alloy-dyn-abi",
+ "alloy-primitives",
+ "alloy-sol-types",
+ "async-trait",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "recvmsg"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14106,6 +14122,7 @@ dependencies = [
  "op-revm",
  "parking_lot",
  "rand 0.9.2",
+ "rcs-filter",
  "reth",
  "reth-basic-payload-builder",
  "reth-chainspec",
@@ -14158,7 +14175,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber 0.3.22",
  "url",
- "xlayer-filter",
  "xlayer-trace-monitor",
 ]
 
@@ -14203,22 +14219,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite",
-]
-
-[[package]]
-name = "xlayer-filter"
-version = "0.1.0"
-dependencies = [
- "alloy-dyn-abi",
- "alloy-primitives",
- "alloy-sol-types",
- "async-trait",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
 ]
 
 [[package]]

@@ -65,13 +65,12 @@ impl FilterConfig {
     pub fn validate(&self) -> crate::Result<()> {
         if self.enabled && self.rcs_base_url.trim().is_empty() {
             return Err(crate::FilterError::Config(
-                "xlayer-filter enabled but rcs_base_url is empty".to_string(),
+                "rcs-filter enabled but rcs_base_url is empty".to_string(),
             ));
         }
         if self.enabled && self.terminal_entry_retention <= self.total_retry_timeout {
             return Err(crate::FilterError::Config(
-                "xlayer-filter terminal_entry_retention must exceed total_retry_timeout"
-                    .to_string(),
+                "rcs-filter terminal_entry_retention must exceed total_retry_timeout".to_string(),
             ));
         }
         Ok(())

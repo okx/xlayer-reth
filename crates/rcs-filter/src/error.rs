@@ -1,4 +1,4 @@
-//! Error types for the XLayer Filter (library crate → typed `thiserror` errors, TD §4.1).
+//! Error types for the RCS Filter (library crate → typed `thiserror` errors, TD §4.1).
 
 use thiserror::Error;
 

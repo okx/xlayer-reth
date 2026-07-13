@@ -86,10 +86,10 @@ where
             let guard = AbortOnDrop(handle.abort_handle());
             match handle.await {
                 Ok(()) => {
-                    warn!(target: "xlayer_filter", worker = name, "worker exited unexpectedly; restarting");
+                    warn!(target: "rcs_filter", worker = name, "worker exited unexpectedly; restarting");
                 }
                 Err(e) if e.is_panic() => {
-                    error!(target: "xlayer_filter", worker = name, "worker panicked; restarting");
+                    error!(target: "rcs_filter", worker = name, "worker panicked; restarting");
                 }
                 Err(_) => return, // cancelled (supervisor aborted) → stop.
             }
@@ -124,17 +124,17 @@ async fn rules_task(shared: Shared, client: Arc<dyn RcsClient>) {
                     // Keep the old rules and keep mining; do not pull the body (it would only be
                     // rejected). Distinct from the startup block, which never mines without rules.
                     warn!(
-                        target: "xlayer_filter",
+                        target: "rcs_filter",
                         protocol_version = v.protocol_version,
                         "advertised unsupported protocol_version; keeping current rules"
                     );
                 } else if let Err(e) = load_and_install(&shared, &client).await {
-                    warn!(target: "xlayer_filter", error = %e, "hot-reload rule pull failed; keeping current rules");
+                    warn!(target: "rcs_filter", error = %e, "hot-reload rule pull failed; keeping current rules");
                 }
             }
             Ok(_) => {}
             Err(e) => {
-                debug!(target: "xlayer_filter", error = %e, "rules/version probe failed; keeping current rules")
+                debug!(target: "rcs_filter", error = %e, "rules/version probe failed; keeping current rules")
             }
         }
     }
@@ -150,7 +150,7 @@ pub(crate) async fn load_and_install(
     let resp = client.get_rules().await?;
     if !is_supported_protocol(resp.protocol_version) {
         warn!(
-            target: "xlayer_filter",
+            target: "rcs_filter",
             protocol_version = resp.protocol_version,
             "unsupported protocol_version; rejecting rule set"
         );
@@ -167,7 +167,7 @@ async fn submit_task(shared: Shared, client: Arc<dyn RcsClient>) {
     loop {
         tokio::time::sleep(shared.config.batch_window).await;
         if let Err(e) = submit_once(&shared, &client).await {
-            warn!(target: "xlayer_filter", error = %e, "batch submit failed; keeping NotSubmitted");
+            warn!(target: "rcs_filter", error = %e, "batch submit failed; keeping NotSubmitted");
         }
     }
 }
@@ -199,7 +199,7 @@ pub(crate) async fn submit_once(shared: &Shared, client: &Arc<dyn RcsClient>) ->
     for (block_height, txs) in groups {
         let resp = client.submit(SubmitRequest { xlayer_block_height: block_height, txs }).await?;
         for rejected in &resp.rejected_malformed {
-            warn!(target: "xlayer_filter", tx_hash = %rejected, "submit rejected_malformed; retrying");
+            warn!(target: "rcs_filter", tx_hash = %rejected, "submit rejected_malformed; retrying");
         }
         let now = shared.clock.now_unix();
         shared.pool_lock().apply_submit_response(&resp.accepted, now);
@@ -212,7 +212,7 @@ async fn query_task(shared: Shared, client: Arc<dyn RcsClient>) {
     loop {
         tokio::time::sleep(POLL_INTERVAL).await;
         if let Err(e) = query_once(&shared, &client).await {
-            debug!(target: "xlayer_filter", error = %e, "query failed; timeout fallback will apply");
+            debug!(target: "rcs_filter", error = %e, "query failed; timeout fallback will apply");
         }
     }
 }
@@ -234,13 +234,13 @@ pub(crate) async fn query_once(shared: &Shared, client: &Arc<dyn RcsClient>) -> 
     for tx in &resp.txs {
         if let Ok(hash) = tx.tx_hash.parse() {
             if let Some(reason) = &tx.reason {
-                debug!(target: "xlayer_filter", tx_hash = %tx.tx_hash, status = %tx.status, %reason, "query result");
+                debug!(target: "rcs_filter", tx_hash = %tx.tx_hash, status = %tx.status, %reason, "query result");
             }
             // `denied`/`outdated` tombstone the entry as `Dropped` in place (G3) — the entry
             // is intentionally NOT removed here, so the tx is neither re-buffered nor
             // re-submitted; the timeout task evicts the tombstone after the retention window.
             if let Some(resolution) = pool.apply_query_status(&hash, &tx.status, now) {
-                debug!(target: "xlayer_filter", tx_hash = %tx.tx_hash, ?resolution, "query resolution");
+                debug!(target: "rcs_filter", tx_hash = %tx.tx_hash, ?resolution, "query resolution");
             }
         }
     }
@@ -260,10 +260,10 @@ async fn timeout_task(shared: Shared) {
             (resolved, pruned)
         };
         for (hash, resolution) in resolved {
-            debug!(target: "xlayer_filter", tx_hash = %format!("{hash:#x}"), ?resolution, "timeout resolution");
+            debug!(target: "rcs_filter", tx_hash = %format!("{hash:#x}"), ?resolution, "timeout resolution");
         }
         if pruned > 0 {
-            debug!(target: "xlayer_filter", pruned, "evicted expired terminal tombstones");
+            debug!(target: "rcs_filter", pruned, "evicted expired terminal tombstones");
         }
     }
 }
