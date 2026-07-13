@@ -8,8 +8,8 @@
 //! consistency check passes. The risk policy itself lives entirely in RCS-delivered rules;
 //! this crate carries no concrete business semantics.
 //!
-//! Authoritative wire/rule contract: `2026-07-09-rcs-filter-api-contract.md` (Binding).
-//! Design: A-03 Technical Design (XLayer Filter).
+//! Authoritative wire/rule contract: the RCS-Filter API contract (Binding) and the XLayer
+//! Filter technical design, both maintained in the team wiki (not in-repo).
 //!
 //! Key design principles (TD §3.4):
 //! 1. The synchronous entry [`FilterHandle::screen_tx`] performs zero network IO — only
