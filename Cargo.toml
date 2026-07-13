@@ -81,6 +81,7 @@ xlayer-trace-monitor = { git = "https://github.com/okx/xlayer-toolkit", rev = "d
 # ==============================================================================
 reth = { git = "https://github.com/okx/reth", rev = "5101851b79b02828fb7dbf2a683dfd0f6712001e" }
 reth-basic-payload-builder = { git = "https://github.com/okx/reth", rev = "5101851b79b02828fb7dbf2a683dfd0f6712001e" }
+reth-chain-state = { git = "https://github.com/okx/reth", rev = "5101851b79b02828fb7dbf2a683dfd0f6712001e" }
 reth-chainspec = { git = "https://github.com/okx/reth", rev = "5101851b79b02828fb7dbf2a683dfd0f6712001e" }
 reth-cli = { git = "https://github.com/okx/reth", rev = "5101851b79b02828fb7dbf2a683dfd0f6712001e" }
 reth-cli-commands = { git = "https://github.com/okx/reth", rev = "5101851b79b02828fb7dbf2a683dfd0f6712001e" }

@@ -29,6 +29,7 @@ use xlayer_flashblocks::subscription::FlashblocksPubSub;
 use xlayer_legacy_rpc::{layer::LegacyRpcRouterLayer, LegacyRpcRouterConfig};
 use xlayer_monitor::{start_monitor_handle, RpcMonitorLayer, XLayerMonitor};
 use xlayer_rpc::xlayer_ext::{XlayerRpcExt, XlayerRpcExtApiServer};
+use xlayer_rpc::{FlashblocksEthApiExt, FlashblocksEthApiOverrideServer};
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
@@ -184,11 +185,22 @@ fn main() {
                     }
 
                     // Register X Layer RPC
-                    let xlayer_rpc = XlayerRpcExt { backend: new_op_eth_api };
+                    let xlayer_rpc = XlayerRpcExt { backend: new_op_eth_api.clone() };
                     ctx.modules.merge_configured(XlayerRpcExtApiServer::<Optimism>::into_rpc(
                         xlayer_rpc,
                     ))?;
                     info!(target: "reth::cli", "xlayer rpc extension enabled");
+
+                    // Register X Layer flashblocks-aware transaction_count override.
+                    // `add_or_replace_if_module_configured` (not `merge_configured`)
+                    // replaces the default `eth_getTransactionCount` dispatch entry;
+                    // `merge_configured` would collide on the duplicate method name.
+                    let flashblocks_eth = FlashblocksEthApiExt::new((*new_op_eth_api).clone());
+                    ctx.modules.add_or_replace_if_module_configured(
+                        RethRpcModule::Eth,
+                        FlashblocksEthApiOverrideServer::into_rpc(flashblocks_eth),
+                    )?;
+                    info!(target: "reth::cli", "xlayer flashblocks eth api overrides initialized");
 
                     info!(message = "X Layer RPC modules initialized");
                     Ok(())

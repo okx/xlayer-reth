@@ -14356,12 +14356,25 @@ dependencies = [
 name = "xlayer-rpc"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-primitives",
  "jsonrpsee",
+ "op-alloy-network",
+ "op-revm",
+ "reth-chain-state",
+ "reth-evm",
+ "reth-optimism-evm",
+ "reth-optimism-primitives",
  "reth-optimism-rpc",
  "reth-rpc",
  "reth-rpc-eth-api",
+ "reth-rpc-server-types",
+ "reth-storage-api",
  "serde",
+ "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
