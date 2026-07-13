@@ -55,7 +55,10 @@ const DENY_BYTECODE: [u8; 5] = [0x60, 0x40, 0x60, 0x00, 0xf3];
 ///
 /// The base genesis is the same template the default test harness uses, so the funded test
 /// accounts and system contracts are present.
-fn gasless_node_config_opt(gasless_bytecode: Option<&[u8]>) -> NodeConfig<OpChainSpec> {
+fn gasless_node_config_opt(
+    gasless_bytecode: Option<&[u8]>,
+    base_fee_per_gas: u64,
+) -> NodeConfig<OpChainSpec> {
     let genesis_json = include_str!("./framework/artifacts/genesis.json.tmpl");
     let mut genesis: Genesis =
         serde_json::from_str(genesis_json).expect("invalid genesis template JSON");
@@ -64,12 +67,15 @@ fn gasless_node_config_opt(gasless_bytecode: Option<&[u8]>) -> NodeConfig<OpChai
     // address (`XLAYER_DEVNET_GASLESS_CONTRACT`, re-exported here as `GASLESS_CONTRACT`).
     genesis.config.chain_id = 195;
 
-    // Block base fee 0 (a fixed point under EIP-1559) so the pool's best-iterator yields the
-    // zero-priced tx (`max_fee_per_gas (0) >= base_fee (0)`). Gasless execution does not need this
-    // — the base-fee check is disabled for gasless txs — it only lets the 0-price tx through the
-    // pool's fee filter. (The genesis base fee of 1 cannot decay to 0: the EIP-1559 step rounds to
-    // 0 at base fee 1, so the value would be stuck at 1.)
-    genesis.base_fee_per_gas = Some(0);
+    // Genesis block base fee, parameterized per test. Most gasless tests pass 0 (a fixed point
+    // under EIP-1559) so the pool's best-iterator yields the zero-priced tx
+    // (`max_fee_per_gas (0) >= base_fee (0)`): gasless execution itself does not need this — the
+    // base-fee check is disabled for gasless txs — it only lets the 0-price tx through the pool's
+    // fee filter. A non-zero base fee is used by tests that supply the gasless tx via payload
+    // attributes (`no_tx_pool=true`, bypassing the pool filter) to prove gasless execution still
+    // succeeds over a base fee a non-gasless zero-priced tx could not clear. (A base fee of 1 is
+    // itself a fixed point: the EIP-1559 step rounds to 0 at base fee 1, so it cannot decay to 0.)
+    genesis.base_fee_per_gas = Some(base_fee_per_gas.into());
 
     // Deploy the gasless whitelist contract at the devnet gasless predeploy address. When `None`,
     // the address is left with no code so the gasless system call returns empty (decoded as
@@ -91,7 +97,7 @@ fn gasless_node_config_opt(gasless_bytecode: Option<&[u8]>) -> NodeConfig<OpChai
 /// Builds the in-process node config with the gasless whitelist contract deployed at
 /// [`GASLESS_CONTRACT`]. See [`gasless_node_config_opt`].
 fn gasless_node_config(gasless_bytecode: &[u8]) -> NodeConfig<OpChainSpec> {
-    gasless_node_config_opt(Some(gasless_bytecode))
+    gasless_node_config_opt(Some(gasless_bytecode), 0)
 }
 
 /// Builds [`BuilderArgs`] for the gasless tests. The gasless mempool is enabled by the test
@@ -230,7 +236,7 @@ async fn gasless_zero_price_tx_not_whitelisted_rejected(
 /// false).
 #[rb_test(
     args = gasless_args(),
-    config = gasless_node_config_opt(None)
+    config = gasless_node_config_opt(None, 0)
 )]
 async fn gasless_zero_price_tx_no_contract_rejected(rbuilder: LocalInstance) -> eyre::Result<()> {
     let driver = rbuilder.driver().await?;
@@ -403,3 +409,46 @@ async fn gasless_block_gas_limit_caps_and_resets(rbuilder: LocalInstance) -> eyr
 /// created once and reused across the `config` and test body (both reference `GASLESS_SIGNERS`).
 static GASLESS_SIGNERS: std::sync::LazyLock<[crate::signer::Signer; NUM_GASLESS_SIGNERS]> =
     std::sync::LazyLock::new(|| core::array::from_fn(|_| crate::signer::Signer::random()));
+
+/// Regression test for gasless tx supplied via payload attributes when no_tx_pool=true. Gasless
+/// must be included in the block instead of skipping.
+#[rb_test(
+    args = gasless_args(),
+    config = gasless_node_config_opt(Some(&ALLOW_HIGH_GAS_BYTECODE), 1)
+)]
+async fn gasless_tx_in_attributes_no_tx_pool_included_over_base_fee(
+    rbuilder: LocalInstance,
+) -> eyre::Result<()> {
+    let driver = rbuilder.driver().await?;
+    let provider = driver.provider().clone();
+
+    // Build the gasless tx but do NOT submit it to the mempool; pass it in the payload attributes
+    // with `no_tx_pool = true` so it is executed by `execute_sequencer_transactions`.
+    let (encoded, tx_hash) = build_zero_priced_transfer(&provider, 1_000u128).await?;
+
+    let latest = driver.get_block(Latest).await?.expect("latest block must exist");
+    let block_timestamp = Duration::from_secs(latest.header.timestamp) + Duration::from_secs(1);
+    let block = driver
+        .build_new_block_with_txs_timestamp(
+            vec![encoded.into()],
+            Some(true),
+            Some(block_timestamp),
+            None,
+            Some(0),
+        )
+        .await?;
+
+    // With base fee > 0, a non-gasless zero-priced tx is base-fee-rejected and skipped, so inclusion
+    // proves it executed gaslessly.
+    assert!(
+        block.includes(&tx_hash),
+        "gasless tx supplied via payload attributes (no_tx_pool) over a non-zero base fee must be \
+        executed gaslessly and included"
+    );
+
+    let receipt =
+        provider.get_transaction_receipt(tx_hash).await?.expect("gasless tx should have a receipt");
+    assert!(receipt.status(), "gasless tx receipt should be successful");
+
+    Ok(())
+}
