@@ -21,6 +21,7 @@ use core::fmt::Debug;
 use op_alloy_consensus::{OpDepositReceipt, OpTxType};
 use op_revm::{L1BlockInfo, OpSpecId};
 
+use rcs_filter::{FilterHandle, Screen, ScreenInput};
 use reth_basic_payload_builder::PayloadConfig;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_evm::{
@@ -50,7 +51,6 @@ use revm::{
     context::result::ResultAndState, inspector::NoOpInspector, interpreter::as_u64_saturated,
     DatabaseCommit,
 };
-use xlayer_filter::{FilterHandle, Screen, ScreenInput};
 
 /// Container type that holds all necessities to build a new payload.
 #[derive(Debug)]
@@ -85,7 +85,7 @@ pub struct FlashblocksBuilderCtx {
     pub gasless_contract: Option<GaslessContract>,
     /// Per-block gas budget for gasless transactions (in gas units). `None` = unlimited.
     pub gasless_block_gas_limit: Option<u64>,
-    /// XLayer Filter handle (FR-1). `None` when the risk-control master switch is off, in
+    /// RCS Filter handle (FR-1). `None` when the risk-control master switch is off, in
     /// which case `screen_tx` is never called and the hot path pays zero extra cost.
     pub filter: Option<Arc<FilterHandle>>,
 }
@@ -779,7 +779,7 @@ impl FlashblocksBuilderCtx {
                 continue;
             }
 
-            // XLayer Filter (FR-1): rule-driven screening on the successful execution
+            // RCS Filter (FR-1): rule-driven screening on the successful execution
             // result, just before this tx would be committed. Runs only when the master
             // switch is on (`filter` is `Some`); disabled → zero hot-path cost. `Deny` and
             // `AuditPending` skip commit/receipt/fee entirely so the same-block execution

@@ -31,7 +31,7 @@ pub fn load_rules(protocol_version: u32, content_version: u64, raw: Vec<RawRule>
         match compile_rule(rule) {
             Ok(compiled) => rules.push(compiled),
             Err(reason) => {
-                warn!(target: "xlayer_filter", rule_id = %id, %reason, "rule rejected during load")
+                warn!(target: "rcs_filter", rule_id = %id, %reason, "rule rejected during load")
             }
         }
     }
@@ -78,7 +78,7 @@ pub fn compile_rule(raw: RawRule) -> std::result::Result<CompiledRule, String> {
     // transfers), otherwise legitimate hits are silently skipped. Not an auto-reject.
     if contract_address.is_some() {
         warn!(
-            target: "xlayer_filter",
+            target: "rcs_filter",
             rule_id = %raw.id,
             "rule declares contract_address; verify the event can only be triggered by a direct call (contract §3.1)"
         );

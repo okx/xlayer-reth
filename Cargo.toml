@@ -18,7 +18,7 @@ members = [
     "crates/chainspec",
     "crates/flashblocks",
     "crates/intercept",
-    "crates/xlayer-filter",
+    "crates/rcs-filter",
     "crates/legacy-rpc",
     "crates/monitor",
     "crates/rpc",
@@ -70,7 +70,7 @@ xlayer-bridge-intercept = { path = "crates/intercept" }
 xlayer-builder = { path = "crates/builder" }
 xlayer-chainspec = { path = "crates/chainspec" }
 xlayer-flashblocks = { path = "crates/flashblocks" }
-xlayer-filter = { path = "crates/xlayer-filter" }
+rcs-filter = { path = "crates/rcs-filter" }
 xlayer-legacy-rpc = { path = "crates/legacy-rpc" }
 xlayer-monitor = { path = "crates/monitor" }
 xlayer-reth-node = { path = "bin/node" }

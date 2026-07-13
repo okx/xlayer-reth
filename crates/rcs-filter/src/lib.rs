@@ -1,4 +1,4 @@
-//! XLayer Filter — rule-driven, per-transaction risk-control interception for the XLayer
+//! RCS Filter — rule-driven, per-transaction risk-control interception for the XLayer
 //! block builder (requirement XLOP-1142 / OKONE Mainnet RSC).
 //!
 //! The component screens every transaction produced during block building through an
