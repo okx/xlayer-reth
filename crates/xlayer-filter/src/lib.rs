@@ -29,6 +29,9 @@ pub mod rules;
 pub mod test_support;
 pub mod worker;
 
+#[cfg(test)]
+mod integration_tests;
+
 pub use client::{
     ActionItem, QueryParams, QueryResponse, QueryTx, RcsClient, ReqwestRcsClient, RulesResponse,
     SubmitRequest, SubmitResponse, SubmitTx, VersionResponse,

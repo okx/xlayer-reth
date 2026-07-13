@@ -36,6 +36,12 @@ pub struct FilterConfig {
     pub total_retry_timeout: Duration,
     /// `GET /rules/version` poll interval (FR-3, default 2s).
     pub rules_version_poll_interval: Duration,
+    /// How long a terminal buffer-pool tombstone (`ReleasePending`/`Dropped`) is retained
+    /// before eviction, bounding pool memory (contract §2.5 `terminal_entry_retention_seconds`,
+    /// default 300s). Must exceed `total_retry_timeout` so a tombstone outlives the full
+    /// adjudication window (every entry is guaranteed terminal within `total_retry_timeout`),
+    /// leaving a margin before a still-mempooled duplicate could be re-screened.
+    pub terminal_entry_retention: Duration,
 }
 
 impl Default for FilterConfig {
@@ -48,6 +54,7 @@ impl Default for FilterConfig {
             risk_module_unresponsive_timeout: Duration::from_secs(20),
             total_retry_timeout: Duration::from_secs(90),
             rules_version_poll_interval: Duration::from_millis(2000),
+            terminal_entry_retention: Duration::from_secs(300),
         }
     }
 }
@@ -59,6 +66,12 @@ impl FilterConfig {
         if self.enabled && self.rcs_base_url.trim().is_empty() {
             return Err(crate::FilterError::Config(
                 "xlayer-filter enabled but rcs_base_url is empty".to_string(),
+            ));
+        }
+        if self.enabled && self.terminal_entry_retention <= self.total_retry_timeout {
+            return Err(crate::FilterError::Config(
+                "xlayer-filter terminal_entry_retention must exceed total_retry_timeout"
+                    .to_string(),
             ));
         }
         Ok(())
@@ -78,6 +91,29 @@ mod tests {
         assert_eq!(c.risk_module_unresponsive_timeout, Duration::from_secs(20));
         assert_eq!(c.total_retry_timeout, Duration::from_secs(90));
         assert_eq!(c.rules_version_poll_interval, Duration::from_millis(2000));
+        assert_eq!(c.terminal_entry_retention, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn retention_must_exceed_total_retry_timeout() {
+        let base =
+            FilterConfig { enabled: true, rcs_base_url: "http://rcs".into(), ..Default::default() };
+        // Equal → rejected.
+        let eq = FilterConfig { terminal_entry_retention: Duration::from_secs(90), ..base.clone() };
+        assert!(eq.validate().is_err());
+        // Strictly less → rejected.
+        let lt = FilterConfig { terminal_entry_retention: Duration::from_secs(30), ..base.clone() };
+        assert!(lt.validate().is_err());
+        // Strictly greater → accepted.
+        let gt = FilterConfig { terminal_entry_retention: Duration::from_secs(91), ..base.clone() };
+        assert!(gt.validate().is_ok());
+        // Disabled → the check is skipped even with an otherwise-invalid retention.
+        let disabled = FilterConfig {
+            enabled: false,
+            terminal_entry_retention: Duration::from_secs(1),
+            ..base
+        };
+        assert!(disabled.validate().is_ok());
     }
 
     #[test]

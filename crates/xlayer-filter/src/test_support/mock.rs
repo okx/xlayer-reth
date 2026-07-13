@@ -31,6 +31,8 @@ struct MockState {
     submit_rejected: Vec<String>,
     query_states: HashMap<String, QueryState>,
     calls: Vec<String>,
+    /// Every `submit` request body received (in order), for payload-verbatim assertions (§6.4).
+    submitted: Vec<SubmitRequest>,
     unavailable: bool,
 }
 
@@ -114,6 +116,17 @@ impl MockRcsClient {
         self.lock().calls.clone()
     }
 
+    /// Every `submit` request body received (that reached the server, in order), for
+    /// payload-verbatim assertions.
+    pub fn submitted_requests(&self) -> Vec<SubmitRequest> {
+        self.lock().submitted.clone()
+    }
+
+    /// The most recent `submit` request body, if any.
+    pub fn last_submit(&self) -> Option<SubmitRequest> {
+        self.lock().submitted.last().cloned()
+    }
+
     fn record(&self, endpoint: &str) {
         self.lock().calls.push(endpoint.to_string());
     }
@@ -149,10 +162,11 @@ impl RcsClient for MockRcsClient {
 
     async fn submit(&self, req: SubmitRequest) -> Result<SubmitResponse> {
         self.record("submit");
-        let s = self.lock();
+        let mut s = self.lock();
         if s.unavailable {
             return Err(FilterError::Transport("mock unavailable".into()));
         }
+        s.submitted.push(req.clone());
         // Default: echo all submitted hashes as accepted (idempotent RCS, contract §2.4).
         let accepted = s
             .submit_accepted
