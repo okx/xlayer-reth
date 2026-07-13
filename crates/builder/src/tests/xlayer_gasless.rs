@@ -16,6 +16,7 @@
 
 use crate::{
     args::BuilderArgs,
+    signer::BuilderSecretKey,
     tests::{
         builder_signer, default_node_config, funded_signer, BlockTransactionsExt, LocalInstance,
     },
@@ -106,7 +107,7 @@ fn gasless_node_config(gasless_bytecode: &[u8]) -> NodeConfig<OpChainSpec> {
 fn gasless_args() -> BuilderArgs {
     BuilderArgs {
         // Use the same builder signer the harness uses so the builder tx is deterministic.
-        builder_signer: Some(builder_signer()),
+        builder_signer: Some(BuilderSecretKey::Literal(builder_signer())),
         ..Default::default()
     }
 }
@@ -299,7 +300,7 @@ fn gasless_budget_node_config(signers: &[crate::signer::Signer]) -> NodeConfig<O
 /// BuilderArgs with gasless block gas limit = 1,000,000 (= 1M gas)
 fn gasless_budget_args() -> BuilderArgs {
     BuilderArgs {
-        builder_signer: Some(builder_signer()),
+        builder_signer: Some(BuilderSecretKey::Literal(builder_signer())),
         gasless_block_gas_limit_raw: Some(GASLESS_BUDGET),
         ..Default::default()
     }

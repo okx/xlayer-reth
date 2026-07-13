@@ -1,10 +1,12 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+pub mod eth;
 pub mod xlayer_ext;
 
 use std::time::Instant;
 // Re-export for convenience
+pub use eth::{FlashblocksEthApiExt, FlashblocksEthApiOverrideServer};
 pub use xlayer_ext::{
     PendingFlashBlockProvider, SequencerClientProvider, XlayerRpcExt, XlayerRpcExtApiServer,
 };

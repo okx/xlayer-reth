@@ -1,6 +1,7 @@
 #![allow(missing_docs, rustdoc::missing_crate_level_docs)]
 
 mod args;
+mod kms_resolve;
 mod payload;
 
 use payload::XLayerPayloadServiceBuilder;
@@ -28,6 +29,7 @@ use xlayer_flashblocks::subscription::FlashblocksPubSub;
 use xlayer_legacy_rpc::{layer::LegacyRpcRouterLayer, LegacyRpcRouterConfig};
 use xlayer_monitor::{start_monitor_handle, RpcMonitorLayer, XLayerMonitor};
 use xlayer_rpc::xlayer_ext::{XlayerRpcExt, XlayerRpcExtApiServer};
+use xlayer_rpc::{FlashblocksEthApiExt, FlashblocksEthApiOverrideServer};
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
@@ -58,13 +60,30 @@ fn main() {
     XLayerArgs::validate_init_command();
 
     Cli::<XLayerChainSpecParser, Args>::parse()
-        .run(|builder, args| async move {
+        .run(|mut builder, mut args| async move {
             info!(message = "starting custom X Layer node");
 
             // Validate X Layer configuration
             if let Err(e) = args.xlayer_args.validate() {
                 eprintln!("X Layer configuration error: {e}");
                 std::process::exit(1);
+            }
+
+            // KMS Secret Resolution — before node launch.
+            // Resolves any `kms:` references in the builder secret key, the
+            // node devp2p key file, and the flashblocks p2p key file.
+            let node_p2p_key_file = builder.config().network.p2p_secret_key.clone();
+            let kms = kms_resolve::resolve_kms_secrets(
+                &mut args.xlayer_args.builder,
+                node_p2p_key_file,
+            )?;
+
+            // Apply the node devp2p secret key in-memory; clear the `kms:` file
+            // path so reth never tries to parse it as a literal key.
+            if let Some(secret) = kms.node_p2p_secret {
+                let network = &mut builder.config_mut().network;
+                network.p2p_secret_key = None;
+                network.p2p_secret_key_hex = Some(secret);
             }
 
             // Initialize global tracer if full link monitor is enabled
@@ -106,10 +125,18 @@ fn main() {
 
             // Create the X Layer payload service builder
             // It handles both flashblocks and default modes internally
-            let payload_builder = XLayerPayloadServiceBuilder::new(
+            let mut payload_builder = XLayerPayloadServiceBuilder::new(
                 args.xlayer_args.builder.clone(),
                 args.rollup_args.compute_pending_block,
             )?;
+
+            // Apply KMS-resolved secrets after payload builder creation
+            if let Some(hex) = kms.flashblocks_p2p_hex {
+                payload_builder.set_p2p_key_override(hex);
+            }
+            if let Some(signer) = kms.builder_signer {
+                payload_builder.set_builder_signer(signer);
+            }
 
             let NodeHandle { node, node_exit_future } = builder
                 .with_types_and_provider::<OpNode, BlockchainProvider<_>>()
@@ -158,11 +185,22 @@ fn main() {
                     }
 
                     // Register X Layer RPC
-                    let xlayer_rpc = XlayerRpcExt { backend: new_op_eth_api };
+                    let xlayer_rpc = XlayerRpcExt { backend: new_op_eth_api.clone() };
                     ctx.modules.merge_configured(XlayerRpcExtApiServer::<Optimism>::into_rpc(
                         xlayer_rpc,
                     ))?;
                     info!(target: "reth::cli", "xlayer rpc extension enabled");
+
+                    // Register X Layer flashblocks-aware transaction_count override.
+                    // `add_or_replace_if_module_configured` (not `merge_configured`)
+                    // replaces the default `eth_getTransactionCount` dispatch entry;
+                    // `merge_configured` would collide on the duplicate method name.
+                    let flashblocks_eth = FlashblocksEthApiExt::new((*new_op_eth_api).clone());
+                    ctx.modules.add_or_replace_if_module_configured(
+                        RethRpcModule::Eth,
+                        FlashblocksEthApiOverrideServer::into_rpc(flashblocks_eth),
+                    )?;
+                    info!(target: "reth::cli", "xlayer flashblocks eth api overrides initialized");
 
                     info!(message = "X Layer RPC modules initialized");
                     Ok(())

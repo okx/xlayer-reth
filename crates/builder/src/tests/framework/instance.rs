@@ -1,7 +1,7 @@
 use crate::{
     args::BuilderArgs,
     flashblocks::{BuilderConfig, FlashblocksServiceBuilder},
-    signer::Signer,
+    signer::{BuilderSecretKey, Signer},
     tests::{
         builder_signer, create_test_db, framework::driver::ChainDriver, EngineApi, Ipc,
         TransactionPoolObserver,
@@ -97,8 +97,9 @@ impl LocalInstance {
         let (txpool_ready_tx, txpool_ready_rx) =
             oneshot::channel::<AllTransactionsEvents<OpPooledTransaction>>();
 
-        let signer = args.builder_signer.unwrap_or(builder_signer());
-        args.builder_signer = Some(signer);
+        let signer =
+            args.builder_signer.as_ref().and_then(|k| k.literal()).unwrap_or_else(builder_signer);
+        args.builder_signer = Some(BuilderSecretKey::Literal(signer));
 
         let builder_config = BuilderConfig::try_from(args.clone())
             .expect("Failed to convert builder args to builder config");

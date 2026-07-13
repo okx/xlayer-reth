@@ -1,0 +1,62 @@
+FROM office-registry-vpc.cn-hongkong.cr.aliyuncs.com/inner-public/cargo-chef/latest-rust-1.92/cargo-chef:latest AS chef
+WORKDIR /app
+
+LABEL org.opencontainers.image.source=https://github.com/xlayer/xlayer-reth
+LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
+
+RUN apt-get update && apt-get -y upgrade && apt-get install -y libclang-dev pkg-config
+
+# Builds a cargo-chef plan
+FROM chef AS planner
+COPY . .
+# Remove test-only workspace members that are excluded from the Docker context
+RUN sed -i '/"crates\/tests"/d' Cargo.toml
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+
+ARG BUILD_PROFILE=release
+ENV BUILD_PROFILE=$BUILD_PROFILE
+
+ARG RUSTFLAGS=""
+ENV RUSTFLAGS="$RUSTFLAGS"
+
+ARG FEATURES=""
+ENV FEATURES=$FEATURES
+
+# Build-time PAT (with read_repository on okcoin-commons/ok-kms-rust) used to
+# fetch the private ok-kms-rust dependency over HTTPS. Passed via --build-arg.
+# It is NEVER exported to ENV; each RUN configures git, fetches, then deletes
+# .gitconfig so the token does not persist in the layer. Cargo.toml keeps the
+# ssh:// URL (local dev uses SSH); here we rewrite ssh->https.
+ARG GIT_TOKEN
+
+RUN git config --global url."https://gitlab-ci-token:${GIT_TOKEN}@gitlab.okg.com/".insteadOf "ssh://git@gitlab.okg.com/" && \
+    printf '[net]\ngit-fetch-with-cli = true\n' >> /usr/local/cargo/config.toml && \
+    cargo chef cook --profile $BUILD_PROFILE --features "$FEATURES" --recipe-path recipe.json --manifest-path /app/bin/node/Cargo.toml; \
+    rc=$?; rm -f /root/.gitconfig; exit $rc
+
+COPY . .
+RUN sed -i '/"crates\/tests"/d' Cargo.toml
+RUN git config --global url."https://gitlab-ci-token:${GIT_TOKEN}@gitlab.okg.com/".insteadOf "ssh://git@gitlab.okg.com/" && \
+    cargo build --profile $BUILD_PROFILE --bin xlayer-reth-node --manifest-path /app/bin/node/Cargo.toml; \
+    rc=$?; rm -f /root/.gitconfig; exit $rc
+
+# Copy binary to a fixed location
+RUN OUTPUT_DIR=$(if [ "$BUILD_PROFILE" = "dev" ] || [ "$BUILD_PROFILE" = "test" ]; then echo debug; else echo "$BUILD_PROFILE"; fi) && \
+    cp /app/target/$OUTPUT_DIR/xlayer-reth-node /app/op-reth
+
+FROM office-registry-vpc.cn-hongkong.cr.aliyuncs.com/okbase/ubuntu:24.04-okg1-sec20251110 AS runtime
+
+RUN apt-get update && \
+    apt-get install -y ca-certificates libssl-dev pkg-config strace curl && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY --from=builder /app/op-reth /usr/local/bin/
+RUN chmod +x /usr/local/bin/op-reth
+COPY LICENSE* ./
+
+EXPOSE 30303 30303/udp 9001 8545 8546 7545 8551
+ENTRYPOINT ["/usr/local/bin/op-reth"]
