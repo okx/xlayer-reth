@@ -11,7 +11,10 @@
 //! infinite loop. The tombstone gives `screen_tx` a deterministic mapping
 //! (`ReleasePending → Screen::AuditApproved`, `Dropped → Screen::AuditPending` never
 //! re-admitted) and keeps the tx out of the submit / query / timeout scans for the rest of
-//! the build cycle.
+//! the build cycle. To bound memory over the node's (unbounded) lifetime, tombstones are
+//! evicted by [`BufferPool::prune_terminal`] once they have been terminal for longer than
+//! `terminal_entry_retention_seconds` (contract §2.5) — long enough that a still-relevant tx
+//! is never re-screened during its mempool lifetime, short enough that the table stays finite.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -30,7 +33,6 @@ pub enum BufferStatus {
     Submitted,
     Pending,
     Approved,
-    Outdated,
     /// Terminal: release the tx into the block (approved + consistency-pass, or fail-open
     /// timeout). `screen_tx` maps this to `Screen::AuditApproved`.
     ReleasePending,
@@ -252,6 +254,24 @@ impl BufferPool {
 
         terminal
     }
+
+    /// Evicts terminal tombstones (`ReleasePending`/`Dropped`) that have been terminal for
+    /// longer than `retention` seconds, bounding pool memory over the node's lifetime
+    /// (contract §2.5 `terminal_entry_retention_seconds`). Non-terminal entries are never
+    /// pruned — the FR-6 outer timeout guarantees every entry reaches a terminal tombstone
+    /// within `total_retry_timeout`, so pruning terminal entries alone bounds the pool.
+    /// Retention exceeds `total_retry_timeout` so a tombstone is not evicted while a still-live
+    /// duplicate of the tx might be re-screened within the same adjudication window; a tx still
+    /// in the mempool after eviction is simply re-screened (and, if it re-matches, re-submitted —
+    /// RCS is idempotent), trading a rare bounded re-submit for bounded memory. Returns the
+    /// number of entries evicted.
+    pub fn prune_terminal(&mut self, retention_secs: u64, now: u64) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|_, e| {
+            !(e.status.is_terminal() && now.saturating_sub(e.last_transition_at) > retention_secs)
+        });
+        before - self.entries.len()
+    }
 }
 
 /// Parses a `0x`-prefixed 64-hex tx hash string into a [`B256`].
@@ -355,6 +375,37 @@ mod tests {
         let out = pool.check_timeouts(&cfg, 91);
         assert_eq!(out[0].1, Resolution::Discard);
         assert_eq!(pool.get(&hash).unwrap().status, BufferStatus::Dropped);
+    }
+
+    #[test]
+    fn prune_terminal_evicts_only_expired_tombstones() {
+        let a =
+            B256::from_str("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .unwrap();
+        let b =
+            B256::from_str("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                .unwrap();
+        let mut pool = BufferPool::default();
+        // Terminal tombstone that last transitioned at t=100.
+        let mut term = entry(100, TimeoutAction::Allow);
+        term.status = BufferStatus::Dropped;
+        term.last_transition_at = 100;
+        pool.insert(term);
+        // Non-terminal entry (never pruned regardless of age).
+        let mut live = entry(0, TimeoutAction::Allow); // NotSubmitted
+        live.tx_hash = b;
+        live.last_transition_at = 0;
+        pool.insert(live);
+
+        let retention = 300;
+        // Boundary is strict: exactly `retention` old → kept.
+        assert_eq!(pool.prune_terminal(retention, 100 + 300), 0);
+        assert_eq!(pool.len(), 2);
+        // Older than `retention` → the terminal tombstone is evicted; the live entry stays.
+        assert_eq!(pool.prune_terminal(retention, 100 + 301), 1);
+        assert!(pool.get(&a).is_none());
+        assert!(pool.get(&b).is_some());
+        assert_eq!(pool.len(), 1);
     }
 
     #[test]

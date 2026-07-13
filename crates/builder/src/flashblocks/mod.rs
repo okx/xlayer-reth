@@ -264,7 +264,9 @@ fn build_xlayer_filter_handle(
         ),
         total_retry_timeout: Duration::from_secs(args.total_retry_timeout_seconds),
         rules_version_poll_interval: Duration::from_millis(args.rules_version_poll_interval_ms),
+        terminal_entry_retention: Duration::from_secs(args.terminal_entry_retention_seconds),
     };
+    config.validate().map_err(|e| eyre::eyre!(e.to_string()))?;
 
     let client =
         Arc::new(ReqwestRcsClient::new(rcs_base_url).map_err(|e| eyre::eyre!(e.to_string()))?);

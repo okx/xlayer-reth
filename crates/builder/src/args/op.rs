@@ -234,6 +234,12 @@ pub struct XLayerFilterArgs {
     /// `GET /rules/version` poll interval in milliseconds (FR-3).
     #[arg(long = "xlayer-filter.rules-version-poll-interval-ms", default_value = "2000")]
     pub rules_version_poll_interval_ms: u64,
+
+    /// Retention of a terminal buffer-pool tombstone before eviction, in seconds (contract
+    /// §2.5 `terminal_entry_retention_seconds`). Bounds pool memory; must exceed
+    /// `total-retry-timeout-seconds`.
+    #[arg(long = "xlayer-filter.terminal-entry-retention-seconds", default_value = "300")]
+    pub terminal_entry_retention_seconds: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]

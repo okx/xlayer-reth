@@ -61,14 +61,38 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    fn current_rules(&self) -> Arc<RuleSet> {
-        self.rules.read().expect("rules lock not poisoned").clone()
+    /// Current rule snapshot. Recovers from lock poisoning: a panic elsewhere while the lock
+    /// was held must not permanently brick screening or the background workers (FR robustness).
+    pub(crate) fn current_rules(&self) -> Arc<RuleSet> {
+        self.rules.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Locks the buffer pool, recovering from poisoning.
+    pub(crate) fn pool_lock(&self) -> std::sync::MutexGuard<'_, BufferPool> {
+        self.pool.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Write guard for the hot-swappable rule slot, recovering from poisoning.
+    pub(crate) fn rules_write(&self) -> std::sync::RwLockWriteGuard<'_, Arc<RuleSet>> {
+        self.rules.write().unwrap_or_else(|e| e.into_inner())
     }
 }
 
 /// Handle exposing the synchronous screening entry and owning background workers.
 pub struct FilterHandle {
     shared: Shared,
+    /// Supervisor task handles for the background workers. Retained (not dropped) so the tasks
+    /// are observable and are aborted when the handle is dropped (no leaked tasks). Empty for
+    /// [`FilterHandle::for_test`].
+    workers: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for FilterHandle {
+    fn drop(&mut self) {
+        for w in &self.workers {
+            w.abort();
+        }
+    }
 }
 
 impl std::fmt::Debug for FilterHandle {
@@ -96,8 +120,8 @@ impl FilterHandle {
             clock,
             ready: Arc::new(AtomicBool::new(false)),
         };
-        crate::worker::spawn(shared.clone(), client);
-        Arc::new(Self { shared })
+        let workers = crate::worker::spawn(shared.clone(), client);
+        Arc::new(Self { shared, workers })
     }
 
     /// True once the first valid rule set has loaded (FR-2: the node should not mine until
@@ -108,7 +132,7 @@ impl FilterHandle {
 
     /// Number of transactions currently buffered awaiting adjudication.
     pub fn buffered_len(&self) -> usize {
-        self.shared.pool.lock().expect("pool lock not poisoned").len()
+        self.shared.pool_lock().len()
     }
 
     /// Screens one transaction (synchronous, no network IO). See [`Screen`].
@@ -116,7 +140,7 @@ impl FilterHandle {
         // Stage zero: dedup short-circuit — a non-terminal buffered entry is reused without
         // re-decoding or re-submitting (FR-4 stage zero).
         let existing = {
-            let pool = self.shared.pool.lock().expect("pool lock");
+            let pool = self.shared.pool_lock();
             pool.get(&input.tx_hash).map(|e| (e.status, e.quota_consistency_hash))
         };
         if let Some((status, stored_hash)) = existing {
@@ -144,7 +168,7 @@ impl FilterHandle {
                     first_not_submitted_at: now,
                     last_transition_at: now,
                 };
-                self.shared.pool.lock().expect("pool lock").insert(entry);
+                self.shared.pool_lock().insert(entry);
                 Screen::AuditPending
             }
         }
@@ -180,7 +204,7 @@ impl FilterHandle {
                     _ => false,
                 };
                 let now = self.shared.clock.now_unix();
-                let mut pool = self.shared.pool.lock().expect("pool lock");
+                let mut pool = self.shared.pool_lock();
                 if consistent {
                     pool.set_terminal(&input.tx_hash, BufferStatus::ReleasePending, now);
                     Screen::AuditApproved
@@ -191,7 +215,7 @@ impl FilterHandle {
                 }
             }
 
-            // NotSubmitted / Submitted / Pending / Outdated → still in flight; skip this round.
+            // NotSubmitted / Submitted / Pending → still in flight; skip this round.
             _ => Screen::AuditPending,
         }
     }
@@ -199,20 +223,20 @@ impl FilterHandle {
     /// Installs a rule set and marks the handle ready. Intended for tests and for a
     /// synchronous first-load path; production hot-reload goes through the worker.
     pub fn install_rules(&self, rules: RuleSet) {
-        *self.shared.rules.write().expect("rules lock") = Arc::new(rules);
+        *self.shared.rules_write() = Arc::new(rules);
         self.shared.ready.store(true, Ordering::Release);
     }
 
     /// Buffer status of a transaction, if buffered (test/observability helper).
     pub fn buffer_status(&self, tx_hash: &B256) -> Option<BufferStatus> {
-        self.shared.pool.lock().expect("pool lock").get(tx_hash).map(|e| e.status)
+        self.shared.pool_lock().get(tx_hash).map(|e| e.status)
     }
 
     /// Test-only accessor to drive the buffer pool directly (simulating worker transitions)
     /// without spawning the async workers.
     #[cfg(test)]
     pub(crate) fn with_pool<R>(&self, f: impl FnOnce(&mut crate::pool::BufferPool) -> R) -> R {
-        let mut pool = self.shared.pool.lock().expect("pool lock");
+        let mut pool = self.shared.pool_lock();
         f(&mut pool)
     }
 
@@ -226,7 +250,7 @@ impl FilterHandle {
             clock,
             ready: Arc::new(AtomicBool::new(true)),
         };
-        Self { shared }
+        Self { shared, workers: Vec::new() }
     }
 }
 

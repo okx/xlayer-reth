@@ -20,7 +20,7 @@ tracing.workspace = true
 async-trait.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
