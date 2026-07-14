@@ -112,7 +112,7 @@ impl ExecutionInfo {
             }
         }
 
-        if self.cumulative_gas_used + tx_gas_limit > block_gas_limit {
+        if self.cumulative_gas_used.saturating_add(tx_gas_limit) > block_gas_limit {
             return Err(TxnExecutionResult::TransactionGasLimitExceeded(
                 self.cumulative_gas_used,
                 tx_gas_limit,
