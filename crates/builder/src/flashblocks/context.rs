@@ -46,11 +46,18 @@ use reth_optimism_txpool::{
 use reth_payload_builder::PayloadId;
 use reth_primitives_traits::{InMemorySize, SealedHeader, SignedTransaction};
 use reth_revm::{context::Block, State};
-use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction};
+use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction, TransactionPool};
 use revm::{
     context::result::ResultAndState, inspector::NoOpInspector, interpreter::as_u64_saturated,
     DatabaseCommit,
 };
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct BlockExecutionLimits {
+    pub(super) gas: u64,
+    pub(super) da: Option<u64>,
+    pub(super) da_footprint: Option<u64>,
+}
 
 /// Container type that holds all necessities to build a new payload.
 #[derive(Debug)]
@@ -555,9 +562,8 @@ impl FlashblocksBuilderCtx {
         info: &mut ExecutionInfo,
         db: &mut State<impl Database>,
         best_txs: &mut impl PayloadTxsBounds,
-        block_gas_limit: u64,
-        block_da_limit: Option<u64>,
-        block_da_footprint_limit: Option<u64>,
+        tx_pool: &impl TransactionPool,
+        limits: BlockExecutionLimits,
     ) -> Result<Option<()>, PayloadBuilderError> {
         let execute_txs_start_time = Instant::now();
         let mut num_txs_considered = 0;
@@ -578,9 +584,9 @@ impl FlashblocksBuilderCtx {
         debug!(
             target: "payload_builder",
             id = ?self.payload_id(),
-            block_da_limit = ?block_da_limit,
+            block_da_limit = ?limits.da,
             tx_da_limit = ?tx_da_limit,
-            block_gas_limit = ?block_gas_limit,
+            block_gas_limit = ?limits.gas,
             "Executing best transactions",
         );
 
@@ -633,12 +639,12 @@ impl FlashblocksBuilderCtx {
             // ensure we still have capacity for this transaction
             if let Err(result) = info.is_tx_over_limits(
                 tx_da_size,
-                block_gas_limit,
+                limits.gas,
                 tx_da_limit,
-                block_da_limit,
+                limits.da,
                 tx.gas_limit(),
                 info.da_footprint_scalar,
-                block_da_footprint_limit,
+                limits.da_footprint,
             ) {
                 // we can't fit this transaction into the block, so we need to mark it as
                 // invalid which also removes all dependent transaction from
@@ -799,6 +805,19 @@ impl FlashblocksBuilderCtx {
                     Screen::Allow | Screen::AuditApproved => {}
                     Screen::Deny => {
                         best_txs.mark_invalid(tx.signer(), tx.nonce());
+                        continue;
+                    }
+                    Screen::Drop => {
+                        // A terminal audit rejection is a discard, not a mined transaction.
+                        // `remove_transaction` parks nonce descendants without deleting them.
+                        best_txs.mark_invalid(tx.signer(), tx.nonce());
+                        if tx_pool.remove_transaction(tx_hash).is_none() {
+                            debug!(
+                                target: "rcs_filter",
+                                %tx_hash,
+                                "terminally rejected transaction was already absent from txpool"
+                            );
+                        }
                         continue;
                     }
                     Screen::AuditPending => {
