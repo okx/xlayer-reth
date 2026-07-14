@@ -35,7 +35,7 @@ pub fn evaluate(rules: &RuleSet, input: &ScreenInput) -> MatchOutcome {
     // multiple times.
     let mut actions_by_log: BTreeMap<
         String,
-        BTreeMap<(usize, String, String, BTreeMap<String, String>), ActionItem>,
+        BTreeMap<(usize, String, String, String), ActionItem>,
     > = BTreeMap::new();
     let mut has_audit = false;
     let mut timeout_action = TimeoutAction::Allow;
@@ -79,7 +79,8 @@ pub fn evaluate(rules: &RuleSet, input: &ScreenInput) -> MatchOutcome {
                             *log_index,
                             item.name.clone(),
                             item.address.clone(),
-                            item.params.clone(),
+                            serde_json::to_string(&item.params)
+                                .expect("ABI-decoded JSON values are serializable"),
                         );
                         by_log.entry(key).or_insert_with(|| item.clone());
                     }
@@ -103,7 +104,7 @@ pub fn evaluate(rules: &RuleSet, input: &ScreenInput) -> MatchOutcome {
 struct MatchedEvent {
     log_index: usize,
     address: String,
-    params: BTreeMap<String, String>,
+    params: BTreeMap<String, Value>,
 }
 
 /// Deduplicated candidate rule indices across all logs (topic0 index lookup), sorted for
@@ -146,7 +147,7 @@ fn build_bindings(
             Some((log_index, log, params)) => {
                 let addr = addr_lower(log.address);
                 for (pname, pval) in &params {
-                    b.insert(format!("{}.{}", event.var_name, pname), Value::String(pval.clone()));
+                    b.insert(format!("{}.{}", event.var_name, pname), pval.clone());
                 }
                 b.insert(format!("{}.address", event.var_name), Value::String(addr.clone()));
                 matched.insert(
@@ -189,7 +190,7 @@ fn build_action_items(matched: &BTreeMap<String, MatchedEvent>) -> Vec<(usize, A
 fn find_log_for_event<'a>(
     event: &CompiledEvent,
     logs: &'a [Log],
-) -> Option<(usize, &'a Log, BTreeMap<String, String>)> {
+) -> Option<(usize, &'a Log, BTreeMap<String, Value>)> {
     logs.iter().enumerate().find_map(|(index, log)| {
         if !event.anonymous && log.data.topics().first() != Some(&event.topic0) {
             return None;
@@ -203,9 +204,9 @@ fn find_log_for_event<'a>(
     })
 }
 
-/// ABI-decodes a matched log into `{ param_name: string_value }` following the event's
-/// declared input order (indexed params from topics, the rest from data).
-fn decode_event(event: &CompiledEvent, log: &Log) -> Option<BTreeMap<String, String>> {
+/// ABI-decodes a matched log into named JSON values following the event's declared input order
+/// (indexed params from topics, the rest from data).
+fn decode_event(event: &CompiledEvent, log: &Log) -> Option<BTreeMap<String, Value>> {
     let mut out = BTreeMap::new();
 
     let indexed_types: Vec<DynSolType> =
@@ -233,24 +234,30 @@ fn decode_event(event: &CompiledEvent, log: &Log) -> Option<BTreeMap<String, Str
             v
         };
         if let Some(v) = value {
-            out.insert(input_def.name.clone(), dyn_value_to_string(v));
+            out.insert(input_def.name.clone(), dyn_value_to_json(v));
         }
     }
     Some(out)
 }
 
-/// Renders a decoded ABI value as a canonical string: addresses lower-cased hex, uint/int
-/// decimal, bool literal. These are the types quota shapes and conditions use (contract §3.3/§3.5).
-fn dyn_value_to_string(v: &DynSolValue) -> String {
+/// Converts decoded ABI values to stable JSON. Scalar values retain the existing string wire
+/// representation, while ABI arrays remain arrays so `TransferBatch` does not leak Rust debug
+/// formatting into the RCS request.
+fn dyn_value_to_json(v: &DynSolValue) -> Value {
     match v {
-        DynSolValue::Address(a) => addr_lower(*a),
-        DynSolValue::Uint(u, _) => u.to_string(),
-        DynSolValue::Int(i, _) => i.to_string(),
-        DynSolValue::Bool(b) => b.to_string(),
-        DynSolValue::String(s) => s.clone(),
-        DynSolValue::FixedBytes(w, _) => format!("{w:#x}"),
-        DynSolValue::Bytes(b) => format!("0x{}", alloy_primitives::hex::encode(b)),
-        other => format!("{other:?}"),
+        DynSolValue::Address(a) => Value::String(addr_lower(*a)),
+        DynSolValue::Uint(u, _) => Value::String(u.to_string()),
+        DynSolValue::Int(i, _) => Value::String(i.to_string()),
+        DynSolValue::Bool(b) => Value::String(b.to_string()),
+        DynSolValue::String(s) => Value::String(s.clone()),
+        DynSolValue::FixedBytes(w, _) => Value::String(format!("{w:#x}")),
+        DynSolValue::Bytes(b) => Value::String(format!("0x{}", alloy_primitives::hex::encode(b))),
+        DynSolValue::Array(values)
+        | DynSolValue::FixedArray(values)
+        | DynSolValue::Tuple(values) => {
+            Value::Array(values.iter().map(dyn_value_to_json).collect())
+        }
+        other => Value::String(format!("{other:?}")),
     }
 }
 
@@ -264,7 +271,7 @@ mod tests {
     use super::*;
     use crate::rules::{load_rules, RawRule};
     use crate::test_support::{golden, log_builder};
-    use alloy_primitives::{keccak256, Bytes, LogData};
+    use alloy_primitives::{keccak256, Bytes, LogData, U256};
     use serde_json::json;
 
     fn ruleset_a() -> RuleSet {
@@ -346,6 +353,61 @@ mod tests {
             }
             other => panic!("expected Audit, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn transfer_batch_decodes_uint_arrays_as_json_string_arrays() {
+        let rules = load_rules(
+            1,
+            1,
+            vec![audit_rule(
+                "batch-quota",
+                "transferBatch",
+                "TransferBatch",
+                json!([
+                    {"name": "operator", "type": "address", "indexed": true},
+                    {"name": "from", "type": "address", "indexed": true},
+                    {"name": "to", "type": "address", "indexed": true},
+                    {"name": "ids", "type": "uint256[]", "indexed": false},
+                    {"name": "values", "type": "uint256[]", "indexed": false}
+                ]),
+                "quota",
+            )],
+        );
+        assert_eq!(rules.rules.len(), 1);
+
+        let logs = vec![log_builder::erc1155_transfer_batch(
+            golden::token_x(),
+            golden::origin(),
+            golden::bridge_erc20(),
+            golden::recipient(),
+            vec![U256::from(7), U256::from(8)],
+            vec![U256::from(100), U256::from(200)],
+        )];
+        let input = ScreenInput {
+            tx_hash: golden::tx_a(),
+            origin: golden::origin(),
+            tx_to: Some(golden::claim_contract()),
+            nonce: 1,
+            value: U256::ZERO,
+            block_height: 1_000_000,
+            logs: &logs,
+        };
+
+        let MatchOutcome::Audit { actions, .. } = evaluate(&rules, &input) else {
+            panic!("expected audit")
+        };
+        let item = &actions["quota"][0];
+        assert_eq!(item.name, "transferBatch");
+        assert_eq!(item.params["operator"], json!(golden::ORIGIN));
+        assert_eq!(item.params["from"], json!(golden::BRIDGE_ERC20));
+        assert_eq!(item.params["to"], json!(golden::RECIPIENT));
+        assert_eq!(item.params["ids"], json!(["7", "8"]));
+        assert_eq!(item.params["values"], json!(["100", "200"]));
+
+        let wire = serde_json::to_value(&actions).unwrap();
+        assert_eq!(wire["quota"][0]["params"]["ids"], json!(["7", "8"]));
+        assert_eq!(wire["quota"][0]["params"]["values"], json!(["100", "200"]));
     }
 
     #[test]

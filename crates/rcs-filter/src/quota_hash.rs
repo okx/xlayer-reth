@@ -31,10 +31,34 @@ pub fn encode_and_hash(actions: &BTreeMap<String, Vec<ActionItem>>) -> B256 {
         push_u32(&mut buf, item.params.len() as u32);
         for (key, value) in &item.params {
             push_bytes(&mut buf, key.as_bytes());
-            push_bytes(&mut buf, value.to_ascii_lowercase().as_bytes());
+            push_json_value(&mut buf, value);
         }
     }
     keccak256(&buf)
+}
+
+/// Canonical encoding for ABI-decoded JSON values. Type tags distinguish arrays from scalar
+/// values; arrays are length-prefixed recursively and retain element order from the event log.
+fn push_json_value(buf: &mut Vec<u8>, value: &serde_json::Value) {
+    match value {
+        serde_json::Value::String(value) => {
+            buf.push(0);
+            push_bytes(buf, value.to_ascii_lowercase().as_bytes())
+        }
+        serde_json::Value::Array(values) => {
+            buf.push(1);
+            push_u32(buf, values.len() as u32);
+            for value in values {
+                push_json_value(buf, value);
+            }
+        }
+        // ABI decoding currently emits strings and arrays only. This fallback remains
+        // deterministic for future JSON scalar extensions.
+        value => {
+            buf.push(2);
+            push_bytes(buf, value.to_string().to_ascii_lowercase().as_bytes())
+        }
+    }
 }
 
 /// Length-prefixed byte field (u32 BE length + bytes).
@@ -66,9 +90,15 @@ mod tests {
 
     fn quota(value: &str) -> BTreeMap<String, Vec<ActionItem>> {
         let mut params = BTreeMap::new();
-        params.insert("from".to_string(), "0x0101010101010101010101010101010101010101".to_string());
-        params.insert("to".to_string(), "0x0303030303030303030303030303030303030303".to_string());
-        params.insert("value".to_string(), value.to_string());
+        params.insert(
+            "from".to_string(),
+            serde_json::Value::String("0x0101010101010101010101010101010101010101".to_string()),
+        );
+        params.insert(
+            "to".to_string(),
+            serde_json::Value::String("0x0303030303030303030303030303030303030303".to_string()),
+        );
+        params.insert("value".to_string(), serde_json::Value::String(value.to_string()));
         let mut m = BTreeMap::new();
         m.insert(
             "quota".to_string(),
@@ -94,10 +124,18 @@ mod tests {
         // Same semantic content, params inserted in different order → canonical (BTreeMap)
         // ordering makes the hash identical (FR-7 AC3: not a JSON-string hash).
         let mut a_params = BTreeMap::new();
-        a_params
-            .insert("from".to_string(), "0x0101010101010101010101010101010101010101".to_string());
-        a_params.insert("value".to_string(), "1000000000000000000".to_string());
-        a_params.insert("to".to_string(), "0x0303030303030303030303030303030303030303".to_string());
+        a_params.insert(
+            "from".to_string(),
+            serde_json::Value::String("0x0101010101010101010101010101010101010101".to_string()),
+        );
+        a_params.insert(
+            "value".to_string(),
+            serde_json::Value::String("1000000000000000000".to_string()),
+        );
+        a_params.insert(
+            "to".to_string(),
+            serde_json::Value::String("0x0303030303030303030303030303030303030303".to_string()),
+        );
         let mut a = BTreeMap::new();
         a.insert(
             "quota".to_string(),
@@ -116,5 +154,21 @@ mod tests {
             encode_and_hash(&quota("1000000000000000000")),
             encode_and_hash(&quota("2000000000000000000"))
         );
+    }
+
+    #[test]
+    fn transfer_batch_arrays_are_order_sensitive_and_deterministic() {
+        let mut first = quota("1");
+        first.get_mut(QUOTA).unwrap()[0]
+            .params
+            .insert("values".to_string(), serde_json::json!(["100", "200"]));
+        let same = first.clone();
+        let mut reversed = first.clone();
+        reversed.get_mut(QUOTA).unwrap()[0]
+            .params
+            .insert("values".to_string(), serde_json::json!(["200", "100"]));
+
+        assert_eq!(encode_and_hash(&first), encode_and_hash(&same));
+        assert_ne!(encode_and_hash(&first), encode_and_hash(&reversed));
     }
 }

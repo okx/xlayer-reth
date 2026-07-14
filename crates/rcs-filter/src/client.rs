@@ -34,8 +34,10 @@ pub struct ActionItem {
     pub name: String,
     /// `log.address` of the triggering log (e.g. the ERC20 token contract) — **not** `tx.to`.
     pub address: String,
-    /// Named ABI-decoded parameters. Ordered deterministically for canonical hashing.
-    pub params: BTreeMap<String, String>,
+    /// Named ABI-decoded parameters. Scalar integers remain decimal strings to preserve
+    /// `uint256` precision; ABI arrays are represented as JSON arrays of those scalar values.
+    /// Map ordering is deterministic for canonical hashing.
+    pub params: BTreeMap<String, serde_json::Value>,
 }
 
 /// One transaction in a `POST /permission-requests/submit` batch (contract §2.4).

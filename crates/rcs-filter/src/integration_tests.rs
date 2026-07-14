@@ -44,6 +44,11 @@ fn scenario_a_rules() -> RuleSet {
     load_rules(1, 1, vec![serde_json::from_str(golden::RULE_SCENARIO_A).unwrap()])
 }
 
+fn transfer_batch_rules() -> RuleSet {
+    let raw = r#"{"id":"batch-quota","event_abis":{"transferBatch":{"type":"event","name":"TransferBatch","inputs":[{"name":"operator","type":"address","indexed":true},{"name":"from","type":"address","indexed":true},{"name":"to","type":"address","indexed":true},{"name":"ids","type":"uint256[]","indexed":false},{"name":"values","type":"uint256[]","indexed":false}],"anonymous":false}},"audit_types":["quota"],"condition":true,"action":"audit","audit_timeout_action":"allow"}"#;
+    load_rules(1, 1, vec![serde_json::from_str(raw).unwrap()])
+}
+
 fn transfer_log(amount: &str) -> Log {
     log_builder::erc20_transfer(
         golden::token_x(),
@@ -436,6 +441,42 @@ async fn it_anonymous_audit_payload_matches_contract() {
     assert_eq!(action.params["from"], golden::BRIDGE_ERC20);
     assert_eq!(action.params["to"], golden::RECIPIENT);
     assert_eq!(action.params["value"], golden::ONE_TOKEN);
+}
+
+#[tokio::test]
+async fn it_transfer_batch_payload_preserves_abi_arrays_through_submit() {
+    let rules = transfer_batch_rules();
+    let logs = vec![log_builder::erc1155_transfer_batch(
+        golden::token_x(),
+        golden::origin(),
+        golden::bridge_erc20(),
+        golden::recipient(),
+        vec![U256::from(7), U256::from(8)],
+        vec![U256::from(100), U256::from(200)],
+    )];
+    let handle =
+        FilterHandle::for_test(enabled_config(), rules.clone(), Arc::new(TestClock::new(START)));
+    assert_eq!(handle.screen_tx(&scenario_a_input(golden::tx_a(), &logs)), Screen::AuditPending);
+    let entry = handle.with_pool(|pool| pool.get(&golden::tx_a()).cloned()).unwrap();
+
+    let mock = Arc::new(MockRcsClient::new());
+    let client: Arc<dyn RcsClient> = mock.clone();
+    let shared = shared_with(Arc::new(TestClock::new(START)), rules, true);
+    shared.pool.lock().unwrap().insert(entry);
+    worker::submit_once(&shared, &client).await.unwrap();
+
+    let request = mock.last_submit().unwrap();
+    let action = &request.txs[0].actions["quota"][0];
+    assert_eq!(action.name, "transferBatch");
+    assert_eq!(action.params["operator"], json!(golden::ORIGIN));
+    assert_eq!(action.params["from"], json!(golden::BRIDGE_ERC20));
+    assert_eq!(action.params["to"], json!(golden::RECIPIENT));
+    assert_eq!(action.params["ids"], json!(["7", "8"]));
+    assert_eq!(action.params["values"], json!(["100", "200"]));
+
+    let wire = serde_json::to_value(&request).unwrap();
+    assert_eq!(wire["txs"][0]["actions"]["quota"][0]["params"]["ids"], json!(["7", "8"]));
+    assert_eq!(wire["txs"][0]["actions"]["quota"][0]["params"]["values"], json!(["100", "200"]));
 }
 
 /// FR-5 adjudication mapping: `Submitted → Pending` (any non-absent response) then
