@@ -377,23 +377,28 @@ where
 
         // Check if need to rebuild from external p2p payload cache. If cache hit but the sequence contains
         // no transactions, we can continue the build from fresh since no replaying required.
-        let rebuild_external_payload = self
-            .p2p_cache
-            .get_flashblocks_sequence_txs::<OpTransactionSigned>(ctx.parent().hash())
-            .filter(|cached_txs| !cached_txs.is_empty())
-            .map(|cached_txs| {
-                // The execution result is discarded here since even on replay errors, we will resolve the
-                // payload till whichever point the replay failed.
-                let _ = ctx
-                    .execute_cached_flashblocks_transactions(&mut info, &mut state, cached_txs)
-                    .inspect_err(|e| {
-                        warn!(
-                            target: "payload_builder",
-                            "Failed replaying external cached flashblocks sequence fully, error: {e}",
-                        );
-                    });
-            })
-            .is_some();
+        // External sequences do not carry an authenticated RCS decision. When filtering is
+        // enabled, rebuild locally from txpool so every transaction crosses the screening path.
+        let rebuild_external_payload = if self.config.rcs_filter.is_some() {
+            false
+        } else {
+            self.p2p_cache
+                .get_flashblocks_sequence_txs::<OpTransactionSigned>(ctx.parent().hash())
+                .filter(|cached_txs| !cached_txs.is_empty())
+                .map(|cached_txs| {
+                    // The execution result is discarded here since even on replay errors, we will resolve the
+                    // payload till whichever point the replay failed.
+                    let _ = ctx
+                        .execute_cached_flashblocks_transactions(&mut info, &mut state, cached_txs)
+                        .inspect_err(|e| {
+                            warn!(
+                                target: "payload_builder",
+                                "Failed replaying external cached flashblocks sequence fully, error: {e}",
+                            );
+                        });
+                })
+                .is_some()
+        };
 
         // We add first builder tx right after deposits
         // For X Layer - skip if replaying

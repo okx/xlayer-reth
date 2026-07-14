@@ -14,11 +14,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use alloy_primitives::{Log, B256, U256};
+use alloy_primitives::{Bytes, Log, LogData, B256, U256};
+use async_trait::async_trait;
+use serde_json::json;
 
-use crate::client::RcsClient;
+use crate::client::{
+    QueryParams, QueryResponse, QueryTx, RcsClient, RulesResponse, SubmitRequest, SubmitResponse,
+    VersionResponse,
+};
 use crate::config::FilterConfig;
-use crate::handle::{FilterHandle, Screen, ScreenInput, Shared};
+use crate::handle::{
+    FilterHandle, PreScreen, Screen, ScreenInput, Shared, TerminalEvent, TerminalReason,
+};
 use crate::matching::{self, MatchOutcome};
 use crate::pool::{BufferEntry, BufferPool, BufferStatus};
 use crate::rules::{load_rules, RuleSet};
@@ -65,12 +72,15 @@ fn scenario_a_input(tx_hash: B256, logs: &[Log]) -> ScreenInput<'_> {
 // ============================================================================================
 
 fn shared_with(clock: Arc<TestClock>, rules: RuleSet, ready: bool) -> Shared {
+    let (terminal_events, _) = tokio::sync::broadcast::channel(1024);
     Shared {
         config: enabled_config(),
         rules: Arc::new(RwLock::new(Arc::new(rules))),
         pool: Arc::new(Mutex::new(BufferPool::default())),
         clock,
         ready: Arc::new(AtomicBool::new(ready)),
+        terminal_events,
+        metrics: crate::metrics::RcsFilterMetrics::default(),
     }
 }
 
@@ -85,6 +95,7 @@ fn scenario_a_entry(tx_hash: B256, block_height: u64, now: u64) -> BufferEntry {
         other => panic!("expected Audit, got {other:?}"),
     };
     BufferEntry {
+        generation: 0,
         tx_hash,
         origin: golden::origin(),
         contract_address: golden::claim_contract(),
@@ -97,6 +108,106 @@ fn scenario_a_entry(tx_hash: B256, block_height: u64, now: u64) -> BufferEntry {
         first_not_submitted_at: now,
         last_transition_at: now,
     }
+}
+
+#[derive(Debug, Default)]
+struct GatedResponseClient {
+    submit_started: tokio::sync::Notify,
+    submit_release: tokio::sync::Notify,
+    query_started: tokio::sync::Notify,
+    query_release: tokio::sync::Notify,
+    block_first_query: AtomicBool,
+}
+
+impl GatedResponseClient {
+    fn new() -> Self {
+        Self { block_first_query: AtomicBool::new(true), ..Default::default() }
+    }
+}
+
+#[async_trait]
+impl RcsClient for GatedResponseClient {
+    async fn get_rules(&self) -> crate::Result<RulesResponse> {
+        unreachable!()
+    }
+
+    async fn get_rules_version(&self) -> crate::Result<VersionResponse> {
+        unreachable!()
+    }
+
+    async fn submit(&self, req: SubmitRequest) -> crate::Result<SubmitResponse> {
+        self.submit_started.notify_one();
+        self.submit_release.notified().await;
+        Ok(SubmitResponse {
+            accepted: req.txs.into_iter().map(|tx| tx.tx_hash).collect(),
+            rejected_malformed: Vec::new(),
+        })
+    }
+
+    async fn query(&self, params: QueryParams) -> crate::Result<QueryResponse> {
+        if self.block_first_query.swap(false, Ordering::SeqCst) {
+            self.query_started.notify_one();
+            self.query_release.notified().await;
+        }
+        let txs = match params {
+            QueryParams::Status(status) if status == "approved" => vec![QueryTx {
+                tx_hash: golden::TX_A.to_string(),
+                status,
+                decided_at: None,
+                reason: None,
+            }],
+            _ => Vec::new(),
+        };
+        Ok(QueryResponse { txs })
+    }
+}
+
+#[tokio::test]
+async fn stale_submit_response_does_not_advance_reinserted_lifecycle() {
+    let client = Arc::new(GatedResponseClient::new());
+    let shared = shared_with(Arc::new(TestClock::new(START)), scenario_a_rules(), true);
+    shared.pool_lock().insert(scenario_a_entry(golden::tx_a(), 1_000_000, START));
+
+    let task_shared = shared.clone();
+    let task_client: Arc<dyn RcsClient> = client.clone();
+    let task = tokio::spawn(async move { worker::submit_once(&task_shared, &task_client).await });
+    client.submit_started.notified().await;
+
+    let old_generation = shared.pool_lock().get(&golden::tx_a()).unwrap().generation;
+    shared.pool_lock().remove(&golden::tx_a());
+    shared.pool_lock().insert(scenario_a_entry(golden::tx_a(), 1_000_001, START + 1));
+    let new_generation = shared.pool_lock().get(&golden::tx_a()).unwrap().generation;
+    assert_ne!(old_generation, new_generation);
+    client.submit_release.notify_one();
+    task.await.unwrap().unwrap();
+
+    assert_eq!(shared.pool_lock().get(&golden::tx_a()).unwrap().status, BufferStatus::NotSubmitted);
+}
+
+#[tokio::test]
+async fn stale_query_response_does_not_approve_reinserted_lifecycle() {
+    let client = Arc::new(GatedResponseClient::new());
+    let shared = shared_with(Arc::new(TestClock::new(START)), scenario_a_rules(), true);
+    let mut first = scenario_a_entry(golden::tx_a(), 1_000_000, START);
+    first.status = BufferStatus::Submitted;
+    shared.pool_lock().insert(first);
+
+    let task_shared = shared.clone();
+    let task_client: Arc<dyn RcsClient> = client.clone();
+    let task = tokio::spawn(async move { worker::query_once(&task_shared, &task_client).await });
+    client.query_started.notified().await;
+
+    let old_generation = shared.pool_lock().get(&golden::tx_a()).unwrap().generation;
+    shared.pool_lock().remove(&golden::tx_a());
+    let mut replacement = scenario_a_entry(golden::tx_a(), 1_000_001, START + 1);
+    replacement.status = BufferStatus::Submitted;
+    shared.pool_lock().insert(replacement);
+    let new_generation = shared.pool_lock().get(&golden::tx_a()).unwrap().generation;
+    assert_ne!(old_generation, new_generation);
+    client.query_release.notify_one();
+    task.await.unwrap().unwrap();
+
+    assert_eq!(shared.pool_lock().get(&golden::tx_a()).unwrap().status, BufferStatus::Submitted);
 }
 
 /// §6.4 断言点1 + FR-10 AC1: the submit payload matches contract §4 scenario a **verbatim**,
@@ -173,6 +284,24 @@ async fn submit_once_groups_by_block_height() {
     assert!(reqs.iter().all(|r| r.txs.len() == 1));
 }
 
+#[tokio::test]
+async fn submit_group_isolation_continues_after_one_height_fails() {
+    let mock = Arc::new(MockRcsClient::new());
+    mock.fail_submit_height(1_000_000);
+    let client: Arc<dyn RcsClient> = mock.clone();
+    let shared = shared_with(Arc::new(TestClock::new(START)), scenario_a_rules(), true);
+    {
+        let mut pool = shared.pool.lock().unwrap();
+        pool.insert(scenario_a_entry(golden::tx_a(), 1_000_000, START));
+        pool.insert(scenario_a_entry(golden::tx_c(), 1_000_010, START));
+    }
+
+    assert!(worker::submit_once(&shared, &client).await.is_err());
+    let pool = shared.pool.lock().unwrap();
+    assert_eq!(pool.get(&golden::tx_a()).unwrap().status, BufferStatus::NotSubmitted);
+    assert_eq!(pool.get(&golden::tx_c()).unwrap().status, BufferStatus::Submitted);
+}
+
 /// FR-2 startup load: a supported protocol version installs the rules and latches `ready`.
 #[tokio::test]
 async fn load_and_install_installs_and_marks_ready() {
@@ -215,6 +344,100 @@ async fn load_and_install_errors_when_unavailable() {
     assert!(!shared.ready.load(Ordering::Acquire));
 }
 
+#[tokio::test]
+async fn partial_query_failure_still_applies_successful_statuses() {
+    let mock = Arc::new(MockRcsClient::new());
+    mock.fail_query_status("pending");
+    mock.register_query_state(golden::TX_A, "approved", Some(START as i64));
+    let client: Arc<dyn RcsClient> = mock.clone();
+    let shared = shared_with(Arc::new(TestClock::new(START)), scenario_a_rules(), true);
+    let mut entry = scenario_a_entry(golden::tx_a(), 1_000_000, START);
+    entry.status = BufferStatus::Submitted;
+    shared.pool.lock().unwrap().insert(entry);
+
+    assert!(worker::query_once(&shared, &client).await.is_err());
+    assert_eq!(
+        shared.pool.lock().unwrap().get(&golden::tx_a()).unwrap().status,
+        BufferStatus::Approved
+    );
+    assert_eq!(
+        mock.queried_modes(),
+        ["pending", "approved", "denied", "outdated"].map(|s| format!("status:{s}"))
+    );
+}
+
+#[tokio::test]
+async fn it_malformed_reload_keeps_old_rules() {
+    let mock = Arc::new(MockRcsClient::new());
+    mock.set_rules_fixture(&[golden::RULE_SCENARIO_A]);
+    let client: Arc<dyn RcsClient> = mock.clone();
+    let shared = shared_with(Arc::new(TestClock::new(START)), RuleSet::default(), false);
+    assert!(worker::load_and_install(&shared, &client).await.unwrap());
+    let previous = shared.rules.read().unwrap().clone();
+
+    mock.set_rules_response_override(json!({
+        "protocol_version": 1,
+        "content_version": 2,
+        "rules": [{
+            "id": "malformed",
+            "event_abis": {"e": {"type": "event", "name": "E", "anonymous": false}},
+            "condition": true,
+            "action": "deny"
+        }]
+    }));
+    assert!(worker::load_and_install(&shared, &client).await.is_err());
+    let current = shared.rules.read().unwrap();
+    assert!(Arc::ptr_eq(&previous, &current));
+    assert_eq!(current.content_version, 1);
+}
+
+#[tokio::test]
+async fn it_missing_rules_never_marks_version_installed() {
+    let mock = Arc::new(MockRcsClient::new());
+    mock.set_rules_response_override(json!({
+        "protocol_version": 1,
+        "content_version": 7
+    }));
+    let client: Arc<dyn RcsClient> = mock.clone();
+    let shared = shared_with(Arc::new(TestClock::new(START)), RuleSet::default(), false);
+
+    assert!(worker::load_and_install(&shared, &client).await.is_err());
+    assert!(!shared.ready.load(Ordering::Acquire));
+    assert_eq!(shared.rules.read().unwrap().content_version, 0);
+}
+
+#[tokio::test]
+async fn it_anonymous_audit_payload_matches_contract() {
+    let raw = r#"{"id":"anonymous-transfer","event_abis":{"transfer":{"type":"event","name":"Transfer","inputs":[{"name":"from","type":"address","indexed":true},{"name":"to","type":"address","indexed":true},{"name":"value","type":"uint256","indexed":false}],"anonymous":true}},"audit_types":["quota"],"condition":true,"action":"audit"}"#;
+    let rules = load_rules(1, 1, vec![serde_json::from_str(raw).unwrap()]);
+    let normal = transfer_log(golden::ONE_TOKEN);
+    let logs = vec![Log {
+        address: normal.address,
+        data: LogData::new_unchecked(
+            normal.data.topics()[1..].to_vec(),
+            Bytes::copy_from_slice(&normal.data.data),
+        ),
+    }];
+    let handle =
+        FilterHandle::for_test(enabled_config(), rules.clone(), Arc::new(TestClock::new(START)));
+    assert_eq!(handle.screen_tx(&scenario_a_input(golden::tx_a(), &logs)), Screen::AuditPending);
+    let entry = handle.with_pool(|pool| pool.get(&golden::tx_a()).cloned()).unwrap();
+
+    let mock = Arc::new(MockRcsClient::new());
+    let client: Arc<dyn RcsClient> = mock.clone();
+    let shared = shared_with(Arc::new(TestClock::new(START)), rules, true);
+    shared.pool.lock().unwrap().insert(entry);
+    worker::submit_once(&shared, &client).await.unwrap();
+
+    let request = mock.last_submit().unwrap();
+    let action = &request.txs[0].actions["quota"][0];
+    assert_eq!(action.name, "transfer");
+    assert_eq!(action.address, golden::TOKEN_X);
+    assert_eq!(action.params["from"], golden::BRIDGE_ERC20);
+    assert_eq!(action.params["to"], golden::RECIPIENT);
+    assert_eq!(action.params["value"], golden::ONE_TOKEN);
+}
+
 /// FR-5 adjudication mapping: `Submitted → Pending` (any non-absent response) then
 /// `Pending → Approved` (status=approved), driven through `query_once`.
 #[tokio::test]
@@ -245,10 +468,11 @@ async fn query_once_maps_submitted_through_pending_to_approved() {
 
 /// §7.2 scenario c: a `denied` status tombstones the entry as `Dropped` in place.
 #[tokio::test]
-async fn query_once_denied_tombstones_dropped() {
+async fn denied_emits_one_discard_event() {
     let mock = Arc::new(MockRcsClient::new());
     let client: Arc<dyn RcsClient> = mock.clone();
     let shared = shared_with(Arc::new(TestClock::new(START)), scenario_a_rules(), true);
+    let mut events = shared.terminal_events.subscribe();
     {
         let mut e = scenario_a_entry(golden::tx_c(), 1_000_010, START);
         e.status = BufferStatus::Submitted;
@@ -263,6 +487,85 @@ async fn query_once_denied_tombstones_dropped() {
         shared.pool.lock().unwrap().get(&golden::tx_c()).unwrap().status,
         BufferStatus::Dropped
     );
+    assert_eq!(
+        events.try_recv().unwrap(),
+        TerminalEvent { tx_hash: golden::tx_c(), generation: 1, reason: TerminalReason::Denied }
+    );
+    assert!(events.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn outdated_emits_discard_event() {
+    let mock = Arc::new(MockRcsClient::new());
+    let client: Arc<dyn RcsClient> = mock.clone();
+    let shared = shared_with(Arc::new(TestClock::new(START)), scenario_a_rules(), true);
+    let mut events = shared.terminal_events.subscribe();
+    let mut entry = scenario_a_entry(golden::tx_d(), 1_000_020, START);
+    entry.status = BufferStatus::Approved;
+    shared.pool.lock().unwrap().insert(entry);
+
+    mock.register_query_state(golden::TX_D, "outdated", Some(START as i64));
+    worker::query_once(&shared, &client).await.expect("query ok");
+
+    assert_eq!(
+        events.try_recv().unwrap(),
+        TerminalEvent { tx_hash: golden::tx_d(), generation: 1, reason: TerminalReason::Outdated }
+    );
+}
+
+#[test]
+fn fail_close_emits_discard_event() {
+    let clock = Arc::new(TestClock::new(START));
+    let shared = shared_with(clock.clone(), scenario_a_rules(), true);
+    let mut events = shared.terminal_events.subscribe();
+    let mut entry = scenario_a_entry(golden::tx_c(), 1_000_010, START);
+    entry.timeout_action = crate::rules::TimeoutAction::Deny;
+    shared.pool.lock().unwrap().insert(entry);
+    clock.set(START + 91);
+
+    let (resolved, _) = worker::timeout_once(&shared);
+    assert_eq!(resolved, vec![(golden::tx_c(), 1, crate::pool::Resolution::Discard)]);
+    assert_eq!(
+        events.try_recv().unwrap(),
+        TerminalEvent {
+            tx_hash: golden::tx_c(),
+            generation: 1,
+            reason: TerminalReason::FailCloseTimeout,
+        }
+    );
+}
+
+#[tokio::test]
+async fn duplicate_terminal_updates_are_idempotent() {
+    let mock = Arc::new(MockRcsClient::new());
+    let client: Arc<dyn RcsClient> = mock.clone();
+    let shared = shared_with(Arc::new(TestClock::new(START)), scenario_a_rules(), true);
+    let mut events = shared.terminal_events.subscribe();
+    let mut entry = scenario_a_entry(golden::tx_c(), 1_000_010, START);
+    entry.status = BufferStatus::Submitted;
+    shared.pool.lock().unwrap().insert(entry);
+    mock.register_query_state(golden::TX_C, "denied", Some(START as i64));
+
+    worker::query_once(&shared, &client).await.unwrap();
+    worker::query_once(&shared, &client).await.unwrap();
+    assert!(events.try_recv().is_ok());
+    assert!(events.try_recv().is_err());
+}
+
+#[test]
+fn channel_lag_reconciles_all_dropped_hashes() {
+    let shared = shared_with(Arc::new(TestClock::new(START)), scenario_a_rules(), true);
+    let mut a = scenario_a_entry(golden::tx_c(), 1_000_010, START);
+    a.status = BufferStatus::Dropped;
+    let mut b = scenario_a_entry(golden::tx_d(), 1_000_020, START);
+    b.status = BufferStatus::Dropped;
+    let mut pool = shared.pool.lock().unwrap();
+    pool.insert(a);
+    pool.insert(b);
+    let hashes = pool.dropped_hashes();
+    assert_eq!(hashes.len(), 2);
+    assert!(hashes.contains(&golden::tx_c()));
+    assert!(hashes.contains(&golden::tx_d()));
 }
 
 /// An absent tx_hash (RCS has never seen it / already swept, contract §2.5) leaves the entry
@@ -336,7 +639,7 @@ async fn e2e_scenario_a_happy_path() {
 
     // Pre-package re-simulation with unchanged logs → consistency pass → release.
     assert_eq!(h.screen_tx(&input), Screen::AuditApproved);
-    assert_eq!(h.buffer_status(&golden::tx_a()), Some(BufferStatus::ReleasePending));
+    assert_eq!(h.buffer_status(&golden::tx_a()), Some(BufferStatus::Approved));
 }
 
 /// §7.2 scenario b: a `deny` rule match drops the tx locally and produces **zero** RCS
@@ -471,7 +774,7 @@ async fn grace_period_no_early_timeout_then_fail_open_at_90s() {
     // Cross the 90s outer timeout → fail-open release.
     clock.set(START + 91);
     spin(2000).await;
-    assert_eq!(h.buffer_status(&golden::tx_a()), Some(BufferStatus::ReleasePending));
+    assert_eq!(h.buffer_status(&golden::tx_a()), Some(BufferStatus::TimedOutAllow));
 }
 
 /// §7.2 "NotSubmitted 循环重试后最终恢复": submit fails while RCS is down (tx stays
@@ -497,8 +800,21 @@ async fn not_submitted_loop_recovers_after_rcs_returns() {
     // RCS returns and approves → the flow completes to release.
     mock.set_unavailable(false);
     mock.register_query_state(golden::TX_A, "approved", Some(START as i64 + 2));
-    spin(1500).await;
-    assert_eq!(h.buffer_status(&golden::tx_a()), Some(BufferStatus::Approved));
+    // Advance in increments so the capped submit backoff and the following query poll both run.
+    for _ in 0..120 {
+        if h.buffer_status(&golden::tx_a()) == Some(BufferStatus::Approved) {
+            break;
+        }
+        spin(250).await;
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        h.buffer_status(&golden::tx_a()),
+        Some(BufferStatus::Approved),
+        "submit calls={}, query calls={}",
+        mock.call_count("submit"),
+        mock.call_count("query")
+    );
     assert_eq!(h.screen_tx(&input), Screen::AuditApproved);
 }
 
@@ -519,7 +835,7 @@ async fn terminal_tombstone_is_pruned_after_retention() {
     // No adjudication ever arrives → the 90s outer timeout tombstones it (fail-open).
     clock.set(START + 91);
     spin(2000).await;
-    assert_eq!(h.buffer_status(&golden::tx_a()), Some(BufferStatus::ReleasePending));
+    assert_eq!(h.buffer_status(&golden::tx_a()), Some(BufferStatus::TimedOutAllow));
     assert_eq!(h.buffered_len(), 1);
 
     // Past the 300s retention (measured from the terminal transition at +91) → evicted.
@@ -527,6 +843,167 @@ async fn terminal_tombstone_is_pruned_after_retention() {
     spin(2000).await;
     assert_eq!(h.buffer_status(&golden::tx_a()), None, "tombstone evicted");
     assert_eq!(h.buffered_len(), 0, "pool bounded");
+}
+
+fn approved_handle_for_lifecycle_test(logs: &[Log]) -> FilterHandle {
+    let handle = FilterHandle::for_test(
+        enabled_config(),
+        scenario_a_rules(),
+        Arc::new(TestClock::new(START)),
+    );
+    let input = scenario_a_input(golden::tx_a(), logs);
+    assert_eq!(handle.screen_tx(&input), Screen::AuditPending);
+    handle.with_pool(|pool| {
+        pool.apply_submit_response_current(&[golden::TX_A.to_string()], START);
+        pool.apply_query_status_current(&golden::tx_a(), "approved", START);
+    });
+    handle
+}
+
+#[test]
+fn it_payload_cancel_does_not_cache_approval() {
+    let original_logs = vec![transfer_log(golden::ONE_TOKEN)];
+    let handle = approved_handle_for_lifecycle_test(&original_logs);
+    assert_eq!(
+        handle.screen_tx(&scenario_a_input(golden::tx_a(), &original_logs)),
+        Screen::AuditApproved
+    );
+    assert_eq!(handle.buffer_status(&golden::tx_a()), Some(BufferStatus::Approved));
+
+    let changed_logs = vec![transfer_log(golden::TWO_TOKENS)];
+    assert_eq!(handle.screen_tx(&scenario_a_input(golden::tx_a(), &changed_logs)), Screen::Drop);
+}
+
+#[test]
+fn it_parent_change_rechecks_approval() {
+    let parent_a_logs = vec![transfer_log(golden::ONE_TOKEN)];
+    let handle = approved_handle_for_lifecycle_test(&parent_a_logs);
+    assert_eq!(
+        handle.screen_tx(&scenario_a_input(golden::tx_a(), &parent_a_logs)),
+        Screen::AuditApproved
+    );
+
+    let parent_b_logs = vec![transfer_log(golden::THREE_TOKENS)];
+    assert_eq!(handle.screen_tx(&scenario_a_input(golden::tx_a(), &parent_b_logs)), Screen::Drop);
+}
+
+#[test]
+fn it_concurrent_payloads_do_not_share_permit() {
+    let logs = vec![transfer_log(golden::ONE_TOKEN)];
+    let handle = Arc::new(approved_handle_for_lifecycle_test(&logs));
+    let first = {
+        let handle = handle.clone();
+        let logs = logs.clone();
+        std::thread::spawn(move || handle.screen_tx(&scenario_a_input(golden::tx_a(), &logs)))
+    };
+    let second = {
+        let handle = handle.clone();
+        std::thread::spawn(move || {
+            let changed = vec![transfer_log(golden::TWO_TOKENS)];
+            handle.screen_tx(&scenario_a_input(golden::tx_a(), &changed))
+        })
+    };
+
+    let results = [first.join().unwrap(), second.join().unwrap()];
+    assert!(results.contains(&Screen::Drop));
+    assert_eq!(handle.buffer_status(&golden::tx_a()), Some(BufferStatus::Dropped));
+}
+
+#[test]
+fn it_canonical_notification_cleans_buffer() {
+    let logs = vec![transfer_log(golden::ONE_TOKEN)];
+    let handle = approved_handle_for_lifecycle_test(&logs);
+    assert_eq!(handle.screen_tx(&scenario_a_input(golden::tx_a(), &logs)), Screen::AuditApproved);
+    assert_eq!(handle.remove_canonical_transactions(&[golden::tx_a()]), 1);
+    assert_eq!(handle.buffer_status(&golden::tx_a()), None);
+}
+
+#[test]
+fn it_reorg_rescreens_reinserted_tx() {
+    let logs = vec![transfer_log(golden::ONE_TOKEN)];
+    let handle = approved_handle_for_lifecycle_test(&logs);
+    assert_eq!(handle.remove_canonical_transactions(&[golden::tx_a()]), 1);
+    assert_eq!(handle.screen_tx(&scenario_a_input(golden::tx_a(), &logs)), Screen::AuditPending);
+    assert_eq!(handle.buffer_status(&golden::tx_a()), Some(BufferStatus::NotSubmitted));
+}
+
+#[tokio::test]
+async fn it_rcs_denied_removes_txpool_root() {
+    let mock = Arc::new(MockRcsClient::new());
+    let client: Arc<dyn RcsClient> = mock.clone();
+    let shared = shared_with(Arc::new(TestClock::new(START)), scenario_a_rules(), true);
+    let mut events = shared.terminal_events.subscribe();
+    let mut entry = scenario_a_entry(golden::tx_c(), 1_000_010, START);
+    entry.status = BufferStatus::Submitted;
+    shared.pool.lock().unwrap().insert(entry);
+    let txpool = Arc::new(Mutex::new(std::collections::HashSet::from([golden::tx_c()])));
+    mock.register_query_state(golden::TX_C, "denied", Some(START as i64));
+
+    worker::query_once(&shared, &client).await.unwrap();
+    let event = events.recv().await.unwrap();
+    txpool.lock().unwrap().remove(&event.tx_hash);
+    assert!(!txpool.lock().unwrap().contains(&golden::tx_c()));
+}
+
+#[tokio::test]
+async fn it_discard_parks_nonce_descendant() {
+    let root = golden::tx_c();
+    let descendant = golden::tx_d();
+    let txpool = Arc::new(Mutex::new(std::collections::HashSet::from([root, descendant])));
+    let shared = shared_with(Arc::new(TestClock::new(START)), scenario_a_rules(), true);
+    let mut events = shared.terminal_events.subscribe();
+    let mut entry = scenario_a_entry(root, 1_000_010, START);
+    entry.status = BufferStatus::Submitted;
+    shared.pool.lock().unwrap().insert(entry);
+    shared.emit_terminal(TerminalEvent {
+        tx_hash: root,
+        generation: 1,
+        reason: TerminalReason::Denied,
+    });
+
+    let event = events.recv().await.unwrap();
+    txpool.lock().unwrap().remove(&event.tx_hash);
+    let pool = txpool.lock().unwrap();
+    assert!(!pool.contains(&root));
+    assert!(pool.contains(&descendant), "nonce descendant remains available to be parked");
+}
+
+#[test]
+fn it_rebroadcast_dropped_hash_is_reconciled() {
+    let logs = vec![transfer_log(golden::ONE_TOKEN)];
+    let handle = FilterHandle::for_test(
+        enabled_config(),
+        scenario_a_rules(),
+        Arc::new(TestClock::new(START)),
+    );
+    let input = scenario_a_input(golden::tx_a(), &logs);
+    assert_eq!(handle.screen_tx(&input), Screen::AuditPending);
+    handle.with_pool(|pool| {
+        pool.apply_submit_response_current(&[golden::TX_A.to_string()], START);
+        pool.apply_query_status_current(&golden::tx_a(), "denied", START);
+    });
+
+    assert_eq!(handle.pre_screen(&golden::tx_a()), PreScreen::Drop);
+    assert_eq!(handle.dropped_hashes(), vec![golden::tx_a()]);
+}
+
+#[test]
+fn it_pending_transactions_do_not_execute_each_flashblock() {
+    let logs = vec![transfer_log(golden::ONE_TOKEN)];
+    let handle = FilterHandle::for_test(
+        enabled_config(),
+        scenario_a_rules(),
+        Arc::new(TestClock::new(START)),
+    );
+    let input = scenario_a_input(golden::tx_a(), &logs);
+    assert_eq!(handle.screen_tx(&input), Screen::AuditPending);
+    let mut executions = 0;
+    for _ in 0..360 {
+        if handle.pre_screen(&golden::tx_a()) == PreScreen::Execute {
+            executions += 1;
+        }
+    }
+    assert_eq!(executions, 0);
 }
 
 /// #5 + F1: an unsupported protocol advertised by the lightweight probe is filtered out

@@ -15,7 +15,6 @@ use crate::error::{FilterError, Result};
 pub struct RulesResponse {
     pub protocol_version: u32,
     pub content_version: u64,
-    #[serde(default)]
     pub rules: Vec<crate::rules::RawRule>,
 }
 
@@ -62,9 +61,7 @@ pub struct SubmitRequest {
 /// are plain `tx_hash` string arrays.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SubmitResponse {
-    #[serde(default)]
     pub accepted: Vec<String>,
-    #[serde(default)]
     pub rejected_malformed: Vec<String>,
 }
 
@@ -94,7 +91,6 @@ pub struct QueryTx {
 /// has never seen (or already swept) is silently absent — not an error.
 #[derive(Debug, Clone, Deserialize)]
 pub struct QueryResponse {
-    #[serde(default)]
     pub txs: Vec<QueryTx>,
 }
 
@@ -121,7 +117,22 @@ pub struct ReqwestRcsClient {
 impl ReqwestRcsClient {
     /// Builds a client against `base_url` (trailing slash trimmed).
     pub fn new(base_url: impl Into<String>) -> Result<Self> {
+        Self::with_timeouts(
+            base_url,
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(3),
+        )
+    }
+
+    /// Builds a client with explicit connect and total-request timeout budgets.
+    pub fn with_timeouts(
+        base_url: impl Into<String>,
+        connect_timeout: std::time::Duration,
+        request_timeout: std::time::Duration,
+    ) -> Result<Self> {
         let http = reqwest::Client::builder()
+            .connect_timeout(connect_timeout)
+            .timeout(request_timeout)
             .build()
             .map_err(|e| FilterError::Transport(e.to_string()))?;
         Ok(Self { base_url: base_url.into().trim_end_matches('/').to_string(), http })
@@ -135,23 +146,14 @@ impl ReqwestRcsClient {
 #[async_trait]
 impl RcsClient for ReqwestRcsClient {
     async fn get_rules(&self) -> Result<RulesResponse> {
-        let resp = self
-            .http
-            .get(self.url("/rules"))
-            .send()
-            .await
-            .map_err(|e| FilterError::Transport(e.to_string()))?;
-        decode_json(resp).await
+        let resp = self.http.get(self.url("/rules")).send().await.map_err(transport_error)?;
+        decode_json(resp, reqwest::StatusCode::OK).await
     }
 
     async fn get_rules_version(&self) -> Result<VersionResponse> {
-        let resp = self
-            .http
-            .get(self.url("/rules/version"))
-            .send()
-            .await
-            .map_err(|e| FilterError::Transport(e.to_string()))?;
-        decode_json(resp).await
+        let resp =
+            self.http.get(self.url("/rules/version")).send().await.map_err(transport_error)?;
+        decode_json(resp, reqwest::StatusCode::OK).await
     }
 
     async fn submit(&self, req: SubmitRequest) -> Result<SubmitResponse> {
@@ -161,8 +163,8 @@ impl RcsClient for ReqwestRcsClient {
             .json(&req)
             .send()
             .await
-            .map_err(|e| FilterError::Transport(e.to_string()))?;
-        decode_json(resp).await
+            .map_err(transport_error)?;
+        decode_json(resp, reqwest::StatusCode::ACCEPTED).await
     }
 
     async fn query(&self, q: QueryParams) -> Result<QueryResponse> {
@@ -171,16 +173,263 @@ impl RcsClient for ReqwestRcsClient {
             QueryParams::Status(s) => req.query(&[("status", s)]),
             QueryParams::TxHashes(hashes) => req.query(&[("tx_hashes", hashes.join(","))]),
         };
-        let resp = req.send().await.map_err(|e| FilterError::Transport(e.to_string()))?;
-        decode_json(resp).await
+        let resp = req.send().await.map_err(transport_error)?;
+        decode_json(resp, reqwest::StatusCode::OK).await
     }
 }
 
-/// Decodes a successful (2xx) JSON response, mapping non-2xx to [`FilterError::UnexpectedStatus`].
-async fn decode_json<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> Result<T> {
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+    use serde_json::json;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    async fn spawn_http_script(
+        responses: Vec<(u16, String, Duration)>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let mut request_lines = Vec::new();
+            for (status, body, body_delay) in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 2048];
+                loop {
+                    let read = stream.read(&mut buffer).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let text = String::from_utf8_lossy(&request);
+                request_lines.push(text.lines().next().unwrap_or_default().to_string());
+                let reason = match status {
+                    200 => "OK",
+                    201 => "Created",
+                    202 => "Accepted",
+                    204 => "No Content",
+                    500 => "Internal Server Error",
+                    _ => "Response",
+                };
+                let headers = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(headers.as_bytes()).await.unwrap();
+                if !body_delay.is_zero() {
+                    tokio::time::sleep(body_delay).await;
+                }
+                let _ = stream.write_all(body.as_bytes()).await;
+            }
+            request_lines
+        });
+        (format!("http://{address}"), task)
+    }
+
+    #[test]
+    fn required_response_fields_fail_decoding_when_missing() {
+        assert!(serde_json::from_value::<RulesResponse>(json!({
+            "protocol_version": 1,
+            "content_version": 1
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<SubmitResponse>(json!({
+            "accepted": []
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<SubmitResponse>(json!({
+            "rejected_malformed": []
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<QueryResponse>(json!({})).is_err());
+    }
+
+    #[tokio::test]
+    async fn endpoint_specific_statuses_are_enforced() {
+        let submit_body = r#"{"accepted":[],"rejected_malformed":[]}"#;
+        for status in [200, 201, 204, 500] {
+            let (url, server) =
+                spawn_http_script(vec![(status, submit_body.to_string(), Duration::ZERO)]).await;
+            let client = ReqwestRcsClient::new(url).unwrap();
+            let result =
+                client.submit(SubmitRequest { xlayer_block_height: 1, txs: Vec::new() }).await;
+            assert!(matches!(result, Err(FilterError::UnexpectedStatus(code)) if code == status));
+            server.await.unwrap();
+        }
+
+        let (url, server) =
+            spawn_http_script(vec![(202, submit_body.to_string(), Duration::ZERO)]).await;
+        ReqwestRcsClient::new(url)
+            .unwrap()
+            .submit(SubmitRequest { xlayer_block_height: 1, txs: Vec::new() })
+            .await
+            .unwrap();
+        server.await.unwrap();
+
+        for status in [202, 204, 500] {
+            let (url, server) =
+                spawn_http_script(vec![(status, r#"{"txs":[]}"#.to_string(), Duration::ZERO)])
+                    .await;
+            let result = ReqwestRcsClient::new(url)
+                .unwrap()
+                .query(QueryParams::Status("pending".into()))
+                .await;
+            assert!(matches!(result, Err(FilterError::UnexpectedStatus(code)) if code == status));
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn get_and_query_decode_only_valid_200_json() {
+        let (url, server) = spawn_http_script(vec![
+            (
+                200,
+                r#"{"protocol_version":1,"content_version":1,"rules":[]}"#.to_string(),
+                Duration::ZERO,
+            ),
+            (200, r#"{"txs":[]}"#.to_string(), Duration::ZERO),
+        ])
+        .await;
+        let client = ReqwestRcsClient::new(url).unwrap();
+        assert!(client.get_rules().await.is_ok());
+        assert!(client.query(QueryParams::Status("approved".into())).await.is_ok());
+        server.await.unwrap();
+
+        let (url, server) = spawn_http_script(vec![(200, "not-json".into(), Duration::ZERO)]).await;
+        assert!(matches!(
+            ReqwestRcsClient::new(url).unwrap().get_rules().await,
+            Err(FilterError::Decode(_))
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn status_query_encoding_never_uses_tx_hashes() {
+        let responses =
+            (0..4).map(|_| (200, r#"{"txs":[]}"#.to_string(), Duration::ZERO)).collect();
+        let (url, server) = spawn_http_script(responses).await;
+        let client = ReqwestRcsClient::new(url).unwrap();
+        for status in ["pending", "approved", "denied", "outdated"] {
+            client.query(QueryParams::Status(status.into())).await.unwrap();
+        }
+        let requests = server.await.unwrap();
+        for (request, status) in requests.iter().zip(["pending", "approved", "denied", "outdated"])
+        {
+            assert!(request.contains(&format!("?status={status}")), "{request}");
+            assert!(!request.contains("tx_hashes"), "{request}");
+        }
+    }
+
+    #[tokio::test]
+    async fn response_body_stall_hits_total_request_timeout() {
+        let (url, server) =
+            spawn_http_script(vec![(200, r#"{"txs":[]}"#.to_string(), Duration::from_secs(1))])
+                .await;
+        let client = ReqwestRcsClient::with_timeouts(
+            url,
+            Duration::from_millis(50),
+            Duration::from_millis(100),
+        )
+        .unwrap();
+        assert!(matches!(
+            client.query(QueryParams::Status("pending".into())).await,
+            Err(FilterError::Timeout(_))
+        ));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn rules_version_and_required_fields_are_enforced_over_http() {
+        let (url, server) = spawn_http_script(vec![(
+            200,
+            r#"{"protocol_version":1,"content_version":7}"#.to_string(),
+            Duration::ZERO,
+        )])
+        .await;
+        let version = ReqwestRcsClient::new(url).unwrap().get_rules_version().await.unwrap();
+        assert_eq!(version.protocol_version, 1);
+        assert_eq!(version.content_version, 7);
+        server.await.unwrap();
+
+        for body in [r#"{"protocol_version":1}"#, r#"{"content_version":7}"#] {
+            let (url, server) =
+                spawn_http_script(vec![(200, body.to_string(), Duration::ZERO)]).await;
+            assert!(matches!(
+                ReqwestRcsClient::new(url).unwrap().get_rules_version().await,
+                Err(FilterError::Decode(_))
+            ));
+            server.await.unwrap();
+        }
+
+        let (url, server) =
+            spawn_http_script(vec![(202, r#"{"accepted":[]}"#.to_string(), Duration::ZERO)]).await;
+        let result = ReqwestRcsClient::new(url)
+            .unwrap()
+            .submit(SubmitRequest { xlayer_block_height: 1, txs: Vec::new() })
+            .await;
+        assert!(matches!(result, Err(FilterError::Decode(_))));
+        server.await.unwrap();
+
+        let (url, server) =
+            spawn_http_script(vec![(200, r#"{}"#.to_string(), Duration::ZERO)]).await;
+        assert!(matches!(
+            ReqwestRcsClient::new(url).unwrap().query(QueryParams::Status("pending".into())).await,
+            Err(FilterError::Decode(_))
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn client_recovers_after_stalled_response_without_recreation() {
+        let (url, server) = spawn_http_script(vec![
+            (200, r#"{"txs":[]}"#.to_string(), Duration::from_millis(150)),
+            (200, r#"{"txs":[]}"#.to_string(), Duration::ZERO),
+        ])
+        .await;
+        let client = ReqwestRcsClient::with_timeouts(
+            url,
+            Duration::from_millis(25),
+            Duration::from_millis(75),
+        )
+        .unwrap();
+        assert!(matches!(
+            client.query(QueryParams::Status("pending".into())).await,
+            Err(FilterError::Timeout(_))
+        ));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(client.query(QueryParams::Status("pending".into())).await.is_ok());
+        server.await.unwrap();
+    }
+}
+
+/// Decodes JSON only when the endpoint's exact expected status is returned.
+async fn decode_json<T: serde::de::DeserializeOwned>(
+    resp: reqwest::Response,
+    expected: reqwest::StatusCode,
+) -> Result<T> {
     let status = resp.status();
-    if !status.is_success() {
+    if status != expected {
         return Err(FilterError::UnexpectedStatus(status.as_u16()));
     }
-    resp.json::<T>().await.map_err(|e| FilterError::Decode(e.to_string()))
+    resp.json::<T>().await.map_err(|error| {
+        if error.is_timeout() || error.is_connect() || error.is_request() {
+            transport_error(error)
+        } else {
+            FilterError::Decode(error.to_string())
+        }
+    })
+}
+
+fn transport_error(error: reqwest::Error) -> FilterError {
+    if error.is_timeout() {
+        FilterError::Timeout(error.to_string())
+    } else {
+        FilterError::Transport(error.to_string())
+    }
 }

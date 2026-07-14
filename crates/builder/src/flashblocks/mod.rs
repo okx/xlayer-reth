@@ -269,6 +269,10 @@ fn build_rcs_filter_handle(
     let config = FilterConfig {
         enabled: true,
         rcs_base_url: rcs_base_url.clone(),
+        connect_timeout: Duration::from_millis(args.connect_timeout_ms),
+        request_timeout: Duration::from_millis(args.request_timeout_ms),
+        retry_initial_backoff: Duration::from_millis(args.retry_initial_backoff_ms),
+        retry_max_backoff: Duration::from_millis(args.retry_max_backoff_ms),
         batch_window: Duration::from_millis(args.batch_window_ms),
         submitted_confirmation_timeout: Duration::from_secs(
             args.submitted_confirmation_timeout_seconds,
@@ -282,8 +286,14 @@ fn build_rcs_filter_handle(
     };
     config.validate().map_err(|e| eyre::eyre!(e.to_string()))?;
 
-    let client =
-        Arc::new(ReqwestRcsClient::new(rcs_base_url).map_err(|e| eyre::eyre!(e.to_string()))?);
+    let client = Arc::new(
+        ReqwestRcsClient::with_timeouts(
+            rcs_base_url,
+            config.connect_timeout,
+            config.request_timeout,
+        )
+        .map_err(|e| eyre::eyre!(e.to_string()))?,
+    );
     let clock = Arc::new(SystemClock);
     Ok(Some(FilterHandle::spawn(config, client, clock)))
 }

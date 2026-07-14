@@ -16,14 +16,16 @@ use crate::{
     traits::{NodeBounds, PoolBounds},
 };
 use eyre::WrapErr as _;
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use reth_basic_payload_builder::BasicPayloadJobGeneratorConfig;
 use reth_node_api::NodeTypes;
 use reth_node_builder::{components::PayloadServiceBuilder, BuilderContext};
 use reth_optimism_evm::OpEvmConfig;
 use reth_payload_builder::{PayloadBuilderHandle, PayloadBuilderService};
+use reth_primitives_traits::BlockBody;
 use reth_provider::CanonStateSubscriptions;
+use reth_transaction_pool::{TransactionListenerKind, TransactionPool};
 
 pub struct FlashblocksServiceBuilder(pub BuilderConfig);
 
@@ -120,6 +122,7 @@ impl FlashblocksServiceBuilder {
         )
         .wrap_err("failed to create ws publisher")?
         .into();
+        let rcs_tx_pool = self.0.rcs_filter.as_ref().map(|_| pool.clone());
         let payload_builder = FlashblocksBuilder::new(
             OpEvmConfig::optimism(ctx.chain_spec()),
             pool,
@@ -148,6 +151,46 @@ impl FlashblocksServiceBuilder {
         let (payload_service, payload_builder_handle) =
             PayloadBuilderService::new(payload_generator, ctx.provider().canonical_state_stream());
 
+        if let Some(filter) = self.0.rcs_filter.clone() {
+            let mut canonical_notifications = ctx.provider().subscribe_to_canonical_state();
+            ctx.task_executor().spawn_critical(
+                "rcs filter canonical cleanup",
+                Box::pin(async move {
+                    loop {
+                        match canonical_notifications.recv().await {
+                            Ok(notification) => {
+                                let hashes = notification
+                                    .committed()
+                                    .blocks_iter()
+                                    .flat_map(|block| block.body().transactions_iter())
+                                    .map(|tx| alloy_primitives::B256::from(*tx.tx_hash()))
+                                    .collect::<Vec<_>>();
+                                filter.remove_canonical_transactions(&hashes);
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                let removed = filter.recover_after_canonical_lag(skipped);
+                                tracing::warn!(
+                                    target: "rcs_filter",
+                                    skipped,
+                                    removed,
+                                    "canonical receiver lagged; invalidated reusable filter state"
+                                );
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                }),
+            );
+        }
+
+        if let (Some(filter), Some(tx_pool)) = (self.0.rcs_filter.clone(), rcs_tx_pool) {
+            let terminal_events = filter.subscribe_terminal_events();
+            ctx.task_executor().spawn_critical(
+                "rcs filter terminal discard",
+                Box::pin(run_terminal_discard(filter, tx_pool, terminal_events)),
+            );
+        }
+
         let handler_ctx = FlashblockHandlerContext::new(
             &ctx.provider().clone(),
             self.0.clone(),
@@ -169,7 +212,7 @@ impl FlashblocksServiceBuilder {
             ctx.task_executor().clone(),
             cancel,
             self.0.flashblocks.p2p_send_full_payload,
-            self.0.flashblocks.p2p_process_full_payload,
+            self.0.flashblocks.p2p_process_full_payload && self.0.rcs_filter.is_none(),
         );
 
         ctx.task_executor().spawn_critical(
@@ -186,6 +229,86 @@ impl FlashblocksServiceBuilder {
 
         tracing::info!(target: "payload_builder", "Flashblocks payload builder service started");
         Ok(payload_builder_handle)
+    }
+}
+
+fn discard_transaction<Pool: TransactionPool>(
+    filter: &rcs_filter::FilterHandle,
+    tx_pool: &Pool,
+    hash: alloy_primitives::B256,
+    generation: u64,
+) -> bool {
+    let Some(removed) = filter
+        .with_dropped_lifecycle(&hash, generation, || tx_pool.remove_transaction(hash).is_some())
+    else {
+        return false;
+    };
+    filter.record_txpool_discard(removed);
+    true
+}
+
+async fn run_terminal_discard<Pool: TransactionPool + Unpin + 'static>(
+    filter: Arc<rcs_filter::FilterHandle>,
+    tx_pool: Pool,
+    mut terminal_events: tokio::sync::broadcast::Receiver<rcs_filter::TerminalEvent>,
+) {
+    let mut new_transactions = tx_pool.new_transactions_listener_for(TransactionListenerKind::All);
+    let mut dropped = filter.dropped_lifecycles().into_iter().collect::<HashMap<_, _>>();
+    let mut reconciliation = tokio::time::interval(Duration::from_secs(1));
+    reconciliation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            terminal = terminal_events.recv() => match terminal {
+                Ok(event) => {
+                    if !discard_transaction(
+                        &filter,
+                        &tx_pool,
+                        event.tx_hash,
+                        event.generation,
+                    ) {
+                        continue;
+                    }
+                    dropped.insert(event.tx_hash, event.generation);
+                    tracing::debug!(
+                        target: "rcs_filter",
+                        tx_hash = %event.tx_hash,
+                        ?event.reason,
+                        "applied terminal discard to txpool"
+                    );
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    dropped = filter.dropped_lifecycles().into_iter().collect();
+                    reconcile_dropped(&filter, &tx_pool, &dropped);
+                    filter.record_terminal_reconciliation(skipped, dropped.len());
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            },
+            new_tx = new_transactions.recv() => match new_tx {
+                Some(event) => {
+                    let hash = *event.transaction.hash();
+                    if let Some(generation) = dropped.get(&hash).copied() {
+                        if !discard_transaction(&filter, &tx_pool, hash, generation) {
+                            dropped.remove(&hash);
+                        }
+                    }
+                }
+                None => break,
+            },
+            _ = reconciliation.tick() => {
+                dropped = filter.dropped_lifecycles().into_iter().collect();
+                reconcile_dropped(&filter, &tx_pool, &dropped);
+            }
+        }
+    }
+}
+
+fn reconcile_dropped<Pool: TransactionPool>(
+    filter: &rcs_filter::FilterHandle,
+    tx_pool: &Pool,
+    lifecycles: &HashMap<alloy_primitives::B256, u64>,
+) {
+    for (hash, generation) in lifecycles {
+        discard_transaction(filter, tx_pool, *hash, *generation);
     }
 }
 
@@ -215,5 +338,139 @@ where
         };
 
         self.spawn_payload_builder_service(ctx, pool, builder_tx)
+    }
+}
+
+#[cfg(test)]
+mod rcs_txpool_tests {
+    use super::run_terminal_discard;
+    use alloy_primitives::{Address, B256};
+    use reth_transaction_pool::{
+        test_utils::{testing_pool, MockTransaction},
+        TransactionOrigin, TransactionPool,
+    };
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn real_txpool_discard_parks_nonce_descendant() {
+        let pool = testing_pool();
+        let sender = Address::repeat_byte(0x11);
+        let root_hash = B256::repeat_byte(0x01);
+        let child_hash = B256::repeat_byte(0x02);
+        let root = MockTransaction::legacy()
+            .with_sender(sender)
+            .with_nonce(0)
+            .with_gas_price(100)
+            .with_hash(root_hash);
+        let child = MockTransaction::legacy()
+            .with_sender(sender)
+            .with_nonce(1)
+            .with_gas_price(100)
+            .with_hash(child_hash);
+
+        pool.add_transaction(TransactionOrigin::External, root).await.unwrap();
+        pool.add_transaction(TransactionOrigin::External, child).await.unwrap();
+        assert_eq!(pool.pending_and_queued_txn_count(), (2, 0));
+
+        assert!(pool.remove_transaction(root_hash).is_some());
+        assert!(pool.get(&root_hash).is_none());
+        assert!(pool.get(&child_hash).is_some());
+        assert_eq!(pool.pending_and_queued_txn_count(), (0, 1));
+    }
+
+    #[tokio::test]
+    async fn terminal_consumer_removes_real_pool_tx_and_rebroadcast() {
+        let pool = testing_pool();
+        let sender = rcs_filter::test_support::golden::origin();
+        let root_hash = rcs_filter::test_support::golden::tx_a();
+        let child_hash = B256::repeat_byte(0x04);
+        let make_root = || {
+            MockTransaction::legacy()
+                .with_sender(sender)
+                .with_nonce(0)
+                .with_gas_price(100)
+                .with_hash(root_hash)
+        };
+        let child = MockTransaction::legacy()
+            .with_sender(sender)
+            .with_nonce(1)
+            .with_gas_price(100)
+            .with_hash(child_hash);
+        pool.add_transaction(TransactionOrigin::External, make_root()).await.unwrap();
+        pool.add_transaction(TransactionOrigin::External, child).await.unwrap();
+
+        let mock = std::sync::Arc::new(rcs_filter::test_support::MockRcsClient::new());
+        mock.set_rules_fixture(&[rcs_filter::test_support::golden::RULE_SCENARIO_A]);
+        mock.register_query_state(rcs_filter::test_support::golden::TX_A, "denied", None);
+        let config = rcs_filter::FilterConfig {
+            enabled: true,
+            rcs_base_url: "http://unused.test".into(),
+            batch_window: Duration::from_millis(10),
+            rules_version_poll_interval: Duration::from_secs(60),
+            ..Default::default()
+        };
+        let filter = rcs_filter::FilterHandle::spawn(
+            config,
+            mock as std::sync::Arc<dyn rcs_filter::RcsClient>,
+            std::sync::Arc::new(rcs_filter::SystemClock),
+        );
+        let terminal_rx = filter.subscribe_terminal_events();
+        let filter_for_screen = filter.clone();
+        let task = tokio::spawn(run_terminal_discard(filter, pool.clone(), terminal_rx));
+        // The worker owns the actual terminal decision; the service task above consumes its event.
+        let logs = vec![rcs_filter::test_support::log_builder::erc20_transfer(
+            rcs_filter::test_support::golden::token_x(),
+            rcs_filter::test_support::golden::bridge_erc20(),
+            rcs_filter::test_support::golden::recipient(),
+            rcs_filter::test_support::golden::one_token(),
+        )];
+        let input = rcs_filter::ScreenInput {
+            tx_hash: root_hash,
+            origin: sender,
+            tx_to: Some(rcs_filter::test_support::golden::claim_contract()),
+            nonce: 0,
+            value: alloy_primitives::U256::ZERO,
+            block_height: 1_000_000,
+            logs: &logs,
+        };
+        // Wait for the asynchronous initial rule load without blocking block production.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !filter_for_screen.is_ready() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(filter_for_screen.screen_tx(&input), rcs_filter::Screen::AuditPending);
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while pool.get(&root_hash).is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(pool.get(&child_hash).is_some());
+        assert_eq!(pool.pending_and_queued_txn_count(), (0, 1));
+
+        pool.add_transaction(TransactionOrigin::External, make_root()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while pool.get(&root_hash).is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(pool.get(&child_hash).is_some());
+        assert_eq!(pool.pending_and_queued_txn_count(), (0, 1));
+
+        // Once the old tombstone is gone, the cached listener token must not remove a new
+        // lifecycle carrying the same hash.
+        assert_eq!(filter_for_screen.remove_canonical_transactions(&[root_hash]), 1);
+        pool.add_transaction(TransactionOrigin::External, make_root()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(pool.get(&root_hash).is_some());
+        assert_eq!(pool.pending_and_queued_txn_count(), (2, 0));
+        task.abort();
     }
 }

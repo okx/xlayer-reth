@@ -198,7 +198,7 @@ impl Default for FlashblocksArgs {
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
 pub struct RcsFilterArgs {
     /// FR-9 master switch. `false` = full bypass (no filter handle, zero hot-path cost);
-    /// `true` = enter the FR-2 blocking rule load.
+    /// `true` = start asynchronous rule loading and screen sequencer-built transactions.
     #[arg(
         id = "rcs-filter.enabled",
         long = "rcs-filter.enabled",
@@ -211,6 +211,38 @@ pub struct RcsFilterArgs {
     /// is a startup error.
     #[arg(id = "rcs-filter.rcs-base-url", long = "rcs-filter.rcs-base-url", env = "RCS_BASE_URL")]
     pub rcs_base_url: Option<String>,
+
+    /// TCP connect timeout for RCS requests in milliseconds.
+    #[arg(
+        long = "rcs-filter.connect-timeout-ms",
+        env = "RCS_CONNECT_TIMEOUT_MS",
+        default_value = "1000"
+    )]
+    pub connect_timeout_ms: u64,
+
+    /// Total RCS request timeout, including response body, in milliseconds.
+    #[arg(
+        long = "rcs-filter.request-timeout-ms",
+        env = "RCS_REQUEST_TIMEOUT_MS",
+        default_value = "3000"
+    )]
+    pub request_timeout_ms: u64,
+
+    /// Initial worker retry delay in milliseconds.
+    #[arg(
+        long = "rcs-filter.retry-initial-backoff-ms",
+        env = "RCS_RETRY_INITIAL_BACKOFF_MS",
+        default_value = "200"
+    )]
+    pub retry_initial_backoff_ms: u64,
+
+    /// Maximum worker retry delay in milliseconds.
+    #[arg(
+        long = "rcs-filter.retry-max-backoff-ms",
+        env = "RCS_RETRY_MAX_BACKOFF_MS",
+        default_value = "5000"
+    )]
+    pub retry_max_backoff_ms: u64,
 
     /// Batch-submit accumulation window in milliseconds (FR-5).
     #[arg(long = "rcs-filter.batch-window-ms", default_value = "200")]

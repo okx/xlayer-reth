@@ -15,17 +15,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::client::{QueryParams, RcsClient, SubmitRequest, SubmitTx};
 use crate::config::is_supported_protocol;
-use crate::handle::Shared;
+use crate::handle::{Shared, TerminalEvent, TerminalReason};
+use crate::metrics::RequestEndpoint;
+use crate::pool::Resolution;
 use crate::rules::load_rules;
 
-/// Initial backoff for the startup load retry loop.
-const INITIAL_BACKOFF: Duration = Duration::from_millis(200);
-/// Backoff ceiling for the startup load retry loop.
-const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// Adjudication poll interval / timeout tick interval.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Delay before a supervised worker is restarted after an unexpected exit/panic.
@@ -103,11 +101,29 @@ where
 async fn rules_task(shared: Shared, client: Arc<dyn RcsClient>) {
     // FR-2: block until a valid, supported rule set is loaded. Unbounded exponential
     // backoff; never fall back to default rules.
-    let mut backoff = INITIAL_BACKOFF;
-    while !matches!(load_and_install(&shared, &client).await, Ok(true)) {
-        tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(MAX_BACKOFF);
+    let mut backoff =
+        RetryBackoff::new(shared.config.retry_initial_backoff, shared.config.retry_max_backoff);
+    let mut failures = 0u64;
+    loop {
+        let failure = match load_and_install(&shared, &client).await {
+            Ok(true) => {
+                if failures > 0 {
+                    info!(target: "rcs_filter", endpoint = "/rules", attempts = failures, "RCS endpoint recovered");
+                }
+                break;
+            }
+            Ok(false) => "unsupported_protocol".to_string(),
+            Err(error) => error_class(&error).to_string(),
+        };
+        failures += 1;
+        let delay = backoff.next_delay();
+        shared.metrics.rules_retry_delay_seconds.set(delay.as_secs_f64());
+        if failures == 1 || backoff.is_capped() {
+            warn!(target: "rcs_filter", endpoint = "/rules", attempt = failures, next_delay = ?delay, error_class = %failure, "RCS request retrying");
+        }
+        tokio::time::sleep(delay).await;
     }
+    shared.metrics.rules_retry_delay_seconds.set(0.0);
 
     // FR-3: poll `content_version`; only pull the full `/rules` body on change. The lightweight
     // probe also carries `protocol_version`, so an unsupported version is filtered out *here*
@@ -118,7 +134,14 @@ async fn rules_task(shared: Shared, client: Arc<dyn RcsClient>) {
     loop {
         tokio::time::sleep(interval).await;
         let current = shared.current_rules().content_version;
-        match client.get_rules_version().await {
+        let started = std::time::Instant::now();
+        let version_result = client.get_rules_version().await;
+        shared.metrics.record_request(
+            RequestEndpoint::RulesVersion,
+            started.elapsed(),
+            &version_result,
+        );
+        match version_result {
             Ok(v) if v.content_version != current => {
                 if !is_supported_protocol(v.protocol_version) {
                     // Keep the old rules and keep mining; do not pull the body (it would only be
@@ -147,7 +170,10 @@ pub(crate) async fn load_and_install(
     shared: &Shared,
     client: &Arc<dyn RcsClient>,
 ) -> crate::Result<bool> {
-    let resp = client.get_rules().await?;
+    let started = std::time::Instant::now();
+    let result = client.get_rules().await;
+    shared.metrics.record_request(RequestEndpoint::Rules, started.elapsed(), &result);
+    let resp = result?;
     if !is_supported_protocol(resp.protocol_version) {
         warn!(
             target: "rcs_filter",
@@ -164,10 +190,31 @@ pub(crate) async fn load_and_install(
 
 /// FR-5 batch-submit loop.
 async fn submit_task(shared: Shared, client: Arc<dyn RcsClient>) {
+    let mut backoff =
+        RetryBackoff::new(shared.config.retry_initial_backoff, shared.config.retry_max_backoff);
+    let mut failures = 0u64;
     loop {
         tokio::time::sleep(shared.config.batch_window).await;
-        if let Err(e) = submit_once(&shared, &client).await {
-            warn!(target: "rcs_filter", error = %e, "batch submit failed; keeping NotSubmitted");
+        match submit_once(&shared, &client).await {
+            Ok(()) => {
+                if failures > 0 {
+                    info!(target: "rcs_filter", endpoint = "/permission-requests/submit", attempts = failures, "RCS endpoint recovered");
+                }
+                failures = 0;
+                backoff.reset();
+            }
+            Err(e) => {
+                failures += 1;
+                let delay = backoff.next_delay();
+                shared.metrics.submit_retry_delay_seconds.set(delay.as_secs_f64());
+                if failures == 1 || backoff.is_capped() {
+                    warn!(target: "rcs_filter", endpoint = "/permission-requests/submit", attempt = failures, next_delay = ?delay, error_class = error_class(&e), error = %e, "batch submit failed; keeping NotSubmitted");
+                }
+                tokio::time::sleep(delay).await;
+            }
+        }
+        if backoff.current == backoff.initial {
+            shared.metrics.submit_retry_delay_seconds.set(0.0);
         }
     }
 }
@@ -176,19 +223,23 @@ async fn submit_task(shared: Shared, client: Arc<dyn RcsClient>) {
 /// hashes to `Submitted` (FR-5). Never holds the pool lock across an await.
 pub(crate) async fn submit_once(shared: &Shared, client: &Arc<dyn RcsClient>) -> crate::Result<()> {
     // Snapshot the batch under the lock, grouped by block height (one request per height).
-    let mut groups: std::collections::BTreeMap<u64, Vec<SubmitTx>> =
+    let mut groups: std::collections::BTreeMap<u64, Vec<(SubmitTx, alloy_primitives::B256, u64)>> =
         std::collections::BTreeMap::new();
     {
         let pool = shared.pool_lock();
         for hash in pool.not_submitted() {
             if let Some(entry) = pool.get(&hash) {
-                groups.entry(entry.block_height).or_default().push(SubmitTx {
-                    tx_hash: format!("{:#x}", entry.tx_hash),
-                    origin: format!("{:#x}", entry.origin),
-                    contract_address: format!("{:#x}", entry.contract_address),
-                    nonce: entry.nonce,
-                    actions: entry.actions.clone(),
-                });
+                groups.entry(entry.block_height).or_default().push((
+                    SubmitTx {
+                        tx_hash: format!("{:#x}", entry.tx_hash),
+                        origin: format!("{:#x}", entry.origin),
+                        contract_address: format!("{:#x}", entry.contract_address),
+                        nonce: entry.nonce,
+                        actions: entry.actions.clone(),
+                    },
+                    entry.tx_hash,
+                    entry.generation,
+                ));
             }
         }
     }
@@ -196,23 +247,61 @@ pub(crate) async fn submit_once(shared: &Shared, client: &Arc<dyn RcsClient>) ->
         return Ok(());
     }
 
-    for (block_height, txs) in groups {
-        let resp = client.submit(SubmitRequest { xlayer_block_height: block_height, txs }).await?;
+    let mut first_error = None;
+    for (block_height, entries) in groups {
+        let expected_generations = entries
+            .iter()
+            .map(|(_, hash, generation)| (*hash, *generation))
+            .collect::<std::collections::HashMap<_, _>>();
+        let txs = entries.into_iter().map(|(tx, _, _)| tx).collect();
+        let started = std::time::Instant::now();
+        let result = client.submit(SubmitRequest { xlayer_block_height: block_height, txs }).await;
+        shared.metrics.record_request(RequestEndpoint::Submit, started.elapsed(), &result);
+        let resp = match result {
+            Ok(resp) => resp,
+            Err(error) => {
+                warn!(target: "rcs_filter", block_height, %error, "submit group failed; continuing other heights");
+                first_error.get_or_insert(error);
+                continue;
+            }
+        };
         for rejected in &resp.rejected_malformed {
             warn!(target: "rcs_filter", tx_hash = %rejected, "submit rejected_malformed; retrying");
         }
         let now = shared.clock.now_unix();
-        shared.pool_lock().apply_submit_response(&resp.accepted, now);
+        shared.pool_lock().apply_submit_response(&resp.accepted, &expected_generations, now);
+        shared.update_buffer_metric();
     }
-    Ok(())
+    first_error.map_or(Ok(()), Err)
 }
 
 /// FR-5 adjudication poll loop.
 async fn query_task(shared: Shared, client: Arc<dyn RcsClient>) {
+    let mut backoff =
+        RetryBackoff::new(shared.config.retry_initial_backoff, shared.config.retry_max_backoff);
+    let mut failures = 0u64;
     loop {
         tokio::time::sleep(POLL_INTERVAL).await;
-        if let Err(e) = query_once(&shared, &client).await {
-            debug!(target: "rcs_filter", error = %e, "query failed; timeout fallback will apply");
+        match query_once(&shared, &client).await {
+            Ok(()) => {
+                if failures > 0 {
+                    info!(target: "rcs_filter", endpoint = "/permission-requests/query", attempts = failures, "RCS endpoint recovered");
+                }
+                failures = 0;
+                backoff.reset();
+            }
+            Err(e) => {
+                failures += 1;
+                let delay = backoff.next_delay();
+                shared.metrics.query_retry_delay_seconds.set(delay.as_secs_f64());
+                if failures == 1 || backoff.is_capped() {
+                    warn!(target: "rcs_filter", endpoint = "/permission-requests/query", attempt = failures, next_delay = ?delay, error_class = error_class(&e), error = %e, "query failed; timeout fallback will apply");
+                }
+                tokio::time::sleep(delay).await;
+            }
+        }
+        if backoff.current == backoff.initial {
+            shared.metrics.query_retry_delay_seconds.set(0.0);
         }
     }
 }
@@ -220,52 +309,155 @@ async fn query_task(shared: Shared, client: Arc<dyn RcsClient>) {
 /// Queries the status of all in-flight txs and applies transitions. Absent/unrecognized
 /// statuses leave the entry untouched (handled by the timeout task) — no optimistic pass.
 pub(crate) async fn query_once(shared: &Shared, client: &Arc<dyn RcsClient>) -> crate::Result<()> {
-    let in_flight: Vec<String> = {
+    let expected_generations = {
         let pool = shared.pool_lock();
-        pool.in_flight_hashes()
+        pool.in_flight_generations()
     };
-    if in_flight.is_empty() {
+    if expected_generations.is_empty() {
         return Ok(());
     }
 
-    let resp = client.query(QueryParams::TxHashes(in_flight)).await?;
-    let now = shared.clock.now_unix();
-    let mut pool = shared.pool_lock();
-    for tx in &resp.txs {
-        if let Ok(hash) = tx.tx_hash.parse() {
-            if let Some(reason) = &tx.reason {
-                debug!(target: "rcs_filter", tx_hash = %tx.tx_hash, status = %tx.status, %reason, "query result");
+    let mut first_error = None;
+    for status in ["pending", "approved", "denied", "outdated"] {
+        let started = std::time::Instant::now();
+        let result = client.query(QueryParams::Status(status.to_string())).await;
+        shared.metrics.record_request(RequestEndpoint::Query, started.elapsed(), &result);
+        let resp = match result {
+            Ok(resp) => resp,
+            Err(error) => {
+                first_error.get_or_insert(error);
+                continue;
             }
-            // `denied`/`outdated` tombstone the entry as `Dropped` in place (G3) — the entry
-            // is intentionally NOT removed here, so the tx is neither re-buffered nor
-            // re-submitted; the timeout task evicts the tombstone after the retention window.
-            if let Some(resolution) = pool.apply_query_status(&hash, &tx.status, now) {
-                debug!(target: "rcs_filter", tx_hash = %tx.tx_hash, ?resolution, "query resolution");
+        };
+        let now = shared.clock.now_unix();
+        let mut pool = shared.pool_lock();
+        for tx in &resp.txs {
+            if let Ok(hash) = tx.tx_hash.parse() {
+                let Some(expected_generation) = expected_generations.get(&hash).copied() else {
+                    continue;
+                };
+                if let Some(reason) = &tx.reason {
+                    debug!(target: "rcs_filter", tx_hash = %tx.tx_hash, status = %tx.status, %reason, "query result");
+                }
+                // `denied`/`outdated` tombstone the entry as `Dropped` in place (G3) — the entry
+                // is intentionally NOT removed here, so the tx is neither re-buffered nor
+                // re-submitted; the timeout task evicts the tombstone after the retention window.
+                if let Some(resolution) =
+                    pool.apply_query_status(&hash, expected_generation, &tx.status, now)
+                {
+                    debug!(target: "rcs_filter", tx_hash = %tx.tx_hash, ?resolution, "query resolution");
+                    if resolution == Resolution::Discard {
+                        let reason = if tx.status == "outdated" {
+                            TerminalReason::Outdated
+                        } else {
+                            TerminalReason::Denied
+                        };
+                        shared.emit_terminal(TerminalEvent {
+                            tx_hash: hash,
+                            generation: expected_generation,
+                            reason,
+                        });
+                    }
+                }
             }
         }
     }
-    Ok(())
+    shared.update_buffer_metric();
+    first_error.map_or(Ok(()), Err)
+}
+
+#[derive(Debug)]
+struct RetryBackoff {
+    initial: Duration,
+    maximum: Duration,
+    current: Duration,
+    jitter_state: u64,
+}
+
+impl RetryBackoff {
+    fn new(initial: Duration, maximum: Duration) -> Self {
+        static SEED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let seed = SEED.fetch_add(0x9e3779b97f4a7c15, Ordering::Relaxed);
+        Self::with_seed(initial, maximum, seed)
+    }
+
+    fn with_seed(initial: Duration, maximum: Duration, seed: u64) -> Self {
+        Self { initial, maximum, current: initial, jitter_state: seed.max(1) }
+    }
+
+    fn next_delay(&mut self) -> Duration {
+        let base = self.next_base_delay();
+        self.jitter_state ^= self.jitter_state << 13;
+        self.jitter_state ^= self.jitter_state >> 7;
+        self.jitter_state ^= self.jitter_state << 17;
+        // Equal jitter in [50%, 100%] keeps the configured maximum a hard cap.
+        let base_nanos = base.as_nanos();
+        let factor = 500u128 + u128::from(self.jitter_state % 501);
+        let jittered = (base_nanos.saturating_mul(factor) / 1000).min(u64::MAX.into());
+        Duration::from_nanos(jittered as u64)
+    }
+
+    fn next_base_delay(&mut self) -> Duration {
+        let delay = self.current;
+        self.current = self.current.saturating_mul(2).min(self.maximum);
+        delay
+    }
+
+    fn reset(&mut self) {
+        self.current = self.initial;
+    }
+
+    fn is_capped(&self) -> bool {
+        self.current == self.maximum
+    }
+}
+
+fn error_class(error: &crate::FilterError) -> &'static str {
+    match error {
+        crate::FilterError::Transport(_) => "transport",
+        crate::FilterError::Timeout(_) => "timeout",
+        crate::FilterError::UnexpectedStatus(_) => "unexpected_status",
+        crate::FilterError::Decode(_) => "decode",
+        crate::FilterError::UnsupportedProtocol(_) => "unsupported_protocol",
+        crate::FilterError::Config(_) => "config",
+    }
 }
 
 /// FR-6 timeout tick loop + terminal-tombstone eviction (bounds pool memory).
 async fn timeout_task(shared: Shared) {
-    let retention = shared.config.terminal_entry_retention.as_secs();
     loop {
         tokio::time::sleep(POLL_INTERVAL).await;
-        let now = shared.clock.now_unix();
-        let (resolved, pruned) = {
-            let mut pool = shared.pool_lock();
-            let resolved = pool.check_timeouts(&shared.config, now);
-            let pruned = pool.prune_terminal(retention, now);
-            (resolved, pruned)
-        };
-        for (hash, resolution) in resolved {
-            debug!(target: "rcs_filter", tx_hash = %format!("{hash:#x}"), ?resolution, "timeout resolution");
-        }
+        let (_, pruned) = timeout_once(&shared);
         if pruned > 0 {
             debug!(target: "rcs_filter", pruned, "evicted expired terminal tombstones");
         }
     }
+}
+
+/// Executes one timeout/prune tick. Kept separate for deterministic state/event testing.
+pub(crate) fn timeout_once(
+    shared: &Shared,
+) -> (Vec<(alloy_primitives::B256, u64, Resolution)>, usize) {
+    let now = shared.clock.now_unix();
+    let retention = shared.config.terminal_entry_retention.as_secs();
+    let (resolved, pruned) = {
+        let mut pool = shared.pool_lock();
+        let resolved = pool.check_timeouts(&shared.config, now);
+        let pruned = pool.prune_terminal(retention, now);
+        (resolved, pruned)
+    };
+    for (hash, generation, resolution) in &resolved {
+        debug!(target: "rcs_filter", tx_hash = %format!("{hash:#x}"), ?resolution, "timeout resolution");
+        if *resolution == Resolution::Discard {
+            shared.emit_terminal(TerminalEvent {
+                tx_hash: *hash,
+                generation: *generation,
+                reason: TerminalReason::FailCloseTimeout,
+            });
+        }
+    }
+    shared.update_buffer_metric();
+    (resolved, pruned)
 }
 
 #[cfg(test)]
@@ -300,5 +492,26 @@ mod tests {
             attempts.load(Ordering::SeqCst)
         );
         sup.abort();
+    }
+
+    #[test]
+    fn retry_schedule_is_exponential_capped_and_resets() {
+        let mut backoff =
+            RetryBackoff::with_seed(Duration::from_millis(200), Duration::from_secs(5), 7);
+        let bases: Vec<_> = (0..7).map(|_| backoff.next_base_delay()).collect();
+        assert_eq!(bases, [200, 400, 800, 1600, 3200, 5000, 5000].map(Duration::from_millis));
+        backoff.reset();
+        assert_eq!(backoff.next_base_delay(), Duration::from_millis(200));
+    }
+
+    #[test]
+    fn retry_jitter_stays_between_half_base_and_cap() {
+        let mut backoff =
+            RetryBackoff::with_seed(Duration::from_millis(200), Duration::from_secs(5), 7);
+        for base in [200, 400, 800, 1600, 3200, 5000] {
+            let delay = backoff.next_delay();
+            assert!(delay >= Duration::from_millis(base / 2));
+            assert!(delay <= Duration::from_millis(base));
+        }
     }
 }
