@@ -22,6 +22,14 @@ pub struct FilterConfig {
     pub enabled: bool,
     /// RCS REST base URL (FR-2/FR-5). Required when `enabled=true`.
     pub rcs_base_url: String,
+    /// TCP connect timeout for each RCS request (default 1s).
+    pub connect_timeout: Duration,
+    /// Total timeout including response body decoding for each RCS request (default 3s).
+    pub request_timeout: Duration,
+    /// Initial retry delay for RCS worker failures (default 200ms).
+    pub retry_initial_backoff: Duration,
+    /// Maximum retry delay for RCS worker failures (default 5s).
+    pub retry_max_backoff: Duration,
     /// Batch-submit accumulation window (FR-5, default 200ms).
     pub batch_window: Duration,
     /// `Submitted → NotSubmitted` timeout when a submitted tx is not confirmed by a
@@ -36,7 +44,7 @@ pub struct FilterConfig {
     pub total_retry_timeout: Duration,
     /// `GET /rules/version` poll interval (FR-3, default 2s).
     pub rules_version_poll_interval: Duration,
-    /// How long a terminal buffer-pool tombstone (`ReleasePending`/`Dropped`) is retained
+    /// How long a terminal buffer-pool tombstone (`TimedOutAllow`/`Dropped`) is retained
     /// before eviction, bounding pool memory (contract §2.5 `terminal_entry_retention_seconds`,
     /// default 300s). Must exceed `total_retry_timeout` so a tombstone outlives the full
     /// adjudication window (every entry is guaranteed terminal within `total_retry_timeout`),
@@ -49,6 +57,10 @@ impl Default for FilterConfig {
         Self {
             enabled: false,
             rcs_base_url: String::new(),
+            connect_timeout: Duration::from_secs(1),
+            request_timeout: Duration::from_secs(3),
+            retry_initial_backoff: Duration::from_millis(200),
+            retry_max_backoff: Duration::from_secs(5),
             batch_window: Duration::from_millis(200),
             submitted_confirmation_timeout: Duration::from_secs(8),
             risk_module_unresponsive_timeout: Duration::from_secs(20),
@@ -73,6 +85,40 @@ impl FilterConfig {
                 "rcs-filter terminal_entry_retention must exceed total_retry_timeout".to_string(),
             ));
         }
+        if self.enabled
+            && (self.connect_timeout.is_zero()
+                || self.request_timeout.is_zero()
+                || self.retry_initial_backoff.is_zero()
+                || self.retry_max_backoff.is_zero()
+                || self.batch_window.is_zero()
+                || self.submitted_confirmation_timeout.is_zero()
+                || self.risk_module_unresponsive_timeout.is_zero()
+                || self.total_retry_timeout.is_zero()
+                || self.rules_version_poll_interval.is_zero()
+                || self.terminal_entry_retention.is_zero())
+        {
+            return Err(crate::FilterError::Config(
+                "rcs-filter durations must be non-zero".to_string(),
+            ));
+        }
+        if self.enabled && self.connect_timeout > self.request_timeout {
+            return Err(crate::FilterError::Config(
+                "rcs-filter connect_timeout must not exceed request_timeout".to_string(),
+            ));
+        }
+        if self.enabled
+            && (self.connect_timeout >= self.total_retry_timeout
+                || self.request_timeout >= self.total_retry_timeout)
+        {
+            return Err(crate::FilterError::Config(
+                "rcs-filter network timeouts must be less than total_retry_timeout".to_string(),
+            ));
+        }
+        if self.enabled && self.retry_initial_backoff > self.retry_max_backoff {
+            return Err(crate::FilterError::Config(
+                "rcs-filter retry_initial_backoff must not exceed retry_max_backoff".to_string(),
+            ));
+        }
         Ok(())
     }
 }
@@ -86,6 +132,10 @@ mod tests {
         let c = FilterConfig::default();
         assert!(!c.enabled);
         assert_eq!(c.batch_window, Duration::from_millis(200));
+        assert_eq!(c.connect_timeout, Duration::from_secs(1));
+        assert_eq!(c.request_timeout, Duration::from_secs(3));
+        assert_eq!(c.retry_initial_backoff, Duration::from_millis(200));
+        assert_eq!(c.retry_max_backoff, Duration::from_secs(5));
         assert_eq!(c.submitted_confirmation_timeout, Duration::from_secs(8));
         assert_eq!(c.risk_module_unresponsive_timeout, Duration::from_secs(20));
         assert_eq!(c.total_retry_timeout, Duration::from_secs(90));
@@ -129,5 +179,44 @@ mod tests {
         let c =
             FilterConfig { enabled: true, rcs_base_url: "http://rcs".into(), ..Default::default() };
         assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn network_timeout_and_backoff_bounds_are_validated() {
+        let base =
+            FilterConfig { enabled: true, rcs_base_url: "http://rcs".into(), ..Default::default() };
+        assert!(FilterConfig { connect_timeout: Duration::ZERO, ..base.clone() }
+            .validate()
+            .is_err());
+        assert!(FilterConfig {
+            connect_timeout: Duration::from_secs(4),
+            request_timeout: Duration::from_secs(3),
+            ..base.clone()
+        }
+        .validate()
+        .is_err());
+        assert!(FilterConfig {
+            retry_initial_backoff: Duration::from_secs(6),
+            retry_max_backoff: Duration::from_secs(5),
+            ..base
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn scheduling_and_state_durations_must_be_non_zero() {
+        let base =
+            FilterConfig { enabled: true, rcs_base_url: "http://rcs".into(), ..Default::default() };
+        for invalid in [
+            FilterConfig { batch_window: Duration::ZERO, ..base.clone() },
+            FilterConfig { submitted_confirmation_timeout: Duration::ZERO, ..base.clone() },
+            FilterConfig { risk_module_unresponsive_timeout: Duration::ZERO, ..base.clone() },
+            FilterConfig { total_retry_timeout: Duration::ZERO, ..base.clone() },
+            FilterConfig { rules_version_poll_interval: Duration::ZERO, ..base.clone() },
+            FilterConfig { terminal_entry_retention: Duration::ZERO, ..base.clone() },
+        ] {
+            assert!(invalid.validate().is_err());
+        }
     }
 }

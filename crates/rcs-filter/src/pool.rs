@@ -5,11 +5,11 @@
 //! table only tracks adjudication progress across block-building rounds.
 //!
 //! Terminal outcomes do **not** remove the entry — they transition it to a builder-visible
-//! **tombstone** (`ReleasePending` = release into the block, `Dropped` = discard). Removing
+//! **tombstone** (`TimedOutAllow` = fail-open release, `Dropped` = discard). Removing
 //! the entry would let the builder re-screen the tx from scratch on the next round, resetting
 //! `first_not_submitted_at` (timeout clock) and re-submitting a denied/outdated tx — an
 //! infinite loop. The tombstone gives `screen_tx` a deterministic mapping
-//! (`ReleasePending → Screen::AuditApproved`, `Dropped → Screen::Drop` for tx-pool eviction)
+//! (`TimedOutAllow → Screen::AuditApproved`, `Dropped → Screen::Drop` for tx-pool eviction)
 //! and keeps the tx out of the submit / query / timeout scans for the rest of
 //! the build cycle. To bound memory over the node's (unbounded) lifetime, tombstones are
 //! evicted by [`BufferPool::prune_terminal`] once they have been terminal for longer than
@@ -24,7 +24,7 @@ use crate::client::ActionItem;
 use crate::config::FilterConfig;
 use crate::rules::TimeoutAction;
 
-/// In-memory audit state (TD §4.7). `ReleasePending` and `Dropped` are **terminal
+/// In-memory audit state (TD §4.7). `TimedOutAllow` and `Dropped` are **terminal
 /// tombstones** kept in the pool (not removed) so the outcome is visible to the builder's
 /// `screen_tx` on the next round without re-screening from scratch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,9 +33,9 @@ pub enum BufferStatus {
     Submitted,
     Pending,
     Approved,
-    /// Terminal: release the tx into the block (approved + consistency-pass, or fail-open
-    /// timeout). `screen_tx` maps this to `Screen::AuditApproved`.
-    ReleasePending,
+    /// Terminal fail-open timeout. A successful consistency check does not enter this state:
+    /// approval remains attempt-scoped until canonical inclusion.
+    TimedOutAllow,
     /// Terminal: discard the tx (denied / outdated / consistency-mismatch / fail-close
     /// timeout). Never packaged, never re-submitted, never re-admitted this build cycle.
     Dropped,
@@ -45,7 +45,7 @@ impl BufferStatus {
     /// Whether this is a terminal tombstone (excluded from submit/query/timeout scans and
     /// from timeout re-resolution).
     pub fn is_terminal(self) -> bool {
-        matches!(self, BufferStatus::ReleasePending | BufferStatus::Dropped)
+        matches!(self, BufferStatus::TimedOutAllow | BufferStatus::Dropped)
     }
 }
 
@@ -62,6 +62,9 @@ pub enum Resolution {
 /// One buffered audit transaction.
 #[derive(Debug, Clone)]
 pub struct BufferEntry {
+    /// Monotonic insertion identity. This prevents a consistency result computed for an older
+    /// lifecycle from being applied after canonical cleanup and reinsertion of the same hash.
+    pub generation: u64,
     pub tx_hash: B256,
     pub origin: Address,
     /// `tx.to` — submitted verbatim as `contract_address` (observational, contract §2.4).
@@ -85,12 +88,37 @@ pub struct BufferEntry {
 #[derive(Debug, Default)]
 pub struct BufferPool {
     entries: HashMap<B256, BufferEntry>,
+    next_generation: u64,
 }
 
 impl BufferPool {
+    /// Counts entries by state for metrics without exposing the backing map.
+    pub fn status_counts(&self) -> [usize; 6] {
+        let mut counts = [0usize; 6];
+        for entry in self.entries.values() {
+            let index = match entry.status {
+                BufferStatus::NotSubmitted => 0,
+                BufferStatus::Submitted => 1,
+                BufferStatus::Pending => 2,
+                BufferStatus::Approved => 3,
+                BufferStatus::TimedOutAllow => 4,
+                BufferStatus::Dropped => 5,
+            };
+            counts[index] += 1;
+        }
+        counts
+    }
+
     /// Returns the entry for `tx_hash`, if any.
     pub fn get(&self, tx_hash: &B256) -> Option<&BufferEntry> {
         self.entries.get(tx_hash)
+    }
+
+    /// Returns true when `tx_hash` still refers to the exact insertion lifecycle and status.
+    pub fn matches(&self, tx_hash: &B256, generation: u64, status: BufferStatus) -> bool {
+        self.entries
+            .get(tx_hash)
+            .is_some_and(|entry| entry.generation == generation && entry.status == status)
     }
 
     /// Whether an entry exists (including a terminal tombstone). Presence drives the dedup
@@ -110,8 +138,13 @@ impl BufferPool {
     }
 
     /// Inserts a freshly-matched audit tx in `NotSubmitted` (no-op if already present).
-    pub fn insert(&mut self, entry: BufferEntry) {
-        self.entries.entry(entry.tx_hash).or_insert(entry);
+    pub fn insert(&mut self, mut entry: BufferEntry) {
+        if self.entries.contains_key(&entry.tx_hash) {
+            return;
+        }
+        self.next_generation = self.next_generation.wrapping_add(1);
+        entry.generation = self.next_generation;
+        self.entries.insert(entry.tx_hash, entry);
     }
 
     /// Removes and returns an entry.
@@ -119,7 +152,7 @@ impl BufferPool {
         self.entries.remove(tx_hash)
     }
 
-    /// Completes the pre-package consistency check if the entry is still `Approved`.
+    /// Applies a pre-package consistency result if the entry is still `Approved`.
     ///
     /// Query and timeout workers can resolve an approved entry while the builder recomputes its
     /// consistency hash without holding the pool lock. Re-checking the status here prevents that
@@ -127,13 +160,16 @@ impl BufferPool {
     pub fn finish_consistency_check(
         &mut self,
         tx_hash: &B256,
+        expected_generation: u64,
         consistent: bool,
         now: u64,
     ) -> Option<BufferStatus> {
         let entry = self.entries.get_mut(tx_hash)?;
-        if entry.status == BufferStatus::Approved {
-            entry.status =
-                if consistent { BufferStatus::ReleasePending } else { BufferStatus::Dropped };
+        if entry.generation != expected_generation {
+            return None;
+        }
+        if entry.status == BufferStatus::Approved && !consistent {
+            entry.status = BufferStatus::Dropped;
             entry.last_transition_at = now;
         }
         Some(entry.status)
@@ -163,13 +199,64 @@ impl BufferPool {
             .collect()
     }
 
+    /// Lifecycle snapshot used to fence status-query responses across network awaits.
+    pub fn in_flight_generations(&self) -> HashMap<B256, u64> {
+        self.entries
+            .values()
+            .filter(|entry| {
+                matches!(
+                    entry.status,
+                    BufferStatus::Submitted | BufferStatus::Pending | BufferStatus::Approved
+                )
+            })
+            .map(|entry| (entry.tx_hash, entry.generation))
+            .collect()
+    }
+
+    /// Removes entries for transactions observed in a newly canonical chain segment.
+    pub fn remove_canonical(&mut self, hashes: &[B256]) -> usize {
+        hashes.iter().filter(|hash| self.entries.remove(*hash).is_some()).count()
+    }
+
+    /// Conservatively invalidates reusable state after canonical notifications were lost.
+    /// Dropped tombstones remain fail-closed; every other lifecycle must be re-screened.
+    pub fn recover_after_canonical_lag(&mut self) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|_, entry| entry.status == BufferStatus::Dropped);
+        before - self.entries.len()
+    }
+
+    /// Snapshot of terminally dropped transaction hashes for txpool reconciliation.
+    pub fn dropped_hashes(&self) -> Vec<B256> {
+        self.entries
+            .values()
+            .filter(|entry| entry.status == BufferStatus::Dropped)
+            .map(|entry| entry.tx_hash)
+            .collect()
+    }
+
+    /// Current dropped lifecycle tokens for builder-side reconciliation.
+    pub fn dropped_lifecycles(&self) -> Vec<(B256, u64)> {
+        self.entries
+            .values()
+            .filter(|entry| entry.status == BufferStatus::Dropped)
+            .map(|entry| (entry.tx_hash, entry.generation))
+            .collect()
+    }
+
     /// Applies a `202` submit response: `accepted` hashes in `NotSubmitted` advance to
     /// `Submitted`; a hash only in `rejected_malformed` stays `NotSubmitted` for retry
     /// (FR-5, contract §2.4).
-    pub fn apply_submit_response(&mut self, accepted: &[String], now: u64) {
+    pub fn apply_submit_response(
+        &mut self,
+        accepted: &[String],
+        expected_generations: &HashMap<B256, u64>,
+        now: u64,
+    ) {
         for hash in accepted {
             if let Some(entry) = parse_hash(hash).and_then(|h| self.entries.get_mut(&h))
                 && entry.status == BufferStatus::NotSubmitted
+                && expected_generations.get(&entry.tx_hash) == Some(&entry.generation)
             {
                 entry.status = BufferStatus::Submitted;
                 entry.last_transition_at = now;
@@ -185,11 +272,12 @@ impl BufferPool {
     pub fn apply_query_status(
         &mut self,
         tx_hash: &B256,
+        expected_generation: u64,
         status: &str,
         now: u64,
     ) -> Option<Resolution> {
         let entry = self.entries.get_mut(tx_hash)?;
-        if entry.status.is_terminal() {
+        if entry.generation != expected_generation || entry.status.is_terminal() {
             return None;
         }
         match status {
@@ -219,12 +307,33 @@ impl BufferPool {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn apply_submit_response_current(&mut self, accepted: &[String], now: u64) {
+        let expected = accepted
+            .iter()
+            .filter_map(|hash| parse_hash(hash))
+            .filter_map(|hash| self.entries.get(&hash).map(|entry| (hash, entry.generation)))
+            .collect();
+        self.apply_submit_response(accepted, &expected, now);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn apply_query_status_current(
+        &mut self,
+        tx_hash: &B256,
+        status: &str,
+        now: u64,
+    ) -> Option<Resolution> {
+        let generation = self.entries.get(tx_hash)?.generation;
+        self.apply_query_status(tx_hash, generation, status, now)
+    }
+
     /// Advances timeout-driven transitions (FR-6). Outer fallback (cumulative > total
     /// retry timeout) is evaluated **before** the regular per-state stalls (TD §4.7).
     /// Terminal tombstones are skipped (no re-resolution, no clock reset). On outer-fallback
-    /// the entry is tombstoned in place (`ReleasePending` for fail-open, `Dropped` for
+    /// the entry is tombstoned in place (`TimedOutAllow` for fail-open, `Dropped` for
     /// fail-close) — not removed — and the resolution is returned for logging.
-    pub fn check_timeouts(&mut self, cfg: &FilterConfig, now: u64) -> Vec<(B256, Resolution)> {
+    pub fn check_timeouts(&mut self, cfg: &FilterConfig, now: u64) -> Vec<(B256, u64, Resolution)> {
         let mut terminal = Vec::new();
 
         for entry in self.entries.values_mut() {
@@ -238,13 +347,13 @@ impl BufferPool {
             if cumulative > cfg.total_retry_timeout.as_secs() {
                 let (resolution, status) = match entry.timeout_action {
                     TimeoutAction::Allow => {
-                        (Resolution::ReleaseForPackaging, BufferStatus::ReleasePending)
+                        (Resolution::ReleaseForPackaging, BufferStatus::TimedOutAllow)
                     }
                     TimeoutAction::Deny => (Resolution::Discard, BufferStatus::Dropped),
                 };
                 entry.status = status;
                 entry.last_transition_at = now;
-                terminal.push((entry.tx_hash, resolution));
+                terminal.push((entry.tx_hash, entry.generation, resolution));
                 continue;
             }
 
@@ -266,7 +375,7 @@ impl BufferPool {
         terminal
     }
 
-    /// Evicts terminal tombstones (`ReleasePending`/`Dropped`) that have been terminal for
+    /// Evicts terminal tombstones (`TimedOutAllow`/`Dropped`) that have been terminal for
     /// longer than `retention` seconds, bounding pool memory over the node's lifetime
     /// (contract §2.5 `terminal_entry_retention_seconds`). Non-terminal entries are never
     /// pruned — the FR-6 outer timeout guarantees every entry reaches a terminal tombstone
@@ -297,6 +406,7 @@ mod tests {
 
     fn entry(now: u64, timeout_action: TimeoutAction) -> BufferEntry {
         BufferEntry {
+            generation: 0,
             tx_hash: B256::from_str(
                 "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             )
@@ -319,7 +429,7 @@ mod tests {
         let mut pool = BufferPool::default();
         pool.insert(entry(0, TimeoutAction::Allow));
         let hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        pool.apply_submit_response(&[hash.to_string()], 1);
+        pool.apply_submit_response_current(&[hash.to_string()], 1);
         assert_eq!(pool.get(&parse_hash(hash).unwrap()).unwrap().status, BufferStatus::Submitted);
     }
 
@@ -333,18 +443,21 @@ mod tests {
             let mut e = entry(0, TimeoutAction::Allow);
             e.status = BufferStatus::Pending;
             pool.insert(e);
-            assert_eq!(pool.apply_query_status(&hash, status, 5), Some(Resolution::Discard));
+            assert_eq!(
+                pool.apply_query_status_current(&hash, status, 5),
+                Some(Resolution::Discard)
+            );
             // G3: tombstoned in place (not removed) so it is not re-submitted.
             assert_eq!(pool.get(&hash).unwrap().status, BufferStatus::Dropped);
             assert!(pool.not_submitted().is_empty());
             assert!(pool.in_flight_hashes().is_empty());
             // A second query on a terminal entry is a no-op.
-            assert_eq!(pool.apply_query_status(&hash, "denied", 6), None);
+            assert_eq!(pool.apply_query_status_current(&hash, "denied", 6), None);
         }
     }
 
     #[test]
-    fn consistency_check_only_transitions_an_approved_entry() {
+    fn concurrent_outdated_beats_consistency_pass() {
         let hash =
             B256::from_str("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
                 .unwrap();
@@ -354,20 +467,46 @@ mod tests {
         approved.status = BufferStatus::Approved;
         pool.insert(approved);
 
+        let generation = pool.get(&hash).unwrap().generation;
         assert_eq!(
-            pool.finish_consistency_check(&hash, true, 5),
-            Some(BufferStatus::ReleasePending)
+            pool.finish_consistency_check(&hash, generation, true, 5),
+            Some(BufferStatus::Approved)
         );
-        assert_eq!(pool.get(&hash).unwrap().last_transition_at, 5);
+        assert_eq!(pool.get(&hash).unwrap().last_transition_at, 0);
 
         let mut pool = BufferPool::default();
         let mut outdated = entry(0, TimeoutAction::Allow);
         outdated.status = BufferStatus::Approved;
         pool.insert(outdated);
-        assert_eq!(pool.apply_query_status(&hash, "outdated", 6), Some(Resolution::Discard));
+        assert_eq!(
+            pool.apply_query_status_current(&hash, "outdated", 6),
+            Some(Resolution::Discard)
+        );
 
-        assert_eq!(pool.finish_consistency_check(&hash, true, 7), Some(BufferStatus::Dropped));
+        let generation = pool.get(&hash).unwrap().generation;
+        assert_eq!(
+            pool.finish_consistency_check(&hash, generation, true, 7),
+            Some(BufferStatus::Dropped)
+        );
         assert_eq!(pool.get(&hash).unwrap().last_transition_at, 6);
+    }
+
+    #[test]
+    fn concurrent_pending_beats_consistency_pass() {
+        let hash =
+            B256::from_str("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .unwrap();
+        let mut pool = BufferPool::default();
+        let mut pending = entry(0, TimeoutAction::Allow);
+        pending.status = BufferStatus::Pending;
+        pool.insert(pending);
+
+        let generation = pool.get(&hash).unwrap().generation;
+        assert_eq!(
+            pool.finish_consistency_check(&hash, generation, true, 7),
+            Some(BufferStatus::Pending)
+        );
+        assert_eq!(pool.get(&hash).unwrap().last_transition_at, 0);
     }
 
     #[test]
@@ -380,7 +519,78 @@ mod tests {
         approved.status = BufferStatus::Approved;
         pool.insert(approved);
 
-        assert_eq!(pool.finish_consistency_check(&hash, false, 5), Some(BufferStatus::Dropped));
+        let generation = pool.get(&hash).unwrap().generation;
+        assert_eq!(
+            pool.finish_consistency_check(&hash, generation, false, 5),
+            Some(BufferStatus::Dropped)
+        );
+    }
+
+    #[test]
+    fn stale_consistency_result_cannot_mutate_reinserted_hash() {
+        let hash = entry(0, TimeoutAction::Allow).tx_hash;
+        let mut pool = BufferPool::default();
+        let mut first = entry(0, TimeoutAction::Allow);
+        first.status = BufferStatus::Approved;
+        pool.insert(first);
+        let old_generation = pool.get(&hash).unwrap().generation;
+
+        pool.remove(&hash);
+        let mut reinserted = entry(1, TimeoutAction::Allow);
+        reinserted.status = BufferStatus::Approved;
+        pool.insert(reinserted);
+        let new_generation = pool.get(&hash).unwrap().generation;
+        assert_ne!(old_generation, new_generation);
+
+        assert_eq!(pool.finish_consistency_check(&hash, old_generation, true, 2), None);
+        assert_eq!(pool.finish_consistency_check(&hash, old_generation, false, 2), None);
+        assert_eq!(pool.get(&hash).unwrap().status, BufferStatus::Approved);
+    }
+
+    #[test]
+    fn stale_submit_and_query_responses_cannot_advance_reinserted_hash() {
+        let hash = entry(0, TimeoutAction::Allow).tx_hash;
+        let mut pool = BufferPool::default();
+        pool.insert(entry(0, TimeoutAction::Allow));
+        let old_generation = pool.get(&hash).unwrap().generation;
+        let expected = HashMap::from([(hash, old_generation)]);
+
+        pool.remove(&hash);
+        pool.insert(entry(1, TimeoutAction::Allow));
+        let new_generation = pool.get(&hash).unwrap().generation;
+        assert_ne!(old_generation, new_generation);
+
+        pool.apply_submit_response(&[format!("{hash:#x}")], &expected, 2);
+        assert_eq!(pool.get(&hash).unwrap().status, BufferStatus::NotSubmitted);
+
+        pool.apply_submit_response_current(&[format!("{hash:#x}")], 2);
+        assert_eq!(pool.apply_query_status(&hash, old_generation, "approved", 3), None);
+        assert_eq!(pool.apply_query_status(&hash, old_generation, "denied", 3), None);
+        assert_eq!(pool.get(&hash).unwrap().status, BufferStatus::Submitted);
+    }
+
+    #[test]
+    fn canonical_lag_recovery_keeps_only_fail_closed_tombstones() {
+        let mut pool = BufferPool::default();
+        for (index, status) in [
+            BufferStatus::NotSubmitted,
+            BufferStatus::Submitted,
+            BufferStatus::Pending,
+            BufferStatus::Approved,
+            BufferStatus::TimedOutAllow,
+            BufferStatus::Dropped,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut item = entry(0, TimeoutAction::Allow);
+            item.tx_hash = B256::with_last_byte(index as u8);
+            item.status = status;
+            pool.insert(item);
+        }
+        assert_eq!(pool.recover_after_canonical_lag(), 5);
+        assert_eq!(pool.len(), 1);
+        assert_eq!(pool.get(&B256::with_last_byte(5)).unwrap().status, BufferStatus::Dropped);
     }
 
     #[test]
@@ -392,7 +602,7 @@ mod tests {
         let mut e = entry(0, TimeoutAction::Allow);
         e.status = BufferStatus::Pending;
         pool.insert(e);
-        assert_eq!(pool.apply_query_status(&hash, "weird", 5), None);
+        assert_eq!(pool.apply_query_status_current(&hash, "weird", 5), None);
     }
 
     #[test]
@@ -409,8 +619,8 @@ mod tests {
         // 91s → fail-open release, tombstoned in place (G1), NOT removed.
         let out = pool.check_timeouts(&cfg, 91);
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].1, Resolution::ReleaseForPackaging);
-        assert_eq!(pool.get(&hash).unwrap().status, BufferStatus::ReleasePending);
+        assert_eq!(out[0].2, Resolution::ReleaseForPackaging);
+        assert_eq!(pool.get(&hash).unwrap().status, BufferStatus::TimedOutAllow);
         // Re-tick does not re-resolve a terminal entry (no clock reset, no loop).
         assert!(pool.check_timeouts(&cfg, 200).is_empty());
     }
@@ -424,7 +634,7 @@ mod tests {
         let mut pool = BufferPool::default();
         pool.insert(entry(0, TimeoutAction::Deny));
         let out = pool.check_timeouts(&cfg, 91);
-        assert_eq!(out[0].1, Resolution::Discard);
+        assert_eq!(out[0].2, Resolution::Discard);
         assert_eq!(pool.get(&hash).unwrap().status, BufferStatus::Dropped);
     }
 
@@ -457,6 +667,25 @@ mod tests {
         assert!(pool.get(&a).is_none());
         assert!(pool.get(&b).is_some());
         assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn canonical_cleanup_removes_only_committed_hashes() {
+        let a =
+            B256::from_str("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .unwrap();
+        let b =
+            B256::from_str("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                .unwrap();
+        let mut pool = BufferPool::default();
+        pool.insert(entry(0, TimeoutAction::Allow));
+        let mut second = entry(0, TimeoutAction::Allow);
+        second.tx_hash = b;
+        pool.insert(second);
+
+        assert_eq!(pool.remove_canonical(&[a]), 1);
+        assert!(pool.get(&a).is_none());
+        assert!(pool.get(&b).is_some());
     }
 
     #[test]

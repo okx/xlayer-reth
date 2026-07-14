@@ -49,7 +49,6 @@ pub struct AbiInput {
     pub name: Option<String>,
     #[serde(rename = "type")]
     pub param_type: String,
-    #[serde(default)]
     pub indexed: bool,
 }
 
@@ -57,12 +56,10 @@ pub struct AbiInput {
 /// the rule-local name; `name` here is the on-chain Solidity event name used for topic0.
 #[derive(Debug, Clone, Deserialize)]
 pub struct EventAbi {
-    #[serde(rename = "type", default)]
+    #[serde(rename = "type")]
     pub abi_type: String,
     pub name: String,
-    #[serde(default)]
     pub inputs: Vec<AbiInput>,
-    #[serde(default)]
     pub anonymous: bool,
 }
 
@@ -79,7 +76,6 @@ pub struct RawRule {
     pub contract_address: Option<String>,
     #[serde(default)]
     pub origin: Option<String>,
-    #[serde(default)]
     pub event_abis: std::collections::BTreeMap<String, EventAbi>,
     #[serde(default = "default_audit_types")]
     pub audit_types: Vec<String>,
@@ -135,11 +131,18 @@ pub struct RuleSet {
     pub rules: Vec<CompiledRule>,
     /// `topic0 → indices into `rules`` of rules declaring an event with that topic0.
     pub index: HashMap<B256, Vec<usize>>,
+    /// Number of indexed topics -> rule indices declaring an anonymous event with that shape.
+    pub anonymous_index: HashMap<usize, Vec<usize>>,
 }
 
 impl RuleSet {
     /// Returns the candidate rule indices for a log whose first topic is `topic0`.
     pub fn candidates_for_topic0(&self, topic0: &B256) -> &[usize] {
         self.index.get(topic0).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Returns candidates for an anonymous event with `indexed_topics` indexed inputs.
+    pub fn candidates_for_anonymous(&self, indexed_topics: usize) -> &[usize] {
+        self.anonymous_index.get(&indexed_topics).map(|v| v.as_slice()).unwrap_or(&[])
     }
 }

@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use alloy_primitives::U256;
+use alloy_primitives::{Address, U256};
 use serde_json::Value;
 
 /// Variable bindings for one candidate rule evaluation.
@@ -18,6 +18,56 @@ pub type Bindings = HashMap<String, Value>;
 /// Evaluates `expr` against `bindings` and returns whether the result is truthy.
 pub fn truthy(expr: &Value, bindings: &Bindings) -> bool {
     is_truthy(&eval(expr, bindings))
+}
+
+/// Validates the supported JSONLogic subset and operator arity at rule-load time.
+pub(crate) fn validate(expr: &Value) -> Result<(), String> {
+    match expr {
+        Value::Object(map) => {
+            if map.len() != 1 {
+                return Err("JSONLogic expression objects must contain exactly one operator".into());
+            }
+            let (op, arg) = map.iter().next().expect("validated non-empty map");
+            let operands = match arg {
+                Value::Array(items) => items.as_slice(),
+                other => std::slice::from_ref(other),
+            };
+            match op.as_str() {
+                "var" => {
+                    if !(1..=2).contains(&operands.len()) || !operands[0].is_string() {
+                        return Err("JSONLogic 'var' expects a name and optional default".into());
+                    }
+                }
+                "==" | "!=" | "in" | ">" | ">=" | "<" | "<=" => {
+                    if operands.len() != 2 {
+                        return Err(format!("JSONLogic '{op}' expects exactly two operands"));
+                    }
+                }
+                "!" => {
+                    if operands.len() != 1 {
+                        return Err("JSONLogic '!' expects exactly one operand".into());
+                    }
+                }
+                "and" | "or" => {
+                    if !arg.is_array() {
+                        return Err(format!("JSONLogic '{op}' expects an operand array"));
+                    }
+                }
+                _ => return Err(format!("unsupported JSONLogic operator '{op}'")),
+            }
+            for operand in operands {
+                validate(operand)?;
+            }
+            Ok(())
+        }
+        Value::Array(items) => {
+            for item in items {
+                validate(item)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// JSONLogic truthiness: `false`/`null`/`0`/empty-string/empty-array are falsy.
@@ -52,8 +102,8 @@ fn eval_op(op: &str, arg: &Value, b: &Bindings) -> Value {
         "==" => Value::Bool(value_eq(&two(arg, b))),
         "!=" => Value::Bool(!value_eq(&two(arg, b))),
         "in" => Value::Bool(eval_in(arg, b)),
-        "and" => Value::Bool(eval_all(arg, b)),
-        "or" => Value::Bool(eval_any(arg, b)),
+        "and" => eval_and(arg, b),
+        "or" => eval_or(arg, b),
         "!" => Value::Bool(!is_truthy(&eval(&first_operand(arg), b))),
         ">" => cmp(arg, b, |o| o == std::cmp::Ordering::Greater),
         ">=" => cmp(arg, b, |o| o != std::cmp::Ordering::Less),
@@ -97,8 +147,7 @@ fn first_operand(arg: &Value) -> Value {
     }
 }
 
-/// Equality with numeric coercion: if both sides parse as uint256, compare numerically;
-/// otherwise compare normalized (lower-cased) string / structural values. `null == null`.
+/// Equality with numeric coercion and case-insensitive comparison only for valid addresses.
 fn value_eq((l, r): &(Value, Value)) -> bool {
     if l.is_null() || r.is_null() {
         return l.is_null() && r.is_null();
@@ -106,7 +155,12 @@ fn value_eq((l, r): &(Value, Value)) -> bool {
     if let (Some(lu), Some(ru)) = (to_u256(l), to_u256(r)) {
         return lu == ru;
     }
-    normalize(l) == normalize(r)
+    if let (Some(ls), Some(rs)) = (l.as_str(), r.as_str())
+        && let (Ok(la), Ok(ra)) = (Address::from_str(ls), Address::from_str(rs))
+    {
+        return la == ra;
+    }
+    l == r
 }
 
 /// `in` membership: `[needle, haystack]` where haystack is an array (blacklist/whitelist)
@@ -120,20 +174,30 @@ fn eval_in(arg: &Value, b: &Bindings) -> bool {
     }
 }
 
-/// `and`: all sub-expressions truthy.
-fn eval_all(arg: &Value, b: &Bindings) -> bool {
-    match arg {
-        Value::Array(items) => items.iter().all(|e| is_truthy(&eval(e, b))),
-        other => is_truthy(&eval(other, b)),
+/// JSONLogic `and` returns the first falsy operand, or the last operand.
+fn eval_and(arg: &Value, b: &Bindings) -> Value {
+    let Value::Array(items) = arg else { return Value::Null };
+    let mut last = Value::Null;
+    for item in items {
+        last = eval(item, b);
+        if !is_truthy(&last) {
+            return last;
+        }
     }
+    last
 }
 
-/// `or`: any sub-expression truthy.
-fn eval_any(arg: &Value, b: &Bindings) -> bool {
-    match arg {
-        Value::Array(items) => items.iter().any(|e| is_truthy(&eval(e, b))),
-        other => is_truthy(&eval(other, b)),
+/// JSONLogic `or` returns the first truthy operand, or the last operand.
+fn eval_or(arg: &Value, b: &Bindings) -> Value {
+    let Value::Array(items) = arg else { return Value::Null };
+    let mut last = Value::Null;
+    for item in items {
+        last = eval(item, b);
+        if is_truthy(&last) {
+            return last;
+        }
     }
+    last
 }
 
 /// Numeric comparison. Returns `false` when either side is not uint256-coercible
@@ -143,14 +207,6 @@ fn cmp(arg: &Value, b: &Bindings, pass: impl Fn(std::cmp::Ordering) -> bool) -> 
     match (to_u256(&l), to_u256(&r)) {
         (Some(lu), Some(ru)) => Value::Bool(pass(lu.cmp(&ru))),
         _ => Value::Bool(false),
-    }
-}
-
-/// Lower-cased string form for non-numeric equality (addresses are compared case-insensitively).
-fn normalize(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.to_ascii_lowercase(),
-        other => other.to_string(),
     }
 }
 
@@ -183,6 +239,15 @@ mod tests {
     #[test]
     fn literal_true_is_truthy() {
         assert!(truthy(&json!(true), &Bindings::new()));
+    }
+
+    #[test]
+    fn empty_and_or_are_valid_and_falsy() {
+        for condition in [json!({"and": []}), json!({"or": []})] {
+            assert!(validate(&condition).is_ok());
+            assert_eq!(eval(&condition, &Bindings::new()), Value::Null);
+            assert!(!truthy(&condition, &Bindings::new()));
+        }
     }
 
     #[test]
@@ -232,5 +297,62 @@ mod tests {
         assert!(truthy(&neq, &binds(&[("origin", json!("0x02"))])));
         let not = json!({"!": {"==": [{"var": "origin"}, "0x01"]}});
         assert!(truthy(&not, &binds(&[("origin", json!("0x02"))])));
+    }
+
+    #[test]
+    fn nested_and_or_return_operands() {
+        let cond = json!({"==": [
+            {"and": [true, {"or": [false, "selected"]}]},
+            "selected"
+        ]});
+        assert!(truthy(&cond, &Bindings::new()));
+    }
+
+    #[test]
+    fn ordinary_strings_are_case_sensitive_but_addresses_are_not() {
+        assert!(!truthy(&json!({"==": ["Quota", "quota"]}), &Bindings::new()));
+        assert!(truthy(
+            &json!({"==": [
+                "0x52908400098527886E0F7030069857D2E4169EE7",
+                "0x52908400098527886e0f7030069857d2e4169ee7"
+            ]}),
+            &Bindings::new()
+        ));
+    }
+
+    #[test]
+    fn validates_all_supported_operators_and_rejects_bad_shapes() {
+        for expression in [
+            json!({"var": "x"}),
+            json!({"==": [1, 1]}),
+            json!({"!=": [1, 2]}),
+            json!({"in": [1, [1]]}),
+            json!({"and": [true, true]}),
+            json!({"or": [false, true]}),
+            json!({"!": true}),
+            json!({">": [2, 1]}),
+            json!({">=": [2, 1]}),
+            json!({"<": [1, 2]}),
+            json!({"<=": [1, 2]}),
+        ] {
+            validate(&expression).expect("supported expression");
+        }
+        for expression in [
+            json!({"unknown": [1]}),
+            json!({"==": [1]}),
+            json!({"!": [true, false]}),
+            json!({"and": true}),
+            json!({"or": false}),
+        ] {
+            assert!(validate(&expression).is_err(), "accepted {expression}");
+        }
+    }
+
+    #[test]
+    fn u256_boundaries_compare_exactly() {
+        let max = U256::MAX.to_string();
+        let below = (U256::MAX - U256::from(1)).to_string();
+        assert!(truthy(&json!({">": [max, below]}), &Bindings::new()));
+        assert!(truthy(&json!({"<=": ["0", max]}), &Bindings::new()));
     }
 }

@@ -14,9 +14,28 @@ use crate::client::RcsClient;
 use crate::clock::Clock;
 use crate::config::FilterConfig;
 use crate::matching::{self, MatchOutcome};
+use crate::metrics::RcsFilterMetrics;
 use crate::pool::{BufferEntry, BufferPool, BufferStatus};
 use crate::quota_hash;
 use crate::rules::RuleSet;
+
+const TERMINAL_EVENT_CAPACITY: usize = 1024;
+
+/// Terminal decision delivered to the builder-owned txpool integration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalEvent {
+    pub tx_hash: B256,
+    pub generation: u64,
+    pub reason: TerminalReason,
+}
+
+/// Why a buffered transaction became permanently rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalReason {
+    Denied,
+    Outdated,
+    FailCloseTimeout,
+}
 
 /// The screening decision returned to the builder hot path (TD §4.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +52,17 @@ pub enum Screen {
     AuditPending,
     /// Approved and the pre-package consistency check passed → package normally.
     AuditApproved,
+}
+
+/// Cheap status-only decision made before EVM execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreScreen {
+    /// Execute the transaction and run the authoritative post-execution screen.
+    Execute,
+    /// Keep the transaction in txpool but skip it and its nonce descendants this iteration.
+    Defer,
+    /// Permanently rejected: remove it from txpool without executing it.
+    Drop,
 }
 
 /// Input to [`FilterHandle::screen_tx`], borrowed from the builder loop (TD §4.2).
@@ -61,6 +91,8 @@ pub(crate) struct Shared {
     pub clock: Arc<dyn Clock>,
     /// Set once the first valid rule set is loaded (FR-2 startup gate).
     pub ready: Arc<AtomicBool>,
+    pub terminal_events: tokio::sync::broadcast::Sender<TerminalEvent>,
+    pub metrics: RcsFilterMetrics,
 }
 
 impl Shared {
@@ -78,6 +110,25 @@ impl Shared {
     /// Write guard for the hot-swappable rule slot, recovering from poisoning.
     pub(crate) fn rules_write(&self) -> std::sync::RwLockWriteGuard<'_, Arc<RuleSet>> {
         self.rules.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) fn emit_terminal(&self, event: TerminalEvent) {
+        self.metrics.terminal_discard_events_total.increment(1);
+        // No active receiver is acceptable during startup/tests. The builder reconciles the
+        // Dropped snapshot when it attaches or if a bounded receiver lags.
+        let _ = self.terminal_events.send(event);
+    }
+
+    pub(crate) fn update_buffer_metric(&self) {
+        let pool = self.pool_lock();
+        let counts = pool.status_counts();
+        self.metrics.buffered_transactions.set(pool.len() as f64);
+        self.metrics.buffer_not_submitted.set(counts[0] as f64);
+        self.metrics.buffer_submitted.set(counts[1] as f64);
+        self.metrics.buffer_pending.set(counts[2] as f64);
+        self.metrics.buffer_approved.set(counts[3] as f64);
+        self.metrics.buffer_timed_out_allow.set(counts[4] as f64);
+        self.metrics.buffer_dropped.set(counts[5] as f64);
     }
 }
 
@@ -116,19 +167,22 @@ impl FilterHandle {
         client: Arc<dyn RcsClient>,
         clock: Arc<dyn Clock>,
     ) -> Arc<Self> {
+        let (terminal_events, _) = tokio::sync::broadcast::channel(TERMINAL_EVENT_CAPACITY);
         let shared = Shared {
             config,
             rules: Arc::new(RwLock::new(Arc::new(RuleSet::default()))),
             pool: Arc::new(Mutex::new(BufferPool::default())),
             clock,
             ready: Arc::new(AtomicBool::new(false)),
+            terminal_events,
+            metrics: RcsFilterMetrics::default(),
         };
         let workers = crate::worker::spawn(shared.clone(), client);
         Arc::new(Self { shared, workers })
     }
 
-    /// True once the first valid rule set has loaded (FR-2: the node should not mine until
-    /// this is true when the filter is enabled).
+    /// True once the first valid rule set has loaded. Until then screening uses the empty
+    /// snapshot while background loading retries, so block production remains live.
     pub fn is_ready(&self) -> bool {
         self.shared.ready.load(Ordering::Acquire)
     }
@@ -144,21 +198,36 @@ impl FilterHandle {
         // re-decoding or re-submitting (FR-4 stage zero).
         let existing = {
             let pool = self.shared.pool_lock();
-            pool.get(&input.tx_hash).map(|e| (e.status, e.quota_consistency_hash))
+            pool.get(&input.tx_hash).map(|e| (e.status, e.quota_consistency_hash, e.generation))
         };
-        if let Some((status, stored_hash)) = existing {
-            return self.screen_existing(input, status, stored_hash);
+        if let Some((status, stored_hash, generation)) = existing {
+            return self.screen_existing(input, status, stored_hash, generation);
         }
 
         // Fresh evaluation.
         let rules = self.shared.current_rules();
         match matching::evaluate(&rules, input) {
-            MatchOutcome::Allow => Screen::Allow,
-            MatchOutcome::Deny => Screen::Deny,
+            MatchOutcome::Allow => {
+                let concurrent = {
+                    let pool = self.shared.pool_lock();
+                    pool.get(&input.tx_hash)
+                        .map(|entry| (entry.status, entry.quota_consistency_hash, entry.generation))
+                };
+                if let Some((status, stored_hash, generation)) = concurrent {
+                    return self.screen_existing(input, status, stored_hash, generation);
+                }
+                self.shared.metrics.allow_total.increment(1);
+                Screen::Allow
+            }
+            MatchOutcome::Deny => {
+                self.shared.metrics.deny_total.increment(1);
+                Screen::Deny
+            }
             MatchOutcome::Audit { actions, timeout_action } => {
                 let now = self.shared.clock.now_unix();
                 let quota_consistency_hash = quota_hash::encode_and_hash(&actions);
                 let entry = BufferEntry {
+                    generation: 0,
                     tx_hash: input.tx_hash,
                     origin: input.origin,
                     contract_address: input.tx_to.unwrap_or(Address::ZERO),
@@ -172,8 +241,86 @@ impl FilterHandle {
                     last_transition_at: now,
                 };
                 self.shared.pool_lock().insert(entry);
+                self.shared.metrics.audit_pending_total.increment(1);
+                self.shared.update_buffer_metric();
                 Screen::AuditPending
             }
+        }
+    }
+
+    /// Returns a status-only decision before EVM execution. Fresh and approved transactions still
+    /// require execution because their logs determine the authoritative screening result.
+    pub fn pre_screen(&self, tx_hash: &B256) -> PreScreen {
+        match self.shared.pool_lock().get(tx_hash).map(|entry| entry.status) {
+            None | Some(BufferStatus::Approved | BufferStatus::TimedOutAllow) => PreScreen::Execute,
+            Some(BufferStatus::Dropped) => PreScreen::Drop,
+            Some(BufferStatus::NotSubmitted | BufferStatus::Submitted | BufferStatus::Pending) => {
+                PreScreen::Defer
+            }
+        }
+    }
+
+    /// Removes buffered entries for transactions included in a newly canonical chain segment.
+    pub fn remove_canonical_transactions(&self, hashes: &[B256]) -> usize {
+        let removed = self.shared.pool_lock().remove_canonical(hashes);
+        self.shared.metrics.canonical_cleanup_total.increment(removed as u64);
+        self.shared.update_buffer_metric();
+        removed
+    }
+
+    /// Invalidates lifecycle state that might have crossed an unobserved canonical update.
+    pub fn recover_after_canonical_lag(&self, skipped: u64) -> usize {
+        let removed = self.shared.pool_lock().recover_after_canonical_lag();
+        self.shared.metrics.canonical_channel_lag_total.increment(skipped);
+        self.shared.metrics.canonical_lag_recovery_total.increment(removed as u64);
+        self.shared.update_buffer_metric();
+        removed
+    }
+
+    /// Snapshot of dropped hashes used by the builder to reconcile missed discard notifications.
+    pub fn dropped_hashes(&self) -> Vec<B256> {
+        self.shared.pool_lock().dropped_hashes()
+    }
+
+    /// Snapshot of dropped hash/generation tokens used for race-safe txpool reconciliation.
+    pub fn dropped_lifecycles(&self) -> Vec<(B256, u64)> {
+        self.shared.pool_lock().dropped_lifecycles()
+    }
+
+    /// Runs `action` while the exact dropped lifecycle is pinned under the filter pool lock.
+    /// This closes the check/use window with canonical cleanup and same-hash reinsertion.
+    pub fn with_dropped_lifecycle<R>(
+        &self,
+        tx_hash: &B256,
+        generation: u64,
+        action: impl FnOnce() -> R,
+    ) -> Option<R> {
+        let pool = self.shared.pool_lock();
+        if pool.matches(tx_hash, generation, BufferStatus::Dropped) {
+            Some(action())
+        } else {
+            None
+        }
+    }
+
+    /// Subscribes to background terminal decisions. Lagged consumers must reconcile via
+    /// [`Self::dropped_hashes`].
+    pub fn subscribe_terminal_events(&self) -> tokio::sync::broadcast::Receiver<TerminalEvent> {
+        self.shared.terminal_events.subscribe()
+    }
+
+    /// Records builder-side terminal event receiver lag and reconciliation work.
+    pub fn record_terminal_reconciliation(&self, skipped: u64, reconciled: usize) {
+        self.shared.metrics.terminal_channel_lag_total.increment(skipped);
+        self.shared.metrics.terminal_reconciliation_total.increment(reconciled as u64);
+    }
+
+    /// Records whether a terminal discard found the transaction in the transaction pool.
+    pub fn record_txpool_discard(&self, removed: bool) {
+        if removed {
+            self.shared.metrics.txpool_discard_success_total.increment(1);
+        } else {
+            self.shared.metrics.txpool_discard_already_absent_total.increment(1);
         }
     }
 
@@ -185,15 +332,36 @@ impl FilterHandle {
         input: &ScreenInput,
         status: BufferStatus,
         stored_hash: B256,
+        generation: u64,
     ) -> Screen {
         match status {
             // Terminal: release into the block (fail-open timeout, or a prior approved +
             // consistency pass). Deterministic on every re-entry; no clock reset (G1).
-            BufferStatus::ReleasePending => Screen::AuditApproved,
+            BufferStatus::TimedOutAllow => {
+                if !self.shared.pool_lock().matches(
+                    &input.tx_hash,
+                    generation,
+                    BufferStatus::TimedOutAllow,
+                ) {
+                    return Screen::AuditPending;
+                }
+                self.shared.metrics.audit_approved_total.increment(1);
+                Screen::AuditApproved
+            }
 
             // Terminal: dropped (denied/outdated/fail-close/consistency-mismatch). Never
             // packaged, never re-submitted, never re-admitted this build cycle (G2/G3).
-            BufferStatus::Dropped => Screen::Drop,
+            BufferStatus::Dropped => {
+                if !self.shared.pool_lock().matches(
+                    &input.tx_hash,
+                    generation,
+                    BufferStatus::Dropped,
+                ) {
+                    return Screen::AuditPending;
+                }
+                self.shared.metrics.drop_total.increment(1);
+                Screen::Drop
+            }
 
             // Approved → FR-7 pre-package consistency check: re-simulate the quota from the
             // current logs and compare to the submit-time hash. Transition to a terminal
@@ -209,12 +377,21 @@ impl FilterHandle {
                 let now = self.shared.clock.now_unix();
                 let status = self.shared.pool_lock().finish_consistency_check(
                     &input.tx_hash,
+                    generation,
                     consistent,
                     now,
                 );
+                self.shared.update_buffer_metric();
                 match status {
-                    Some(BufferStatus::ReleasePending) => Screen::AuditApproved,
-                    Some(BufferStatus::Dropped) => Screen::Drop,
+                    Some(BufferStatus::Approved) if consistent => {
+                        self.shared.metrics.audit_approved_total.increment(1);
+                        Screen::AuditApproved
+                    }
+                    Some(BufferStatus::Dropped) => {
+                        self.shared.metrics.consistency_mismatch_total.increment(1);
+                        self.shared.metrics.drop_total.increment(1);
+                        Screen::Drop
+                    }
                     // A concurrent query/timeout resolution takes precedence over the stale
                     // consistency result. Other non-terminal states remain pending.
                     _ => Screen::AuditPending,
@@ -249,12 +426,15 @@ impl FilterHandle {
     /// Constructs a handle without spawning workers, pre-loaded with `rules` (test helper —
     /// lets `screen_tx` be exercised without a tokio runtime).
     pub fn for_test(config: FilterConfig, rules: RuleSet, clock: Arc<dyn Clock>) -> Self {
+        let (terminal_events, _) = tokio::sync::broadcast::channel(TERMINAL_EVENT_CAPACITY);
         let shared = Shared {
             config,
             rules: Arc::new(RwLock::new(Arc::new(rules))),
             pool: Arc::new(Mutex::new(BufferPool::default())),
             clock,
             ready: Arc::new(AtomicBool::new(true)),
+            terminal_events,
+            metrics: RcsFilterMetrics::default(),
         };
         Self { shared, workers: Vec::new() }
     }
@@ -380,8 +560,8 @@ mod tests {
 
         let now = 1_751_000_000;
         h.with_pool(|p| {
-            p.apply_submit_response(&[format!("{:#x}", golden::tx_c())], now);
-            p.apply_query_status(&golden::tx_c(), "denied", now);
+            p.apply_submit_response_current(&[format!("{:#x}", golden::tx_c())], now);
+            p.apply_query_status_current(&golden::tx_c(), "denied", now);
         });
         assert_eq!(h.buffer_status(&golden::tx_c()), Some(BufferStatus::Dropped));
 
@@ -406,20 +586,20 @@ mod tests {
 
         let now = 1_751_000_000;
         h.with_pool(|p| {
-            p.apply_submit_response(&[format!("{:#x}", golden::tx_d())], now);
-            p.apply_query_status(&golden::tx_d(), "pending", now);
-            p.apply_query_status(&golden::tx_d(), "approved", now);
-            p.apply_query_status(&golden::tx_d(), "outdated", now);
+            p.apply_submit_response_current(&[format!("{:#x}", golden::tx_d())], now);
+            p.apply_query_status_current(&golden::tx_d(), "pending", now);
+            p.apply_query_status_current(&golden::tx_d(), "approved", now);
+            p.apply_query_status_current(&golden::tx_d(), "outdated", now);
         });
         assert_eq!(h.buffer_status(&golden::tx_d()), Some(BufferStatus::Dropped));
         assert_eq!(h.screen_tx(&input), Screen::Drop);
     }
 
     /// FR-6 §6.5 fail-open: an audit tx whose `audit_timeout_action=allow` exceeds the 90s
-    /// outer timeout is released into the block via `ReleasePending → AuditApproved` (G1),
+    /// outer timeout is released into the block via `TimedOutAllow → AuditApproved` (G1),
     /// deterministically on every subsequent round (no clock reset, no re-buffer).
     #[test]
-    fn fail_open_timeout_releases_for_packaging() {
+    fn timed_out_allow_is_terminal_allow() {
         let (h, clock) = handle_and_clock(1_751_000_000);
         let logs = vec![transfer_log(golden::ONE_TOKEN)];
         let input = audit_input(golden::tx_a(), 1, 1_000_000, &logs);
@@ -432,7 +612,7 @@ mod tests {
             let resolved = p.check_timeouts(&FilterConfig::default(), now);
             assert_eq!(resolved.len(), 1);
         });
-        assert_eq!(h.buffer_status(&golden::tx_a()), Some(BufferStatus::ReleasePending));
+        assert_eq!(h.buffer_status(&golden::tx_a()), Some(BufferStatus::TimedOutAllow));
         assert_eq!(h.screen_tx(&input), Screen::AuditApproved);
         // Deterministic on re-entry.
         assert_eq!(h.screen_tx(&input), Screen::AuditApproved);
@@ -440,7 +620,7 @@ mod tests {
 
     /// FR-7 §6.6 consistency pass: approved + matching re-simulation → release.
     #[test]
-    fn approved_consistency_pass_releases() {
+    fn approved_consistency_pass_is_attempt_scoped() {
         let (h, _clock) = handle_and_clock(1_751_000_000);
         let logs = vec![transfer_log(golden::ONE_TOKEN)];
         let input = audit_input(golden::tx_a(), 1, 1_000_000, &logs);
@@ -448,12 +628,100 @@ mod tests {
         assert_eq!(h.screen_tx(&input), Screen::AuditPending);
         let now = 1_751_000_000;
         h.with_pool(|p| {
-            p.apply_submit_response(&[format!("{:#x}", golden::tx_a())], now);
-            p.apply_query_status(&golden::tx_a(), "approved", now);
+            p.apply_submit_response_current(&[format!("{:#x}", golden::tx_a())], now);
+            p.apply_query_status_current(&golden::tx_a(), "approved", now);
         });
         // Same logs → hash matches → release.
         assert_eq!(h.screen_tx(&input), Screen::AuditApproved);
-        assert_eq!(h.buffer_status(&golden::tx_a()), Some(BufferStatus::ReleasePending));
+        assert_eq!(h.buffer_status(&golden::tx_a()), Some(BufferStatus::Approved));
+    }
+
+    #[test]
+    fn cancelled_attempt_rechecks_changed_actions() {
+        let (h, _clock) = handle_and_clock(1_751_000_000);
+        let original_logs = vec![transfer_log(golden::ONE_TOKEN)];
+        let original = audit_input(golden::tx_a(), 1, 1_000_000, &original_logs);
+        assert_eq!(h.screen_tx(&original), Screen::AuditPending);
+        h.with_pool(|p| {
+            p.apply_submit_response_current(&[format!("{:#x}", golden::tx_a())], 1_751_000_000);
+            p.apply_query_status_current(&golden::tx_a(), "approved", 1_751_000_000);
+        });
+        assert_eq!(h.screen_tx(&original), Screen::AuditApproved);
+        assert_eq!(h.buffer_status(&golden::tx_a()), Some(BufferStatus::Approved));
+
+        let changed_logs = vec![transfer_log(golden::TWO_TOKENS)];
+        let changed = audit_input(golden::tx_a(), 1, 1_000_000, &changed_logs);
+        assert_eq!(h.screen_tx(&changed), Screen::Drop);
+    }
+
+    #[test]
+    fn pre_screen_defers_all_inflight_states() {
+        for target in ["not_submitted", "submitted", "pending"] {
+            let (h, _) = handle_and_clock(1_751_000_000);
+            let logs = vec![transfer_log(golden::ONE_TOKEN)];
+            let input = audit_input(golden::tx_a(), 1, 1_000_000, &logs);
+            assert_eq!(h.screen_tx(&input), Screen::AuditPending);
+            h.with_pool(|pool| {
+                if target != "not_submitted" {
+                    pool.apply_submit_response_current(
+                        &[format!("{:#x}", golden::tx_a())],
+                        1_751_000_000,
+                    );
+                }
+                if target == "pending" {
+                    pool.apply_query_status_current(&golden::tx_a(), "pending", 1_751_000_000);
+                }
+            });
+            assert_eq!(h.pre_screen(&golden::tx_a()), PreScreen::Defer);
+        }
+    }
+
+    #[test]
+    fn pre_screen_executes_approved_and_timeout_allow() {
+        for target in ["approved", "timed_out_allow"] {
+            let (h, _) = handle_and_clock(1_751_000_000);
+            let logs = vec![transfer_log(golden::ONE_TOKEN)];
+            let input = audit_input(golden::tx_a(), 1, 1_000_000, &logs);
+            assert_eq!(h.screen_tx(&input), Screen::AuditPending);
+            h.with_pool(|pool| {
+                if target == "approved" {
+                    pool.apply_submit_response_current(
+                        &[format!("{:#x}", golden::tx_a())],
+                        1_751_000_000,
+                    );
+                    pool.apply_query_status_current(&golden::tx_a(), "approved", 1_751_000_000);
+                } else {
+                    pool.check_timeouts(&FilterConfig::default(), 1_751_000_091);
+                }
+            });
+            assert_eq!(h.pre_screen(&golden::tx_a()), PreScreen::Execute);
+        }
+    }
+
+    #[test]
+    fn pending_precheck_marks_descendants_invalid_for_iterator() {
+        let (h, _) = handle_and_clock(1_751_000_000);
+        let logs = vec![transfer_log(golden::ONE_TOKEN)];
+        let input = audit_input(golden::tx_a(), 1, 1_000_000, &logs);
+        assert_eq!(h.screen_tx(&input), Screen::AuditPending);
+        assert_eq!(h.pre_screen(&golden::tx_a()), PreScreen::Defer);
+    }
+
+    #[test]
+    fn approved_can_become_outdated_before_canonical_cleanup() {
+        let (h, _) = handle_and_clock(1_751_000_000);
+        let logs = vec![transfer_log(golden::ONE_TOKEN)];
+        let input = audit_input(golden::tx_a(), 1, 1_000_000, &logs);
+        assert_eq!(h.screen_tx(&input), Screen::AuditPending);
+        h.with_pool(|pool| {
+            pool.apply_submit_response_current(&[format!("{:#x}", golden::tx_a())], 1_751_000_000);
+            pool.apply_query_status_current(&golden::tx_a(), "approved", 1_751_000_000);
+        });
+        assert_eq!(h.screen_tx(&input), Screen::AuditApproved);
+        h.with_pool(|pool| {
+            pool.apply_query_status_current(&golden::tx_a(), "outdated", 1_751_000_001);
+        });
+        assert_eq!(h.pre_screen(&golden::tx_a()), PreScreen::Drop);
     }
 
     /// FR-7 §6.6 consistency mismatch (G2): approved but the pre-package re-simulation yields
@@ -467,8 +735,8 @@ mod tests {
         assert_eq!(h.screen_tx(&input_submit), Screen::AuditPending);
         let now = 1_751_000_000;
         h.with_pool(|p| {
-            p.apply_submit_response(&[format!("{:#x}", golden::tx_a())], now);
-            p.apply_query_status(&golden::tx_a(), "approved", now);
+            p.apply_submit_response_current(&[format!("{:#x}", golden::tx_a())], now);
+            p.apply_query_status_current(&golden::tx_a(), "approved", now);
         });
 
         // Re-simulate with a different amount → quota hash mismatch → drop.

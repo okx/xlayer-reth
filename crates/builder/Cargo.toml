@@ -149,6 +149,7 @@ reth-ipc.workspace = true
 reth-optimism-rpc = { workspace = true, features = ["client"] }
 rlimit = { version = "0.10" }
 tokio = { workspace = true, features = ["test-util"] }
+reth-transaction-pool = { workspace = true, features = ["test-utils"] }
 
 [features]
 default = []

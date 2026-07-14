@@ -13,6 +13,10 @@ pub enum FilterError {
     #[error("rcs transport error: {0}")]
     Transport(String),
 
+    /// The configured connect or total-request deadline elapsed.
+    #[error("rcs request timed out: {0}")]
+    Timeout(String),
+
     /// RCS responded with an unexpected (non-2xx / non-202) HTTP status.
     #[error("rcs unexpected status: {0}")]
     UnexpectedStatus(u16),

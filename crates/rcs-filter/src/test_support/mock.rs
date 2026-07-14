@@ -2,7 +2,7 @@
 //! and network-free — suitable for module tests. Golden payloads are registered verbatim
 //! from contract §4 via [`crate::test_support::golden`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -27,12 +27,16 @@ struct MockState {
     protocol_version: u32,
     content_version: u64,
     rules: Vec<Value>,
+    rules_response_override: Option<Value>,
     submit_accepted: Option<Vec<String>>,
     submit_rejected: Vec<String>,
     query_states: HashMap<String, QueryState>,
     calls: Vec<String>,
     /// Every `submit` request body received (in order), for payload-verbatim assertions (§6.4).
     submitted: Vec<SubmitRequest>,
+    queried_modes: Vec<String>,
+    failed_query_statuses: HashSet<String>,
+    failed_submit_heights: HashSet<u64>,
     unavailable: bool,
 }
 
@@ -81,6 +85,11 @@ impl MockRcsClient {
         self.lock().protocol_version = pv;
     }
 
+    /// Overrides the complete `GET /rules` body to exercise wire decode failures.
+    pub fn set_rules_response_override(&self, body: Value) {
+        self.lock().rules_response_override = Some(body);
+    }
+
     /// Registers the `202` submit response (accepted / rejected_malformed hash lists).
     pub fn register_submit_response(&self, accepted: &[&str], rejected: &[&str]) {
         let mut s = self.lock();
@@ -104,6 +113,21 @@ impl MockRcsClient {
     /// Makes all endpoints fail as if RCS is unreachable (FR-2/FR-6 fault injection).
     pub fn set_unavailable(&self, unavailable: bool) {
         self.lock().unavailable = unavailable;
+    }
+
+    /// Makes one status-mode query fail while other status modes remain available.
+    pub fn fail_query_status(&self, status: &str) {
+        self.lock().failed_query_statuses.insert(status.to_string());
+    }
+
+    /// Makes submission for one block height fail while later groups remain available.
+    pub fn fail_submit_height(&self, block_height: u64) {
+        self.lock().failed_submit_heights.insert(block_height);
+    }
+
+    /// Ordered query modes received by the mock.
+    pub fn queried_modes(&self) -> Vec<String> {
+        self.lock().queried_modes.clone()
     }
 
     /// Number of recorded calls to `endpoint` (`get_rules`/`get_rules_version`/`submit`/`query`).
@@ -140,10 +164,12 @@ impl RcsClient for MockRcsClient {
         if s.unavailable {
             return Err(FilterError::Transport("mock unavailable".into()));
         }
-        let body = json!({
-            "protocol_version": s.protocol_version,
-            "content_version": s.content_version,
-            "rules": Value::Array(s.rules.clone()),
+        let body = s.rules_response_override.clone().unwrap_or_else(|| {
+            json!({
+                "protocol_version": s.protocol_version,
+                "content_version": s.content_version,
+                "rules": Value::Array(s.rules.clone()),
+            })
         });
         serde_json::from_value(body).map_err(|e| FilterError::Decode(e.to_string()))
     }
@@ -166,6 +192,9 @@ impl RcsClient for MockRcsClient {
         if s.unavailable {
             return Err(FilterError::Transport("mock unavailable".into()));
         }
+        if s.failed_submit_heights.contains(&req.xlayer_block_height) {
+            return Err(FilterError::Transport("mock submit group unavailable".into()));
+        }
         s.submitted.push(req.clone());
         // Default: echo all submitted hashes as accepted (idempotent RCS, contract §2.4).
         let accepted = s
@@ -177,9 +206,19 @@ impl RcsClient for MockRcsClient {
 
     async fn query(&self, q: QueryParams) -> Result<QueryResponse> {
         self.record("query");
-        let s = self.lock();
+        let mut s = self.lock();
         if s.unavailable {
             return Err(FilterError::Transport("mock unavailable".into()));
+        }
+        let mode = match &q {
+            QueryParams::TxHashes(_) => "tx_hashes".to_string(),
+            QueryParams::Status(status) => format!("status:{status}"),
+        };
+        s.queried_modes.push(mode);
+        if let QueryParams::Status(status) = &q
+            && s.failed_query_statuses.contains(status)
+        {
+            return Err(FilterError::Transport("mock query status unavailable".into()));
         }
         let txs = match q {
             QueryParams::TxHashes(hashes) => {

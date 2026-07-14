@@ -21,7 +21,7 @@ use core::fmt::Debug;
 use op_alloy_consensus::{OpDepositReceipt, OpTxType};
 use op_revm::{L1BlockInfo, OpSpecId};
 
-use rcs_filter::{FilterHandle, Screen, ScreenInput};
+use rcs_filter::{FilterHandle, PreScreen, Screen, ScreenInput};
 use reth_basic_payload_builder::PayloadConfig;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_evm::{
@@ -666,6 +666,25 @@ impl FlashblocksBuilderCtx {
                 return Ok(Some(()));
             }
 
+            // Buffered audit transactions can be decided without repeating EVM execution. Marking
+            // the sender/nonce invalid only affects this iterator and suppresses nonce descendants;
+            // the transaction remains in txpool for a later flashblock.
+            if let Some(filter) = self.filter.as_ref() {
+                match filter.pre_screen(&tx_hash) {
+                    PreScreen::Execute => {}
+                    PreScreen::Defer => {
+                        best_txs.mark_invalid(tx.signer(), tx.nonce());
+                        continue;
+                    }
+                    PreScreen::Drop => {
+                        best_txs.mark_invalid(tx.signer(), tx.nonce());
+                        let removed = tx_pool.remove_transaction(tx_hash).is_some();
+                        filter.record_txpool_discard(removed);
+                        continue;
+                    }
+                }
+            }
+
             // Once the per-block gasless budget is spent, skip further gasless candidates without
             // simulating them.
             if info.gasless_budget_exhausted && tx.max_fee_per_gas() == 0 {
@@ -805,13 +824,17 @@ impl FlashblocksBuilderCtx {
                     Screen::Allow | Screen::AuditApproved => {}
                     Screen::Deny => {
                         best_txs.mark_invalid(tx.signer(), tx.nonce());
+                        let removed = tx_pool.remove_transaction(tx_hash).is_some();
+                        filter.record_txpool_discard(removed);
                         continue;
                     }
                     Screen::Drop => {
                         // A terminal audit rejection is a discard, not a mined transaction.
                         // `remove_transaction` parks nonce descendants without deleting them.
                         best_txs.mark_invalid(tx.signer(), tx.nonce());
-                        if tx_pool.remove_transaction(tx_hash).is_none() {
+                        let removed = tx_pool.remove_transaction(tx_hash).is_some();
+                        filter.record_txpool_discard(removed);
+                        if !removed {
                             debug!(
                                 target: "rcs_filter",
                                 %tx_hash,
@@ -821,9 +844,10 @@ impl FlashblocksBuilderCtx {
                         continue;
                     }
                     Screen::AuditPending => {
-                        // Skip commit/receipt/fee; do NOT mark_invalid (tx stays in the pool
-                        // for a later round). Adjudication state lives in the filter's
-                        // BufferPool across rounds.
+                        // Skip commit/receipt/fee and this sender's nonce descendants for the
+                        // current iterator. `mark_invalid` does not remove the transaction from
+                        // txpool; adjudication state remains in BufferPool across rounds.
+                        best_txs.mark_invalid(tx.signer(), tx.nonce());
                         continue;
                     }
                 }
