@@ -204,6 +204,8 @@ where
         })?;
 
         // 2. Execute sequencer transactions from payload attributes
+        // Runs the predetermined `attributes` tx set via the block executor (gasless fee applied by the
+        // executor). Does NOT apply the per-block gasless gas budget — same reason as `execute_cached_transactions`.
         let mut info = ctx.execute_sequencer_transactions(&mut builder, None)?;
 
         // 3. Execute cached transactions (replaces execute_best_transactions)
@@ -271,7 +273,12 @@ where
     }
 }
 
-/// Executes cached flashblocks transactions via [`BlockBuilder::execute_transaction`].
+/// Executes cached flashblocks transactions via [`BlockBuilder::execute_transaction`] (gasless fee
+/// applied by the executor). Does NOT apply the per-block gasless gas budget: that budget is a
+/// builder-side mempool-selection policy (`OpPayloadBuilderCtx::execute_best_transactions`), not a
+/// consensus rule (the executor/validation never checks it). These `cached_txs` were already
+/// budget-capped by the producing sequencer, and cache replay must reproduce that block verbatim
+/// (failover reorg protection); re-capping here could drop a tx the original block included and reorg.
 fn execute_cached_transactions<N, Builder>(
     info: &mut reth_optimism_payload_builder::builder::ExecutionInfo,
     builder: &mut Builder,
@@ -327,10 +334,10 @@ where
         info.accumulate_gas(tx_gas_used, tx_gas_used);
         info.cumulative_da_bytes_used += tx_da_size;
 
-        // Track fees for payload metadata
-        let miner_fee = recovered_tx
-            .effective_tip_per_gas(base_fee)
-            .expect("fee is always valid; execution succeeded");
+        // Track fees for payload metadata. `effective_tip_per_gas` returns `None` for a
+        // zero-priced (e.g. gasless) tx under a non-zero base fee, so fall back to a 0 tip
+        // instead of panicking.
+        let miner_fee = recovered_tx.effective_tip_per_gas(base_fee).unwrap_or(0);
         info.total_fees += U256::from(miner_fee) * U256::from(tx_gas_used);
     }
 
