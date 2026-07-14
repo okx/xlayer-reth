@@ -18,6 +18,8 @@ use super::model::{
 const ERC20_TRANSFER_SHAPE: &[&str] = &["from", "to", "value"];
 /// Fixed ERC1155 `TransferSingle` quota shape (ordered input names) — contract §3.3.
 const ERC1155_TRANSFER_SINGLE_SHAPE: &[&str] = &["operator", "from", "to", "id", "value"];
+/// ERC1155 `TransferBatch` quota shape advertised by the RCS rule ABI.
+const ERC1155_TRANSFER_BATCH_SHAPE: &[&str] = &["operator", "from", "to", "ids", "values"];
 /// The only audit type implemented today (contract §2.4).
 const QUOTA: &str = "quota";
 
@@ -86,7 +88,7 @@ pub fn compile_rule(raw: RawRule) -> std::result::Result<CompiledRule, String> {
         // declared event must match one of the fixed shapes (contract §3.3).
         if is_quota_audit && !matches_quota_shape(&compiled) {
             return Err(format!(
-                "event '{var_name}' does not match a fixed quota shape (ERC20 Transfer / ERC1155 TransferSingle)"
+                "event '{var_name}' does not match a fixed quota shape (ERC20 Transfer / ERC1155 TransferSingle / ERC1155 TransferBatch)"
             ));
         }
         events.push(compiled);
@@ -169,7 +171,9 @@ fn compile_event(var_name: &str, abi: &EventAbi) -> std::result::Result<Compiled
 /// Whether a compiled event's ordered input names match a fixed quota shape (contract §3.3).
 fn matches_quota_shape(event: &CompiledEvent) -> bool {
     let names: Vec<&str> = event.inputs.iter().map(|i| i.name.as_str()).collect();
-    names == ERC20_TRANSFER_SHAPE || names == ERC1155_TRANSFER_SINGLE_SHAPE
+    names == ERC20_TRANSFER_SHAPE
+        || names == ERC1155_TRANSFER_SINGLE_SHAPE
+        || names == ERC1155_TRANSFER_BATCH_SHAPE
 }
 
 /// Parses an optional `0x`-prefixed address; a present-but-malformed address rejects the rule.
@@ -234,6 +238,38 @@ mod tests {
         // audit_types quota but shape is not ERC20/ERC1155.
         let json = r#"{"id":"r","event_abis":{"e":{"type":"event","name":"E","inputs":[{"name":"a","type":"address","indexed":false}],"anonymous":false}},"audit_types":["quota"],"condition":true,"action":"audit"}"#;
         assert!(compile_rule(parse(json)).is_err());
+    }
+
+    #[test]
+    fn rendered_quota_rule_accepts_transfer_batch_shape() {
+        let json = r#"{
+          "id":"rendered-quota-rule",
+          "event_abis":{
+            "transfer":{"type":"event","name":"Transfer","inputs":[
+              {"name":"from","type":"address","indexed":true},
+              {"name":"to","type":"address","indexed":true},
+              {"name":"value","type":"uint256","indexed":false}],"anonymous":false},
+            "transferSingle":{"type":"event","name":"TransferSingle","inputs":[
+              {"name":"operator","type":"address","indexed":true},
+              {"name":"from","type":"address","indexed":true},
+              {"name":"to","type":"address","indexed":true},
+              {"name":"id","type":"uint256","indexed":false},
+              {"name":"value","type":"uint256","indexed":false}],"anonymous":false},
+            "transferBatch":{"type":"event","name":"TransferBatch","inputs":[
+              {"name":"operator","type":"address","indexed":true},
+              {"name":"from","type":"address","indexed":true},
+              {"name":"to","type":"address","indexed":true},
+              {"name":"ids","type":"uint256[]","indexed":false},
+              {"name":"values","type":"uint256[]","indexed":false}],"anonymous":false}
+          },
+          "audit_types":["quota"],
+          "condition":true,
+          "action":"audit",
+          "audit_timeout_action":"allow"
+        }"#;
+
+        let compiled = compile_rule(parse(json)).expect("RCS-rendered quota rule must compile");
+        assert_eq!(compiled.events.len(), 3);
     }
 
     #[test]
