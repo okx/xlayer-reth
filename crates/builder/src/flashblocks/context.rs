@@ -6,7 +6,7 @@ use crate::{
 };
 use std::{sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 use alloy_consensus::{
     conditional::BlockConditionalAttributes, transaction::Recovered, Eip658Value, Transaction,
@@ -314,6 +314,9 @@ impl FlashblocksBuilderCtx {
         }
     }
 
+    /// Executes the sequencer-provided txs (`attributes().transactions`) via `transact_maybe_gasless`,
+    /// so gasless txs get `is_gasless` set (a plain `evm.transact` would skip them at the base-fee
+    /// check). Does NOT apply the per-block gasless gas budget — same reason as `execute_cached_transactions`.
     pub(super) fn execute_sequencer_transactions(
         &self,
         db: &mut State<impl Database>,
@@ -361,17 +364,25 @@ impl FlashblocksBuilderCtx {
                     ))
                 })?;
 
-            let ResultAndState { result, state } = match evm.transact(&sequencer_tx) {
-                Ok(res) => res,
-                Err(err) => {
-                    if err.is_invalid_tx_err() {
-                        trace!(target: "payload_builder", %err, ?sequencer_tx, "Error in sequencer transaction, skipping.");
-                        continue;
+            let (ResultAndState { result, state }, _is_gasless) =
+                match self.transact_maybe_gasless(&mut evm, &sequencer_tx) {
+                    Ok(res) => res,
+                    Err(err) => {
+                        if err.is_invalid_tx_err() {
+                            warn!(
+                                target: "payload_builder",
+                                id = %self.payload_id(),
+                                block_number = self.block_number(),
+                                tx_hash = %sequencer_tx.tx_hash(),
+                                %err,
+                                "Error in sequencer transaction, skipping."
+                            );
+                            continue;
+                        }
+                        // this is an error that we should treat as fatal for this attempt
+                        return Err(PayloadBuilderError::EvmExecutionError(Box::new(err)));
                     }
-                    // this is an error that we should treat as fatal for this attempt
-                    return Err(PayloadBuilderError::EvmExecutionError(Box::new(err)));
-                }
-            };
+                };
 
             // add gas used by the transaction to cumulative gas used, before creating the receipt
             let gas_used = result.tx_gas_used();
@@ -483,7 +494,7 @@ impl FlashblocksBuilderCtx {
             }
 
             // Ensure transaction execution is valid.
-            let (ResultAndState { result, state }, is_gasless) =
+            let (ResultAndState { result, state }, _is_gasless) =
                 match self.transact_maybe_gasless(&mut evm, &recovered_tx) {
                     Ok(res) => res,
                     Err(err) => {
@@ -516,15 +527,10 @@ impl FlashblocksBuilderCtx {
             // Commit changes
             evm.db_mut().commit(state);
 
-            // update add to total fees. Gasless txs contribute no miner fee (see the equivalent
-            // note in `execute_best_transactions`).
-            let miner_fee = if is_gasless {
-                0
-            } else {
-                recovered_tx
-                    .effective_tip_per_gas(self.base_fee())
-                    .expect("fee is always valid; execution succeeded")
-            };
+            // update add to total fees. Gasless txs contribute no miner fee: they execute with an
+            // effective gas price of 0, so `effective_tip_per_gas` returns `None` and `unwrap_or(0)`
+            // yields a 0 tip for them (see the equivalent note in `execute_best_transactions`).
+            let miner_fee = recovered_tx.effective_tip_per_gas(self.base_fee()).unwrap_or(0);
             info.total_fees += U256::from(miner_fee) * U256::from(gas_used);
 
             // Append sender and transaction to the respective lists
@@ -666,31 +672,44 @@ impl FlashblocksBuilderCtx {
             // Gasless: zero-priced, whitelisted txs are executed with the base-fee check relaxed
             // (gated on the chain's gasless contract approving the tx). Non-gasless txs are
             // unaffected — see [`Self::transact_maybe_gasless`].
-            let (ResultAndState { result, state }, is_gasless) = match self
-                .transact_maybe_gasless(&mut evm, &tx)
-            {
-                Ok(res) => res,
-                Err(err) => {
-                    if let Some(err) = err.as_invalid_tx_err() {
-                        if err.is_nonce_too_low() {
-                            // if the nonce is too low, we can skip this transaction
-                            log_txn(TxnExecutionResult::NonceTooLow);
-                            trace!(target: "payload_builder", %err, ?tx, "skipping nonce too low transaction");
-                        } else {
-                            // if the transaction is invalid, we can skip it and all of its
-                            // descendants
-                            log_txn(TxnExecutionResult::InternalError(err.0.clone()));
-                            trace!(target: "payload_builder", %err, ?tx, "skipping invalid transaction and its descendants");
-                            best_txs.mark_invalid(tx.signer(), tx.nonce());
-                        }
+            let (ResultAndState { result, state }, is_gasless) =
+                match self.transact_maybe_gasless(&mut evm, &tx) {
+                    Ok(res) => res,
+                    Err(err) => {
+                        if let Some(err) = err.as_invalid_tx_err() {
+                            if err.is_nonce_too_low() {
+                                // if the nonce is too low, we can skip this transaction
+                                log_txn(TxnExecutionResult::NonceTooLow);
+                                warn!(
+                                    target: "payload_builder",
+                                    id = %self.payload_id(),
+                                    block_number = self.block_number(),
+                                    tx_hash = %tx.tx_hash(),
+                                    %err,
+                                    "skipping nonce too low transaction"
+                                );
+                            } else {
+                                // if the transaction is invalid, we can skip it and all of its
+                                // descendants
+                                log_txn(TxnExecutionResult::InternalError(err.0.clone()));
+                                warn!(
+                                    target: "payload_builder",
+                                    id = %self.payload_id(),
+                                    block_number = self.block_number(),
+                                    tx_hash = %tx.tx_hash(),
+                                    %err,
+                                    "skipping invalid transaction and its descendants"
+                                );
+                                best_txs.mark_invalid(tx.signer(), tx.nonce());
+                            }
 
-                        continue;
+                            continue;
+                        }
+                        // this is an error that we should treat as fatal for this attempt
+                        log_txn(TxnExecutionResult::EvmError);
+                        return Err(PayloadBuilderError::evm(err));
                     }
-                    // this is an error that we should treat as fatal for this attempt
-                    log_txn(TxnExecutionResult::EvmError);
-                    return Err(PayloadBuilderError::evm(err));
-                }
-            };
+                };
 
             self.metrics.tx_simulation_duration.record(tx_simulation_start_time.elapsed());
             self.metrics.tx_byte_size.record(tx.inner().size() as f64);
@@ -721,7 +740,7 @@ impl FlashblocksBuilderCtx {
 
             if is_gasless
                 && let Some(limit) = self.gasless_block_gas_limit
-                && info.cumulative_gasless_gas_used + gas_used > limit
+                && info.cumulative_gasless_gas_used.saturating_add(gas_used) > limit
             {
                 log_txn(TxnExecutionResult::GaslessBlockGasLimitExceeded(
                     info.cumulative_gasless_gas_used,
@@ -729,7 +748,7 @@ impl FlashblocksBuilderCtx {
                     limit,
                 ));
                 if !info.gasless_budget_exhausted {
-                    debug!(
+                    warn!(
                         target: "payload_builder",
                         id = ?self.payload_id(),
                         gasless_gas_used = info.cumulative_gasless_gas_used,
@@ -776,15 +795,10 @@ impl FlashblocksBuilderCtx {
             // commit changes
             evm.db_mut().commit(state);
 
-            // update add to total fees. Gasless txs contribute no miner fee (they execute with an
-            // effective gas price of 0) and `effective_tip_per_gas` would return `None` for a
-            // zero-priced tx under a non-zero base fee, so skip the fee accounting for them.
-            let miner_fee = if is_gasless {
-                0
-            } else {
-                tx.effective_tip_per_gas(base_fee)
-                    .expect("fee is always valid; execution succeeded")
-            };
+            // update add to total fees. Gasless txs contribute no miner fee: they execute with an
+            // effective gas price of 0, so `effective_tip_per_gas` returns `None` for a zero-priced
+            // tx under a non-zero base fee and `unwrap_or(0)` yields a 0 tip for them.
+            let miner_fee = tx.effective_tip_per_gas(base_fee).unwrap_or(0);
             info.total_fees += U256::from(miner_fee) * U256::from(gas_used);
 
             // append sender and transaction to the respective lists

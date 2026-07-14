@@ -44,6 +44,9 @@ impl XLayerPayloadServiceBuilder {
         da_config: OpDAConfig,
         gas_limit_config: OpGasLimitConfig,
     ) -> eyre::Result<Self> {
+        gas_limit_config.set_gasless_block_gas_limit(
+            xlayer_builder_args.gasless_block_gas_limit().unwrap_or(0),
+        );
         let builder = if xlayer_builder_args.flashblocks.enabled {
             let builder_config = BuilderConfig::try_from(xlayer_builder_args)?;
             XLayerPayloadServiceBuilderInner::Flashblocks(Box::new(FlashblocksServiceBuilder {
@@ -51,9 +54,6 @@ impl XLayerPayloadServiceBuilder {
                 bridge_intercept: Default::default(),
             }))
         } else {
-            gas_limit_config.set_gasless_block_gas_limit(
-                xlayer_builder_args.gasless_block_gas_limit().unwrap_or(0),
-            );
             let payload_builder = OpPayloadBuilder::new(compute_pending_block)
                 .with_da_config(da_config)
                 .with_gas_limit_config(gas_limit_config);
