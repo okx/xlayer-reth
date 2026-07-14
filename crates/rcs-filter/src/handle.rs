@@ -25,6 +25,9 @@ pub enum Screen {
     Allow,
     /// Exclude via `mark_invalid` (a `deny` rule matched).
     Deny,
+    /// Permanently discard an audit transaction from the transaction pool after a terminal
+    /// rejection (`denied`, `outdated`, fail-close, or consistency mismatch).
+    Drop,
     /// Skip this round (do not commit, do not `mark_invalid`); tx stays in the pool for a
     /// later round while its audit adjudication proceeds.
     AuditPending,
@@ -190,7 +193,7 @@ impl FilterHandle {
 
             // Terminal: dropped (denied/outdated/fail-close/consistency-mismatch). Never
             // packaged, never re-submitted, never re-admitted this build cycle (G2/G3).
-            BufferStatus::Dropped => Screen::AuditPending,
+            BufferStatus::Dropped => Screen::Drop,
 
             // Approved → FR-7 pre-package consistency check: re-simulate the quota from the
             // current logs and compare to the submit-time hash. Transition to a terminal
@@ -204,14 +207,17 @@ impl FilterHandle {
                     _ => false,
                 };
                 let now = self.shared.clock.now_unix();
-                let mut pool = self.shared.pool_lock();
-                if consistent {
-                    pool.set_terminal(&input.tx_hash, BufferStatus::ReleasePending, now);
-                    Screen::AuditApproved
-                } else {
-                    // G2: consistency mismatch → hard drop (deterministic, no re-admit).
-                    pool.set_terminal(&input.tx_hash, BufferStatus::Dropped, now);
-                    Screen::AuditPending
+                let status = self.shared.pool_lock().finish_consistency_check(
+                    &input.tx_hash,
+                    consistent,
+                    now,
+                );
+                match status {
+                    Some(BufferStatus::ReleasePending) => Screen::AuditApproved,
+                    Some(BufferStatus::Dropped) => Screen::Drop,
+                    // A concurrent query/timeout resolution takes precedence over the stale
+                    // consistency result. Other non-terminal states remain pending.
+                    _ => Screen::AuditPending,
                 }
             }
 
@@ -362,7 +368,7 @@ mod tests {
     }
 
     /// FR-10 scenario c (denied → drop). Denied tombstones the tx as `Dropped`; it is never
-    /// packaged, never re-submitted, and re-screening keeps returning `AuditPending` (G3).
+    /// packaged or re-submitted, and re-screening requests tx-pool eviction (G3).
     #[test]
     fn scenario_c_denied_drops_and_never_resubmits() {
         let (h, _clock) = handle_and_clock(1_751_000_000);
@@ -380,7 +386,7 @@ mod tests {
         assert_eq!(h.buffer_status(&golden::tx_c()), Some(BufferStatus::Dropped));
 
         // Re-screen: still dropped; not re-admitted, not re-submitted, not re-queried.
-        assert_eq!(h.screen_tx(&input), Screen::AuditPending);
+        assert_eq!(h.screen_tx(&input), Screen::Drop);
         h.with_pool(|p| {
             assert!(p.not_submitted().is_empty());
             assert!(p.in_flight_hashes().is_empty());
@@ -406,7 +412,7 @@ mod tests {
             p.apply_query_status(&golden::tx_d(), "outdated", now);
         });
         assert_eq!(h.buffer_status(&golden::tx_d()), Some(BufferStatus::Dropped));
-        assert_eq!(h.screen_tx(&input), Screen::AuditPending);
+        assert_eq!(h.screen_tx(&input), Screen::Drop);
     }
 
     /// FR-6 §6.5 fail-open: an audit tx whose `audit_timeout_action=allow` exceeds the 90s
@@ -468,9 +474,9 @@ mod tests {
         // Re-simulate with a different amount → quota hash mismatch → drop.
         let repackage_logs = vec![transfer_log(golden::TWO_TOKENS)];
         let input_repackage = audit_input(golden::tx_a(), 1, 1_000_000, &repackage_logs);
-        assert_eq!(h.screen_tx(&input_repackage), Screen::AuditPending);
+        assert_eq!(h.screen_tx(&input_repackage), Screen::Drop);
         assert_eq!(h.buffer_status(&golden::tx_a()), Some(BufferStatus::Dropped));
         // Never re-admitted / never released.
-        assert_eq!(h.screen_tx(&input_repackage), Screen::AuditPending);
+        assert_eq!(h.screen_tx(&input_repackage), Screen::Drop);
     }
 }

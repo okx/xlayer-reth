@@ -9,8 +9,8 @@
 //! the entry would let the builder re-screen the tx from scratch on the next round, resetting
 //! `first_not_submitted_at` (timeout clock) and re-submitting a denied/outdated tx — an
 //! infinite loop. The tombstone gives `screen_tx` a deterministic mapping
-//! (`ReleasePending → Screen::AuditApproved`, `Dropped → Screen::AuditPending` never
-//! re-admitted) and keeps the tx out of the submit / query / timeout scans for the rest of
+//! (`ReleasePending → Screen::AuditApproved`, `Dropped → Screen::Drop` for tx-pool eviction)
+//! and keeps the tx out of the submit / query / timeout scans for the rest of
 //! the build cycle. To bound memory over the node's (unbounded) lifetime, tombstones are
 //! evicted by [`BufferPool::prune_terminal`] once they have been terminal for longer than
 //! `terminal_entry_retention_seconds` (contract §2.5) — long enough that a still-relevant tx
@@ -119,13 +119,24 @@ impl BufferPool {
         self.entries.remove(tx_hash)
     }
 
-    /// Transitions an entry to a terminal tombstone status (`ReleasePending`/`Dropped`)
-    /// without removing it, so the outcome stays visible to `screen_tx`. No-op if absent.
-    pub fn set_terminal(&mut self, tx_hash: &B256, status: BufferStatus, now: u64) {
-        if let Some(entry) = self.entries.get_mut(tx_hash) {
-            entry.status = status;
+    /// Completes the pre-package consistency check if the entry is still `Approved`.
+    ///
+    /// Query and timeout workers can resolve an approved entry while the builder recomputes its
+    /// consistency hash without holding the pool lock. Re-checking the status here prevents that
+    /// stale computation from overwriting a newer terminal decision such as `Dropped`.
+    pub fn finish_consistency_check(
+        &mut self,
+        tx_hash: &B256,
+        consistent: bool,
+        now: u64,
+    ) -> Option<BufferStatus> {
+        let entry = self.entries.get_mut(tx_hash)?;
+        if entry.status == BufferStatus::Approved {
+            entry.status =
+                if consistent { BufferStatus::ReleasePending } else { BufferStatus::Dropped };
             entry.last_transition_at = now;
         }
+        Some(entry.status)
     }
 
     /// tx_hashes currently in `NotSubmitted` (batch-submit candidates).
@@ -330,6 +341,46 @@ mod tests {
             // A second query on a terminal entry is a no-op.
             assert_eq!(pool.apply_query_status(&hash, "denied", 6), None);
         }
+    }
+
+    #[test]
+    fn consistency_check_only_transitions_an_approved_entry() {
+        let hash =
+            B256::from_str("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .unwrap();
+
+        let mut pool = BufferPool::default();
+        let mut approved = entry(0, TimeoutAction::Allow);
+        approved.status = BufferStatus::Approved;
+        pool.insert(approved);
+
+        assert_eq!(
+            pool.finish_consistency_check(&hash, true, 5),
+            Some(BufferStatus::ReleasePending)
+        );
+        assert_eq!(pool.get(&hash).unwrap().last_transition_at, 5);
+
+        let mut pool = BufferPool::default();
+        let mut outdated = entry(0, TimeoutAction::Allow);
+        outdated.status = BufferStatus::Approved;
+        pool.insert(outdated);
+        assert_eq!(pool.apply_query_status(&hash, "outdated", 6), Some(Resolution::Discard));
+
+        assert_eq!(pool.finish_consistency_check(&hash, true, 7), Some(BufferStatus::Dropped));
+        assert_eq!(pool.get(&hash).unwrap().last_transition_at, 6);
+    }
+
+    #[test]
+    fn inconsistent_approved_entry_is_dropped() {
+        let hash =
+            B256::from_str("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .unwrap();
+        let mut pool = BufferPool::default();
+        let mut approved = entry(0, TimeoutAction::Allow);
+        approved.status = BufferStatus::Approved;
+        pool.insert(approved);
+
+        assert_eq!(pool.finish_consistency_check(&hash, false, 5), Some(BufferStatus::Dropped));
     }
 
     #[test]

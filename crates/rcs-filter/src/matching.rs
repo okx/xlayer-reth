@@ -30,7 +30,10 @@ pub enum MatchOutcome {
 
 /// Runs the full screening algorithm for one transaction. Zero network IO.
 pub fn evaluate(rules: &RuleSet, input: &ScreenInput) -> MatchOutcome {
-    let mut actions: BTreeMap<String, Vec<ActionItem>> = BTreeMap::new();
+    // Merge audit rules at the physical-log level. Multiple rules can match the same log, but
+    // RCS must receive that event only once per audit type or it would account the same action
+    // multiple times.
+    let mut actions_by_log: BTreeMap<String, BTreeMap<usize, ActionItem>> = BTreeMap::new();
     let mut has_audit = false;
     let mut timeout_action = TimeoutAction::Allow;
 
@@ -64,21 +67,32 @@ pub fn evaluate(rules: &RuleSet, input: &ScreenInput) -> MatchOutcome {
                 timeout_action = timeout_action.stricter(rule.audit_timeout_action);
                 let items = build_action_items(&matched);
                 for audit_type in &rule.audit_types {
-                    actions.entry(audit_type.clone()).or_default().extend(items.clone());
+                    let by_log = actions_by_log.entry(audit_type.clone()).or_default();
+                    for (log_index, item) in &items {
+                        by_log.entry(*log_index).or_insert_with(|| item.clone());
+                    }
                 }
             }
         }
     }
 
     if has_audit {
+        let actions = actions_by_log
+            .into_iter()
+            .map(|(audit_type, by_log)| (audit_type, by_log.into_values().collect()))
+            .collect();
         MatchOutcome::Audit { actions, timeout_action }
     } else {
         MatchOutcome::Allow
     }
 }
 
-/// A matched named event: the triggering `log.address` and its decoded named params.
-type MatchedEvent = (String, BTreeMap<String, String>);
+/// A matched named event and the physical transaction log that produced it.
+struct MatchedEvent {
+    log_index: usize,
+    address: String,
+    params: BTreeMap<String, String>,
+}
 
 /// Deduplicated candidate rule indices across all logs (topic0 index lookup), sorted for
 /// deterministic deny short-circuit order.
@@ -114,14 +128,17 @@ fn build_bindings(
 
     for event in &rule.events {
         match find_log_for_event(event, input.logs) {
-            Some(log) => {
+            Some((log_index, log)) => {
                 let params = decode_event(event, log);
                 let addr = addr_lower(log.address);
                 for (pname, pval) in &params {
                     b.insert(format!("{}.{}", event.var_name, pname), Value::String(pval.clone()));
                 }
                 b.insert(format!("{}.address", event.var_name), Value::String(addr.clone()));
-                matched.insert(event.var_name.clone(), (addr, params));
+                matched.insert(
+                    event.var_name.clone(),
+                    MatchedEvent { log_index, address: addr, params },
+                );
             }
             None => {
                 for input_def in &event.inputs {
@@ -135,22 +152,28 @@ fn build_bindings(
     (b, matched)
 }
 
-/// Turns the matched event set into submit `ActionItem`s (one per matched named event).
-fn build_action_items(matched: &BTreeMap<String, MatchedEvent>) -> Vec<ActionItem> {
+/// Turns the matched event set into indexed submit items so cross-rule merging can identify
+/// multiple matches of the same physical log.
+fn build_action_items(matched: &BTreeMap<String, MatchedEvent>) -> Vec<(usize, ActionItem)> {
     matched
         .iter()
-        .map(|(name, (address, params))| ActionItem {
-            name: name.clone(),
-            address: address.clone(),
-            params: params.clone(),
+        .map(|(name, event)| {
+            (
+                event.log_index,
+                ActionItem {
+                    name: name.clone(),
+                    address: event.address.clone(),
+                    params: event.params.clone(),
+                },
+            )
         })
         .collect()
 }
 
 /// Finds the first log matching an event's `topic0` (contract §3.2: first log only, no
 /// multi-log pairing).
-fn find_log_for_event<'a>(event: &CompiledEvent, logs: &'a [Log]) -> Option<&'a Log> {
-    logs.iter().find(|log| log.data.topics().first() == Some(&event.topic0))
+fn find_log_for_event<'a>(event: &CompiledEvent, logs: &'a [Log]) -> Option<(usize, &'a Log)> {
+    logs.iter().enumerate().find(|(_, log)| log.data.topics().first() == Some(&event.topic0))
 }
 
 /// ABI-decodes a matched log into `{ param_name: string_value }` following the event's
@@ -215,11 +238,59 @@ fn addr_lower(a: Address) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rules::load_rules;
+    use crate::rules::{load_rules, RawRule};
     use crate::test_support::{golden, log_builder};
+    use alloy_primitives::{keccak256, Bytes, LogData};
+    use serde_json::json;
 
     fn ruleset_a() -> RuleSet {
         load_rules(1, 1, vec![serde_json::from_str(golden::RULE_SCENARIO_A).unwrap()])
+    }
+
+    fn audit_rule(
+        id: &str,
+        event_alias: &str,
+        event_name: &str,
+        inputs: Value,
+        audit_type: &str,
+    ) -> RawRule {
+        let mut event_abis = serde_json::Map::new();
+        event_abis.insert(
+            event_alias.to_string(),
+            json!({
+                "type": "event",
+                "name": event_name,
+                "inputs": inputs,
+                "anonymous": false
+            }),
+        );
+        serde_json::from_value(json!({
+            "id": id,
+            "event_abis": event_abis,
+            "audit_types": [audit_type],
+            "condition": true,
+            "action": "audit"
+        }))
+        .unwrap()
+    }
+
+    fn erc20_audit_rule(id: &str, event_alias: &str) -> RawRule {
+        audit_rule(
+            id,
+            event_alias,
+            "Transfer",
+            json!([
+                {"name": "from", "type": "address", "indexed": true},
+                {"name": "to", "type": "address", "indexed": true},
+                {"name": "value", "type": "uint256", "indexed": false}
+            ]),
+            "quota",
+        )
+    }
+
+    fn empty_event_log(address: Address, event_name: &str) -> Log {
+        let topic0 = keccak256(format!("{event_name}()").as_bytes());
+        Log { address, data: LogData::new_unchecked(vec![topic0], Bytes::new()) }
     }
 
     #[test]
@@ -248,6 +319,78 @@ mod tests {
                 assert_eq!(quota[0].address, golden::TOKEN_X);
                 assert_eq!(quota[0].params.get("value").unwrap(), golden::ONE_TOKEN);
                 assert_eq!(quota[0].params.get("from").unwrap(), golden::BRIDGE_ERC20);
+            }
+            other => panic!("expected Audit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn same_log_matching_multiple_audit_rules_is_submitted_once_per_type() {
+        let rules = load_rules(
+            1,
+            1,
+            vec![
+                erc20_audit_rule("quota-a", "first_transfer"),
+                erc20_audit_rule("quota-b", "second_transfer"),
+            ],
+        );
+        let logs = vec![log_builder::erc20_transfer(
+            golden::token_x(),
+            golden::bridge_erc20(),
+            golden::recipient(),
+            golden::one_token(),
+        )];
+        let input = ScreenInput {
+            tx_hash: golden::tx_a(),
+            origin: golden::origin(),
+            tx_to: Some(golden::claim_contract()),
+            nonce: 1,
+            value: alloy_primitives::U256::ZERO,
+            block_height: 1_000_000,
+            logs: &logs,
+        };
+
+        match evaluate(&rules, &input) {
+            MatchOutcome::Audit { actions, .. } => {
+                let quota = actions.get("quota").expect("quota key");
+                assert_eq!(quota.len(), 1);
+                assert_eq!(quota[0].name, "first_transfer");
+                assert_eq!(quota[0].params.get("value").unwrap(), golden::ONE_TOKEN);
+            }
+            other => panic!("expected Audit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn distinct_logs_in_the_same_audit_type_are_preserved() {
+        let rules = load_rules(
+            1,
+            1,
+            vec![
+                audit_rule("custom-a", "event_a", "EventA", json!([]), "custom"),
+                audit_rule("custom-b", "event_b", "EventB", json!([]), "custom"),
+            ],
+        );
+        let logs = vec![
+            empty_event_log(golden::token_x(), "EventA"),
+            empty_event_log(golden::claim_contract(), "EventB"),
+        ];
+        let input = ScreenInput {
+            tx_hash: golden::tx_a(),
+            origin: golden::origin(),
+            tx_to: Some(golden::claim_contract()),
+            nonce: 1,
+            value: alloy_primitives::U256::ZERO,
+            block_height: 1_000_000,
+            logs: &logs,
+        };
+
+        match evaluate(&rules, &input) {
+            MatchOutcome::Audit { actions, .. } => {
+                let custom = actions.get("custom").expect("custom key");
+                assert_eq!(custom.len(), 2);
+                assert_eq!(custom[0].name, "event_a");
+                assert_eq!(custom[1].name, "event_b");
             }
             other => panic!("expected Audit, got {other:?}"),
         }

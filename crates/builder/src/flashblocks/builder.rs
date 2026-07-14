@@ -2,7 +2,7 @@ use crate::{
     flashblocks::{
         best_txs::BestFlashblocksTxs,
         builder_tx::FlashblocksBuilderTx,
-        context::FlashblocksBuilderCtx,
+        context::{BlockExecutionLimits, FlashblocksBuilderCtx},
         generator::{BlockCell, BuildArguments, PayloadBuilder},
         timing::FlashblockScheduler,
         utils::{
@@ -701,9 +701,12 @@ where
             info,
             state,
             best_txs,
-            target_gas_for_batch.min(ctx.block_gas_limit()),
-            target_da_for_batch,
-            target_da_footprint_for_batch,
+            &self.pool,
+            BlockExecutionLimits {
+                gas: target_gas_for_batch.min(ctx.block_gas_limit()),
+                da: target_da_for_batch,
+                da_footprint: target_da_footprint_for_batch,
+            },
         )
         .wrap_err("failed to execute best transactions")?;
         // Extract last transactions

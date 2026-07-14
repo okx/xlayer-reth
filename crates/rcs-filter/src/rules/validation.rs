@@ -11,7 +11,7 @@ use alloy_primitives::{keccak256, Address};
 use tracing::warn;
 
 use super::model::{
-    CompiledEvent, CompiledInput, CompiledRule, EventAbi, RawRule, RuleSet, TimeoutAction,
+    Action, CompiledEvent, CompiledInput, CompiledRule, EventAbi, RawRule, RuleSet, TimeoutAction,
 };
 
 /// Fixed ERC20 `Transfer` quota shape (ordered input names) — contract §3.3.
@@ -55,14 +55,16 @@ pub fn compile_rule(raw: RawRule) -> std::result::Result<CompiledRule, String> {
         return Err("event_abis is empty".to_string());
     }
 
-    let is_quota = raw.audit_types.iter().any(|t| t == QUOTA);
+    // `audit_types` is irrelevant to filter-only deny/allow rules. In particular, its wire
+    // default is `["quota"]`, which must not make non-audit events subject to quota shapes.
+    let is_quota_audit = raw.action == Action::Audit && raw.audit_types.iter().any(|t| t == QUOTA);
 
     let mut events = Vec::with_capacity(raw.event_abis.len());
     for (var_name, abi) in &raw.event_abis {
         let compiled = compile_event(var_name, abi)?;
-        // (2) quota fixed-shape: when audit_types includes "quota", every declared event
-        // must match one of the two fixed shapes, else reject the whole rule (contract §3.3).
-        if is_quota && !matches_quota_shape(&compiled) {
+        // (2) quota fixed-shape: for audit rules whose audit_types includes "quota", every
+        // declared event must match one of the fixed shapes (contract §3.3).
+        if is_quota_audit && !matches_quota_shape(&compiled) {
             return Err(format!(
                 "event '{var_name}' does not match a fixed quota shape (ERC20 Transfer / ERC1155 TransferSingle)"
             ));
@@ -196,6 +198,18 @@ mod tests {
         // audit_types quota but shape is not ERC20/ERC1155.
         let json = r#"{"id":"r","event_abis":{"e":{"type":"event","name":"E","inputs":[{"name":"a","type":"address"}],"anonymous":false}},"audit_types":["quota"],"condition":true,"action":"audit"}"#;
         assert!(compile_rule(parse(json)).is_err());
+    }
+
+    #[test]
+    fn non_audit_rules_do_not_require_quota_event_shapes() {
+        let deny = r#"{"id":"deny-owner-change","event_abis":{"owner_change":{"type":"event","name":"OwnershipTransferred","inputs":[{"name":"previousOwner","type":"address","indexed":true},{"name":"newOwner","type":"address","indexed":true}],"anonymous":false}},"condition":true,"action":"deny"}"#;
+        let allow = r#"{"id":"allow-owner-change","event_abis":{"owner_change":{"type":"event","name":"OwnershipTransferred","inputs":[{"name":"previousOwner","type":"address","indexed":true},{"name":"newOwner","type":"address","indexed":true}],"anonymous":false}},"condition":true,"action":"allow"}"#;
+
+        for (json, expected_action) in [(deny, Action::Deny), (allow, Action::Allow)] {
+            let rule = compile_rule(parse(json)).expect("non-audit rule is not quota-shaped");
+            assert_eq!(rule.action, expected_action);
+            assert_eq!(rule.audit_types, [QUOTA]);
+        }
     }
 
     #[test]
