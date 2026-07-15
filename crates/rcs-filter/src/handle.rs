@@ -89,7 +89,7 @@ pub(crate) struct Shared {
     pub rules: Arc<RwLock<Arc<RuleSet>>>,
     pub pool: Arc<Mutex<BufferPool>>,
     pub clock: Arc<dyn Clock>,
-    /// Set once the first valid rule set is loaded (FR-2 startup gate).
+    /// Set once the first valid rule set is loaded. Before that, screening uses empty rules.
     pub ready: Arc<AtomicBool>,
     pub terminal_events: tokio::sync::broadcast::Sender<TerminalEvent>,
     pub metrics: RcsFilterMetrics,
@@ -110,6 +110,15 @@ impl Shared {
     /// Write guard for the hot-swappable rule slot, recovering from poisoning.
     pub(crate) fn rules_write(&self) -> std::sync::RwLockWriteGuard<'_, Arc<RuleSet>> {
         self.rules.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Atomically installs a supported rule snapshot and publishes its operational state.
+    pub(crate) fn install_rules(&self, rules: RuleSet) {
+        let content_version = rules.content_version;
+        *self.rules_write() = Arc::new(rules);
+        self.metrics.rules_content_version.set(content_version as f64);
+        self.metrics.rules_ready.set(1.0);
+        self.ready.store(true, Ordering::Release);
     }
 
     pub(crate) fn emit_terminal(&self, event: TerminalEvent) {
@@ -168,6 +177,9 @@ impl FilterHandle {
         clock: Arc<dyn Clock>,
     ) -> Arc<Self> {
         let (terminal_events, _) = tokio::sync::broadcast::channel(TERMINAL_EVENT_CAPACITY);
+        let metrics = RcsFilterMetrics::default();
+        metrics.rules_ready.set(0.0);
+        metrics.rules_content_version.set(0.0);
         let shared = Shared {
             config,
             rules: Arc::new(RwLock::new(Arc::new(RuleSet::default()))),
@@ -175,7 +187,7 @@ impl FilterHandle {
             clock,
             ready: Arc::new(AtomicBool::new(false)),
             terminal_events,
-            metrics: RcsFilterMetrics::default(),
+            metrics,
         };
         let workers = crate::worker::spawn(shared.clone(), client);
         Arc::new(Self { shared, workers })
@@ -287,6 +299,24 @@ impl FilterHandle {
         self.shared.pool_lock().dropped_lifecycles()
     }
 
+    /// Snapshot of non-terminal lifecycle tokens used to remove state for transactions that no
+    /// longer exist in the builder's transaction pool.
+    pub fn non_terminal_lifecycles(&self) -> Vec<(B256, u64)> {
+        self.shared.pool_lock().non_terminal_lifecycles()
+    }
+
+    /// Removes an exact non-terminal lifecycle after the builder confirms the transaction is no
+    /// longer in txpool. A stale generation can never remove a reinserted lifecycle.
+    pub fn remove_non_terminal_if_generation(&self, tx_hash: &B256, generation: u64) -> bool {
+        let removed =
+            self.shared.pool_lock().remove_non_terminal_if_generation(tx_hash, generation);
+        if removed {
+            self.shared.metrics.txpool_absent_cleanup_total.increment(1);
+            self.shared.update_buffer_metric();
+        }
+        removed
+    }
+
     /// Runs `action` while the exact dropped lifecycle is pinned under the filter pool lock.
     /// This closes the check/use window with canonical cleanup and same-hash reinsertion.
     pub fn with_dropped_lifecycle<R>(
@@ -335,8 +365,7 @@ impl FilterHandle {
         generation: u64,
     ) -> Screen {
         match status {
-            // Terminal: release into the block (fail-open timeout, or a prior approved +
-            // consistency pass). Deterministic on every re-entry; no clock reset (G1).
+            // Terminal fail-open: release into the block without resetting the retry clock.
             BufferStatus::TimedOutAllow => {
                 if !self.shared.pool_lock().matches(
                     &input.tx_hash,
@@ -392,8 +421,8 @@ impl FilterHandle {
                         self.shared.metrics.drop_total.increment(1);
                         Screen::Drop
                     }
-                    // A concurrent query/timeout resolution takes precedence over the stale
-                    // consistency result. Other non-terminal states remain pending.
+                    // A concurrent query resolution takes precedence over the stale consistency
+                    // result. Other non-terminal states remain pending.
                     _ => Screen::AuditPending,
                 }
             }
@@ -406,8 +435,7 @@ impl FilterHandle {
     /// Installs a rule set and marks the handle ready. Intended for tests and for a
     /// synchronous first-load path; production hot-reload goes through the worker.
     pub fn install_rules(&self, rules: RuleSet) {
-        *self.shared.rules_write() = Arc::new(rules);
-        self.shared.ready.store(true, Ordering::Release);
+        self.shared.install_rules(rules);
     }
 
     /// Buffer status of a transaction, if buffered (test/observability helper).
@@ -427,6 +455,9 @@ impl FilterHandle {
     /// lets `screen_tx` be exercised without a tokio runtime).
     pub fn for_test(config: FilterConfig, rules: RuleSet, clock: Arc<dyn Clock>) -> Self {
         let (terminal_events, _) = tokio::sync::broadcast::channel(TERMINAL_EVENT_CAPACITY);
+        let metrics = RcsFilterMetrics::default();
+        metrics.rules_ready.set(1.0);
+        metrics.rules_content_version.set(rules.content_version as f64);
         let shared = Shared {
             config,
             rules: Arc::new(RwLock::new(Arc::new(rules))),
@@ -434,7 +465,7 @@ impl FilterHandle {
             clock,
             ready: Arc::new(AtomicBool::new(true)),
             terminal_events,
-            metrics: RcsFilterMetrics::default(),
+            metrics,
         };
         Self { shared, workers: Vec::new() }
     }
@@ -746,5 +777,36 @@ mod tests {
         assert_eq!(h.buffer_status(&golden::tx_a()), Some(BufferStatus::Dropped));
         // Never re-admitted / never released.
         assert_eq!(h.screen_tx(&input_repackage), Screen::Drop);
+    }
+
+    #[test]
+    fn approved_mismatch_after_total_timeout_still_drops() {
+        let (h, clock) = handle_and_clock(1_751_000_000);
+        let original_logs = vec![transfer_log(golden::ONE_TOKEN)];
+        let original = audit_input(golden::tx_a(), 1, 1_000_000, &original_logs);
+        assert_eq!(h.screen_tx(&original), Screen::AuditPending);
+        h.with_pool(|pool| {
+            pool.apply_submit_response_current(&[format!("{:#x}", golden::tx_a())], 1_751_000_000);
+            pool.apply_query_status_current(&golden::tx_a(), "approved", 1_751_000_001);
+        });
+
+        clock.set(1_751_000_200);
+        let changed_logs = vec![transfer_log(golden::TWO_TOKENS)];
+        let changed = audit_input(golden::tx_a(), 1, 1_000_000, &changed_logs);
+        assert_eq!(h.screen_tx(&changed), Screen::Drop);
+        assert_eq!(h.buffer_status(&golden::tx_a()), Some(BufferStatus::Dropped));
+    }
+
+    #[test]
+    fn rules_state_updates_on_install_and_reload() {
+        let (h, _) = handle_and_clock(1_751_000_000);
+        assert!(h.is_ready());
+        assert_eq!(h.shared.current_rules().content_version, 1);
+
+        let replacement =
+            load_rules(1, 2, vec![serde_json::from_str(golden::RULE_SCENARIO_A).unwrap()]);
+        h.install_rules(replacement);
+        assert!(h.is_ready());
+        assert_eq!(h.shared.current_rules().content_version, 2);
     }
 }

@@ -99,9 +99,24 @@ impl MockRcsClient {
 
     /// Registers the query status for a tx_hash.
     pub fn register_query_state(&self, tx_hash: &str, status: &str, decided_at: Option<i64>) {
+        self.register_query_state_with_reason(tx_hash, status, decided_at, None);
+    }
+
+    /// Registers a query status including the optional diagnostic reason returned by RCS.
+    pub fn register_query_state_with_reason(
+        &self,
+        tx_hash: &str,
+        status: &str,
+        decided_at: Option<i64>,
+        reason: Option<&str>,
+    ) {
         self.lock().query_states.insert(
             tx_hash.to_string(),
-            QueryState { status: status.to_string(), decided_at, reason: None },
+            QueryState {
+                status: status.to_string(),
+                decided_at,
+                reason: reason.map(str::to_string),
+            },
         );
     }
 
@@ -269,10 +284,16 @@ mod tests {
     #[tokio::test]
     async fn submit_echoes_and_query_returns_state() {
         let mock = MockRcsClient::new();
-        mock.register_query_state(golden::TX_A, "approved", Some(1_751_000_002));
+        mock.register_query_state_with_reason(
+            golden::TX_A,
+            "approved",
+            Some(1_751_000_002),
+            Some("quota reserved"),
+        );
         let resp = mock.query(QueryParams::TxHashes(vec![golden::TX_A.to_string()])).await.unwrap();
         assert_eq!(resp.txs.len(), 1);
         assert_eq!(resp.txs[0].status, "approved");
+        assert_eq!(resp.txs[0].reason.as_deref(), Some("quota reserved"));
         // Absent hash → silently missing.
         let empty =
             mock.query(QueryParams::TxHashes(vec![golden::TX_B.to_string()])).await.unwrap();

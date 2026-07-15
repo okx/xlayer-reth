@@ -3,8 +3,8 @@
 //!
 //! Four cooperating tokio tasks, each run under a supervisor ([`spawn_supervised`]) so a
 //! panic is logged (never silent) and the task self-heals:
-//! - **rules**: FR-2 blocking startup load (unbounded exponential backoff, no default
-//!   rules) then FR-3 hot-reload (`content_version`-triggered atomic swap).
+//! - **rules**: FR-2 asynchronous initial load (unbounded exponential backoff, empty rules
+//!   until ready) then FR-3 hot-reload (`content_version`-triggered atomic swap).
 //! - **submit**: FR-5 batch submit every `batch_window`.
 //! - **query**: FR-5 adjudication poll, mapping RCS status → buffer transitions.
 //! - **timeout**: FR-6 timeout tick (outer 90s fallback + 8s/20s stalls) + terminal-tombstone
@@ -21,7 +21,7 @@ use crate::client::{QueryParams, RcsClient, SubmitRequest, SubmitTx};
 use crate::config::is_supported_protocol;
 use crate::handle::{Shared, TerminalEvent, TerminalReason};
 use crate::metrics::RequestEndpoint;
-use crate::pool::Resolution;
+use crate::pool::{QueryResolution, Resolution};
 use crate::rules::load_rules;
 
 /// Adjudication poll interval / timeout tick interval.
@@ -97,10 +97,10 @@ where
     })
 }
 
-/// FR-2 blocking startup load followed by FR-3 hot-reload polling.
+/// FR-2 asynchronous initial load followed by FR-3 hot-reload polling.
 async fn rules_task(shared: Shared, client: Arc<dyn RcsClient>) {
-    // FR-2: block until a valid, supported rule set is loaded. Unbounded exponential
-    // backoff; never fall back to default rules.
+    // FR-2: retry until a valid, supported rule set is loaded. Screening remains live with
+    // an empty snapshot until then; readiness metrics make that fail-open window observable.
     let mut backoff =
         RetryBackoff::new(shared.config.retry_initial_backoff, shared.config.retry_max_backoff);
     let mut failures = 0u64;
@@ -144,8 +144,8 @@ async fn rules_task(shared: Shared, client: Arc<dyn RcsClient>) {
         match version_result {
             Ok(v) if v.content_version != current => {
                 if !is_supported_protocol(v.protocol_version) {
-                    // Keep the old rules and keep mining; do not pull the body (it would only be
-                    // rejected). Distinct from the startup block, which never mines without rules.
+                    // Keep the old rules and keep mining; do not pull the body because it would
+                    // only be rejected. Initial loading follows the same live/retry policy.
                     warn!(
                         target: "rcs_filter",
                         protocol_version = v.protocol_version,
@@ -183,8 +183,7 @@ pub(crate) async fn load_and_install(
         return Ok(false);
     }
     let set = load_rules(resp.protocol_version, resp.content_version, resp.rules);
-    *shared.rules_write() = Arc::new(set);
-    shared.ready.store(true, Ordering::Release);
+    shared.install_rules(set);
     Ok(true)
 }
 
@@ -225,8 +224,10 @@ pub(crate) async fn submit_once(shared: &Shared, client: &Arc<dyn RcsClient>) ->
     // Snapshot the batch under the lock, grouped by block height (one request per height).
     let mut groups: std::collections::BTreeMap<u64, Vec<(SubmitTx, alloy_primitives::B256, u64)>> =
         std::collections::BTreeMap::new();
-    {
-        let pool = shared.pool_lock();
+    let expired = {
+        let mut pool = shared.pool_lock();
+        let now = shared.clock.now_unix();
+        let expired = pool.resolve_total_timeouts(&shared.config, now);
         for hash in pool.not_submitted() {
             if let Some(entry) = pool.get(&hash) {
                 groups.entry(entry.block_height).or_default().push((
@@ -242,6 +243,11 @@ pub(crate) async fn submit_once(shared: &Shared, client: &Arc<dyn RcsClient>) ->
                 ));
             }
         }
+        expired
+    };
+    emit_timeout_resolutions(shared, &expired);
+    if !expired.is_empty() {
+        shared.update_buffer_metric();
     }
     if groups.is_empty() {
         return Ok(());
@@ -249,6 +255,27 @@ pub(crate) async fn submit_once(shared: &Shared, client: &Arc<dyn RcsClient>) ->
 
     let mut first_error = None;
     for (block_height, entries) in groups {
+        // A previous height may have spent the remaining retry budget awaiting RCS. Resolve the
+        // cumulative deadline again and only send lifecycles that are still NotSubmitted.
+        let (entries, expired) = {
+            let mut pool = shared.pool_lock();
+            let now = shared.clock.now_unix();
+            let expired = pool.resolve_total_timeouts(&shared.config, now);
+            let entries = entries
+                .into_iter()
+                .filter(|(_, hash, generation)| {
+                    pool.matches(hash, *generation, crate::pool::BufferStatus::NotSubmitted)
+                })
+                .collect::<Vec<_>>();
+            (entries, expired)
+        };
+        emit_timeout_resolutions(shared, &expired);
+        if !expired.is_empty() {
+            shared.update_buffer_metric();
+        }
+        if entries.is_empty() {
+            continue;
+        }
         let expected_generations = entries
             .iter()
             .map(|(_, hash, generation)| (*hash, *generation))
@@ -261,6 +288,15 @@ pub(crate) async fn submit_once(shared: &Shared, client: &Arc<dyn RcsClient>) ->
             Ok(resp) => resp,
             Err(error) => {
                 warn!(target: "rcs_filter", block_height, %error, "submit group failed; continuing other heights");
+                let expired = {
+                    let mut pool = shared.pool_lock();
+                    let now = shared.clock.now_unix();
+                    pool.resolve_total_timeouts(&shared.config, now)
+                };
+                emit_timeout_resolutions(shared, &expired);
+                if !expired.is_empty() {
+                    shared.update_buffer_metric();
+                }
                 first_error.get_or_insert(error);
                 continue;
             }
@@ -268,8 +304,12 @@ pub(crate) async fn submit_once(shared: &Shared, client: &Arc<dyn RcsClient>) ->
         for rejected in &resp.rejected_malformed {
             warn!(target: "rcs_filter", tx_hash = %rejected, "submit rejected_malformed; retrying");
         }
-        let now = shared.clock.now_unix();
-        shared.pool_lock().apply_submit_response(&resp.accepted, &expected_generations, now);
+        let expired = {
+            let mut pool = shared.pool_lock();
+            let now = shared.clock.now_unix();
+            pool.apply_submit_response(&resp.accepted, &expected_generations, &shared.config, now)
+        };
+        emit_timeout_resolutions(shared, &expired);
         shared.update_buffer_metric();
     }
     first_error.map_or(Ok(()), Err)
@@ -309,10 +349,16 @@ async fn query_task(shared: Shared, client: Arc<dyn RcsClient>) {
 /// Queries the status of all in-flight txs and applies transitions. Absent/unrecognized
 /// statuses leave the entry untouched (handled by the timeout task) — no optimistic pass.
 pub(crate) async fn query_once(shared: &Shared, client: &Arc<dyn RcsClient>) -> crate::Result<()> {
-    let expected_generations = {
-        let pool = shared.pool_lock();
-        pool.in_flight_generations()
+    let (expected_generations, expired) = {
+        let mut pool = shared.pool_lock();
+        let now = shared.clock.now_unix();
+        let expired = pool.resolve_total_timeouts(&shared.config, now);
+        (pool.in_flight_generations(), expired)
     };
+    emit_timeout_resolutions(shared, &expired);
+    if !expired.is_empty() {
+        shared.update_buffer_metric();
+    }
     if expected_generations.is_empty() {
         return Ok(());
     }
@@ -325,34 +371,70 @@ pub(crate) async fn query_once(shared: &Shared, client: &Arc<dyn RcsClient>) -> 
         let resp = match result {
             Ok(resp) => resp,
             Err(error) => {
+                let expired = {
+                    let mut pool = shared.pool_lock();
+                    let now = shared.clock.now_unix();
+                    pool.resolve_total_timeouts(&shared.config, now)
+                };
+                emit_timeout_resolutions(shared, &expired);
+                if !expired.is_empty() {
+                    shared.update_buffer_metric();
+                }
                 first_error.get_or_insert(error);
                 continue;
             }
         };
-        let now = shared.clock.now_unix();
-        let mut pool = shared.pool_lock();
+        // Parse, filter and deduplicate outside the pool lock. The resulting set is bounded by
+        // this node's in-flight snapshot even if RCS returns an unexpectedly large response.
+        let mut relevant = std::collections::BTreeMap::new();
         for tx in &resp.txs {
-            if let Ok(hash) = tx.tx_hash.parse() {
-                let Some(expected_generation) = expected_generations.get(&hash).copied() else {
-                    continue;
-                };
-                if let Some(reason) = &tx.reason {
-                    debug!(target: "rcs_filter", tx_hash = %tx.tx_hash, status = %tx.status, %reason, "query result");
-                }
-                // `denied`/`outdated` tombstone the entry as `Dropped` in place (G3) — the entry
-                // is intentionally NOT removed here, so the tx is neither re-buffered nor
-                // re-submitted; the timeout task evicts the tombstone after the retention window.
-                if let Some(resolution) =
-                    pool.apply_query_status(&hash, expected_generation, &tx.status, now)
-                {
+            let Ok(hash) = tx.tx_hash.parse() else {
+                continue;
+            };
+            let Some(expected_generation) = expected_generations.get(&hash).copied() else {
+                continue;
+            };
+            if let Some(reason) = &tx.reason {
+                debug!(target: "rcs_filter", tx_hash = %tx.tx_hash, status = %tx.status, %reason, "query result");
+            }
+            let priority = match tx.status.as_str() {
+                "denied" | "outdated" => 2,
+                "approved" => 1,
+                "pending" => 0,
+                _ => continue,
+            };
+            let replace = relevant
+                .get(&hash)
+                .is_none_or(|(current_priority, _, _)| priority > *current_priority);
+            if replace {
+                relevant.insert(hash, (priority, expected_generation, tx));
+            }
+        }
+        let terminal = {
+            let mut pool = shared.pool_lock();
+            let now = shared.clock.now_unix();
+            let mut terminal = Vec::new();
+            for (hash, (_, expected_generation, tx)) in relevant {
+                // Deadline check and query transition happen under one pool lock. Events are
+                // emitted only after the lock is released.
+                if let Some(resolution) = pool.apply_query_status(
+                    &hash,
+                    expected_generation,
+                    &tx.status,
+                    &shared.config,
+                    now,
+                ) {
                     debug!(target: "rcs_filter", tx_hash = %tx.tx_hash, ?resolution, "query resolution");
-                    if resolution == Resolution::Discard {
-                        let reason = if tx.status == "outdated" {
-                            TerminalReason::Outdated
-                        } else {
-                            TerminalReason::Denied
-                        };
-                        shared.emit_terminal(TerminalEvent {
+                    let reason = match resolution {
+                        QueryResolution::RetryTimeout(Resolution::Discard) => {
+                            Some(TerminalReason::FailCloseTimeout)
+                        }
+                        QueryResolution::RetryTimeout(Resolution::ReleaseForPackaging) => None,
+                        QueryResolution::Denied => Some(TerminalReason::Denied),
+                        QueryResolution::Outdated => Some(TerminalReason::Outdated),
+                    };
+                    if let Some(reason) = reason {
+                        terminal.push(TerminalEvent {
                             tx_hash: hash,
                             generation: expected_generation,
                             reason,
@@ -360,10 +442,30 @@ pub(crate) async fn query_once(shared: &Shared, client: &Arc<dyn RcsClient>) -> 
                     }
                 }
             }
+            terminal
+        };
+        for event in terminal {
+            shared.emit_terminal(event);
         }
     }
     shared.update_buffer_metric();
     first_error.map_or(Ok(()), Err)
+}
+
+fn emit_timeout_resolutions(
+    shared: &Shared,
+    resolved: &[(alloy_primitives::B256, u64, Resolution)],
+) {
+    for (hash, generation, resolution) in resolved {
+        debug!(target: "rcs_filter", tx_hash = %format!("{hash:#x}"), ?resolution, "cumulative timeout resolution");
+        if *resolution == Resolution::Discard {
+            shared.emit_terminal(TerminalEvent {
+                tx_hash: *hash,
+                generation: *generation,
+                reason: TerminalReason::FailCloseTimeout,
+            });
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -438,24 +540,15 @@ async fn timeout_task(shared: Shared) {
 pub(crate) fn timeout_once(
     shared: &Shared,
 ) -> (Vec<(alloy_primitives::B256, u64, Resolution)>, usize) {
-    let now = shared.clock.now_unix();
     let retention = shared.config.terminal_entry_retention.as_secs();
     let (resolved, pruned) = {
         let mut pool = shared.pool_lock();
+        let now = shared.clock.now_unix();
         let resolved = pool.check_timeouts(&shared.config, now);
         let pruned = pool.prune_terminal(retention, now);
         (resolved, pruned)
     };
-    for (hash, generation, resolution) in &resolved {
-        debug!(target: "rcs_filter", tx_hash = %format!("{hash:#x}"), ?resolution, "timeout resolution");
-        if *resolution == Resolution::Discard {
-            shared.emit_terminal(TerminalEvent {
-                tx_hash: *hash,
-                generation: *generation,
-                reason: TerminalReason::FailCloseTimeout,
-            });
-        }
-    }
+    emit_timeout_resolutions(shared, &resolved);
     shared.update_buffer_metric();
     (resolved, pruned)
 }

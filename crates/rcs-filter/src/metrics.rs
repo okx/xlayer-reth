@@ -61,6 +61,13 @@ pub(crate) struct RcsFilterMetrics {
     pub txpool_discard_success_total: Counter,
     /// Terminal discards whose transaction was already absent.
     pub txpool_discard_already_absent_total: Counter,
+    /// Non-terminal lifecycle entries removed after their transaction left txpool.
+    pub txpool_absent_cleanup_total: Counter,
+
+    /// Whether the first supported rule snapshot has been installed (0 or 1).
+    pub rules_ready: Gauge,
+    /// Content version of the currently installed rule snapshot.
+    pub rules_content_version: Gauge,
 
     /// Full rules endpoint requests.
     pub rules_requests_total: Counter,

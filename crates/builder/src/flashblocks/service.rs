@@ -297,10 +297,10 @@ async fn run_terminal_discard<Pool: TransactionPool + Unpin + 'static>(
             new_tx = new_transactions.recv() => match new_tx {
                 Some(event) => {
                     let hash = *event.transaction.hash();
-                    if let Some(generation) = dropped.get(&hash).copied() {
-                        if !discard_transaction(&filter, &tx_pool, hash, generation) {
-                            dropped.remove(&hash);
-                        }
+                    if let Some(generation) = dropped.get(&hash).copied()
+                        && !discard_transaction(&filter, &tx_pool, hash, generation)
+                    {
+                        dropped.remove(&hash);
                     }
                 }
                 None => break,
@@ -308,9 +308,30 @@ async fn run_terminal_discard<Pool: TransactionPool + Unpin + 'static>(
             _ = reconciliation.tick() => {
                 dropped = filter.dropped_lifecycles().into_iter().collect();
                 reconcile_dropped(&filter, &tx_pool, &dropped);
+                let removed = reconcile_absent_non_terminal(&filter, &tx_pool);
+                if removed > 0 {
+                    tracing::debug!(
+                        target: "rcs_filter",
+                        removed,
+                        "removed non-terminal filter lifecycles absent from txpool"
+                    );
+                }
             }
         }
     }
+}
+
+fn reconcile_absent_non_terminal<Pool: TransactionPool>(
+    filter: &rcs_filter::FilterHandle,
+    tx_pool: &Pool,
+) -> usize {
+    filter
+        .non_terminal_lifecycles()
+        .into_iter()
+        .filter(|(hash, generation)| {
+            !tx_pool.contains(hash) && filter.remove_non_terminal_if_generation(hash, *generation)
+        })
+        .count()
 }
 
 fn reconcile_dropped<Pool: TransactionPool>(
@@ -354,7 +375,7 @@ where
 
 #[cfg(test)]
 mod rcs_txpool_tests {
-    use super::run_terminal_discard;
+    use super::{reconcile_absent_non_terminal, run_terminal_discard};
     use alloy_primitives::{Address, B256};
     use reth_transaction_pool::{
         test_utils::{testing_pool, MockTransaction},
@@ -483,5 +504,122 @@ mod rcs_txpool_tests {
         assert!(pool.get(&root_hash).is_some());
         assert_eq!(pool.pending_and_queued_txn_count(), (2, 0));
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn non_terminal_reconciliation_tracks_real_txpool_presence() {
+        let pool = testing_pool();
+        let sender = rcs_filter::test_support::golden::origin();
+        let root_hash = rcs_filter::test_support::golden::tx_a();
+        let root = MockTransaction::legacy()
+            .with_sender(sender)
+            .with_nonce(0)
+            .with_gas_price(100)
+            .with_hash(root_hash);
+        pool.add_transaction(TransactionOrigin::External, root).await.unwrap();
+
+        let rules = rcs_filter::rules::load_rules(
+            1,
+            1,
+            vec![serde_json::from_str(rcs_filter::test_support::golden::RULE_SCENARIO_A).unwrap()],
+        );
+        let filter = rcs_filter::FilterHandle::for_test(
+            rcs_filter::FilterConfig::default(),
+            rules,
+            std::sync::Arc::new(rcs_filter::SystemClock),
+        );
+        let logs = vec![rcs_filter::test_support::log_builder::erc20_transfer(
+            rcs_filter::test_support::golden::token_x(),
+            rcs_filter::test_support::golden::bridge_erc20(),
+            rcs_filter::test_support::golden::recipient(),
+            rcs_filter::test_support::golden::one_token(),
+        )];
+        let input = rcs_filter::ScreenInput {
+            tx_hash: root_hash,
+            origin: sender,
+            tx_to: Some(rcs_filter::test_support::golden::claim_contract()),
+            nonce: 0,
+            value: alloy_primitives::U256::ZERO,
+            block_height: 1_000_000,
+            logs: &logs,
+        };
+        assert_eq!(filter.screen_tx(&input), rcs_filter::Screen::AuditPending);
+
+        let old_generation = filter.non_terminal_lifecycles()[0].1;
+        assert_eq!(reconcile_absent_non_terminal(&filter, &pool), 0);
+        assert_eq!(filter.buffered_len(), 1);
+
+        assert_eq!(filter.remove_canonical_transactions(&[root_hash]), 1);
+        assert_eq!(filter.screen_tx(&input), rcs_filter::Screen::AuditPending);
+        let new_generation = filter.non_terminal_lifecycles()[0].1;
+        assert_ne!(old_generation, new_generation);
+        assert!(!filter.remove_non_terminal_if_generation(&root_hash, old_generation));
+        assert_eq!(filter.buffered_len(), 1, "stale reconciliation cannot remove reinsertion");
+
+        assert!(pool.remove_transaction(root_hash).is_some());
+        assert_eq!(reconcile_absent_non_terminal(&filter, &pool), 1);
+        assert_eq!(filter.buffered_len(), 0);
+    }
+
+    #[tokio::test]
+    async fn approved_reconciliation_removes_absent_real_txpool_entry() {
+        let pool = testing_pool();
+        let sender = rcs_filter::test_support::golden::origin();
+        let root_hash = rcs_filter::test_support::golden::tx_a();
+        let root = MockTransaction::legacy()
+            .with_sender(sender)
+            .with_nonce(0)
+            .with_gas_price(100)
+            .with_hash(root_hash);
+        pool.add_transaction(TransactionOrigin::External, root).await.unwrap();
+
+        let mock = std::sync::Arc::new(rcs_filter::test_support::MockRcsClient::new());
+        mock.set_rules_fixture(&[rcs_filter::test_support::golden::RULE_SCENARIO_A]);
+        mock.register_query_state(rcs_filter::test_support::golden::TX_A, "approved", None);
+        let filter = rcs_filter::FilterHandle::spawn(
+            rcs_filter::FilterConfig {
+                enabled: true,
+                rcs_base_url: "http://unused.test".into(),
+                batch_window: Duration::from_millis(10),
+                ..Default::default()
+            },
+            mock as std::sync::Arc<dyn rcs_filter::RcsClient>,
+            std::sync::Arc::new(rcs_filter::SystemClock),
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !filter.is_ready() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let logs = [rcs_filter::test_support::log_builder::erc20_transfer(
+            rcs_filter::test_support::golden::token_x(),
+            rcs_filter::test_support::golden::bridge_erc20(),
+            rcs_filter::test_support::golden::recipient(),
+            rcs_filter::test_support::golden::one_token(),
+        )];
+        let input = rcs_filter::ScreenInput {
+            tx_hash: root_hash,
+            origin: sender,
+            tx_to: Some(rcs_filter::test_support::golden::claim_contract()),
+            nonce: 0,
+            value: alloy_primitives::U256::ZERO,
+            block_height: 1_000_000,
+            logs: &logs,
+        };
+        assert_eq!(filter.screen_tx(&input), rcs_filter::Screen::AuditPending);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while filter.buffer_status(&root_hash) != Some(rcs_filter::BufferStatus::Approved) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert!(pool.remove_transaction(root_hash).is_some());
+        assert_eq!(reconcile_absent_non_terminal(&filter, &pool), 1);
+        assert_eq!(filter.buffered_len(), 0);
     }
 }
