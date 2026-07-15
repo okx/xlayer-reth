@@ -17,12 +17,13 @@
 //! exact transaction generation is no longer present in txpool.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use alloy_primitives::{Address, B256};
 
 use crate::client::ActionItem;
 use crate::config::FilterConfig;
-use crate::rules::TimeoutAction;
+use crate::rules::{RuleSet, TimeoutAction};
 
 /// In-memory audit state (TD §4.7). `TimedOutAllow` and `Dropped` are **terminal
 /// tombstones** kept in the pool (not removed) so the outcome is visible to the builder's
@@ -85,6 +86,9 @@ pub struct BufferEntry {
     pub status: BufferStatus,
     /// The exact `actions` payload submitted (snapshot), reused for the submit request.
     pub actions: BTreeMap<String, Vec<ActionItem>>,
+    /// The exact rule snapshot used to produce `actions`. Approved transactions are re-evaluated
+    /// against this snapshot so a hot reload cannot change an in-flight decision.
+    pub rule_snapshot: Arc<RuleSet>,
     /// keccak256 of the canonical `actions.quota` computed at submit time (FR-7).
     pub quota_consistency_hash: B256,
     /// Merged fallback action across matched audit rules (FR-6).
@@ -506,6 +510,7 @@ mod tests {
             block_height: 1_000_000,
             status: BufferStatus::NotSubmitted,
             actions: BTreeMap::new(),
+            rule_snapshot: Arc::new(RuleSet::default()),
             quota_consistency_hash: B256::ZERO,
             timeout_action,
             first_not_submitted_at: now,

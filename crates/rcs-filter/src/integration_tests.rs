@@ -109,7 +109,7 @@ fn shared_with(clock: Arc<TestClock>, rules: RuleSet, ready: bool) -> Shared {
 /// Builds a `NotSubmitted` buffer entry from a real scenario-a match so the submitted
 /// payload carries the genuine `actions.quota` (not a hand-faked stub).
 fn scenario_a_entry(tx_hash: B256, block_height: u64, now: u64) -> BufferEntry {
-    let rules = scenario_a_rules();
+    let rules = Arc::new(scenario_a_rules());
     let logs = vec![transfer_log(golden::ONE_TOKEN)];
     let input = ScreenInput { block_height, ..scenario_a_input(tx_hash, &logs) };
     let (actions, timeout_action) = match matching::evaluate(&rules, &input) {
@@ -125,6 +125,7 @@ fn scenario_a_entry(tx_hash: B256, block_height: u64, now: u64) -> BufferEntry {
         block_height,
         status: BufferStatus::NotSubmitted,
         actions,
+        rule_snapshot: rules,
         quota_consistency_hash: B256::ZERO,
         timeout_action,
         first_not_submitted_at: now,
@@ -1276,7 +1277,14 @@ async fn hot_reload_applies_to_new_tx_but_not_buffered() {
     let buffered = scenario_a_input(golden::tx_a(), &logs);
     assert_eq!(h.screen_tx(&buffered), Screen::AuditPending);
 
-    // Hot-swap to an empty rule set.
+    // Submit and approve the buffered transaction under the original rules.
+    spin(500).await;
+    assert_eq!(h.buffer_status(&golden::tx_a()), Some(BufferStatus::Submitted));
+    mock.register_query_state(golden::TX_A, "approved", Some(START as i64 + 2));
+    spin(1500).await;
+    assert_eq!(h.buffer_status(&golden::tx_a()), Some(BufferStatus::Approved));
+
+    // Hot-swap to an empty rule set after approval.
     mock.set_rules_fixture(&[]);
     mock.bump_rules_version();
     spin(3000).await; // > rules_version_poll_interval (2s)
@@ -1286,9 +1294,14 @@ async fn hot_reload_applies_to_new_tx_but_not_buffered() {
     let fresh = scenario_a_input(golden::tx_c(), &logs);
     assert_eq!(h.screen_tx(&fresh), Screen::Allow);
 
-    // The already-buffered tx keeps its audit decision (dedup short-circuit, not re-evaluated
-    // against the empty rules — it would otherwise become Allow).
-    assert_eq!(h.screen_tx(&buffered), Screen::AuditPending);
+    // The already-buffered tx is re-evaluated with its submit-time rule snapshot, so unchanged
+    // logs still pass even though the globally active rule set is now empty.
+    assert_eq!(h.screen_tx(&buffered), Screen::AuditApproved);
+
+    // The snapshot only pins rule semantics: the latest execution logs remain authoritative.
+    let changed_logs = vec![transfer_log("2000000000000000000")];
+    let changed = scenario_a_input(golden::tx_a(), &changed_logs);
+    assert_eq!(h.screen_tx(&changed), Screen::Drop);
 }
 
 /// §7.2 "protocol_version 不支持" (runtime): a version bump advertising an unsupported
