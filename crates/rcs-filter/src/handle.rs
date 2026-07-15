@@ -210,10 +210,12 @@ impl FilterHandle {
         // re-decoding or re-submitting (FR-4 stage zero).
         let existing = {
             let pool = self.shared.pool_lock();
-            pool.get(&input.tx_hash).map(|e| (e.status, e.quota_consistency_hash, e.generation))
+            pool.get(&input.tx_hash).map(|e| {
+                (e.status, e.quota_consistency_hash, e.generation, Arc::clone(&e.rule_snapshot))
+            })
         };
-        if let Some((status, stored_hash, generation)) = existing {
-            return self.screen_existing(input, status, stored_hash, generation);
+        if let Some((status, stored_hash, generation, rule_snapshot)) = existing {
+            return self.screen_existing(input, status, stored_hash, generation, rule_snapshot);
         }
 
         // Fresh evaluation.
@@ -222,11 +224,23 @@ impl FilterHandle {
             MatchOutcome::Allow => {
                 let concurrent = {
                     let pool = self.shared.pool_lock();
-                    pool.get(&input.tx_hash)
-                        .map(|entry| (entry.status, entry.quota_consistency_hash, entry.generation))
+                    pool.get(&input.tx_hash).map(|entry| {
+                        (
+                            entry.status,
+                            entry.quota_consistency_hash,
+                            entry.generation,
+                            Arc::clone(&entry.rule_snapshot),
+                        )
+                    })
                 };
-                if let Some((status, stored_hash, generation)) = concurrent {
-                    return self.screen_existing(input, status, stored_hash, generation);
+                if let Some((status, stored_hash, generation, rule_snapshot)) = concurrent {
+                    return self.screen_existing(
+                        input,
+                        status,
+                        stored_hash,
+                        generation,
+                        rule_snapshot,
+                    );
                 }
                 self.shared.metrics.allow_total.increment(1);
                 Screen::Allow
@@ -247,6 +261,7 @@ impl FilterHandle {
                     block_height: input.block_height,
                     status: BufferStatus::NotSubmitted,
                     actions,
+                    rule_snapshot: rules,
                     quota_consistency_hash,
                     timeout_action,
                     first_not_submitted_at: now,
@@ -363,6 +378,7 @@ impl FilterHandle {
         status: BufferStatus,
         stored_hash: B256,
         generation: u64,
+        rule_snapshot: Arc<RuleSet>,
     ) -> Screen {
         match status {
             // Terminal fail-open: release into the block without resetting the retry clock.
@@ -396,8 +412,7 @@ impl FilterHandle {
             // current logs and compare to the submit-time hash. Transition to a terminal
             // tombstone either way (no RCS cancel call on mismatch, TD §4.8).
             BufferStatus::Approved => {
-                let rules = self.shared.current_rules();
-                let consistent = match matching::evaluate(&rules, input) {
+                let consistent = match matching::evaluate(&rule_snapshot, input) {
                     MatchOutcome::Audit { actions, .. } => {
                         quota_hash::encode_and_hash(&actions) == stored_hash
                     }
