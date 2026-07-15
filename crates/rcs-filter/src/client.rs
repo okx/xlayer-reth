@@ -10,6 +10,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{FilterError, Result};
 
+/// Hard cap for every RCS JSON response. The current canonical rules snapshot is only a few
+/// kilobytes; this leaves ample growth room while preventing a faulty peer from forcing an
+/// unbounded allocation during response decoding.
+const MAX_RESPONSE_BODY_BYTES: usize = 16 * 1024 * 1024;
+
 /// `GET /rules` response (contract §2.2). `rules` may be an empty array.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RulesResponse {
@@ -180,6 +185,43 @@ impl RcsClient for ReqwestRcsClient {
     }
 }
 
+/// Decodes JSON only when the endpoint's exact expected status is returned.
+async fn decode_json<T: serde::de::DeserializeOwned>(
+    mut resp: reqwest::Response,
+    expected: reqwest::StatusCode,
+) -> Result<T> {
+    let status = resp.status();
+    if status != expected {
+        return Err(FilterError::UnexpectedStatus(status.as_u16()));
+    }
+
+    if resp.content_length().is_some_and(|length| length > MAX_RESPONSE_BODY_BYTES as u64) {
+        return Err(response_too_large());
+    }
+    let mut body = Vec::with_capacity(
+        resp.content_length().unwrap_or_default().min(MAX_RESPONSE_BODY_BYTES as u64) as usize,
+    );
+    while let Some(chunk) = resp.chunk().await.map_err(transport_error)? {
+        if body.len().saturating_add(chunk.len()) > MAX_RESPONSE_BODY_BYTES {
+            return Err(response_too_large());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body).map_err(|error| FilterError::Decode(error.to_string()))
+}
+
+fn response_too_large() -> FilterError {
+    FilterError::Decode(format!("RCS response body exceeds {MAX_RESPONSE_BODY_BYTES} bytes"))
+}
+
+fn transport_error(error: reqwest::Error) -> FilterError {
+    if error.is_timeout() {
+        FilterError::Timeout(error.to_string())
+    } else {
+        FilterError::Transport(error.to_string())
+    }
+}
+
 #[cfg(test)]
 mod wire_tests {
     use super::*;
@@ -230,6 +272,22 @@ mod wire_tests {
                 let _ = stream.write_all(body.as_bytes()).await;
             }
             request_lines
+        });
+        (format!("http://{address}"), task)
+    }
+
+    async fn spawn_oversized_response() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 2048];
+            let _ = stream.read(&mut request).await.unwrap();
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                MAX_RESPONSE_BODY_BYTES + 1
+            );
+            stream.write_all(headers.as_bytes()).await.unwrap();
         });
         (format!("http://{address}"), task)
     }
@@ -329,6 +387,39 @@ mod wire_tests {
     }
 
     #[tokio::test]
+    async fn tx_hashes_query_encodes_only_tx_hashes() {
+        let (url, server) =
+            spawn_http_script(vec![(200, r#"{"txs":[]}"#.to_string(), Duration::ZERO)]).await;
+        let client = ReqwestRcsClient::new(url).unwrap();
+        client.query(QueryParams::TxHashes(vec!["0xaaaa".into(), "0xbbbb".into()])).await.unwrap();
+
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].contains("?tx_hashes=0xaaaa%2C0xbbbb"), "{}", requests[0]);
+        assert!(!requests[0].contains("status="), "{}", requests[0]);
+    }
+
+    #[tokio::test]
+    async fn rules_endpoints_reject_non_200() {
+        for path in ["rules", "version"] {
+            let (url, server) = spawn_http_script(vec![(
+                202,
+                r#"{"protocol_version":1,"content_version":1,"rules":[]}"#.to_string(),
+                Duration::ZERO,
+            )])
+            .await;
+            let client = ReqwestRcsClient::new(url).unwrap();
+            let result = if path == "rules" {
+                client.get_rules().await.map(|_| ())
+            } else {
+                client.get_rules_version().await.map(|_| ())
+            };
+            assert!(matches!(result, Err(FilterError::UnexpectedStatus(202))));
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn response_body_stall_hits_total_request_timeout() {
         let (url, server) =
             spawn_http_script(vec![(200, r#"{"txs":[]}"#.to_string(), Duration::from_secs(1))])
@@ -344,6 +435,14 @@ mod wire_tests {
             Err(FilterError::Timeout(_))
         ));
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn oversized_response_is_rejected_before_body_allocation() {
+        let (url, server) = spawn_oversized_response().await;
+        let result = ReqwestRcsClient::new(url).unwrap().get_rules().await;
+        assert!(matches!(result, Err(FilterError::Decode(message)) if message.contains("exceeds")));
+        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -407,31 +506,5 @@ mod wire_tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(client.query(QueryParams::Status("pending".into())).await.is_ok());
         server.await.unwrap();
-    }
-}
-
-/// Decodes JSON only when the endpoint's exact expected status is returned.
-async fn decode_json<T: serde::de::DeserializeOwned>(
-    resp: reqwest::Response,
-    expected: reqwest::StatusCode,
-) -> Result<T> {
-    let status = resp.status();
-    if status != expected {
-        return Err(FilterError::UnexpectedStatus(status.as_u16()));
-    }
-    resp.json::<T>().await.map_err(|error| {
-        if error.is_timeout() || error.is_connect() || error.is_request() {
-            transport_error(error)
-        } else {
-            FilterError::Decode(error.to_string())
-        }
-    })
-}
-
-fn transport_error(error: reqwest::Error) -> FilterError {
-    if error.is_timeout() {
-        FilterError::Timeout(error.to_string())
-    } else {
-        FilterError::Transport(error.to_string())
     }
 }

@@ -1,0 +1,181 @@
+{
+    "content_version": 1784019568,
+    "protocol_version": 1,
+    "rules": [
+        {
+            "id": "rendered-quota-rule",
+            "event_abis": {
+                "transfer": {
+                    "type": "event",
+                    "name": "Transfer",
+                    "inputs": [
+                        {
+                            "name": "from",
+                            "type": "address",
+                            "indexed": true
+                        },
+                        {
+                            "name": "to",
+                            "type": "address",
+                            "indexed": true
+                        },
+                        {
+                            "name": "value",
+                            "type": "uint256",
+                            "indexed": false
+                        }
+                    ],
+                    "anonymous": false
+                },
+                "transferBatch": {
+                    "type": "event",
+                    "name": "TransferBatch",
+                    "inputs": [
+                        {
+                            "name": "operator",
+                            "type": "address",
+                            "indexed": true
+                        },
+                        {
+                            "name": "from",
+                            "type": "address",
+                            "indexed": true
+                        },
+                        {
+                            "name": "to",
+                            "type": "address",
+                            "indexed": true
+                        },
+                        {
+                            "name": "ids",
+                            "type": "uint256[]",
+                            "indexed": false
+                        },
+                        {
+                            "name": "values",
+                            "type": "uint256[]",
+                            "indexed": false
+                        }
+                    ],
+                    "anonymous": false
+                },
+                "transferSingle": {
+                    "type": "event",
+                    "name": "TransferSingle",
+                    "inputs": [
+                        {
+                            "name": "operator",
+                            "type": "address",
+                            "indexed": true
+                        },
+                        {
+                            "name": "from",
+                            "type": "address",
+                            "indexed": true
+                        },
+                        {
+                            "name": "to",
+                            "type": "address",
+                            "indexed": true
+                        },
+                        {
+                            "name": "id",
+                            "type": "uint256",
+                            "indexed": false
+                        },
+                        {
+                            "name": "value",
+                            "type": "uint256",
+                            "indexed": false
+                        }
+                    ],
+                    "anonymous": false
+                }
+            },
+            "audit_types": [
+                "quota"
+            ],
+            "condition": {
+                "or": [
+                    {
+                        "and": [
+                            {
+                                "in": [
+                                    {
+                                        "var": "transfer.address"
+                                    },
+                                    [
+                                        "0x2a511132DD27cA58A80c74F9d75dC6a707935597",
+                                        "0x5599a9501653b101E54BA9Db6e935262A0D6E6f5"
+                                    ]
+                                ]
+                            },
+                            {
+                                "in": [
+                                    {
+                                        "var": "transfer.from"
+                                    },
+                                    [
+                                        "0xDA04189B410cEf73BD6564D21c87A2DA335E7c49"
+                                    ]
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "and": [
+                            {
+                                "in": [
+                                    {
+                                        "var": "transferSingle.address"
+                                    },
+                                    [
+                                        "0x2a511132DD27cA58A80c74F9d75dC6a707935597",
+                                        "0x5599a9501653b101E54BA9Db6e935262A0D6E6f5"
+                                    ]
+                                ]
+                            },
+                            {
+                                "in": [
+                                    {
+                                        "var": "transferSingle.from"
+                                    },
+                                    [
+                                        "0xDA04189B410cEf73BD6564D21c87A2DA335E7c49"
+                                    ]
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "and": [
+                            {
+                                "in": [
+                                    {
+                                        "var": "transferBatch.address"
+                                    },
+                                    [
+                                        "0x2a511132DD27cA58A80c74F9d75dC6a707935597",
+                                        "0x5599a9501653b101E54BA9Db6e935262A0D6E6f5"
+                                    ]
+                                ]
+                            },
+                            {
+                                "in": [
+                                    {
+                                        "var": "transferBatch.from"
+                                    },
+                                    [
+                                        "0xDA04189B410cEf73BD6564D21c87A2DA335E7c49"
+                                    ]
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            },
+            "action": "audit",
+            "audit_timeout_action": "allow"
+        }
+    ]
+}

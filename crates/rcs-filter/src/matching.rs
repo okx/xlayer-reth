@@ -12,6 +12,14 @@ use crate::client::ActionItem;
 use crate::handle::ScreenInput;
 use crate::rules::{truthy, Action, CompiledEvent, CompiledRule, RuleSet, TimeoutAction};
 
+type ActionDedupKey = (usize, String, String, String);
+type ActionsByLog = BTreeMap<String, BTreeMap<ActionDedupKey, ActionItem>>;
+
+#[cfg(test)]
+std::thread_local! {
+    static TEST_DECODE_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Outcome of matching one transaction against a rule set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MatchOutcome {
@@ -33,10 +41,7 @@ pub fn evaluate(rules: &RuleSet, input: &ScreenInput) -> MatchOutcome {
     // Merge audit rules at the physical-log level. Multiple rules can match the same log, but
     // RCS must receive that event only once per audit type or it would account the same action
     // multiple times.
-    let mut actions_by_log: BTreeMap<
-        String,
-        BTreeMap<(usize, String, String, String), ActionItem>,
-    > = BTreeMap::new();
+    let mut actions_by_log = ActionsByLog::new();
     let mut has_audit = false;
     let mut timeout_action = TimeoutAction::Allow;
 
@@ -200,6 +205,8 @@ fn find_log_for_event<'a>(
         {
             return None;
         }
+        #[cfg(test)]
+        TEST_DECODE_ATTEMPTS.with(|attempts| attempts.set(attempts.get() + 1));
         decode_event(event, log).map(|params| (index, log, params))
     })
 }
@@ -322,6 +329,142 @@ mod tests {
     fn empty_event_log(address: Address, event_name: &str) -> Log {
         let topic0 = keccak256(format!("{event_name}()").as_bytes());
         Log { address, data: LogData::new_unchecked(vec![topic0], Bytes::new()) }
+    }
+
+    fn reset_decode_attempts() {
+        TEST_DECODE_ATTEMPTS.with(|attempts| attempts.set(0));
+    }
+
+    fn decode_attempts() -> usize {
+        TEST_DECODE_ATTEMPTS.with(std::cell::Cell::get)
+    }
+
+    fn transfer_input<'a>(logs: &'a [Log]) -> ScreenInput<'a> {
+        ScreenInput {
+            tx_hash: golden::tx_a(),
+            origin: golden::origin(),
+            tx_to: Some(golden::claim_contract()),
+            nonce: 1,
+            value: U256::ZERO,
+            block_height: 1_000_000,
+            logs,
+        }
+    }
+
+    #[test]
+    fn filter_skip_contract_mismatch_decodes_zero_logs() {
+        let mut raw: RawRule = serde_json::from_str(golden::RULE_SCENARIO_A).unwrap();
+        raw.contract_address = Some(golden::CLAIM_CONTRACT.to_string());
+        let rules = load_rules(1, 1, vec![raw]);
+        let logs = [log_builder::erc20_transfer(
+            golden::token_x(),
+            golden::bridge_erc20(),
+            golden::recipient(),
+            golden::one_token(),
+        )];
+        let mut input = transfer_input(&logs);
+        input.tx_to = Some(golden::token_x());
+        reset_decode_attempts();
+        assert_eq!(evaluate(&rules, &input), MatchOutcome::Allow);
+        assert_eq!(decode_attempts(), 0);
+    }
+
+    #[test]
+    fn filter_skip_origin_mismatch_decodes_zero_logs() {
+        let mut raw: RawRule = serde_json::from_str(golden::RULE_SCENARIO_A).unwrap();
+        raw.origin = Some(golden::ORIGIN.to_string());
+        let rules = load_rules(1, 1, vec![raw]);
+        let logs = [log_builder::erc20_transfer(
+            golden::token_x(),
+            golden::bridge_erc20(),
+            golden::recipient(),
+            golden::one_token(),
+        )];
+        let mut input = transfer_input(&logs);
+        input.origin = golden::recipient();
+        reset_decode_attempts();
+        assert_eq!(evaluate(&rules, &input), MatchOutcome::Allow);
+        assert_eq!(decode_attempts(), 0);
+    }
+
+    #[test]
+    fn missing_named_event_binds_null() {
+        let raw = r#"{
+          "id":"null-companion",
+          "event_abis":{
+            "transfer":{"type":"event","name":"Transfer","inputs":[
+              {"name":"from","type":"address","indexed":true},
+              {"name":"to","type":"address","indexed":true},
+              {"name":"value","type":"uint256","indexed":false}],"anonymous":false},
+            "companion":{"type":"event","name":"Companion","inputs":[],"anonymous":false}
+          },
+          "audit_types":["custom"],
+          "condition":{"==":[{"var":"companion.address"},null]},
+          "action":"audit"
+        }"#;
+        let rules = load_rules(1, 1, vec![serde_json::from_str(raw).unwrap()]);
+        let logs = [log_builder::erc20_transfer(
+            golden::token_x(),
+            golden::bridge_erc20(),
+            golden::recipient(),
+            golden::one_token(),
+        )];
+        let input = transfer_input(&logs);
+        let (bindings, matched) = build_bindings(&rules.rules[0], &input);
+        assert_eq!(bindings["companion.address"], Value::Null);
+        assert!(!matched.contains_key("companion"));
+        assert!(matches!(evaluate(&rules, &input), MatchOutcome::Audit { .. }));
+    }
+
+    #[test]
+    fn same_log_uses_strictest_action_and_audit_union() {
+        let mut allow = erc20_audit_rule("allow", "transfer");
+        allow.action = Action::Allow;
+        let quota = erc20_audit_rule("quota", "transfer");
+        let custom = audit_rule(
+            "custom",
+            "transfer",
+            "Transfer",
+            json!([
+                {"name": "from", "type": "address", "indexed": true},
+                {"name": "to", "type": "address", "indexed": true},
+                {"name": "value", "type": "uint256", "indexed": false}
+            ]),
+            "custom",
+        );
+        let logs = [log_builder::erc20_transfer(
+            golden::token_x(),
+            golden::bridge_erc20(),
+            golden::recipient(),
+            golden::one_token(),
+        )];
+        let input = transfer_input(&logs);
+        let rules = load_rules(1, 1, vec![allow, quota, custom]);
+        let MatchOutcome::Audit { actions, .. } = evaluate(&rules, &input) else {
+            panic!("audit must dominate allow")
+        };
+        assert_eq!(actions.keys().map(String::as_str).collect::<Vec<_>>(), ["custom", "quota"]);
+
+        let mut deny = erc20_audit_rule("deny", "transfer");
+        deny.action = Action::Deny;
+        let rules = load_rules(1, 1, vec![erc20_audit_rule("audit", "transfer"), deny]);
+        assert_eq!(evaluate(&rules, &input), MatchOutcome::Deny);
+    }
+
+    #[test]
+    fn deny_stops_remaining_candidate_scan() {
+        let mut deny = erc20_audit_rule("deny-first", "transfer");
+        deny.action = Action::Deny;
+        let rules = load_rules(1, 1, vec![deny, erc20_audit_rule("audit-later", "transfer")]);
+        let logs = [log_builder::erc20_transfer(
+            golden::token_x(),
+            golden::bridge_erc20(),
+            golden::recipient(),
+            golden::one_token(),
+        )];
+        reset_decode_attempts();
+        assert_eq!(evaluate(&rules, &transfer_input(&logs)), MatchOutcome::Deny);
+        assert_eq!(decode_attempts(), 1);
     }
 
     #[test]

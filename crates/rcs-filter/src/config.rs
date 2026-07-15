@@ -46,9 +46,9 @@ pub struct FilterConfig {
     pub rules_version_poll_interval: Duration,
     /// How long a terminal buffer-pool tombstone (`TimedOutAllow`/`Dropped`) is retained
     /// before eviction, bounding pool memory (contract §2.5 `terminal_entry_retention_seconds`,
-    /// default 300s). Must exceed `total_retry_timeout` so a tombstone outlives the full
-    /// adjudication window (every entry is guaranteed terminal within `total_retry_timeout`),
-    /// leaving a margin before a still-mempooled duplicate could be re-screened.
+    /// default 300s). Must exceed `total_retry_timeout` so a timeout tombstone outlives the full
+    /// retry window. Non-terminal entries are bounded separately by builder-side reconciliation
+    /// with txpool; `Approved` is intentionally not resolved by this retention setting.
     pub terminal_entry_retention: Duration,
 }
 
