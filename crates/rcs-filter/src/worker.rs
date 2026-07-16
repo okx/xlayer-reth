@@ -17,12 +17,14 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
-use crate::client::{QueryParams, RcsClient, SubmitRequest, SubmitTx};
+use crate::client::{QueryParams, RcsClient};
 use crate::config::is_supported_protocol;
 use crate::handle::{Shared, TerminalEvent, TerminalReason};
 use crate::metrics::RequestEndpoint;
 use crate::pool::{QueryResolution, Resolution};
 use crate::rules::load_rules;
+
+pub(crate) use crate::submit::submit_once;
 
 /// Adjudication poll interval / timeout tick interval.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -218,103 +220,6 @@ async fn submit_task(shared: Shared, client: Arc<dyn RcsClient>) {
     }
 }
 
-/// Collects `NotSubmitted` txs, submits them grouped by block height, and advances accepted
-/// hashes to `Submitted` (FR-5). Never holds the pool lock across an await.
-pub(crate) async fn submit_once(shared: &Shared, client: &Arc<dyn RcsClient>) -> crate::Result<()> {
-    // Snapshot the batch under the lock, grouped by block height (one request per height).
-    let mut groups: std::collections::BTreeMap<u64, Vec<(SubmitTx, alloy_primitives::B256, u64)>> =
-        std::collections::BTreeMap::new();
-    let expired = {
-        let mut pool = shared.pool_lock();
-        let now = shared.clock.now_unix();
-        let expired = pool.resolve_total_timeouts(&shared.config, now);
-        for hash in pool.not_submitted() {
-            if let Some(entry) = pool.get(&hash) {
-                groups.entry(entry.block_height).or_default().push((
-                    SubmitTx {
-                        tx_hash: format!("{:#x}", entry.tx_hash),
-                        origin: format!("{:#x}", entry.origin),
-                        contract_address: format!("{:#x}", entry.contract_address),
-                        nonce: entry.nonce,
-                        actions: entry.actions.clone(),
-                    },
-                    entry.tx_hash,
-                    entry.generation,
-                ));
-            }
-        }
-        expired
-    };
-    emit_timeout_resolutions(shared, &expired);
-    if !expired.is_empty() {
-        shared.update_buffer_metric();
-    }
-    if groups.is_empty() {
-        return Ok(());
-    }
-
-    let mut first_error = None;
-    for (block_height, entries) in groups {
-        // A previous height may have spent the remaining retry budget awaiting RCS. Resolve the
-        // cumulative deadline again and only send lifecycles that are still NotSubmitted.
-        let (entries, expired) = {
-            let mut pool = shared.pool_lock();
-            let now = shared.clock.now_unix();
-            let expired = pool.resolve_total_timeouts(&shared.config, now);
-            let entries = entries
-                .into_iter()
-                .filter(|(_, hash, generation)| {
-                    pool.matches(hash, *generation, crate::pool::BufferStatus::NotSubmitted)
-                })
-                .collect::<Vec<_>>();
-            (entries, expired)
-        };
-        emit_timeout_resolutions(shared, &expired);
-        if !expired.is_empty() {
-            shared.update_buffer_metric();
-        }
-        if entries.is_empty() {
-            continue;
-        }
-        let expected_generations = entries
-            .iter()
-            .map(|(_, hash, generation)| (*hash, *generation))
-            .collect::<std::collections::HashMap<_, _>>();
-        let txs = entries.into_iter().map(|(tx, _, _)| tx).collect();
-        let started = std::time::Instant::now();
-        let result = client.submit(SubmitRequest { xlayer_block_height: block_height, txs }).await;
-        shared.metrics.record_request(RequestEndpoint::Submit, started.elapsed(), &result);
-        let resp = match result {
-            Ok(resp) => resp,
-            Err(error) => {
-                warn!(target: "rcs_filter", block_height, %error, "submit group failed; continuing other heights");
-                let expired = {
-                    let mut pool = shared.pool_lock();
-                    let now = shared.clock.now_unix();
-                    pool.resolve_total_timeouts(&shared.config, now)
-                };
-                emit_timeout_resolutions(shared, &expired);
-                if !expired.is_empty() {
-                    shared.update_buffer_metric();
-                }
-                first_error.get_or_insert(error);
-                continue;
-            }
-        };
-        for rejected in &resp.rejected_malformed {
-            warn!(target: "rcs_filter", tx_hash = %rejected, "submit rejected_malformed; retrying");
-        }
-        let expired = {
-            let mut pool = shared.pool_lock();
-            let now = shared.clock.now_unix();
-            pool.apply_submit_response(&resp.accepted, &expected_generations, &shared.config, now)
-        };
-        emit_timeout_resolutions(shared, &expired);
-        shared.update_buffer_metric();
-    }
-    first_error.map_or(Ok(()), Err)
-}
-
 /// FR-5 adjudication poll loop.
 async fn query_task(shared: Shared, client: Arc<dyn RcsClient>) {
     let mut backoff =
@@ -355,7 +260,7 @@ pub(crate) async fn query_once(shared: &Shared, client: &Arc<dyn RcsClient>) -> 
         let expired = pool.resolve_total_timeouts(&shared.config, now);
         (pool.in_flight_generations(), expired)
     };
-    emit_timeout_resolutions(shared, &expired);
+    shared.emit_timeout_resolutions(&expired);
     if !expired.is_empty() {
         shared.update_buffer_metric();
     }
@@ -376,7 +281,7 @@ pub(crate) async fn query_once(shared: &Shared, client: &Arc<dyn RcsClient>) -> 
                     let now = shared.clock.now_unix();
                     pool.resolve_total_timeouts(&shared.config, now)
                 };
-                emit_timeout_resolutions(shared, &expired);
+                shared.emit_timeout_resolutions(&expired);
                 if !expired.is_empty() {
                     shared.update_buffer_metric();
                 }
@@ -450,22 +355,6 @@ pub(crate) async fn query_once(shared: &Shared, client: &Arc<dyn RcsClient>) -> 
     }
     shared.update_buffer_metric();
     first_error.map_or(Ok(()), Err)
-}
-
-fn emit_timeout_resolutions(
-    shared: &Shared,
-    resolved: &[(alloy_primitives::B256, u64, Resolution)],
-) {
-    for (hash, generation, resolution) in resolved {
-        debug!(target: "rcs_filter", tx_hash = %format!("{hash:#x}"), ?resolution, "cumulative timeout resolution");
-        if *resolution == Resolution::Discard {
-            shared.emit_terminal(TerminalEvent {
-                tx_hash: *hash,
-                generation: *generation,
-                reason: TerminalReason::FailCloseTimeout,
-            });
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -548,7 +437,7 @@ pub(crate) fn timeout_once(
         let pruned = pool.prune_terminal(retention, now);
         (resolved, pruned)
     };
-    emit_timeout_resolutions(shared, &resolved);
+    shared.emit_timeout_resolutions(&resolved);
     shared.update_buffer_metric();
     (resolved, pruned)
 }

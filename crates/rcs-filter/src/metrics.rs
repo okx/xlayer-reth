@@ -105,6 +105,12 @@ pub(crate) struct RcsFilterMetrics {
     pub submit_decode_errors_total: Counter,
     /// Submit endpoint unexpected statuses.
     pub submit_unexpected_status_total: Counter,
+    /// Number of block-height groups planned in a non-empty submit batch.
+    pub submit_batch_groups: Histogram,
+    /// Peak number of RCS submit requests concurrently in flight in one batch.
+    pub submit_batch_max_in_flight: Histogram,
+    /// End-to-end duration of a non-empty submit batch.
+    pub submit_batch_duration_seconds: Histogram,
     /// Query endpoint requests.
     pub query_requests_total: Counter,
     /// Query endpoint request latency.

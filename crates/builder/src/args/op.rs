@@ -248,6 +248,15 @@ pub struct RcsFilterArgs {
     #[arg(long = "rcs-filter.batch-window-ms", default_value = "200")]
     pub batch_window_ms: u64,
 
+    /// Maximum number of independent block-height submit groups in flight at once.
+    /// Keep at 1 until the target RCS deployment has passed concurrent-submit capacity checks.
+    #[arg(
+        long = "rcs-filter.submit-max-concurrency",
+        env = "RCS_SUBMIT_MAX_CONCURRENCY",
+        default_value = "1"
+    )]
+    pub submit_max_concurrency: usize,
+
     /// `Submitted → NotSubmitted` confirmation timeout in seconds (FR-6).
     #[arg(long = "rcs-filter.submitted-confirmation-timeout-seconds", default_value = "8")]
     pub submitted_confirmation_timeout_seconds: u64,
@@ -319,4 +328,36 @@ pub struct FlashblocksP2pArgs {
         default_value = "false"
     )]
     pub p2p_process_full_payload: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+
+    use clap::{CommandFactory, Parser};
+    use reth_optimism_cli::commands::Commands;
+
+    #[test]
+    fn rcs_submit_concurrency_cli_metadata_has_default_and_env() {
+        let command = crate::args::Cli::command();
+        let node = command.find_subcommand("node").unwrap();
+        let argument = node
+            .get_arguments()
+            .find(|argument| argument.get_long() == Some("rcs-filter.submit-max-concurrency"))
+            .unwrap();
+        assert_eq!(argument.get_default_values(), [OsStr::new("1")]);
+        assert_eq!(argument.get_env(), Some(OsStr::new("RCS_SUBMIT_MAX_CONCURRENCY")));
+    }
+
+    #[test]
+    fn rcs_submit_concurrency_cli_override_is_parsed() {
+        let args = crate::args::Cli::parse_from([
+            "dummy",
+            "node",
+            "--rcs-filter.submit-max-concurrency",
+            "4",
+        ]);
+        let Commands::Node(node) = args.command else { unreachable!() };
+        assert_eq!(node.ext.rcs_filter.submit_max_concurrency, 4);
+    }
 }

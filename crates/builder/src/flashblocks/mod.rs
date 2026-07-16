@@ -259,6 +259,23 @@ impl TryFrom<BuilderArgs> for BuilderConfig {
 fn build_rcs_filter_handle(
     args: &crate::args::RcsFilterArgs,
 ) -> eyre::Result<Option<Arc<FilterHandle>>> {
+    let Some(config) = build_rcs_filter_config(args)? else { return Ok(None) };
+    let rcs_base_url = config.rcs_base_url.clone();
+    let client = Arc::new(
+        ReqwestRcsClient::with_timeouts(
+            rcs_base_url,
+            config.connect_timeout,
+            config.request_timeout,
+        )
+        .map_err(|e| eyre::eyre!(e.to_string()))?,
+    );
+    let clock = Arc::new(SystemClock);
+    Ok(Some(FilterHandle::spawn(config, client, clock)))
+}
+
+fn build_rcs_filter_config(
+    args: &crate::args::RcsFilterArgs,
+) -> eyre::Result<Option<FilterConfig>> {
     if !args.enabled {
         return Ok(None);
     }
@@ -274,6 +291,7 @@ fn build_rcs_filter_handle(
         retry_initial_backoff: Duration::from_millis(args.retry_initial_backoff_ms),
         retry_max_backoff: Duration::from_millis(args.retry_max_backoff_ms),
         batch_window: Duration::from_millis(args.batch_window_ms),
+        submit_max_concurrency: args.submit_max_concurrency,
         submitted_confirmation_timeout: Duration::from_secs(
             args.submitted_confirmation_timeout_seconds,
         ),
@@ -285,17 +303,7 @@ fn build_rcs_filter_handle(
         terminal_entry_retention: Duration::from_secs(args.terminal_entry_retention_seconds),
     };
     config.validate().map_err(|e| eyre::eyre!(e.to_string()))?;
-
-    let client = Arc::new(
-        ReqwestRcsClient::with_timeouts(
-            rcs_base_url,
-            config.connect_timeout,
-            config.request_timeout,
-        )
-        .map_err(|e| eyre::eyre!(e.to_string()))?,
-    );
-    let clock = Arc::new(SystemClock);
-    Ok(Some(FilterHandle::spawn(config, client, clock)))
+    Ok(Some(config))
 }
 
 impl BuilderConfig {
@@ -304,5 +312,48 @@ impl BuilderConfig {
             return 0;
         }
         (self.block_time.as_millis() / self.flashblocks.interval.as_millis()) as u64
+    }
+}
+
+#[cfg(test)]
+mod rcs_filter_config_tests {
+    use super::*;
+
+    fn enabled_args() -> crate::args::RcsFilterArgs {
+        let mut args = crate::args::BuilderArgs::default().rcs_filter;
+        args.enabled = true;
+        args.rcs_base_url = Some("http://rcs.test".to_string());
+        // Do not let the host's RCS_SUBMIT_MAX_CONCURRENCY leak into these config-mapping tests.
+        args.submit_max_concurrency = 1;
+        args
+    }
+
+    #[test]
+    fn invalid_submit_concurrency_fails_before_workers_start() {
+        for invalid in [0, rcs_filter::config::MAX_SUBMIT_CONCURRENCY + 1] {
+            let mut args = enabled_args();
+            args.submit_max_concurrency = invalid;
+            let error = build_rcs_filter_handle(&args).unwrap_err();
+            assert!(error.to_string().contains("submit_max_concurrency"));
+        }
+    }
+
+    #[test]
+    fn submit_concurrency_is_mapped_into_filter_config() {
+        let default = build_rcs_filter_config(&enabled_args()).unwrap().unwrap();
+        assert_eq!(default.submit_max_concurrency, 1);
+
+        let mut overridden = enabled_args();
+        overridden.submit_max_concurrency = 4;
+        let config = build_rcs_filter_config(&overridden).unwrap().unwrap();
+        assert_eq!(config.submit_max_concurrency, 4);
+    }
+
+    #[test]
+    fn disabled_filter_bypasses_config_and_handle_construction() {
+        let mut args = crate::args::BuilderArgs::default().rcs_filter;
+        args.submit_max_concurrency = 0;
+        assert!(build_rcs_filter_config(&args).unwrap().is_none());
+        assert!(build_rcs_filter_handle(&args).unwrap().is_none());
     }
 }
