@@ -27,6 +27,7 @@ mod metrics;
 pub mod pool;
 pub mod quota_hash;
 pub mod rules;
+mod submit;
 pub mod test_support;
 pub mod worker;
 

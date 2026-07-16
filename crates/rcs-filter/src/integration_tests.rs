@@ -9,13 +9,15 @@
 //!   tasks under a paused tokio clock, driving virtual time so the loops (initial-load retry
 //!   retry, hot-reload polling, batch submit, adjudication poll, timeout tick) actually run.
 
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use alloy_primitives::{Address, Bytes, Log, LogData, B256, U256};
 use async_trait::async_trait;
+use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 use serde_json::json;
 
 use crate::client::{
@@ -133,6 +135,19 @@ fn scenario_a_entry(tx_hash: B256, block_height: u64, now: u64) -> BufferEntry {
     }
 }
 
+fn independent_entry(id: u8, block_height: u64, now: u64) -> BufferEntry {
+    let mut entry = scenario_a_entry(B256::repeat_byte(id), block_height, now);
+    entry.origin = Address::repeat_byte(id);
+    entry.nonce = u64::from(id);
+    let action = entry.actions.get_mut("quota").unwrap().first_mut().unwrap();
+    action.address = format!("{:#x}", Address::repeat_byte(id.wrapping_add(64)));
+    action.params.insert(
+        "to".to_string(),
+        json!(format!("{:#x}", Address::repeat_byte(id.wrapping_add(128)))),
+    );
+    entry
+}
+
 #[derive(Debug, Default)]
 struct GatedResponseClient {
     submit_started: tokio::sync::Notify,
@@ -191,6 +206,165 @@ impl RcsClient for GatedResponseClient {
             _ => Vec::new(),
         };
         Ok(QueryResponse { txs })
+    }
+}
+
+#[derive(Debug)]
+struct ControlledSubmitClient {
+    gates: Mutex<HashMap<u64, Arc<tokio::sync::Semaphore>>>,
+    failed_heights: Mutex<HashSet<u64>>,
+    started: Mutex<Vec<u64>>,
+    completed: Mutex<Vec<u64>>,
+    started_version: tokio::sync::watch::Sender<usize>,
+    completed_version: tokio::sync::watch::Sender<usize>,
+    active: AtomicUsize,
+    max_active: AtomicUsize,
+}
+
+impl ControlledSubmitClient {
+    fn new() -> Self {
+        let (started_version, _) = tokio::sync::watch::channel(0);
+        let (completed_version, _) = tokio::sync::watch::channel(0);
+        Self {
+            gates: Mutex::new(HashMap::new()),
+            failed_heights: Mutex::new(HashSet::new()),
+            started: Mutex::new(Vec::new()),
+            completed: Mutex::new(Vec::new()),
+            started_version,
+            completed_version,
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+        }
+    }
+
+    fn gate(&self, height: u64) {
+        self.gates.lock().unwrap().insert(height, Arc::new(tokio::sync::Semaphore::new(0)));
+    }
+
+    fn release(&self, height: u64) {
+        self.gates.lock().unwrap().get(&height).expect("registered gate").add_permits(1);
+    }
+
+    fn fail(&self, height: u64) {
+        self.failed_heights.lock().unwrap().insert(height);
+    }
+
+    fn has_started(&self, height: u64) -> bool {
+        self.started.lock().unwrap().contains(&height)
+    }
+
+    fn max_active(&self) -> usize {
+        self.max_active.load(Ordering::SeqCst)
+    }
+
+    async fn wait_started(&self, height: u64) {
+        let mut changes = self.started_version.subscribe();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if self.has_started(height) {
+                    break;
+                }
+                changes.changed().await.expect("submit client remains alive");
+            }
+        })
+        .await
+        .expect("submit height started before timeout");
+    }
+
+    async fn wait_completed(&self, height: u64) {
+        let mut changes = self.completed_version.subscribe();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if self.completed.lock().unwrap().contains(&height) {
+                    break;
+                }
+                changes.changed().await.expect("submit client remains alive");
+            }
+        })
+        .await
+        .expect("submit height completed before timeout");
+    }
+}
+
+struct ControlledActiveGuard<'a>(&'a ControlledSubmitClient);
+
+impl Drop for ControlledActiveGuard<'_> {
+    fn drop(&mut self) {
+        self.0.active.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl RcsClient for ControlledSubmitClient {
+    async fn get_rules(&self) -> crate::Result<RulesResponse> {
+        unreachable!()
+    }
+
+    async fn get_rules_version(&self) -> crate::Result<VersionResponse> {
+        unreachable!()
+    }
+
+    async fn submit(&self, req: SubmitRequest) -> crate::Result<SubmitResponse> {
+        let height = req.xlayer_block_height;
+        let current = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(current, Ordering::SeqCst);
+        let active = ControlledActiveGuard(self);
+        let version = {
+            let mut started = self.started.lock().unwrap();
+            started.push(height);
+            started.len()
+        };
+        self.started_version.send_replace(version);
+        let gate = self.gates.lock().unwrap().get(&height).cloned();
+        if let Some(gate) = gate {
+            gate.acquire().await.expect("test gate remains open").forget();
+        }
+        if self.failed_heights.lock().unwrap().contains(&height) {
+            return Err(crate::FilterError::Transport(format!("height {height} failed")));
+        }
+        let completed_version = {
+            let mut completed = self.completed.lock().unwrap();
+            completed.push(height);
+            completed.len()
+        };
+        self.completed_version.send_replace(completed_version);
+        drop(active);
+        Ok(SubmitResponse {
+            accepted: req.txs.into_iter().map(|tx| tx.tx_hash).collect(),
+            rejected_malformed: Vec::new(),
+        })
+    }
+
+    async fn query(&self, _params: QueryParams) -> crate::Result<QueryResponse> {
+        unreachable!()
+    }
+}
+
+#[derive(Debug)]
+struct DelayedSubmitClient {
+    delay: Duration,
+}
+
+#[async_trait]
+impl RcsClient for DelayedSubmitClient {
+    async fn get_rules(&self) -> crate::Result<RulesResponse> {
+        unreachable!()
+    }
+
+    async fn get_rules_version(&self) -> crate::Result<VersionResponse> {
+        unreachable!()
+    }
+
+    async fn submit(&self, req: SubmitRequest) -> crate::Result<SubmitResponse> {
+        tokio::time::sleep(self.delay).await;
+        Ok(SubmitResponse {
+            accepted: req.txs.into_iter().map(|tx| tx.tx_hash).collect(),
+            rejected_malformed: Vec::new(),
+        })
+    }
+
+    async fn query(&self, _params: QueryParams) -> crate::Result<QueryResponse> {
+        unreachable!()
     }
 }
 
@@ -525,7 +699,7 @@ async fn submit_once_groups_by_block_height() {
     let reqs = mock.submitted_requests();
     assert_eq!(reqs.len(), 2, "one request per block height");
     let heights: Vec<u64> = reqs.iter().map(|r| r.xlayer_block_height).collect();
-    assert!(heights.contains(&1_000_000) && heights.contains(&1_000_010));
+    assert_eq!(heights, [1_000_000, 1_000_010], "K=1 preserves height order");
     assert!(reqs.iter().all(|r| r.txs.len() == 1));
 }
 
@@ -545,6 +719,415 @@ async fn submit_group_isolation_continues_after_one_height_fails() {
     let pool = shared.pool.lock().unwrap();
     assert_eq!(pool.get(&golden::tx_a()).unwrap().status, BufferStatus::NotSubmitted);
     assert_eq!(pool.get(&golden::tx_c()).unwrap().status, BufferStatus::Submitted);
+}
+
+fn submit_batch_histograms(snapshotter: &Snapshotter) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let mut groups = Vec::new();
+    let mut max_in_flight = Vec::new();
+    let mut durations = Vec::new();
+    for (key, _, _, value) in snapshotter.snapshot().into_vec() {
+        let DebugValue::Histogram(values) = value else { continue };
+        let values = values.into_iter().map(|value| value.into_inner()).collect::<Vec<_>>();
+        match key.key().name() {
+            name if name.ends_with("submit_batch_groups") => groups = values,
+            name if name.ends_with("submit_batch_max_in_flight") => max_in_flight = values,
+            name if name.ends_with("submit_batch_duration_seconds") => durations = values,
+            _ => {}
+        }
+    }
+    (groups, max_in_flight, durations)
+}
+
+fn assert_single_group_batch_metrics(snapshotter: &Snapshotter) {
+    let (groups, max_in_flight, durations) = submit_batch_histograms(snapshotter);
+    assert_eq!(groups, [1.0]);
+    assert_eq!(max_in_flight, [1.0]);
+    assert_eq!(durations.len(), 1);
+    assert!(durations[0] >= 0.0);
+}
+
+fn attach_isolated_submit_batch_metrics(shared: &mut Shared) {
+    // The production derive uses metric call-site handles that may already have been initialized
+    // by another parallel test. Unique test-only call sites keep this recorder deterministic.
+    shared.metrics.submit_batch_groups = metrics::histogram!("rcs_filter_test.submit_batch_groups");
+    shared.metrics.submit_batch_max_in_flight =
+        metrics::histogram!("rcs_filter_test.submit_batch_max_in_flight");
+    shared.metrics.submit_batch_duration_seconds =
+        metrics::histogram!("rcs_filter_test.submit_batch_duration_seconds");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn submit_batch_metrics_cover_empty_completed_and_error_batches() {
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+
+    let mut empty = shared_with(Arc::new(TestClock::new(START)), scenario_a_rules(), true);
+    attach_isolated_submit_batch_metrics(&mut empty);
+    let empty_client: Arc<dyn RcsClient> = Arc::new(MockRcsClient::new());
+    worker::submit_once(&empty, &empty_client).await.unwrap();
+    assert_eq!(submit_batch_histograms(&snapshotter), (vec![], vec![], vec![]));
+
+    let mut completed = shared_with(Arc::new(TestClock::new(START)), scenario_a_rules(), true);
+    attach_isolated_submit_batch_metrics(&mut completed);
+    completed.pool_lock().insert(scenario_a_entry(golden::tx_a(), 1_000_000, START));
+    let completed_client: Arc<dyn RcsClient> = Arc::new(MockRcsClient::new());
+    worker::submit_once(&completed, &completed_client).await.unwrap();
+    assert_single_group_batch_metrics(&snapshotter);
+
+    let mock = Arc::new(MockRcsClient::new());
+    mock.fail_submit_height(1_000_010);
+    let error_client: Arc<dyn RcsClient> = mock;
+    let mut error = shared_with(Arc::new(TestClock::new(START)), scenario_a_rules(), true);
+    attach_isolated_submit_batch_metrics(&mut error);
+    error.pool_lock().insert(scenario_a_entry(golden::tx_c(), 1_000_010, START));
+    assert!(worker::submit_once(&error, &error_client).await.is_err());
+    assert_single_group_batch_metrics(&snapshotter);
+}
+
+fn concurrent_submit_shared(entries: impl IntoIterator<Item = BufferEntry>) -> Shared {
+    submit_shared_with_concurrency(entries, 4)
+}
+
+fn submit_shared_with_concurrency(
+    entries: impl IntoIterator<Item = BufferEntry>,
+    max_concurrency: usize,
+) -> Shared {
+    let mut shared = shared_with(Arc::new(TestClock::new(START)), scenario_a_rules(), true);
+    shared.config.submit_max_concurrency = max_concurrency;
+    let mut pool = shared.pool_lock();
+    for entry in entries {
+        pool.insert(entry);
+    }
+    drop(pool);
+    shared
+}
+
+#[tokio::test]
+async fn submit_once_refills_slots_beyond_limit_while_first_group_is_blocked() {
+    let heights = [1_000_001, 1_000_002, 1_000_003, 1_000_004, 1_000_005, 1_000_006];
+    let client = Arc::new(ControlledSubmitClient::new());
+    for height in &heights[..4] {
+        client.gate(*height);
+    }
+    let shared =
+        concurrent_submit_shared(heights.into_iter().enumerate().map(|(index, height)| {
+            independent_entry(u8::try_from(index + 1).unwrap(), height, START)
+        }));
+    let task_shared = shared.clone();
+    let task_client: Arc<dyn RcsClient> = client.clone();
+    let task = tokio::spawn(async move { worker::submit_once(&task_shared, &task_client).await });
+
+    for height in &heights[..4] {
+        client.wait_started(*height).await;
+    }
+    assert_eq!(client.max_active(), 4);
+
+    client.release(heights[1]);
+    client.wait_started(heights[4]).await;
+    client.wait_started(heights[5]).await;
+    assert!(!client.completed.lock().unwrap().contains(&heights[0]));
+    assert!(client.max_active() <= 4);
+
+    client.release(heights[0]);
+    client.release(heights[2]);
+    client.release(heights[3]);
+    task.await.unwrap().unwrap();
+    assert!(shared.pool_lock().status_counts().iter().enumerate().all(|(index, count)| {
+        if index == 1 {
+            *count == 6
+        } else {
+            *count == 0
+        }
+    }));
+}
+
+#[tokio::test(start_paused = true)]
+async fn four_way_concurrency_reduces_eight_group_latency_by_four_times() {
+    async fn run(max_concurrency: usize) -> (Duration, [usize; 6]) {
+        let entries = (0..8).map(|index| {
+            independent_entry(
+                u8::try_from(index + 101).unwrap(),
+                1_001_000 + u64::try_from(index).unwrap(),
+                START,
+            )
+        });
+        let shared = submit_shared_with_concurrency(entries, max_concurrency);
+        let client: Arc<dyn RcsClient> =
+            Arc::new(DelayedSubmitClient { delay: Duration::from_millis(100) });
+        let started = tokio::time::Instant::now();
+
+        worker::submit_once(&shared, &client).await.unwrap();
+
+        (started.elapsed(), shared.pool_lock().status_counts())
+    }
+
+    let (serial_elapsed, serial_statuses) = run(1).await;
+    let (concurrent_elapsed, concurrent_statuses) = run(4).await;
+
+    assert_eq!(serial_elapsed, Duration::from_millis(800));
+    assert_eq!(concurrent_elapsed, Duration::from_millis(200));
+    assert_eq!(serial_elapsed, concurrent_elapsed * 4);
+    assert_eq!(serial_statuses, [0, 8, 0, 0, 0, 0]);
+    assert_eq!(concurrent_statuses, serial_statuses);
+}
+
+#[tokio::test]
+async fn submit_once_preserves_same_nonce_order_while_refilling_independent_work() {
+    let heights = [1_000_011, 1_000_012, 1_000_013, 1_000_014, 1_000_015, 1_000_016];
+    let mut entries = heights
+        .into_iter()
+        .enumerate()
+        .map(|(index, height)| independent_entry(u8::try_from(index + 11).unwrap(), height, START))
+        .collect::<Vec<_>>();
+    entries[4].origin = entries[0].origin;
+    entries[4].nonce = entries[0].nonce;
+
+    let client = Arc::new(ControlledSubmitClient::new());
+    for height in &heights[..4] {
+        client.gate(*height);
+    }
+    let shared = concurrent_submit_shared(entries);
+    let task_shared = shared.clone();
+    let task_client: Arc<dyn RcsClient> = client.clone();
+    let task = tokio::spawn(async move { worker::submit_once(&task_shared, &task_client).await });
+
+    for height in &heights[..4] {
+        client.wait_started(*height).await;
+    }
+    client.release(heights[1]);
+    client.wait_started(heights[5]).await;
+    assert!(!client.has_started(heights[4]), "same-nonce successor bypassed predecessor");
+
+    client.release(heights[0]);
+    client.wait_started(heights[4]).await;
+    client.release(heights[2]);
+    client.release(heights[3]);
+    task.await.unwrap().unwrap();
+    assert!(client.max_active() <= 4);
+}
+
+#[tokio::test]
+async fn submit_once_preserves_same_quota_order_while_refilling_independent_work() {
+    let heights = [1_000_021, 1_000_022, 1_000_023, 1_000_024, 1_000_025, 1_000_026];
+    let mut entries = heights
+        .into_iter()
+        .enumerate()
+        .map(|(index, height)| independent_entry(u8::try_from(index + 21).unwrap(), height, START))
+        .collect::<Vec<_>>();
+    let first_action = entries[0].actions["quota"][0].clone();
+    let successor_action = entries[4].actions.get_mut("quota").unwrap().first_mut().unwrap();
+    successor_action.address = first_action.address;
+    successor_action.params.insert("to".to_string(), first_action.params["to"].clone());
+
+    let client = Arc::new(ControlledSubmitClient::new());
+    for height in &heights[..4] {
+        client.gate(*height);
+    }
+    let shared = concurrent_submit_shared(entries);
+    let task_shared = shared.clone();
+    let task_client: Arc<dyn RcsClient> = client.clone();
+    let task = tokio::spawn(async move { worker::submit_once(&task_shared, &task_client).await });
+
+    for height in &heights[..4] {
+        client.wait_started(*height).await;
+    }
+    client.release(heights[1]);
+    client.wait_started(heights[5]).await;
+    assert!(!client.has_started(heights[4]), "same-quota successor bypassed predecessor");
+
+    client.release(heights[0]);
+    client.wait_started(heights[4]).await;
+    client.release(heights[2]);
+    client.release(heights[3]);
+    task.await.unwrap().unwrap();
+    assert!(client.max_active() <= 4);
+}
+
+#[tokio::test]
+async fn failed_conflict_predecessor_releases_successor() {
+    let heights = [1_000_031, 1_000_032];
+    let first = independent_entry(31, heights[0], START);
+    let mut second = independent_entry(32, heights[1], START);
+    second.origin = first.origin;
+    second.nonce = first.nonce;
+    let first_hash = first.tx_hash;
+    let second_hash = second.tx_hash;
+    let shared = concurrent_submit_shared([first, second]);
+    let client = Arc::new(ControlledSubmitClient::new());
+    client.fail(heights[0]);
+    let trait_client: Arc<dyn RcsClient> = client.clone();
+
+    assert!(worker::submit_once(&shared, &trait_client).await.is_err());
+    assert_eq!(*client.started.lock().unwrap(), heights);
+    let pool = shared.pool_lock();
+    assert_eq!(pool.get(&first_hash).unwrap().status, BufferStatus::NotSubmitted);
+    assert_eq!(pool.get(&second_hash).unwrap().status, BufferStatus::Submitted);
+}
+
+#[tokio::test]
+async fn concurrent_partial_failure_keeps_independent_groups_isolated() {
+    let heights = [1_000_061, 1_000_062, 1_000_063];
+    let entries = heights
+        .into_iter()
+        .enumerate()
+        .map(|(index, height)| independent_entry(u8::try_from(index + 61).unwrap(), height, START))
+        .collect::<Vec<_>>();
+    let hashes = entries.iter().map(|entry| entry.tx_hash).collect::<Vec<_>>();
+    let shared = concurrent_submit_shared(entries);
+    let client = Arc::new(ControlledSubmitClient::new());
+    client.fail(heights[1]);
+    let trait_client: Arc<dyn RcsClient> = client.clone();
+
+    let error = worker::submit_once(&shared, &trait_client).await.unwrap_err();
+
+    assert_eq!(error.to_string(), format!("rcs transport error: height {} failed", heights[1]));
+    let pool = shared.pool_lock();
+    assert_eq!(pool.get(&hashes[0]).unwrap().status, BufferStatus::Submitted);
+    assert_eq!(pool.get(&hashes[1]).unwrap().status, BufferStatus::NotSubmitted);
+    assert_eq!(pool.get(&hashes[2]).unwrap().status, BufferStatus::Submitted);
+}
+
+#[tokio::test]
+async fn out_of_order_independent_responses_update_only_their_own_generations() {
+    let heights = [1_000_071, 1_000_072];
+    let entries = heights
+        .into_iter()
+        .enumerate()
+        .map(|(index, height)| independent_entry(u8::try_from(index + 71).unwrap(), height, START))
+        .collect::<Vec<_>>();
+    let hashes = entries.iter().map(|entry| entry.tx_hash).collect::<Vec<_>>();
+    let shared = concurrent_submit_shared(entries);
+    let client = Arc::new(ControlledSubmitClient::new());
+    client.gate(heights[0]);
+    let task_shared = shared.clone();
+    let task_client: Arc<dyn RcsClient> = client.clone();
+    let task = tokio::spawn(async move { worker::submit_once(&task_shared, &task_client).await });
+
+    client.wait_started(heights[0]).await;
+    client.wait_completed(heights[1]).await;
+    {
+        let pool = shared.pool_lock();
+        assert_eq!(pool.get(&hashes[0]).unwrap().status, BufferStatus::NotSubmitted);
+        assert_eq!(pool.get(&hashes[1]).unwrap().status, BufferStatus::Submitted);
+    }
+    client.release(heights[0]);
+    task.await.unwrap().unwrap();
+    let pool = shared.pool_lock();
+    assert_eq!(pool.get(&hashes[0]).unwrap().status, BufferStatus::Submitted);
+    assert_eq!(pool.get(&hashes[1]).unwrap().status, BufferStatus::Submitted);
+}
+
+#[tokio::test]
+async fn all_failed_groups_are_attempted_and_lowest_height_error_is_returned() {
+    let heights = [1_000_051, 1_000_052, 1_000_053];
+    let entries = heights
+        .into_iter()
+        .enumerate()
+        .map(|(index, height)| independent_entry(u8::try_from(index + 51).unwrap(), height, START));
+    let shared = concurrent_submit_shared(entries);
+    let client = Arc::new(ControlledSubmitClient::new());
+    for height in heights {
+        client.fail(height);
+    }
+    let trait_client: Arc<dyn RcsClient> = client.clone();
+
+    let error = worker::submit_once(&shared, &trait_client).await.unwrap_err();
+
+    assert_eq!(error.to_string(), format!("rcs transport error: height {} failed", heights[0]));
+    let mut started = client.started.lock().unwrap().clone();
+    started.sort_unstable();
+    assert_eq!(started, heights);
+    assert_eq!(shared.pool_lock().status_counts(), [3, 0, 0, 0, 0, 0]);
+}
+
+#[tokio::test]
+async fn serial_fallback_preserves_height_order_and_lowest_error() {
+    let heights = [1_000_081, 1_000_082, 1_000_083];
+    let entries = heights
+        .into_iter()
+        .enumerate()
+        .map(|(index, height)| independent_entry(u8::try_from(index + 81).unwrap(), height, START))
+        .collect::<Vec<_>>();
+    let hashes = entries.iter().map(|entry| entry.tx_hash).collect::<Vec<_>>();
+    let shared = submit_shared_with_concurrency(entries, 1);
+    let client = Arc::new(ControlledSubmitClient::new());
+    client.fail(heights[0]);
+    client.fail(heights[2]);
+    let trait_client: Arc<dyn RcsClient> = client.clone();
+
+    let error = worker::submit_once(&shared, &trait_client).await.unwrap_err();
+
+    assert_eq!(*client.started.lock().unwrap(), heights);
+    assert_eq!(error.to_string(), format!("rcs transport error: height {} failed", heights[0]));
+    let pool = shared.pool_lock();
+    assert_eq!(pool.get(&hashes[0]).unwrap().status, BufferStatus::NotSubmitted);
+    assert_eq!(pool.get(&hashes[1]).unwrap().status, BufferStatus::Submitted);
+    assert_eq!(pool.get(&hashes[2]).unwrap().status, BufferStatus::NotSubmitted);
+}
+
+#[tokio::test]
+async fn transaction_inserted_during_slow_batch_is_processed_by_next_batch() {
+    let heights = [1_000_091, 1_000_092];
+    let first = independent_entry(91, heights[0], START);
+    let second = independent_entry(92, heights[1], START);
+    let hashes = [first.tx_hash, second.tx_hash];
+    let shared = concurrent_submit_shared([first]);
+    let client = Arc::new(ControlledSubmitClient::new());
+    client.gate(heights[0]);
+    let task_shared = shared.clone();
+    let task_client: Arc<dyn RcsClient> = client.clone();
+    let task = tokio::spawn(async move { worker::submit_once(&task_shared, &task_client).await });
+
+    client.wait_started(heights[0]).await;
+    shared.pool_lock().insert(second);
+    assert!(!client.has_started(heights[1]), "new lifecycle leaked into an existing snapshot");
+    client.release(heights[0]);
+    task.await.unwrap().unwrap();
+
+    let trait_client: Arc<dyn RcsClient> = client.clone();
+    worker::submit_once(&shared, &trait_client).await.unwrap();
+    assert_eq!(*client.started.lock().unwrap(), heights);
+    let pool = shared.pool_lock();
+    assert_eq!(pool.get(&hashes[0]).unwrap().status, BufferStatus::Submitted);
+    assert_eq!(pool.get(&hashes[1]).unwrap().status, BufferStatus::Submitted);
+}
+
+#[tokio::test]
+async fn unknown_audit_type_is_a_global_submit_barrier() {
+    let heights = [1_000_041, 1_000_042, 1_000_043, 1_000_044];
+    let mut entries = heights
+        .into_iter()
+        .enumerate()
+        .map(|(index, height)| independent_entry(u8::try_from(index + 41).unwrap(), height, START))
+        .collect::<Vec<_>>();
+    let custom_items = entries[2].actions.remove("quota").unwrap();
+    entries[2].actions.insert("custom".to_string(), custom_items);
+
+    let client = Arc::new(ControlledSubmitClient::new());
+    client.gate(heights[0]);
+    client.gate(heights[1]);
+    client.gate(heights[2]);
+    let shared = concurrent_submit_shared(entries);
+    let task_shared = shared.clone();
+    let task_client: Arc<dyn RcsClient> = client.clone();
+    let task = tokio::spawn(async move { worker::submit_once(&task_shared, &task_client).await });
+
+    client.wait_started(heights[0]).await;
+    client.wait_started(heights[1]).await;
+    assert!(!client.has_started(heights[2]));
+    client.release(heights[0]);
+    client.wait_completed(heights[0]).await;
+    assert!(
+        !client.has_started(heights[2]),
+        "exclusive group started before prior segment drained"
+    );
+    client.release(heights[1]);
+    client.wait_started(heights[2]).await;
+    assert!(!client.has_started(heights[3]), "post-barrier group bypassed exclusive group");
+    client.release(heights[2]);
+    client.wait_started(heights[3]).await;
+    task.await.unwrap().unwrap();
 }
 
 /// FR-2 startup load: a supported protocol version installs the rules and latches `ready`.

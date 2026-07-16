@@ -15,7 +15,7 @@ use crate::clock::Clock;
 use crate::config::FilterConfig;
 use crate::matching::{self, MatchOutcome};
 use crate::metrics::RcsFilterMetrics;
-use crate::pool::{BufferEntry, BufferPool, BufferStatus};
+use crate::pool::{BufferEntry, BufferPool, BufferStatus, Resolution};
 use crate::quota_hash;
 use crate::rules::RuleSet;
 
@@ -126,6 +126,19 @@ impl Shared {
         // No active receiver is acceptable during startup/tests. The builder reconciles the
         // Dropped snapshot when it attaches or if a bounded receiver lags.
         let _ = self.terminal_events.send(event);
+    }
+
+    pub(crate) fn emit_timeout_resolutions(&self, resolved: &[(B256, u64, Resolution)]) {
+        for (hash, generation, resolution) in resolved {
+            tracing::debug!(target: "rcs_filter", tx_hash = %format!("{hash:#x}"), ?resolution, "cumulative timeout resolution");
+            if *resolution == Resolution::Discard {
+                self.emit_terminal(TerminalEvent {
+                    tx_hash: *hash,
+                    generation: *generation,
+                    reason: TerminalReason::FailCloseTimeout,
+                });
+            }
+        }
     }
 
     pub(crate) fn update_buffer_metric(&self) {

@@ -9,6 +9,9 @@ use std::time::Duration;
 /// changes, so there is no "partial compatibility" middle state.
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[1];
 
+/// Hard safety ceiling for concurrent RCS submit requests from one filter instance.
+pub const MAX_SUBMIT_CONCURRENCY: usize = 64;
+
 /// Returns true iff `pv` is a `protocol_version` this build knows how to process.
 pub fn is_supported_protocol(pv: u32) -> bool {
     SUPPORTED_PROTOCOL_VERSIONS.contains(&pv)
@@ -32,6 +35,9 @@ pub struct FilterConfig {
     pub retry_max_backoff: Duration,
     /// Batch-submit accumulation window (FR-5, default 200ms).
     pub batch_window: Duration,
+    /// Maximum number of independent block-height submit groups in flight at once.
+    /// `1` preserves the legacy height-ordered serial behavior.
+    pub submit_max_concurrency: usize,
     /// `Submitted → NotSubmitted` timeout when a submitted tx is not confirmed by a
     /// query (FR-6, default 8s).
     pub submitted_confirmation_timeout: Duration,
@@ -62,6 +68,7 @@ impl Default for FilterConfig {
             retry_initial_backoff: Duration::from_millis(200),
             retry_max_backoff: Duration::from_secs(5),
             batch_window: Duration::from_millis(200),
+            submit_max_concurrency: 1,
             submitted_confirmation_timeout: Duration::from_secs(8),
             risk_module_unresponsive_timeout: Duration::from_secs(20),
             total_retry_timeout: Duration::from_secs(90),
@@ -119,6 +126,11 @@ impl FilterConfig {
                 "rcs-filter retry_initial_backoff must not exceed retry_max_backoff".to_string(),
             ));
         }
+        if self.enabled && !(1..=MAX_SUBMIT_CONCURRENCY).contains(&self.submit_max_concurrency) {
+            return Err(crate::FilterError::Config(format!(
+                "rcs-filter submit_max_concurrency must be between 1 and {MAX_SUBMIT_CONCURRENCY}"
+            )));
+        }
         Ok(())
     }
 }
@@ -132,6 +144,7 @@ mod tests {
         let c = FilterConfig::default();
         assert!(!c.enabled);
         assert_eq!(c.batch_window, Duration::from_millis(200));
+        assert_eq!(c.submit_max_concurrency, 1);
         assert_eq!(c.connect_timeout, Duration::from_secs(1));
         assert_eq!(c.request_timeout, Duration::from_secs(3));
         assert_eq!(c.retry_initial_backoff, Duration::from_millis(200));
@@ -218,5 +231,27 @@ mod tests {
         ] {
             assert!(invalid.validate().is_err());
         }
+    }
+
+    #[test]
+    fn submit_concurrency_boundaries_are_validated_when_enabled() {
+        let base =
+            FilterConfig { enabled: true, rcs_base_url: "http://rcs".into(), ..Default::default() };
+
+        assert!(FilterConfig { submit_max_concurrency: 0, ..base.clone() }.validate().is_err());
+        assert!(FilterConfig { submit_max_concurrency: 1, ..base.clone() }.validate().is_ok());
+        assert!(FilterConfig { submit_max_concurrency: 4, ..base.clone() }.validate().is_ok());
+        assert!(FilterConfig { submit_max_concurrency: MAX_SUBMIT_CONCURRENCY, ..base.clone() }
+            .validate()
+            .is_ok());
+        assert!(FilterConfig { submit_max_concurrency: MAX_SUBMIT_CONCURRENCY + 1, ..base }
+            .validate()
+            .is_err());
+    }
+
+    #[test]
+    fn disabled_filter_skips_submit_concurrency_validation() {
+        let config = FilterConfig { submit_max_concurrency: 0, ..Default::default() };
+        assert!(config.validate().is_ok());
     }
 }
