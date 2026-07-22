@@ -12,7 +12,7 @@ alloy-primitives.workspace = true
 alloy-dyn-abi.workspace = true
 alloy-sol-types.workspace = true
 tokio = { workspace = true }
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["query"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true

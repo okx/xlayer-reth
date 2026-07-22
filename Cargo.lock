@@ -6262,7 +6262,7 @@ dependencies = [
  "crossbeam-epoch",
  "crossbeam-utils",
  "hashbrown 0.16.1",
- "indexmap 2.13.0",
+ "indexmap 2.14.0",
  "metrics",
  "ordered-float",
  "quanta",
@@ -7969,7 +7969,7 @@ dependencies = [
 
 [[package]]
 name = "rcs-filter"
-version = "0.1.0"
+version = "0.0.6"
 dependencies = [
  "alloy-dyn-abi",
  "alloy-primitives",
@@ -7978,11 +7978,11 @@ dependencies = [
  "futures-util",
  "metrics",
  "metrics-util",
- "reqwest",
+ "reqwest 0.13.4",
  "reth-metrics",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
