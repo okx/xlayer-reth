@@ -36,7 +36,9 @@ COPY deps/ deps/
 # rustflags into each unit's fingerprint, so if cook ran without this config the
 # build step would re-fingerprint and recompile every dependency, defeating
 # cargo-chef's dependency caching.
-COPY .cargo/ .cargo/
+# The [o] glob makes the copy a no-op when .cargo/ is absent — it is gitignored
+# and `just build-docker` removes it for production builds.
+COPY .carg[o]/ .cargo/
 
 ARG BUILD_PROFILE=release
 ENV BUILD_PROFILE=$BUILD_PROFILE
