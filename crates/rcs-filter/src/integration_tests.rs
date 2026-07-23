@@ -1219,6 +1219,50 @@ async fn it_malformed_reload_keeps_old_rules() {
     assert_eq!(current.content_version, 1);
 }
 
+/// FR-8: a rule that deserializes fine (unlike `it_malformed_reload_keeps_old_rules`'s
+/// wire-decode failure above) but fails `compile_rule`'s semantic validation (here: empty
+/// `event_abis`, a "dead rule" that could never match anything) must reject the *entire*
+/// update, not silently install the one valid sibling rule and drop the bad one. Regression
+/// guard for a real bug report: a rule authored without `event_abis` to test its `condition`
+/// in isolation was silently dropped, making the condition look broken when actually the rule
+/// never loaded at all.
+#[tokio::test]
+async fn it_partially_invalid_reload_rejects_whole_batch_and_keeps_old_rules() {
+    let mock = Arc::new(MockRcsClient::new());
+    mock.set_rules_fixture(&[golden::RULE_SCENARIO_A]);
+    let client: Arc<dyn RcsClient> = mock.clone();
+    let shared = shared_with(Arc::new(TestClock::new(START)), RuleSet::default(), false);
+    assert!(worker::load_and_install(&shared, &client).await.unwrap());
+    let previous = shared.rules.read().unwrap().clone();
+    assert_eq!(previous.rules.len(), 1);
+
+    mock.set_rules_response_override(json!({
+        "protocol_version": 1,
+        "content_version": 2,
+        "rules": [
+            serde_json::from_str::<serde_json::Value>(golden::RULE_SCENARIO_B).unwrap(),
+            json!({
+                "id": "no-events-condition-only",
+                "event_abis": {},
+                "condition": {"==": [1, 1]},
+                "action": "deny"
+            })
+        ]
+    }));
+
+    let err = worker::load_and_install(&shared, &client)
+        .await
+        .expect_err("a batch with any invalid rule must be rejected as a whole");
+    assert!(matches!(err, crate::FilterError::InvalidRules(1, _)), "got {err:?}");
+
+    let current = shared.rules.read().unwrap();
+    assert!(
+        Arc::ptr_eq(&previous, &current),
+        "old rules must stay installed when the new batch is rejected"
+    );
+    assert_eq!(current.content_version, 1, "content_version must not advance on rejection");
+}
+
 #[tokio::test]
 async fn it_missing_rules_never_marks_version_installed() {
     let mock = Arc::new(MockRcsClient::new());

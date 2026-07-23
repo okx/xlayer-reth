@@ -10,7 +10,7 @@ mod validation;
 
 pub use jsonlogic::{truthy, Bindings};
 pub use model::{
-    AbiInput, Action, CompiledEvent, CompiledInput, CompiledRule, EventAbi, RawRule, RuleSet,
-    TimeoutAction,
+    AbiInput, Action, CompiledEvent, CompiledInput, CompiledRule, EventAbi, RawRule, RejectedRule,
+    RuleSet, TimeoutAction,
 };
 pub use validation::{compile_rule, load_rules};

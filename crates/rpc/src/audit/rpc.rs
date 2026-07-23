@@ -83,6 +83,22 @@ where
         req: AuditTransactionsRequest,
     ) -> RpcResult<AuditTransactionsResponse> {
         let rules = load_rules(1, 0, req.rules);
+        if !rules.rejected.is_empty() {
+            // Fail the whole request rather than silently classifying against a rule set
+            // that's missing the rule(s) the caller actually asked for — a caller testing a
+            // specific rule must not get a misleadingly "clean" verdict back.
+            return Err(jsonrpsee::types::ErrorObjectOwned::owned(
+                -32602,
+                format!("{} rule(s) failed validation and were rejected", rules.rejected.len()),
+                Some(
+                    rules
+                        .rejected
+                        .iter()
+                        .map(|r| serde_json::json!({"id": r.id, "reason": r.reason}))
+                        .collect::<Vec<_>>(),
+                ),
+            ));
+        }
 
         // Build every tx up front so a per-item construction failure produces a `Malformed`
         // result without aborting the rest of the batch.

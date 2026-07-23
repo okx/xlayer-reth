@@ -181,7 +181,9 @@ impl RcsFilterMetrics {
                 FilterError::Timeout(_) => timeout.increment(1),
                 FilterError::Decode(_) => decode.increment(1),
                 FilterError::UnexpectedStatus(_) => status.increment(1),
-                FilterError::UnsupportedProtocol(_) | FilterError::Config(_) => {}
+                FilterError::UnsupportedProtocol(_)
+                | FilterError::Config(_)
+                | FilterError::InvalidRules(..) => {}
             }
         }
     }
