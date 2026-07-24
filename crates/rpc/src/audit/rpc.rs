@@ -46,6 +46,29 @@ fn commit_and_continue(verdict: Verdict) -> (bool, bool) {
     }
 }
 
+/// Builds the final, request-ordered `Vec<AuditResult>` from the per-exec-index execution
+/// outcomes. `built[i]` maps original request index `i` to an index into `executed` (or `None`
+/// if `build_deposit_tx` failed for that item — always `Malformed`, independent of execution).
+/// `executed[exec_idx]` is `None` only when the single-pass execution loop stopped (on `Audit`)
+/// before reaching that index — those become `Unknown`.
+fn assemble_results(
+    txs: &[DepositTxRequest],
+    built: &[Option<usize>],
+    executed: &mut [Option<AuditResult>],
+) -> Vec<AuditResult> {
+    let mut results = Vec::with_capacity(txs.len());
+    for (i, tx_req) in txs.iter().enumerate() {
+        match built[i] {
+            None => results.push(AuditResult::malformed(tx_req.source_hash.clone())),
+            Some(exec_idx) => match executed[exec_idx].take() {
+                Some(result) => results.push(result),
+                None => results.push(AuditResult::unknown(tx_req.source_hash.clone())),
+            },
+        }
+    }
+    results
+}
+
 #[derive(Debug, serde::Deserialize)]
 pub struct AuditTransactionsRequest {
     pub rules: Vec<RawRule>,
@@ -216,5 +239,95 @@ mod algorithm_tests {
     #[test]
     fn audit_discards_and_stops() {
         assert_eq!(commit_and_continue(Verdict::Audit), (false, false));
+    }
+
+    use super::super::deposit::DepositTxRequest;
+    use super::super::verdict::AuditResult;
+    use super::assemble_results;
+
+    fn req(source_hash: &str) -> DepositTxRequest {
+        DepositTxRequest {
+            source_hash: source_hash.to_string(),
+            from: "0x0404040404040404040404040404040404040404".to_string(),
+            to: None,
+            mint: "0".to_string(),
+            value: "0".to_string(),
+            gas_limit: 100_000,
+            is_system_transaction: false,
+            data: "0x".to_string(),
+        }
+    }
+
+    #[test]
+    fn malformed_entry_stays_malformed_regardless_of_executed_state() {
+        let txs = vec![req("0xa")];
+        let built = vec![None]; // build_deposit_tx failed for this one
+        let mut executed: Vec<Option<AuditResult>> = vec![];
+
+        let results = assemble_results(&txs, &built, &mut executed);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].verdict, Verdict::Malformed);
+        assert_eq!(results[0].source_hash, "0xa");
+    }
+
+    #[test]
+    fn executed_entry_is_used_as_is() {
+        let txs = vec![req("0xa")];
+        let built = vec![Some(0)];
+        let mut executed = vec![Some(AuditResult {
+            tx_hash: "0xhash".to_string(),
+            source_hash: "0xa".to_string(),
+            verdict: Verdict::Allow,
+            actions: None,
+        })];
+
+        let results = assemble_results(&txs, &built, &mut executed);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].verdict, Verdict::Allow);
+        assert_eq!(results[0].tx_hash, "0xhash");
+    }
+
+    #[test]
+    fn never_executed_entry_becomes_unknown() {
+        // Simulates: this tx was built successfully (built[0] = Some(0)) but the execution loop
+        // stopped before reaching it (an earlier tx in the batch hit Audit) — executed[0] stays
+        // None. This is the exact bug-fix scenario: previously this tx would have been executed
+        // and (wrongly) classified anyway.
+        let txs = vec![req("0xb")];
+        let built = vec![Some(0)];
+        let mut executed: Vec<Option<AuditResult>> = vec![None];
+
+        let results = assemble_results(&txs, &built, &mut executed);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].verdict, Verdict::Unknown);
+        assert_eq!(results[0].source_hash, "0xb");
+    }
+
+    #[test]
+    fn mixed_batch_preserves_original_order() {
+        let txs = vec![req("0xa"), req("0xb"), req("0xc")];
+        let built = vec![Some(0), None, Some(1)];
+        let mut executed = vec![
+            Some(AuditResult {
+                tx_hash: "0xhashA".to_string(),
+                source_hash: "0xa".to_string(),
+                verdict: Verdict::Allow,
+                actions: None,
+            }),
+            None, // 0xc was built (built[2] = Some(1)) but never executed
+        ];
+
+        let results = assemble_results(&txs, &built, &mut executed);
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].source_hash, "0xa");
+        assert_eq!(results[0].verdict, Verdict::Allow);
+        assert_eq!(results[1].source_hash, "0xb");
+        assert_eq!(results[1].verdict, Verdict::Malformed);
+        assert_eq!(results[2].source_hash, "0xc");
+        assert_eq!(results[2].verdict, Verdict::Unknown);
     }
 }
