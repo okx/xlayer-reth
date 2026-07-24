@@ -73,10 +73,30 @@ fn assemble_results(
     results
 }
 
+/// Builds the forced-`Allow` result for a tx whose `source_hash` is in the caller-supplied
+/// `known_allowed` set — skips rule (re-)classification entirely (see
+/// `AuditTransactionsRequest::known_allowed`'s doc comment for why).
+fn known_allowed_result(tx_hash: alloy_primitives::B256, source_hash: &str) -> AuditResult {
+    AuditResult {
+        tx_hash: format!("{tx_hash:#x}"),
+        source_hash: source_hash.to_string(),
+        verdict: Verdict::Allow,
+        actions: None,
+    }
+}
+
 #[derive(Debug, serde::Deserialize)]
 pub struct AuditTransactionsRequest {
     pub rules: Vec<RawRule>,
     pub txs: Vec<DepositTxRequest>,
+    /// `source_hash` values RCS has already resolved to Allow (a formerly-`audit`-verdict
+    /// deposit that RCS's adjudicator approved in an earlier round). Executed and committed
+    /// unconditionally, skipping rule (re-)classification — a `quota`-type rule match is
+    /// unconditional on the tx's own logs and has no memory of a prior decision, so
+    /// re-classifying it would just produce `audit` again forever. See
+    /// `docs/superpowers/specs/2026-07-24-audit-transactions-multiround-rpc-design.md` §5.5.
+    #[serde(default)]
+    pub known_allowed: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -144,6 +164,9 @@ where
             ));
         }
 
+        let known_allowed: std::collections::HashSet<String> =
+            req.known_allowed.iter().cloned().collect();
+
         // Build every tx up front so a per-item construction failure produces a `Malformed`
         // result without aborting the rest of the batch.
         let mut ordered_txs = Vec::with_capacity(req.txs.len());
@@ -194,11 +217,20 @@ where
                 let mut executed: Vec<Option<AuditResult>> =
                     (0..ordered_txs.len()).map(|_| None).collect();
                 for (exec_idx, tx) in ordered_txs.iter().enumerate() {
+                    let tx_req = &ordered_tx_reqs[exec_idx];
                     let ResultAndState { result, state } =
                         evm.transact(tx).map_err(T::Error::from_evm_err)?;
+
+                    if known_allowed.contains(&tx_req.source_hash) {
+                        evm.db_mut().commit(state);
+                        executed[exec_idx] =
+                            Some(known_allowed_result(tx.tx_hash(), &tx_req.source_hash));
+                        continue;
+                    }
+
                     let logs = result.logs().to_vec();
                     let verdict_result = super::verdict::verdict_for(
-                        &ordered_tx_reqs[exec_idx],
+                        tx_req,
                         tx.signer(),
                         tx.to(),
                         tx.tx_hash(),
@@ -333,5 +365,25 @@ mod algorithm_tests {
         assert_eq!(results[1].verdict, Verdict::Malformed);
         assert_eq!(results[2].source_hash, "0xc");
         assert_eq!(results[2].verdict, Verdict::Unknown);
+    }
+
+    use super::known_allowed_result;
+    use alloy_primitives::B256;
+
+    #[test]
+    fn known_allowed_result_is_allow_with_no_actions() {
+        let result = known_allowed_result(B256::ZERO, "0xsrc");
+        assert_eq!(result.verdict, Verdict::Allow);
+        assert_eq!(result.source_hash, "0xsrc");
+        assert_eq!(result.tx_hash, format!("{:#x}", B256::ZERO));
+        assert!(result.actions.is_none());
+    }
+
+    #[test]
+    fn known_allowed_membership_check_matches_by_source_hash() {
+        let known_allowed: std::collections::HashSet<String> =
+            ["0xsrc1".to_string(), "0xsrc2".to_string()].into_iter().collect();
+        assert!(known_allowed.contains("0xsrc1"));
+        assert!(!known_allowed.contains("0xsrc3"));
     }
 }
