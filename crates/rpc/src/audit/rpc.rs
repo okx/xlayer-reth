@@ -5,6 +5,9 @@
 //! reported as `Unknown` without ever being executed (its correct execution basis depends on
 //! whether the `Audit` tx's eventual allow/deny decision, made later by RCS, actually happens on
 //! chain — see `docs/superpowers/specs/2026-07-24-audit-transactions-multiround-rpc-design.md`).
+//! A tx whose `source_hash` is in the request's `known_allowed` set skips this classification
+//! entirely — it's executed and its state committed unconditionally as `Allow` (see
+//! `AuditTransactionsRequest::known_allowed`'s doc comment for why this bypass is necessary).
 //!
 //! This handler does no side-effecting screening (never touches `FilterHandle::screen_tx` or its
 //! `BufferPool`): it runs a throwaway EVM overlay seeded from the current chain-tip state and
@@ -106,7 +109,10 @@ pub struct AuditTransactionsResponse {
 
 #[rpc(server, namespace = "xlayer")]
 pub trait XlayerAuditApi {
-    /// Classifies each deposit tx in `req.txs` against `req.rules`, without side effects.
+    /// Classifies each deposit tx in `req.txs` against `req.rules`, without side effects —
+    /// except for txs whose `source_hash` is in `req.known_allowed`, which are force-classified
+    /// `allow` without running `req.rules` against them at all (see
+    /// `AuditTransactionsRequest::known_allowed`).
     ///
     /// **Only meaningful for deposits not yet recorded in `TxBlacklist`.** If a deposit passed
     /// here has *already* been blacklisted on-chain, the underlying EVM (see the L1 force-tx
