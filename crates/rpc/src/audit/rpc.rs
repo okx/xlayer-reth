@@ -1,6 +1,10 @@
-//! `xlayer_auditTransactions` JSON-RPC method: builds deposit txs from the request, executes
-//! them one at a time against chain-tip state (each commit visible to the next tx in the
-//! batch), and classifies each with the pure `verdict_for`.
+//! `xlayer_auditTransactions` JSON-RPC method: builds deposit txs from the request and executes
+//! them **one at a time, in order**, against chain-tip state — but only commits a tx's state if
+//! it classifies as `Allow`. A `Deny` tx's state is discarded (never committed); an `Audit` tx's
+//! state is also discarded, and the loop stops immediately — every tx after it in the batch is
+//! reported as `Unknown` without ever being executed (its correct execution basis depends on
+//! whether the `Audit` tx's eventual allow/deny decision, made later by RCS, actually happens on
+//! chain — see `docs/superpowers/specs/2026-07-24-audit-transactions-multiround-rpc-design.md`).
 //!
 //! This handler does no side-effecting screening (never touches `FilterHandle::screen_tx` or its
 //! `BufferPool`): it runs a throwaway EVM overlay seeded from the current chain-tip state and
@@ -143,11 +147,13 @@ where
         // Build every tx up front so a per-item construction failure produces a `Malformed`
         // result without aborting the rest of the batch.
         let mut ordered_txs = Vec::with_capacity(req.txs.len());
+        let mut ordered_tx_reqs: Vec<DepositTxRequest> = Vec::with_capacity(req.txs.len());
         let mut built: Vec<Option<usize>> = Vec::with_capacity(req.txs.len());
         for tx_req in &req.txs {
             match build_deposit_tx(tx_req) {
                 Ok(tx) => {
                     built.push(Some(ordered_txs.len()));
+                    ordered_tx_reqs.push(tx_req.clone());
                     ordered_txs.push(tx);
                 }
                 Err(_err) => {
@@ -175,9 +181,9 @@ where
             jsonrpsee::types::ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>)
         })?;
 
-        // `ordered_txs`/`txs`/`built`/`rules` all move into the closure below: assembling each
-        // request's `AuditResult` has to happen there too, since the executed subset's logs
-        // (`ordered_txs`-indexed) never leave the blocking task.
+        // `ordered_txs`/`ordered_tx_reqs`/`txs`/`built`/`rules` all move into the closure below:
+        // assembling each request's `AuditResult` has to happen there too, since the executed
+        // subset's logs (`ordered_txs`-indexed) never leave the blocking task.
         let backend = self.backend.as_ref().clone();
         let block_id = BlockId::hash(latest_header.hash());
         let txs = req.txs;
@@ -185,34 +191,32 @@ where
             .spawn_with_state_at_block(block_id, move |this, mut state_db| {
                 let mut evm = this.evm_config().evm_with_env(&mut state_db, evm_env);
 
-                let mut executed_logs = Vec::with_capacity(ordered_txs.len());
-                for tx in &ordered_txs {
+                let mut executed: Vec<Option<AuditResult>> =
+                    (0..ordered_txs.len()).map(|_| None).collect();
+                for (exec_idx, tx) in ordered_txs.iter().enumerate() {
                     let ResultAndState { result, state } =
                         evm.transact(tx).map_err(T::Error::from_evm_err)?;
-                    evm.db_mut().commit(state);
-                    executed_logs.push(result.logs().to_vec());
-                }
-
-                let mut results = Vec::with_capacity(txs.len());
-                for (i, tx_req) in txs.iter().enumerate() {
-                    match built[i] {
-                        None => results.push(AuditResult::malformed(tx_req.source_hash.clone())),
-                        Some(exec_idx) => {
-                            let tx = &ordered_txs[exec_idx];
-                            let logs = &executed_logs[exec_idx];
-                            results.push(super::verdict::verdict_for(
-                                tx_req,
-                                tx.signer(),
-                                tx.to(),
-                                tx.tx_hash(),
-                                tx.value(),
-                                logs,
-                                &rules,
-                            ));
-                        }
+                    let logs = result.logs().to_vec();
+                    let verdict_result = super::verdict::verdict_for(
+                        &ordered_tx_reqs[exec_idx],
+                        tx.signer(),
+                        tx.to(),
+                        tx.tx_hash(),
+                        tx.value(),
+                        &logs,
+                        &rules,
+                    );
+                    let (commit, keep_going) = commit_and_continue(verdict_result.verdict);
+                    if commit {
+                        evm.db_mut().commit(state);
+                    }
+                    executed[exec_idx] = Some(verdict_result);
+                    if !keep_going {
+                        break;
                     }
                 }
-                Ok(results)
+
+                Ok(assemble_results(&txs, &built, &mut executed))
             })
             .await
             .map_err(Into::into)?;
