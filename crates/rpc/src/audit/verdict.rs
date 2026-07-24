@@ -23,6 +23,10 @@ pub enum Verdict {
     Allow,
     Deny,
     Audit,
+    /// Never executed/classified because an earlier tx in the same batch resolved to `Audit`
+    /// and the handler stopped executing the rest — see
+    /// `docs/superpowers/specs/2026-07-24-audit-transactions-multiround-rpc-design.md`.
+    Unknown,
     Malformed,
 }
 
@@ -40,6 +44,12 @@ impl AuditResult {
     /// it never reaches this module's `verdict_for`.
     pub fn malformed(source_hash: String) -> Self {
         Self { tx_hash: String::new(), source_hash, verdict: Verdict::Malformed, actions: None }
+    }
+
+    /// Builds an `Unknown` result for a tx that was never executed because an earlier tx in the
+    /// same batch stopped the loop with an `Audit` verdict (see `rpc.rs`'s `assemble_results`).
+    pub fn unknown(source_hash: String) -> Self {
+        Self { tx_hash: String::new(), source_hash, verdict: Verdict::Unknown, actions: None }
     }
 }
 
@@ -249,5 +259,14 @@ mod tests {
         assert_eq!(item.name, "transfer");
         assert_eq!(item.address, format!("{:#x}", token()));
         assert_eq!(item.params.get("value").and_then(|v| v.as_str()), Some("2000000000000000000"));
+    }
+
+    #[test]
+    fn unknown_result_has_empty_tx_hash_and_no_actions() {
+        let result = AuditResult::unknown("0xsrc".to_string());
+        assert_eq!(result.verdict, Verdict::Unknown);
+        assert_eq!(result.source_hash, "0xsrc");
+        assert_eq!(result.tx_hash, "");
+        assert!(result.actions.is_none());
     }
 }
