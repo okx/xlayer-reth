@@ -28,6 +28,23 @@ use revm::{context_interface::result::ResultAndState, DatabaseCommit};
 
 use super::deposit::{build_deposit_tx, DepositTxRequest};
 use super::verdict::AuditResult;
+use super::verdict::Verdict;
+
+/// Decides what to do with one just-classified tx's state during the single-pass execution
+/// loop: commit its state only if `Allow`; discard it (never commit) for `Deny` or `Audit`;
+/// stop executing the rest of the batch only for `Audit`. `Verdict::Unknown`/`Verdict::Malformed`
+/// are never produced by `verdict_for` (the only caller of this function's `verdict` input), so
+/// they're intentionally not handled here.
+fn commit_and_continue(verdict: Verdict) -> (bool, bool) {
+    match verdict {
+        Verdict::Allow => (true, true),
+        Verdict::Deny => (false, true),
+        Verdict::Audit => (false, false),
+        Verdict::Unknown | Verdict::Malformed => {
+            unreachable!("verdict_for never produces {verdict:?}")
+        }
+    }
+}
 
 #[derive(Debug, serde::Deserialize)]
 pub struct AuditTransactionsRequest {
@@ -178,5 +195,26 @@ where
             .map_err(Into::into)?;
 
         Ok(AuditTransactionsResponse { results })
+    }
+}
+
+#[cfg(test)]
+mod algorithm_tests {
+    use super::super::verdict::Verdict;
+    use super::commit_and_continue;
+
+    #[test]
+    fn allow_commits_and_continues() {
+        assert_eq!(commit_and_continue(Verdict::Allow), (true, true));
+    }
+
+    #[test]
+    fn deny_discards_and_continues() {
+        assert_eq!(commit_and_continue(Verdict::Deny), (false, true));
+    }
+
+    #[test]
+    fn audit_discards_and_stops() {
+        assert_eq!(commit_and_continue(Verdict::Audit), (false, false));
     }
 }
