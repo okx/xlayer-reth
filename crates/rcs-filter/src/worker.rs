@@ -185,6 +185,19 @@ pub(crate) async fn load_and_install(
         return Ok(false);
     }
     let set = load_rules(resp.protocol_version, resp.content_version, resp.rules);
+    if !set.rejected.is_empty() {
+        // Fail the whole update rather than installing a rule set that's silently missing
+        // the rule(s) that failed validation — a partial/degraded rule set with no operator
+        // visibility is worse than keeping the last-known-good one and retrying next poll.
+        warn!(
+            target: "rcs_filter",
+            content_version = resp.content_version,
+            rejected_count = set.rejected.len(),
+            rejected = ?set.rejected,
+            "rule set contains invalid rule(s); rejecting entire update, keeping current rules"
+        );
+        return Err(crate::FilterError::InvalidRules(set.rejected.len(), set.rejected));
+    }
     shared.install_rules(set);
     Ok(true)
 }
@@ -411,6 +424,7 @@ fn error_class(error: &crate::FilterError) -> &'static str {
         crate::FilterError::Decode(_) => "decode",
         crate::FilterError::UnsupportedProtocol(_) => "unsupported_protocol",
         crate::FilterError::Config(_) => "config",
+        crate::FilterError::InvalidRules(..) => "invalid_rules",
     }
 }
 

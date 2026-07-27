@@ -11,7 +11,8 @@ use alloy_primitives::{keccak256, Address};
 use tracing::warn;
 
 use super::model::{
-    Action, CompiledEvent, CompiledInput, CompiledRule, EventAbi, RawRule, RuleSet, TimeoutAction,
+    Action, CompiledEvent, CompiledInput, CompiledRule, EventAbi, RawRule, RejectedRule, RuleSet,
+    TimeoutAction,
 };
 
 /// Fixed ERC20 `Transfer` quota shape (ordered input names) — contract §3.3.
@@ -33,16 +34,20 @@ pub fn load_rules(protocol_version: u32, content_version: u64, raw: Vec<RawRule>
     }
 
     let mut rules = Vec::new();
+    let mut rejected = Vec::new();
     for rule in raw {
         let id = rule.id.clone();
         if id_counts.get(&id).copied().unwrap_or_default() > 1 {
+            let reason = "duplicate rule id".to_string();
             warn!(target: "rcs_filter", rule_id = %id, "duplicate rule id rejected");
+            rejected.push(RejectedRule { id, reason });
             continue;
         }
         match compile_rule(rule) {
             Ok(compiled) => rules.push(compiled),
             Err(reason) => {
-                warn!(target: "rcs_filter", rule_id = %id, %reason, "rule rejected during load")
+                warn!(target: "rcs_filter", rule_id = %id, %reason, "rule rejected during load");
+                rejected.push(RejectedRule { id, reason });
             }
         }
     }
@@ -61,7 +66,7 @@ pub fn load_rules(protocol_version: u32, content_version: u64, raw: Vec<RawRule>
         }
     }
 
-    RuleSet { protocol_version, content_version, rules, index, anonymous_index }
+    RuleSet { protocol_version, content_version, rules, index, anonymous_index, rejected }
 }
 
 /// Validates and compiles a single raw rule. Returns `Err(reason)` when the rule must be

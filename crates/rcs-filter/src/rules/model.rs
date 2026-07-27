@@ -122,6 +122,15 @@ pub struct CompiledRule {
     pub audit_timeout_action: TimeoutAction,
 }
 
+/// One rule dropped during [`super::load_rules`] (FR-8: per-rule id + why it failed), surfaced
+/// so callers can decide whether a partially-invalid batch is still safe to install rather than
+/// silently running with fewer active rules than the source actually declared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RejectedRule {
+    pub id: String,
+    pub reason: String,
+}
+
 /// An immutable, validated rule set snapshot plus its topic0 index. Swapped atomically on
 /// hot-reload (TD §4.9); the hot path only ever reads a fully-built snapshot.
 #[derive(Debug, Clone, Default)]
@@ -133,6 +142,11 @@ pub struct RuleSet {
     pub index: HashMap<B256, Vec<usize>>,
     /// Number of indexed topics -> rule indices declaring an anonymous event with that shape.
     pub anonymous_index: HashMap<usize, Vec<usize>>,
+    /// Rules from the source batch that failed validation and were left out of `rules` above.
+    /// Non-empty means this snapshot is a *strict subset* of what was requested — callers that
+    /// require all-or-nothing semantics (hot-reload install, the audit RPC) must check this
+    /// before trusting `rules` as complete.
+    pub rejected: Vec<RejectedRule>,
 }
 
 impl RuleSet {

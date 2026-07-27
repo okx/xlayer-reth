@@ -33,4 +33,11 @@ pub enum FilterError {
     /// Configuration is invalid (e.g. `enabled=true` without an `rcs_base_url`).
     #[error("filter configuration error: {0}")]
     Config(String),
+
+    /// One or more rules in an otherwise well-formed `/rules` response failed per-rule
+    /// validation (FR-8, e.g. empty `event_abis`, duplicate id, invalid JSONLogic). Surfaced as
+    /// an error — rather than silently installing the valid subset — so a partially-invalid
+    /// batch never replaces the currently-active rule set.
+    #[error("rule set contains {0} invalid rule(s), rejecting entire update: {1:?}")]
+    InvalidRules(usize, Vec<crate::rules::RejectedRule>),
 }

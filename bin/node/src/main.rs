@@ -273,6 +273,14 @@ fn main() {
                         None
                     };
 
+                    // Register X Layer audit RPC (`xlayer_auditTransactions`).
+                    let xlayer_audit_rpc =
+                        xlayer_rpc::XlayerAuditRpc { backend: new_op_eth_api.clone() };
+                    ctx.modules.merge_configured(xlayer_rpc::XlayerAuditApiServer::into_rpc(
+                        xlayer_audit_rpc,
+                    ))?;
+                    info!(target: "reth::cli", "xlayer audit rpc extension enabled");
+
                     // Register X Layer RPC
                     let peer_status = fb_p2p_status.get().cloned();
                     if xlayer_args.sequencer_mode && peer_status.is_none() {
