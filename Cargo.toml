@@ -69,6 +69,10 @@ xlayer-bridge-intercept = { path = "crates/intercept" }
 xlayer-builder = { path = "crates/builder" }
 xlayer-chainspec = { path = "crates/chainspec" }
 xlayer-flashblocks = { path = "crates/flashblocks" }
+# `kms:<name>` secret resolution, shared with the op-node side of the stack. The
+# private SDK behind it is pulled in only by this crate's `kms` feature; see
+# deps/optimism/rust/xlayer-kms/ for why the default build needs no credentials.
+xlayer-kms = { path = "deps/optimism/rust/xlayer-kms", default-features = false }
 xlayer-legacy-rpc = { path = "crates/legacy-rpc" }
 xlayer-monitor = { path = "crates/monitor" }
 xlayer-reth-node = { path = "bin/node" }

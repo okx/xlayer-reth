@@ -6760,6 +6760,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ok-kms-rust"
+version = "0.1.0"
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14569,6 +14573,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "xlayer-kms"
+version = "0.1.0"
+dependencies = [
+ "ok-kms-rust",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "xlayer-legacy-rpc"
 version = "0.0.6"
 dependencies = [
@@ -14618,6 +14630,7 @@ dependencies = [
  "either",
  "eyre",
  "humantime",
+ "libc",
  "op-alloy-network",
  "reth",
  "reth-basic-payload-builder",
@@ -14649,6 +14662,7 @@ dependencies = [
  "xlayer-builder",
  "xlayer-chainspec",
  "xlayer-flashblocks",
+ "xlayer-kms",
  "xlayer-legacy-rpc",
  "xlayer-monitor",
  "xlayer-rpc",
