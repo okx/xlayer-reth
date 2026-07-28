@@ -456,7 +456,7 @@ mod tests {
     use reth_optimism_payload_builder::{payload::OpPayloadBuilderAttributes, OpPayloadPrimitives};
     use reth_optimism_primitives::OpPrimitives;
     use reth_payload_primitives::BuiltPayloadExecutedBlock;
-    use reth_primitives::SealedBlock;
+    use reth_primitives_traits::SealedBlock;
     use reth_provider::test_utils::MockEthProvider;
     use reth_testing_utils::generators::{random_block_range, BlockRangeParams};
     use tokio::{

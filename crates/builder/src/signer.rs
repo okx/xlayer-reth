@@ -4,7 +4,7 @@ use alloy_consensus::SignableTransaction;
 use alloy_primitives::{Address, Signature, B256, U256};
 use op_alloy_consensus::OpTypedTransaction;
 use reth_optimism_primitives::OpTransactionSigned;
-use reth_primitives::Recovered;
+use reth_primitives_traits::Recovered;
 use secp256k1::{Message, PublicKey, SecretKey, SECP256K1};
 use sha3::{Digest, Keccak256};
 
