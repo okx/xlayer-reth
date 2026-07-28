@@ -292,7 +292,9 @@ fn chain_spec() -> Arc<OpChainSpec> {
 }
 
 fn runtime() -> Runtime {
-    Runtime::test_with_handle(tokio::runtime::Handle::current())
+    // `Runtime::test()` attaches to the current tokio handle (when called from
+    // `#[tokio::test]`) which is what the previous `test_with_handle(...)` API did.
+    Runtime::test()
 }
 
 fn pool_component(rollup_args: &RollupArgs) -> OpPoolBuilder {
@@ -389,13 +391,21 @@ impl FlashblocksListener {
 
     /// Check if any flashblock contains the given transaction hash
     pub fn contains_transaction(&self, tx_hash: &B256) -> bool {
-        self.flashblocks.lock().iter().any(|fb| fb.payload.metadata.receipts.contains_key(tx_hash))
+        self.flashblocks
+            .lock()
+            .iter()
+            .any(|fb| fb.payload.metadata.receipts.as_ref().is_some_and(|r| r.contains_key(tx_hash)))
     }
 
     /// Find which flashblock index contains the given transaction hash
     pub fn find_transaction_flashblock(&self, tx_hash: &B256) -> Option<u64> {
         self.flashblocks.lock().iter().find_map(|fb| {
-            fb.payload.metadata.receipts.contains_key(tx_hash).then_some(fb.payload.index)
+            fb.payload
+                .metadata
+                .receipts
+                .as_ref()
+                .is_some_and(|r| r.contains_key(tx_hash))
+                .then_some(fb.payload.index)
         })
     }
 
