@@ -391,10 +391,9 @@ impl FlashblocksListener {
 
     /// Check if any flashblock contains the given transaction hash
     pub fn contains_transaction(&self, tx_hash: &B256) -> bool {
-        self.flashblocks
-            .lock()
-            .iter()
-            .any(|fb| fb.payload.metadata.receipts.as_ref().is_some_and(|r| r.contains_key(tx_hash)))
+        self.flashblocks.lock().iter().any(|fb| {
+            fb.payload.metadata.receipts.as_ref().is_some_and(|r| r.contains_key(tx_hash))
+        })
     }
 
     /// Find which flashblock index contains the given transaction hash
