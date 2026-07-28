@@ -344,6 +344,7 @@ where
                     index: Some(ctx.idx as u64),
                     block_hash: Some(ctx.sealed_block.hash()),
                     block_number: Some(ctx.sealed_block.header().number()),
+                    block_timestamp: Some(ctx.sealed_block.header().timestamp()),
                     base_fee: ctx.sealed_block.header().base_fee_per_gas(),
                 },
             )
