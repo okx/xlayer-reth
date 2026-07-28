@@ -72,7 +72,7 @@ pub struct GenGenesisCommand<C: ChainSpecParser> {
 
 impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
     /// Execute `gen-genesis` command
-    pub async fn execute<N>(self) -> Result<()>
+    pub async fn execute<N>(self, runtime: reth_tasks::Runtime) -> Result<()>
     where
         N: reth_cli_commands::common::CliNodeTypes<ChainSpec = C::ChainSpec>,
     {
@@ -116,7 +116,7 @@ impl<C: ChainSpecParser<ChainSpec = OpChainSpec>> GenGenesisCommand<C> {
         .wrap_err("Failed to set interrupt handler")?;
 
         // Initialize the environment (opens the database in read-write mode to avoid error)
-        let Environment { provider_factory, .. } = self.env.init::<N>(AccessRights::RW)?;
+        let Environment { provider_factory, .. } = self.env.init::<N>(AccessRights::RW, runtime)?;
 
         // Get the latest block number from the database
         let provider = provider_factory.provider()?;

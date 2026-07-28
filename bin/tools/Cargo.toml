@@ -43,6 +43,7 @@ reth-stages-types.workspace = true
 reth-static-file.workspace = true
 reth-static-file-types.workspace = true
 reth-storage-api.workspace = true
+reth-tasks.workspace = true
 
 # alloy
 alloy-consensus.workspace = true

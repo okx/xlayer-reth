@@ -99,6 +99,12 @@ impl PoolTransaction for MockFbTransaction {
         self.inner.into()
     }
 
+    fn consensus_ref(&self) -> Recovered<&Self::Consensus> {
+        // Mirror upstream `MockTransaction::consensus_ref`: the mock doesn't wrap a real
+        // consensus transaction, so this isn't reachable in our flashblocks tests.
+        unimplemented!("mock transaction does not wrap a consensus transaction")
+    }
+
     fn from_pooled(pooled: Recovered<Self::Pooled>) -> Self {
         Self { inner: pooled.into() }
     }
