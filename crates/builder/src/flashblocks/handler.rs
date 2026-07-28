@@ -293,6 +293,7 @@ where
 
     let payload_config = PayloadConfig {
         parent_header: Arc::new(SealedHeader::new(parent_header.clone(), parent_hash)),
+        parent_block_info: None,
         attributes: OpPayloadBuilderAttributes {
             id: payload.id(),    // unused
             parent: parent_hash, // unused
