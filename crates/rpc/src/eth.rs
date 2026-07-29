@@ -127,7 +127,8 @@ where
                             .provider()
                             .history_by_block_hash(pending.block().parent_hash())
                             .to_rpc_result()?;
-                        let state = BlockState::from(pending).state_provider(latest_historical);
+                        let state =
+                            BlockState::from(pending.pending).state_provider(latest_historical);
                         let nonce =
                             state.account_nonce(&address).to_rpc_result()?.unwrap_or_default();
                         Ok(U256::from(nonce))
