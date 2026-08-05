@@ -1,7 +1,3 @@
-use crate::{
-    broadcast::XLayerFlashblockMessage, metrics::tokio::MonitoredTask, metrics::BuilderMetrics,
-};
-use alloy_primitives::Bytes;
 use core::{
     fmt::{Debug, Formatter},
     net::SocketAddr,
@@ -9,6 +5,7 @@ use core::{
 };
 use futures::SinkExt;
 use futures_util::StreamExt;
+use op_alloy_rpc_types_engine::OpFlashblockPayload;
 use std::{io, net::TcpListener, sync::Arc};
 use tokio::{
     net::TcpStream,
@@ -21,21 +18,23 @@ use tokio_tungstenite::{
     accept_async,
     tungstenite::{
         protocol::frame::{coding::CloseCode, CloseFrame},
-        Message,
+        Message, Utf8Bytes,
     },
     WebSocketStream,
 };
 use tracing::{debug, info, trace, warn};
 
+use crate::{metrics::tokio::MonitoredTask, metrics::BuilderMetrics};
+
 /// A WebSockets publisher that accepts connections from client websockets and broadcasts to them
 /// updates about new flashblocks. It maintains a count of sent messages and active subscriptions.
 ///
-/// This is modelled as a `futures::Sink` that can be used to send `Bytes` wire bytes messages.
+/// This is modelled as a `futures::Sink` that can be used to send `OpFlashblockPayload` messages.
 pub struct WebSocketPublisher {
     sent: Arc<AtomicUsize>,
     subs: Arc<AtomicUsize>,
     term: watch::Sender<bool>,
-    pipe: broadcast::Sender<Bytes>,
+    pipe: broadcast::Sender<Utf8Bytes>,
     subscriber_limit: Option<u16>,
 }
 
@@ -66,30 +65,26 @@ impl WebSocketPublisher {
         Ok(Self { sent, subs, term, pipe, subscriber_limit })
     }
 
-    pub fn publish(&self, bytes: Bytes, payload: &XLayerFlashblockMessage) -> io::Result<usize> {
-        match payload {
-            XLayerFlashblockMessage::Payload(payload) => {
-                info!(
-                    target: "payload_builder::broadcast",
-                    event = "flashblock_sent",
-                    message = "Sending flashblock to subscribers",
-                    id = %payload.inner.payload_id,
-                    index = payload.inner.index,
-                    base = payload.inner.base.is_some(),
-                    target_index = payload.target_index,
-                );
-            }
-            XLayerFlashblockMessage::PayloadEnd(payload) => {
-                info!(
-                    target: "payload_builder::broadcast",
-                    event = "flashblock_end_sent",
-                    message = "Sending flashblock to subscribers",
-                    id = %payload.payload_id,
-                );
-            }
-        }
-        let size = bytes.len();
-        self.pipe.send(bytes).map_err(|e| io::Error::new(io::ErrorKind::ConnectionAborted, e))?;
+    pub fn publish(&self, payload: &OpFlashblockPayload) -> io::Result<usize> {
+        // Serialize the payload to a UTF-8 string
+        // serialize only once, then just copy around only a pointer
+        // to the serialized data for each subscription.
+        info!(
+            target: "payload_builder",
+            event = "flashblock_sent",
+            message = "Sending flashblock to subscribers",
+            id = %payload.payload_id,
+            index = payload.index,
+            base = payload.base.is_some(),
+        );
+
+        let serialized = serde_json::to_string(payload)?;
+        let utf8_bytes = Utf8Bytes::from(serialized);
+        let size = utf8_bytes.len();
+        // Send the serialized payload to all subscribers
+        self.pipe
+            .send(utf8_bytes)
+            .map_err(|e| io::Error::new(io::ErrorKind::ConnectionAborted, e))?;
         Ok(size)
     }
 }
@@ -98,14 +93,14 @@ impl Drop for WebSocketPublisher {
     fn drop(&mut self) {
         // Notify the listener loop to terminate
         let _ = self.term.send(true);
-        info!(target: "payload_builder::broadcast", "WebSocketPublisher dropped, terminating listener loop");
+        info!(target: "payload_builder", "WebSocketPublisher dropped, terminating listener loop");
     }
 }
 
 async fn listener_loop(
     listener: TcpListener,
     metrics: Arc<BuilderMetrics>,
-    receiver: Receiver<Bytes>,
+    receiver: Receiver<Utf8Bytes>,
     term: watch::Receiver<bool>,
     sent: Arc<AtomicUsize>,
     subs: Arc<AtomicUsize>,
@@ -117,7 +112,7 @@ async fn listener_loop(
         .expect("Failed to convert TcpListener to tokio TcpListener");
 
     let listen_addr = listener.local_addr().expect("Failed to get local address of listener");
-    info!(target: "payload_builder::broadcast", "Flashblocks WebSocketPublisher listening on {listen_addr}");
+    info!(target: "payload_builder", "Flashblocks WebSocketPublisher listening on {listen_addr}");
 
     let mut term = term;
 
@@ -145,7 +140,7 @@ async fn listener_loop(
                     Ok(mut stream) => {
                         tokio::spawn(async move {
                             if let Some(limit) = subscriber_limit && subs.load(Ordering::Relaxed) >= limit as usize {
-                                    warn!(target: "payload_builder::broadcast", "WebSocket connection for {peer_addr} rejected: subscriber limit reached");
+                                    warn!(target: "payload_builder", "WebSocket connection for {peer_addr} rejected: subscriber limit reached");
                                     let _ = stream.close(Some(CloseFrame {
                                         code: CloseCode::Again,
                                         reason: "subscriber limit reached, please try again later".into(),
@@ -153,17 +148,17 @@ async fn listener_loop(
                                     return;
                             }
                             subs.fetch_add(1, Ordering::Relaxed);
-                            debug!(target: "payload_builder::broadcast", "WebSocket connection established with {}", peer_addr);
+                            debug!(target: "payload_builder", "WebSocket connection established with {}", peer_addr);
 
                             // Handle the WebSocket connection in a dedicated task
                             broadcast_loop(stream, metrics, term, receiver_clone, sent).await;
 
                             subs.fetch_sub(1, Ordering::Relaxed);
-                            debug!(target: "payload_builder::broadcast", "WebSocket connection closed for {}", peer_addr);
+                            debug!(target: "payload_builder", "WebSocket connection closed for {}", peer_addr);
                         });
                     }
                     Err(e) => {
-                        warn!(target: "payload_builder::broadcast", "Failed to accept WebSocket connection from {peer_addr}: {e}");
+                        warn!(target: "payload_builder", "Failed to accept WebSocket connection from {peer_addr}: {e}");
                     }
                 }
             }
@@ -180,7 +175,7 @@ async fn broadcast_loop(
     stream: WebSocketStream<TcpStream>,
     metrics: Arc<BuilderMetrics>,
     term: watch::Receiver<bool>,
-    blocks: broadcast::Receiver<Bytes>,
+    blocks: broadcast::Receiver<Utf8Bytes>,
     sent: Arc<AtomicUsize>,
 ) {
     let mut term = term;
@@ -197,7 +192,7 @@ async fn broadcast_loop(
             // Check if the publisher is terminated
             _ = term.changed() => {
                 if *term.borrow() {
-                    info!(target: "payload_builder::broadcast", "WebSocketPublisher is terminating, closing broadcast loop");
+                    info!(target: "payload_builder", "WebSocketPublisher is terminating, closing broadcast loop");
                     return;
                 }
             }
@@ -210,25 +205,18 @@ async fn broadcast_loop(
                     sent.fetch_add(1, Ordering::Relaxed);
                     metrics.messages_sent_count.increment(1);
 
-                    trace!(
-                        target: "payload_builder::broadcast",
-                        size = payload.len(),
-                        "Broadcasted payload"
-                    );
-                    if let Err(e) = stream
-                        .send(Message::Binary(tokio_tungstenite::tungstenite::Bytes::from(payload)))
-                        .await
-                    {
-                        debug!(target: "payload_builder::broadcast", "Send payload error for flashblocks subscription {peer_addr}: {e}");
+                    trace!(target: "payload_builder", "Broadcasted payload: {:?}", payload);
+                    if let Err(e) = stream.send(Message::Text(payload)).await {
+                        debug!(target: "payload_builder", "Send payload error for flashblocks subscription {peer_addr}: {e}");
                         break; // Exit the loop if sending fails
                     }
                 }
                 Err(RecvError::Closed) => {
-                    debug!(target: "payload_builder::broadcast", "Broadcast channel closed, exiting broadcast loop");
+                    debug!(target: "payload_builder", "Broadcast channel closed, exiting broadcast loop");
                     return;
                 }
                 Err(RecvError::Lagged(_)) => {
-                    warn!(target: "payload_builder::broadcast", "Broadcast channel lagged, some messages were dropped");
+                    warn!(target: "payload_builder", "Broadcast channel lagged, some messages were dropped");
                 }
             },
 
@@ -236,11 +224,11 @@ async fn broadcast_loop(
             message = stream.next() => if let Some(message) = message { match message {
                 // We handle only close frame to highlight conn closing
                 Ok(Message::Close(_)) => {
-                    info!(target: "payload_builder::broadcast", "Closing frame received, stopping connection for {peer_addr}");
+                    info!(target: "payload_builder", "Closing frame received, stopping connection for {peer_addr}");
                     break;
                 }
                 Err(e) => {
-                    warn!(target: "payload_builder::broadcast", "Received error. Closing flashblocks subscription for {peer_addr}: {e}");
+                    warn!(target: "payload_builder", "Received error. Closing flashblocks subscription for {peer_addr}: {e}");
                     break;
                 }
                 _ => (),

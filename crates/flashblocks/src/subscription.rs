@@ -1,11 +1,11 @@
-use crate::{
-    subscription::pubsub::{
-        EnrichedTransaction, FlashblockParams, FlashblockStreamEvent, FlashblockSubscriptionKind,
-        FlashblocksFilter,
-    },
-    PendingSequence, PendingSequenceRx,
+use crate::pubsub::{
+    EnrichedTransaction, FlashblockParams, FlashblockStreamEvent, FlashblockSubscriptionKind,
+    FlashblocksFilter,
 };
-
+use alloy_consensus::{transaction::TxHashRef, BlockHeader as _, Transaction as _, TxReceipt as _};
+use alloy_json_rpc::RpcObject;
+use alloy_primitives::{Address, TxHash, U256};
+use alloy_rpc_types_eth::{Header, TransactionInfo};
 use futures::StreamExt;
 use jsonrpsee::{
     proc_macros::rpc, server::SubscriptionMessage, types::ErrorObject, PendingSubscriptionSink,
@@ -13,14 +13,7 @@ use jsonrpsee::{
 };
 use moka::policy::EvictionPolicy;
 use moka::sync::Cache;
-use std::{collections::HashSet, future::ready, sync::Arc};
-use tokio_stream::{wrappers::WatchStream, Stream};
-
-use alloy_consensus::{transaction::TxHashRef, BlockHeader as _, Transaction as _, TxReceipt as _};
-use alloy_json_rpc::RpcObject;
-use alloy_primitives::{Address, TxHash, U256};
-use alloy_rpc_types_eth::{Header, TransactionInfo};
-
+use reth_optimism_flashblocks::{PendingBlockRx, PendingFlashBlock};
 use reth_primitives_traits::{
     NodePrimitives, Recovered, RecoveredBlock, SealedBlock, TransactionMeta,
 };
@@ -32,6 +25,8 @@ use reth_rpc_server_types::result::{internal_rpc_err, invalid_params_rpc_err};
 use reth_storage_api::BlockNumReader;
 use reth_tasks::TaskExecutor;
 use reth_tracing::tracing::{trace, warn};
+use std::{collections::HashSet, future::ready, sync::Arc};
+use tokio_stream::{wrappers::WatchStream, Stream};
 
 const MAX_TXHASH_CACHE_SIZE: u64 = 10_000;
 
@@ -92,7 +87,7 @@ where
     /// Subscription tasks are spawned via [`tokio::task::spawn`]
     pub fn new(
         eth_pubsub: EthPubSub<Eth>,
-        pending_block_rx: PendingSequenceRx<N>,
+        pending_block_rx: PendingBlockRx<N>,
         subscription_task_spawner: TaskExecutor,
         tx_converter: Eth::RpcConvert,
         max_subscribed_addresses: usize,
@@ -198,7 +193,7 @@ where
 #[derive(Clone)]
 pub struct FlashblocksPubSubInner<Eth: EthApiTypes, N: NodePrimitives> {
     /// Pending block receiver from flashblocks, if available
-    pub(crate) pending_block_rx: PendingSequenceRx<N>,
+    pub(crate) pending_block_rx: PendingBlockRx<N>,
     /// The type that's used to spawn subscription tasks.
     pub(crate) subscription_task_spawner: TaskExecutor,
     /// RPC transaction converter.
@@ -238,7 +233,7 @@ where
 
     /// Convert a flashblock into a stream of events (header + transaction messages)
     fn flashblock_to_stream_events(
-        pending_block: &PendingSequence<N>,
+        pending_block: &PendingFlashBlock<N>,
         filter: &FlashblocksFilter,
         tx_converter: &Eth::RpcConvert,
         txhash_cache: &Cache<TxHash, ()>,
@@ -349,8 +344,8 @@ where
                     index: Some(ctx.idx as u64),
                     block_hash: Some(ctx.sealed_block.hash()),
                     block_number: Some(ctx.sealed_block.header().number()),
+                    block_timestamp: Some(ctx.sealed_block.header().timestamp()),
                     base_fee: ctx.sealed_block.header().base_fee_per_gas(),
-                    ..Default::default()
                 },
             )
             .ok()?;
@@ -488,7 +483,7 @@ where
 
 /// Extract `Header` from `PendingFlashBlock`
 fn extract_header_from_pending_block<N: NodePrimitives>(
-    pending_block: &PendingSequence<N>,
+    pending_block: &PendingFlashBlock<N>,
 ) -> Result<Header<N::BlockHeader>, ErrorObject<'static>> {
     let block = pending_block.block();
     Ok(Header::from_consensus(

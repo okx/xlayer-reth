@@ -6,7 +6,7 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Rust](https://img.shields.io/badge/Rust-1.94+-orange.svg)](https://www.rust-lang.org/)
 [![GitHub release](https://img.shields.io/github/v/release/okx/xlayer-reth)](https://github.com/okx/xlayer-reth/releases)
-[![Reth](https://img.shields.io/badge/reth-v2.1.0-purple.svg)](https://github.com/paradigmxyz/reth/releases/tag/v2.1.0)
+[![Reth](https://img.shields.io/badge/reth-v2.3.0-purple.svg)](https://github.com/paradigmxyz/reth/releases/tag/v2.3.0)
 
 # XLayer Reth
 
@@ -145,7 +145,6 @@ OTEL_EXPORTER_OTLP_PROTOCOL=http cargo r -p xlayer-reth-node node \
 ```
 
 Key flags:
-
 - `--dev`: Enables dev mode (auto-mining, no consensus required)
 - `--dev.block-time 1s`: Mine a new block every second
 - `--engine.legacy-state-root`: Use legacy state root computation
@@ -192,17 +191,14 @@ just watch-check
 ```
 
 ## Testing
-
 ### End-to-end Testing
 
 To run end-to-end (e2e) tests, first build ``xlayer-reth`` Docker image in this repo:
-
 ```
 just build-docker
 ```
 
 Next, you need to start a devnet using [xlayer-toolkit](https://github.com/okx/xlayer-toolkit/blob/main/devnet/README.md). Make sure you set the following environment variables in ``xlayer-toolkit/devnet/example.env``:
-
 ```
 SEQ_TYPE=reth
 RPC_TYPE=reth
@@ -210,7 +206,6 @@ ENABLE_INNERTX_RPC=true
 ```
 
 After devnet is started, run the e2e test:
-
 ```
 cargo test -p xlayer-e2e-test --test e2e_tests -- --nocapture --test-threads=1
 # or
@@ -218,28 +213,23 @@ just test true
 ```
 
 ### Flashblocks Tests
-
 Similar to e2e tests, first build ``xlayer-reth`` Docker image in this repo:
-
 ```
 just build-docker
 ```
 
 Next, you need to start a devnet using [xlayer-toolkit](https://github.com/okx/xlayer-toolkit/blob/main/devnet/README.md). Make sure you set the following environment variables in ``xlayer-toolkit/devnet/example.env``:
-
 ```
 FLASHBLOCK_ENABLED=true
 FLASHBLOCK_P2P_ENABLED=true
 ```
 
 Also, start the 2nd RPC node under ``xlayer-toolkit/devnet``:
-
 ```
 ./scripts/run-rpc2.sh
 ```
 
 Then, in this repo, run:
-
 ```
 cargo test -p xlayer-e2e-test --test flashblocks_tests -- --nocapture --test-threads=1
 # or
@@ -247,7 +237,6 @@ just test false true
 ```
 
 To run all flashblocks tests (including ignored tests, also requires 2nd RPC node to be running), run:
-
 ```
 cargo test -p xlayer-e2e-test --test flashblocks_tests -- --include-ignored --nocapture --test-threads=1
 ```

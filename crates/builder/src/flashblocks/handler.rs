@@ -1,8 +1,10 @@
 use crate::{
-    broadcast::{BroadcastFrame, Message, WebSocketPublisher, XLayerFlashblockMessage},
     flashblocks::{
         handler_ctx::FlashblockHandlerContext,
-        utils::{cache::FlashblockPayloadsCache, execution::ExecutionInfo},
+        utils::{
+            cache::FlashblockPayloadsCache, execution::ExecutionInfo, p2p::Message,
+            wspub::WebSocketPublisher,
+        },
     },
     traits::ClientBounds,
 };
@@ -37,11 +39,11 @@ pub(crate) struct FlashblocksPayloadHandler<Client> {
     // handler context for external flashblock execution
     ctx: FlashblockHandlerContext,
     // receives new flashblock payloads built by this builder.
-    built_fb_payload_rx: mpsc::Receiver<XLayerFlashblockMessage>,
+    built_fb_payload_rx: mpsc::Receiver<OpFlashblockPayload>,
     // receives new full block payloads built by this builder.
     built_payload_rx: mpsc::Receiver<OpBuiltPayload>,
     // receives incoming p2p messages from peers.
-    p2p_rx: mpsc::Receiver<BroadcastFrame>,
+    p2p_rx: mpsc::Receiver<Message>,
     // outgoing p2p channel to broadcast new payloads to peers.
     p2p_tx: mpsc::Sender<Message>,
     // sends a `Events::BuiltPayload` to the reth payload builder when a new payload is received.
@@ -66,9 +68,9 @@ where
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         ctx: FlashblockHandlerContext,
-        built_fb_payload_rx: mpsc::Receiver<XLayerFlashblockMessage>,
+        built_fb_payload_rx: mpsc::Receiver<OpFlashblockPayload>,
         built_payload_rx: mpsc::Receiver<OpBuiltPayload>,
-        p2p_rx: mpsc::Receiver<BroadcastFrame>,
+        p2p_rx: mpsc::Receiver<Message>,
         p2p_tx: mpsc::Sender<Message>,
         payload_events_handle: tokio::sync::broadcast::Sender<Events<OpEngineTypes>>,
         p2p_cache: FlashblockPayloadsCache,
@@ -118,7 +120,7 @@ where
         loop {
             tokio::select! {
                 Some(payload) = built_fb_payload_rx.recv() => {
-                    // ignore send error (broadcast node may have shut down)
+                    // ignore error here; if p2p was disabled, the channel will be closed.
                     let _ = p2p_tx.send(Message::from_flashblock_payload(payload)).await;
                 }
                 Some(payload) = built_payload_rx.recv() => {
@@ -127,18 +129,18 @@ where
                         warn!(target: "payload_builder", e = ?e, "failed to send BuiltPayload event");
                     }
                     if p2p_send_full_payload_flag {
-                        // ignore send error (broadcast node may have shut down)
+                        // ignore error here; if p2p was disabled, the channel will be closed.
                         let _ = p2p_tx.send(Message::from_built_payload(payload)).await;
                     }
                 }
-                Some(frame) = p2p_rx.recv() => {
-                    match frame.decoded.as_ref() {
+                Some(message) = p2p_rx.recv() => {
+                    match message {
                         Message::OpBuiltPayload(payload) => {
                             if !p2p_process_full_payload_flag {
                                 continue;
                             }
 
-                            let payload: OpBuiltPayload = (**payload).clone().into();
+                            let payload: OpBuiltPayload = payload.into();
                             let block_hash = payload.block().hash();
                             // Check if this block is already the pending block in canonical state
                             if let Ok(Some(pending)) = client.pending_block()
@@ -181,10 +183,10 @@ where
                             }));
                         }
                         Message::OpFlashblockPayload(fb_payload) => {
-                            if let XLayerFlashblockMessage::Payload(payload) = fb_payload {
-                                p2p_cache.add_flashblock_payload(payload.inner.clone());
+                            if let Err(e) = p2p_cache.add_flashblock_payload(fb_payload.clone()) {
+                                warn!(target: "payload_builder", e = ?e, "failed to add flashblock txs to cache");
                             }
-                            if let Err(e) = ws_pub.publish(frame.bytes.clone(), fb_payload) {
+                            if let Err(e) = ws_pub.publish(&fb_payload) {
                                 warn!(target: "payload_builder", e = ?e, "failed to publish flashblock to websocket publisher");
                             }
                         }
@@ -291,6 +293,7 @@ where
 
     let payload_config = PayloadConfig {
         parent_header: Arc::new(SealedHeader::new(parent_header.clone(), parent_hash)),
+        parent_block_info: None,
         attributes: OpPayloadBuilderAttributes {
             id: payload.id(),    // unused
             parent: parent_hash, // unused

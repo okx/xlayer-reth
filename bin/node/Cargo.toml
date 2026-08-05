@@ -16,6 +16,7 @@ workspace = true
 xlayer-bridge-intercept.workspace = true
 xlayer-builder.workspace = true
 xlayer-flashblocks.workspace = true
+xlayer-kms.workspace = true
 xlayer-chainspec.workspace = true
 xlayer-legacy-rpc.workspace = true
 xlayer-monitor.workspace = true
@@ -25,10 +26,7 @@ xlayer-trace-monitor.workspace = true
 
 # reth
 reth.workspace = true
-reth-chain-state.workspace = true
-reth-engine-tree.workspace = true
 reth-optimism-node.workspace = true
-reth-optimism-primitives.workspace = true
 reth-optimism-cli.workspace = true
 reth-node-api.workspace = true
 reth-node-builder.workspace = true
@@ -49,11 +47,7 @@ reth-optimism-forks.workspace = true
 reth-optimism-txpool.workspace = true
 reth-transaction-pool.workspace = true
 reth-cli-util.workspace = true
-reth-provider.workspace = true
-reth-rpc-builder.workspace = true
 reth-rpc-server-types.workspace = true
-reth-tasks = { workspace = true, features = ["rayon"] }
-reth-trie-db.workspace = true
 
 # alloy
 alloy-primitives.workspace = true
@@ -64,9 +58,6 @@ op-alloy-network.workspace = true
 # revm
 revm.workspace = true
 
-# async
-tokio.workspace = true
-
 # misc
 clap.workspace = true
 tracing.workspace = true
@@ -75,8 +66,19 @@ eyre.workspace = true
 humantime.workspace = true
 either.workspace = true
 
+# X Layer: memfd_create for staging a KMS-resolved p2p key behind a
+# /proc/self/fd path (see resolve_kms_secret_flags in main.rs).
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [features]
 default = []
+
+# X Layer: resolve `kms:<name>` references in secret-bearing flags (builder
+# secret key, flashblocks p2p key, reth's --p2p-secret-key). All resolution
+# happens in main.rs before clap parses, so no other crate is involved. See
+# deps/optimism/rust/xlayer-kms/.
+kms = ["xlayer-kms/kms"]
 jemalloc = ["reth-cli-util/jemalloc", "reth-optimism-cli/jemalloc"]
 jemalloc-prof = ["reth-cli-util/jemalloc-prof"]
 asm-keccak = ["alloy-primitives/asm-keccak"]

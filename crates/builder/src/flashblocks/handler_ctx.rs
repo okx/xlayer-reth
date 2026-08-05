@@ -96,8 +96,8 @@ impl FlashblockHandlerContext {
             bridge_intercept_config: Default::default(),
             gasless_contract: self.gasless_contract,
             gasless_block_gas_limit: None,
-            // External full-payload processing is disabled by service.rs while RCS filtering is
-            // enabled. This follower/replay context therefore never performs local screening.
+            // External full-payload processing is disabled while RCS filtering is enabled, so
+            // follower/replay execution never performs local screening.
             filter: None,
         }
     }

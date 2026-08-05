@@ -29,9 +29,6 @@ impl ChainSpecParser for XLayerChainSpecParser {
         "optimism",
         "optimism_sepolia",
         "optimism-sepolia",
-        "base",
-        "base_sepolia",
-        "base-sepolia",
         // XLayer chains
         "xlayer-mainnet",
         "xlayer-testnet",
@@ -92,7 +89,7 @@ fn xlayer_chain_value_parser(s: &str) -> eyre::Result<Arc<OpChainSpec>> {
         }
         // For other inputs, try known OP chains first, then parse as genesis
         _ => {
-            // Try to match known OP chains (optimism, base, etc.)
+            // Try to match known OP chains (optimism, op-sepolia, etc.)
             if let Some(op_chain_spec) = generated_chain_value_parser(s) {
                 return Ok(op_chain_spec);
             }
@@ -132,17 +129,10 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_base() {
-        let spec = XLayerChainSpecParser::parse("base").unwrap();
-        assert_eq!(spec.chain().id(), 8453);
-    }
-
-    #[test]
     fn test_supported_chains() {
         assert!(XLayerChainSpecParser::SUPPORTED_CHAINS.contains(&"xlayer-mainnet"));
         assert!(XLayerChainSpecParser::SUPPORTED_CHAINS.contains(&"xlayer-testnet"));
         assert!(XLayerChainSpecParser::SUPPORTED_CHAINS.contains(&"optimism"));
-        assert!(XLayerChainSpecParser::SUPPORTED_CHAINS.contains(&"base"));
     }
 
     #[test]

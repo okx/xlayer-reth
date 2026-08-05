@@ -199,6 +199,7 @@ where
         let deadline = Box::pin(tokio::time::sleep(deadline));
         let config = PayloadConfig {
             parent_header: Arc::new(parent_header.clone()),
+            parent_block_info: None,
             attributes: builder_attrs,
             payload_id: id,
         };

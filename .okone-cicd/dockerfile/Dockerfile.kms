@@ -1,0 +1,99 @@
+FROM office-registry-vpc.cn-hongkong.cr.aliyuncs.com/inner-public/cargo-chef/latest-rust-1.92/cargo-chef:latest AS chef
+WORKDIR /app
+LABEL org.opencontainers.image.source=https://github.com/xlayer/xlayer-reth
+LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
+RUN apt-get update && apt-get -y upgrade && apt-get install -y libclang-dev pkg-config
+
+# Pre-install the toolchain pinned by rust-toolchain.toml (the repo pins 1.94, the
+# base image ships 1.92). Done as its own cached layer keyed only on
+# rust-toolchain.toml so cook and the final build use the SAME toolchain (otherwise
+# cook compiles with 1.92 and the post-`COPY . .` build re-fingerprints on 1.94,
+# busting cargo-chef's dependency cache — or fails if 1.94 cannot be fetched late).
+COPY rust-toolchain.toml .
+RUN rustup show
+
+# X Layer: authenticate against the private gitlab.okg.com group so the real
+# ok-kms-rust SDK can be checked out below. GIT_TOKEN is passed at build time via
+# --build-arg (use $CI_JOB_TOKEN); it only ever lives in a builder stage and never
+# reaches the runtime image. ok-kms-rust must allowlist this project's job token.
+ARG GIT_TOKEN
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
+RUN git config --global \
+      url."https://gitlab-ci-token:${GIT_TOKEN}@gitlab.okg.com/".insteadOf \
+      "https://gitlab.okg.com/"
+
+# Builds a cargo-chef plan
+FROM chef AS planner
+COPY . .
+# Remove test-only workspace members that are excluded from the Docker context
+RUN sed -i '/"crates\/tests"/d' Cargo.toml
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+# REQUIRED before `cargo chef cook`: the workspace has a `[patch.crates-io]` entry
+#   libp2p-yamux = { path = "deps/libp2p-yamux" }
+# (a security fork that drops vulnerable yamux 0.12.x — CVE-2026-32314). cargo-chef
+# recreates `[dependencies]` path crates from the recipe, but NOT `[patch]` path
+# crates, so cook must see the real `deps/` on disk. Without this copy cook fails
+# with: failed to read `/app/deps/libp2p-yamux/Cargo.toml`: No such file or directory.
+COPY deps/ deps/
+
+# X Layer: swap the in-tree ok-kms-rust stand-in for a real checkout of the private
+# SDK. deps/optimism/rust/xlayer-kms depends on it by path precisely so that the
+# committed workspace needs no gitlab.okg.com access — see that crate's lib.rs.
+# This mirrors the `kms-crate` recipe in deps/optimism/rust/justfile (inlined
+# because this image has no `just`, and cloning over HTTPS so the token above
+# applies); keep the tag in sync with KMS_CRATE_TAG there.
+#
+# Done before `cargo chef cook` so the SDK's own dependencies land in the cached
+# dependency layer rather than being compiled after `COPY . .`.
+ARG KMS_CRATE_TAG=v1.0.0
+RUN rm -rf deps/optimism/rust/xlayer-kms/stubs/ok-kms-rust && \
+    git clone --depth 1 --branch "${KMS_CRATE_TAG}" \
+      https://gitlab.okg.com/okcoin-commons/ok-kms-rust.git \
+      deps/optimism/rust/xlayer-kms/stubs/ok-kms-rust && \
+    rm -rf deps/optimism/rust/xlayer-kms/stubs/ok-kms-rust/.git
+
+ARG BUILD_PROFILE=release
+ENV BUILD_PROFILE=$BUILD_PROFILE
+ARG RUSTFLAGS=""
+ENV RUSTFLAGS="$RUSTFLAGS"
+# X Layer: `kms` links in the KMS-backed resolution of the builder secret key,
+# the flashblocks p2p key and reth's --p2p-secret-key. Extra features can be
+# appended, e.g. FEATURES="kms,jemalloc".
+ARG FEATURES="kms"
+ENV FEATURES=$FEATURES
+RUN cargo chef cook --profile $BUILD_PROFILE --features "$FEATURES" --recipe-path recipe.json --manifest-path /app/bin/node/Cargo.toml
+COPY . .
+RUN sed -i '/"crates\/tests"/d' Cargo.toml
+# The COPY above restored the stub over the real checkout, so swap it back in.
+RUN rm -rf deps/optimism/rust/xlayer-kms/stubs/ok-kms-rust && \
+    git clone --depth 1 --branch "${KMS_CRATE_TAG}" \
+      https://gitlab.okg.com/okcoin-commons/ok-kms-rust.git \
+      deps/optimism/rust/xlayer-kms/stubs/ok-kms-rust && \
+    rm -rf deps/optimism/rust/xlayer-kms/stubs/ok-kms-rust/.git
+# Unlike the non-KMS Dockerfile, --features must be passed here too: without it
+# the final binary is built with default features and silently has no KMS support,
+# even though cook warmed the dependency cache with it.
+RUN cargo build --profile $BUILD_PROFILE --features "$FEATURES" --bin xlayer-reth-node --manifest-path /app/bin/node/Cargo.toml
+# Copy binary to a fixed location
+RUN OUTPUT_DIR=$(if [ "$BUILD_PROFILE" = "dev" ] || [ "$BUILD_PROFILE" = "test" ]; then echo debug; else echo "$BUILD_PROFILE"; fi) && \
+    cp /app/target/$OUTPUT_DIR/xlayer-reth-node /app/op-reth
+
+# Fail the build rather than ship a binary that claims KMS support but cannot
+# resolve a secret: the stand-in embeds this marker, the real SDK does not.
+RUN if grep -qa OK_KMS_STUB /app/op-reth; then \
+      echo "ERROR: xlayer-reth-node was linked against the ok-kms-rust stub, not the real SDK" >&2; \
+      exit 1; \
+    fi
+
+FROM office-registry-vpc.cn-hongkong.cr.aliyuncs.com/okbase/ubuntu:24.04-okg1-sec20251110 AS runtime
+RUN apt-get update && \
+    apt-get install -y ca-certificates libssl-dev pkg-config strace curl && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=builder /app/op-reth /usr/local/bin/
+RUN chmod +x /usr/local/bin/op-reth
+COPY LICENSE* ./
+EXPOSE 30303 30303/udp 9001 8545 8546 7545 8551

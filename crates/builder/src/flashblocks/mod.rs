@@ -23,7 +23,7 @@ pub(crate) mod utils;
 
 pub use context::FlashblocksBuilderCtx;
 pub use service::FlashblocksServiceBuilder;
-pub use utils::cache::FlashblockPayloadsCache;
+pub use utils::{cache::FlashblockPayloadsCache, wspub::WebSocketPublisher};
 
 /// Configuration values that are specific to the flashblocks builder.
 #[derive(Debug, Clone)]
@@ -55,6 +55,9 @@ pub struct FlashblocksConfig {
     /// Time in milliseconds to build the last flashblock early before the end of the slot.
     /// This serves as a buffer time to account for the last flashblock being delayed.
     pub end_buffer_ms: u64,
+
+    /// Whether to enable the p2p node for flashblocks
+    pub p2p_enabled: bool,
 
     /// Port for the p2p node
     pub p2p_port: u16,
@@ -91,6 +94,7 @@ impl Default for FlashblocksConfig {
             number_contract_address: None,
             send_offset_ms: 0,
             end_buffer_ms: 0,
+            p2p_enabled: false,
             p2p_port: 9009,
             p2p_private_key_file: None,
             p2p_known_peers: None,
@@ -149,8 +153,7 @@ pub struct BuilderConfig {
     /// Configuration values that are specific to the flashblocks builder.
     pub flashblocks: FlashblocksConfig,
 
-    /// RCS Filter handle (FR-1/FR-9). `None` when the master switch is off, in which case
-    /// the block-building hot path performs no screening (full bypass).
+    /// RCS Filter handle. `None` when the master switch is disabled.
     pub rcs_filter: Option<Arc<FilterHandle>>,
 }
 
@@ -206,7 +209,6 @@ impl TryFrom<BuilderArgs> for BuilderConfig {
         let disable_async_calculate_state_root =
             args.flashblocks.flashblocks_disable_async_calculate_state_root;
         let number_contract_address = args.flashblocks.flashblocks_number_contract_address;
-
         let rcs_filter = build_rcs_filter_handle(&args.rcs_filter)?;
 
         Ok(Self {
@@ -225,6 +227,7 @@ impl TryFrom<BuilderArgs> for BuilderConfig {
                 number_contract_address,
                 send_offset_ms: args.flashblocks.flashblocks_send_offset_ms,
                 end_buffer_ms: args.flashblocks.flashblocks_end_buffer_ms,
+                p2p_enabled: args.flashblocks.p2p.p2p_enabled,
                 p2p_port: args.flashblocks.p2p.p2p_port,
                 p2p_private_key_file: args.flashblocks.p2p.p2p_private_key_file,
                 p2p_known_peers: args.flashblocks.p2p.p2p_known_peers,
@@ -239,24 +242,20 @@ impl TryFrom<BuilderArgs> for BuilderConfig {
     }
 }
 
-/// Builds the RCS Filter handle from CLI args (FR-9/FR-2). Returns `Ok(None)` when the
-/// master switch is off (full bypass). When enabled, `rcs_base_url` is required (startup
-/// error otherwise) and the background workers are spawned on the current tokio runtime.
+/// Builds the RCS Filter handle from CLI args. A disabled filter is a full bypass.
 fn build_rcs_filter_handle(
     args: &crate::args::RcsFilterArgs,
 ) -> eyre::Result<Option<Arc<FilterHandle>>> {
     let Some(config) = build_rcs_filter_config(args)? else { return Ok(None) };
-    let rcs_base_url = config.rcs_base_url.clone();
     let client = Arc::new(
         ReqwestRcsClient::with_timeouts(
-            rcs_base_url,
+            config.rcs_base_url.clone(),
             config.connect_timeout,
             config.request_timeout,
         )
-        .map_err(|e| eyre::eyre!(e.to_string()))?,
+        .map_err(|error| eyre::eyre!(error.to_string()))?,
     );
-    let clock = Arc::new(SystemClock);
-    Ok(Some(FilterHandle::spawn(config, client, clock)))
+    Ok(Some(FilterHandle::spawn(config, client, Arc::new(SystemClock))))
 }
 
 fn build_rcs_filter_config(
@@ -268,10 +267,9 @@ fn build_rcs_filter_config(
     let rcs_base_url = args.rcs_base_url.clone().ok_or_else(|| {
         eyre::eyre!("rcs-filter enabled but --rcs-filter.rcs-base-url is missing")
     })?;
-
     let config = FilterConfig {
         enabled: true,
-        rcs_base_url: rcs_base_url.clone(),
+        rcs_base_url,
         connect_timeout: Duration::from_millis(args.connect_timeout_ms),
         request_timeout: Duration::from_millis(args.request_timeout_ms),
         retry_initial_backoff: Duration::from_millis(args.retry_initial_backoff_ms),
@@ -288,7 +286,7 @@ fn build_rcs_filter_config(
         rules_version_poll_interval: Duration::from_millis(args.rules_version_poll_interval_ms),
         terminal_entry_retention: Duration::from_secs(args.terminal_entry_retention_seconds),
     };
-    config.validate().map_err(|e| eyre::eyre!(e.to_string()))?;
+    config.validate().map_err(|error| eyre::eyre!(error.to_string()))?;
     Ok(Some(config))
 }
 
@@ -309,7 +307,6 @@ mod rcs_filter_config_tests {
         let mut args = crate::args::BuilderArgs::default().rcs_filter;
         args.enabled = true;
         args.rcs_base_url = Some("http://rcs.test".to_string());
-        // Do not let the host's RCS_SUBMIT_MAX_CONCURRENCY leak into these config-mapping tests.
         args.submit_max_concurrency = 1;
         args
     }

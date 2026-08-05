@@ -52,13 +52,6 @@ use revm::{
     DatabaseCommit,
 };
 
-#[derive(Debug, Clone, Copy)]
-pub(super) struct BlockExecutionLimits {
-    pub(super) gas: u64,
-    pub(super) da: Option<u64>,
-    pub(super) da_footprint: Option<u64>,
-}
-
 /// Container type that holds all necessities to build a new payload.
 #[derive(Debug)]
 pub struct FlashblocksBuilderCtx {
@@ -92,9 +85,16 @@ pub struct FlashblocksBuilderCtx {
     pub gasless_contract: Option<GaslessContract>,
     /// Per-block gas budget for gasless transactions (in gas units). `None` = unlimited.
     pub gasless_block_gas_limit: Option<u64>,
-    /// RCS Filter handle (FR-1). `None` when the risk-control master switch is off, in
-    /// which case `screen_tx` is never called and the hot path pays zero extra cost.
+    /// RCS Filter handle. `None` when the risk-control master switch is disabled.
     pub filter: Option<Arc<FilterHandle>>,
+}
+
+/// Per-flashblock execution capacity passed to the transaction executor.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct TransactionLimits {
+    pub block_gas: u64,
+    pub block_da: Option<u64>,
+    pub block_da_footprint: Option<u64>,
 }
 
 impl FlashblocksBuilderCtx {
@@ -334,11 +334,6 @@ impl FlashblocksBuilderCtx {
     ) -> Result<ExecutionInfo, PayloadBuilderError> {
         let mut info = ExecutionInfo::with_capacity(self.attributes().transactions.len());
 
-        // EIP-7928: tx K (zero-indexed in the block) records at `bal_index = K + 1`
-        // (pre-exec occupies index 0). Compute the index for the first tx in this
-        // batch from the running tx count.
-        let next_bal_index = info.executed_transactions.len() as u64 + 1;
-        db.set_bal_index(next_bal_index);
         let mut evm = self.evm_config.evm_with_env(&mut *db, self.evm_env.clone());
 
         for sequencer_tx in &self.attributes().transactions {
@@ -419,10 +414,8 @@ impl FlashblocksBuilderCtx {
             evm.db_mut().commit(state);
 
             // append sender and transaction to the respective lists
-            // and increment the next txn index for the access list
             info.executed_senders.push(sequencer_tx.signer());
             info.executed_transactions.push(sequencer_tx.into_inner());
-            evm.db_mut().bump_bal_index();
         }
 
         let da_footprint_gas_scalar = self
@@ -462,11 +455,6 @@ impl FlashblocksBuilderCtx {
             block_gas_limit = ?block_gas_limit,
         );
 
-        // EIP-7928: tx K (zero-indexed in the block) records at `bal_index = K + 1`
-        // (pre-exec occupies index 0). Compute the index for the first tx in this
-        // batch from the running tx count.
-        let next_bal_index = info.executed_transactions.len() as u64 + 1;
-        db.set_bal_index(next_bal_index);
         let mut evm = self.evm_config.evm_with_env(&mut *db, self.evm_env.clone());
 
         for with_encoded_tx in cached_txs {
@@ -545,10 +533,8 @@ impl FlashblocksBuilderCtx {
             info.total_fees += U256::from(miner_fee) * U256::from(gas_used);
 
             // Append sender and transaction to the respective lists
-            // and increment the next txn index for the access list
             info.executed_senders.push(sender);
             info.executed_transactions.push(recovered_tx.into_inner());
-            evm.db_mut().bump_bal_index();
         }
 
         Ok(())
@@ -563,7 +549,7 @@ impl FlashblocksBuilderCtx {
         db: &mut State<impl Database>,
         best_txs: &mut impl PayloadTxsBounds,
         tx_pool: &impl TransactionPool,
-        limits: BlockExecutionLimits,
+        limits: TransactionLimits,
     ) -> Result<Option<()>, PayloadBuilderError> {
         let execute_txs_start_time = Instant::now();
         let mut num_txs_considered = 0;
@@ -574,19 +560,14 @@ impl FlashblocksBuilderCtx {
         let base_fee = self.base_fee();
 
         let tx_da_limit = self.da_config.max_da_tx_size();
-        // EIP-7928: tx K (zero-indexed in the block) records at `bal_index = K + 1`
-        // (pre-exec occupies index 0). Compute the index for the first tx in this
-        // batch from the running tx count.
-        let next_bal_index = info.executed_transactions.len() as u64 + 1;
-        db.set_bal_index(next_bal_index);
         let mut evm = self.evm_config.evm_with_env(&mut *db, self.evm_env.clone());
 
         debug!(
             target: "payload_builder",
             id = ?self.payload_id(),
-            block_da_limit = ?limits.da,
+            block_da_limit = ?limits.block_da,
             tx_da_limit = ?tx_da_limit,
-            block_gas_limit = ?limits.gas,
+            block_gas_limit = ?limits.block_gas,
             "Executing best transactions",
         );
 
@@ -639,12 +620,12 @@ impl FlashblocksBuilderCtx {
             // ensure we still have capacity for this transaction
             if let Err(result) = info.is_tx_over_limits(
                 tx_da_size,
-                limits.gas,
+                limits.block_gas,
                 tx_da_limit,
-                limits.da,
+                limits.block_da,
                 tx.gas_limit(),
                 info.da_footprint_scalar,
-                limits.da_footprint,
+                limits.block_da_footprint,
             ) {
                 // we can't fit this transaction into the block, so we need to mark it as
                 // invalid which also removes all dependent transaction from
@@ -666,9 +647,8 @@ impl FlashblocksBuilderCtx {
                 return Ok(Some(()));
             }
 
-            // Buffered audit transactions can be decided without repeating EVM execution. Marking
-            // the sender/nonce invalid only affects this iterator and suppresses nonce descendants;
-            // the transaction remains in txpool for a later flashblock.
+            // Reuse in-flight RCS state before repeating EVM execution. Deferring a transaction
+            // only removes it and its nonce descendants from this iterator, not from txpool.
             if let Some(filter) = self.filter.as_ref() {
                 match filter.pre_screen(&tx_hash) {
                     PreScreen::Execute => {}
@@ -804,11 +784,7 @@ impl FlashblocksBuilderCtx {
                 continue;
             }
 
-            // RCS Filter (FR-1): rule-driven screening on the successful execution
-            // result, just before this tx would be committed. Runs only when the master
-            // switch is on (`filter` is `Some`); disabled → zero hot-path cost. `Deny` and
-            // `AuditPending` skip commit/receipt/fee entirely so the same-block execution
-            // baseline is never polluted (TD §4.2, FR-1 AC3).
+            // Run rule-driven RCS screening after simulation and before committing any state.
             if let Some(filter) = self.filter.as_ref() {
                 let decision = filter.screen_tx(&ScreenInput {
                     tx_hash,
@@ -820,7 +796,6 @@ impl FlashblocksBuilderCtx {
                     logs: result.logs(),
                 });
                 match decision {
-                    // Allow / already-approved-and-consistent → fall through to normal commit.
                     Screen::Allow | Screen::AuditApproved => {}
                     Screen::Deny => {
                         best_txs.mark_invalid(tx.signer(), tx.nonce());
@@ -829,8 +804,6 @@ impl FlashblocksBuilderCtx {
                         continue;
                     }
                     Screen::Drop => {
-                        // A terminal audit rejection is a discard, not a mined transaction.
-                        // `remove_transaction` parks nonce descendants without deleting them.
                         best_txs.mark_invalid(tx.signer(), tx.nonce());
                         let removed = tx_pool.remove_transaction(tx_hash).is_some();
                         filter.record_txpool_discard(removed);
@@ -844,9 +817,6 @@ impl FlashblocksBuilderCtx {
                         continue;
                     }
                     Screen::AuditPending => {
-                        // Skip commit/receipt/fee and this sender's nonce descendants for the
-                        // current iterator. `mark_invalid` does not remove the transaction from
-                        // txpool; adjudication state remains in BufferPool across rounds.
                         best_txs.mark_invalid(tx.signer(), tx.nonce());
                         continue;
                     }
@@ -880,10 +850,8 @@ impl FlashblocksBuilderCtx {
             info.total_fees += U256::from(miner_fee) * U256::from(gas_used);
 
             // append sender and transaction to the respective lists
-            // and increment the next txn index for the access list
             info.executed_senders.push(tx.signer());
             info.executed_transactions.push(tx.into_inner());
-            evm.db_mut().bump_bal_index();
         }
 
         let payload_transaction_simulation_time = execute_txs_start_time.elapsed();

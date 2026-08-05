@@ -144,9 +144,8 @@ where
     // Deposit txs (`Recovered<OpTxEnvelope>`) only convert into a `TxEnv` when `T`'s configured
     // EVM factory is `OpEvmFactory` (that's where `FromRecoveredTx<OpTxEnvelope>` is defined).
     // Pin it down so `evm.transact(tx)` below type-checks for any `T`, not just one concrete node.
-    <T as RpcNodeCore>::Evm: ConfigureEvm<
-        BlockExecutorFactory: BlockExecutorFactory<EvmFactory = OpEvmFactory>,
-    >,
+    <T as RpcNodeCore>::Evm:
+        ConfigureEvm<BlockExecutorFactory: BlockExecutorFactory<EvmFactory = OpEvmFactory>>,
 {
     async fn audit_transactions(
         &self,

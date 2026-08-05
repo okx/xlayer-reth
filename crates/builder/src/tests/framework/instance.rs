@@ -7,6 +7,8 @@ use crate::{
         TransactionPoolObserver,
     },
 };
+use alloy_primitives::B256;
+use alloy_provider::{Identity, ProviderBuilder, RootProvider};
 use clap::Parser;
 use core::{
     any::Any,
@@ -19,19 +21,9 @@ use core::{
 use futures::{FutureExt, StreamExt};
 use moka::future::Cache;
 use nanoid::nanoid;
-use parking_lot::Mutex;
-use std::{
-    sync::{Arc, LazyLock},
-    time::Instant,
-};
-use tokio::{sync::oneshot, task::JoinHandle};
-use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tokio_util::sync::CancellationToken;
-
-use alloy_primitives::B256;
-use alloy_provider::{Identity, ProviderBuilder, RootProvider};
 use op_alloy_network::Optimism;
 use op_alloy_rpc_types_engine::OpFlashblockPayload;
+use parking_lot::Mutex;
 use reth::{
     args::{DatadirArgs, NetworkArgs, RpcServerArgs},
     core::exit::NodeExitFuture,
@@ -50,6 +42,13 @@ use reth_optimism_node::{
 use reth_optimism_rpc::OpEthApiBuilder;
 use reth_optimism_txpool::OpPooledTransaction;
 use reth_transaction_pool::{AllTransactionsEvents, TransactionPool};
+use std::{
+    sync::{Arc, LazyLock},
+    time::Instant,
+};
+use tokio::{sync::oneshot, task::JoinHandle};
+use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_util::sync::CancellationToken;
 
 /// Represents a type that emulates a local in-process instance of the OP builder node.
 /// This node uses IPC as the communication channel for the RPC server Engine API.
@@ -123,7 +122,6 @@ impl LocalInstance {
                 FlashblocksServiceBuilder {
                     config: builder_config,
                     bridge_intercept: Default::default(),
-                    peer_status_sink: std::sync::Arc::new(std::sync::OnceLock::new()),
                 },
             ))
             .with_add_ons(addons)
@@ -348,22 +346,13 @@ impl FlashblocksListener {
                     _ = cancellation_token_clone.cancelled() => {
                         break Ok(());
                     }
-                    Some(Ok(msg)) = read.next() => {
-                        let bytes = match msg {
-                            Message::Binary(b) => b.to_vec(),
-                            Message::Text(t) => t.as_bytes().to_vec(),
-                            _ => continue,
+                    Some(Ok(Message::Text(text))) = read.next() => {
+                        let payload = serde_json::from_str(&text).unwrap();
+                        let timestamped = TimestampedFlashblock {
+                            payload,
+                            received_at: Instant::now(),
                         };
-                        let outer: crate::broadcast::Message =
-                            crate::broadcast::frame::decode(&bytes).unwrap();
-                            if let crate::broadcast::Message::OpFlashblockPayload(message) = outer &&
-                                let Some(payload) = message.as_payload() {
-                                let timestamped = TimestampedFlashblock {
-                                    payload: payload.inner.clone(),
-                                    received_at: Instant::now(),
-                                };
-                                flashblocks_clone.lock().push(timestamped);
-                        }
+                        flashblocks_clone.lock().push(timestamped);
                     }
                 }
             }
@@ -402,7 +391,6 @@ impl FlashblocksListener {
 
     /// Check if any flashblock contains the given transaction hash
     pub fn contains_transaction(&self, tx_hash: &B256) -> bool {
-        // `metadata.receipts` is now `Option<BTreeMap<...>>` upstream.
         self.flashblocks.lock().iter().any(|fb| {
             fb.payload.metadata.receipts.as_ref().is_some_and(|r| r.contains_key(tx_hash))
         })

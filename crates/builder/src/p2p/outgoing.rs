@@ -1,4 +1,5 @@
-use alloy_primitives::Bytes;
+use super::Message;
+use eyre::Context;
 use futures::stream::FuturesUnordered;
 use libp2p::{swarm::Stream, PeerId, StreamProtocol};
 use std::collections::HashMap;
@@ -30,16 +31,15 @@ impl StreamsHandler {
         self.peers_to_stream.remove(peer);
     }
 
-    pub(crate) async fn broadcast_message(
-        &mut self,
-        protocol: StreamProtocol,
-        bytes: Bytes,
-    ) -> eyre::Result<Vec<PeerId>> {
+    pub(crate) async fn broadcast_message<M: Message>(&mut self, message: M) -> eyre::Result<()> {
         use futures::{SinkExt as _, StreamExt as _};
         use tokio_util::{
-            codec::{FramedWrite, LengthDelimitedCodec},
+            codec::{FramedWrite, LinesCodec},
             compat::FuturesAsyncReadCompatExt as _,
         };
+
+        let protocol = message.protocol();
+        let payload = message.to_string().wrap_err("failed to serialize payload")?;
 
         let peers = self.peers_to_stream.keys().cloned().collect::<Vec<_>>();
         let mut futures = FuturesUnordered::new();
@@ -47,22 +47,22 @@ impl StreamsHandler {
             let protocol_to_stream =
                 self.peers_to_stream.get_mut(&peer).expect("stream map must exist for peer");
             let Some(stream) = protocol_to_stream.remove(&protocol) else {
-                warn!(target: "payload_builder::broadcast", "no stream for protocol {protocol:?} to peer {peer}");
+                warn!(target: "flashblocks-p2p", "no stream for protocol {protocol:?} to peer {peer}");
                 continue;
             };
             let stream = stream.compat();
-            let bytes = bytes.clone();
+            let payload = payload.clone();
             let fut = async move {
-                let mut writer = FramedWrite::new(stream, LengthDelimitedCodec::new());
-                match writer.send(bytes.into()).await {
-                    Ok(()) => Ok((peer, writer.into_inner().into_inner())),
-                    Err(e) => Err((peer, eyre::eyre!(e))),
-                }
+                let mut writer = FramedWrite::new(stream, LinesCodec::new());
+                writer.send(payload).await.wrap_err("failed to send message to peer")?;
+                Ok::<(PeerId, libp2p::swarm::Stream), eyre::ErrReport>((
+                    peer,
+                    writer.into_inner().into_inner(),
+                ))
             };
             futures.push(fut);
         }
 
-        let mut failed_peers = Vec::new();
         while let Some(result) = futures.next().await {
             match result {
                 Ok((peer, stream)) => {
@@ -72,20 +72,18 @@ impl StreamsHandler {
                         .expect("stream map must exist for peer");
                     protocol_to_stream.insert(protocol.clone(), stream);
                 }
-                Err((peer, e)) => {
-                    warn!(target: "payload_builder::broadcast", "failed to send payload to peer {peer}: {e:?}");
-                    self.peers_to_stream.remove(&peer);
-                    failed_peers.push(peer);
+                Err(e) => {
+                    warn!(target: "flashblocks-p2p", "failed to send payload to peer: {e:?}");
                 }
             }
         }
 
         debug!(
-            target: "payload_builder::broadcast",
+            target: "flashblocks-p2p",
             "broadcasted message to {} peers",
             self.peers_to_stream.len()
         );
 
-        Ok(failed_peers)
+        Ok(())
     }
 }

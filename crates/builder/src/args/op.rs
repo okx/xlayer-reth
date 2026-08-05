@@ -190,13 +190,11 @@ impl Default for FlashblocksArgs {
     }
 }
 
-/// RCS Filter (rule-driven transaction risk-control interception) configuration
-/// (TD §4.3, XLOP-1142). Flattened into [`BuilderArgs`]. All keys are new; the master
-/// switch and timeouts are read once at startup (no runtime hot-switch).
+/// RCS Filter (rule-driven transaction risk-control interception) configuration.
+/// Flattened into [`BuilderArgs`]. The master switch and timeouts are read once at startup.
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
 pub struct RcsFilterArgs {
-    /// FR-9 master switch. `false` = full bypass (no filter handle, zero hot-path cost);
-    /// `true` = start asynchronous rule loading and screen sequencer-built transactions.
+    /// Master switch. `false` fully bypasses filtering.
     #[arg(
         id = "rcs-filter.enabled",
         long = "rcs-filter.enabled",
@@ -205,8 +203,7 @@ pub struct RcsFilterArgs {
     )]
     pub enabled: bool,
 
-    /// RCS REST base URL (FR-2/FR-5). Required when the switch is enabled; a missing value
-    /// is a startup error.
+    /// RCS REST base URL. Required when the switch is enabled.
     #[arg(id = "rcs-filter.rcs-base-url", long = "rcs-filter.rcs-base-url", env = "RCS_BASE_URL")]
     pub rcs_base_url: Option<String>,
 
@@ -242,12 +239,11 @@ pub struct RcsFilterArgs {
     )]
     pub retry_max_backoff_ms: u64,
 
-    /// Batch-submit accumulation window in milliseconds (FR-5).
+    /// Batch-submit accumulation window in milliseconds.
     #[arg(long = "rcs-filter.batch-window-ms", default_value = "200")]
     pub batch_window_ms: u64,
 
     /// Maximum number of independent block-height submit groups in flight at once.
-    /// Keep at 1 until the target RCS deployment has passed concurrent-submit capacity checks.
     #[arg(
         long = "rcs-filter.submit-max-concurrency",
         env = "RCS_SUBMIT_MAX_CONCURRENCY",
@@ -255,32 +251,37 @@ pub struct RcsFilterArgs {
     )]
     pub submit_max_concurrency: usize,
 
-    /// `Submitted → NotSubmitted` confirmation timeout in seconds (FR-6).
+    /// Submitted confirmation timeout in seconds.
     #[arg(long = "rcs-filter.submitted-confirmation-timeout-seconds", default_value = "8")]
     pub submitted_confirmation_timeout_seconds: u64,
 
-    /// `Pending → NotSubmitted` risk-module unresponsive timeout in seconds (FR-6).
+    /// Pending risk-module unresponsive timeout in seconds.
     #[arg(long = "rcs-filter.risk-module-unresponsive-timeout-seconds", default_value = "20")]
     pub risk_module_unresponsive_timeout_seconds: u64,
 
-    /// Cumulative fail-open/fail-close fallback timeout in seconds (FR-6). Must exceed the
-    /// RCS active/standby switch grace period (deployment invariant, TD §7 R-1).
+    /// Cumulative fail-open/fail-close fallback timeout in seconds.
     #[arg(long = "rcs-filter.total-retry-timeout-seconds", default_value = "90")]
     pub total_retry_timeout_seconds: u64,
 
-    /// `GET /rules/version` poll interval in milliseconds (FR-3).
+    /// Rules-version poll interval in milliseconds.
     #[arg(long = "rcs-filter.rules-version-poll-interval-ms", default_value = "2000")]
     pub rules_version_poll_interval_ms: u64,
 
-    /// Retention of a terminal buffer-pool tombstone before eviction, in seconds (contract
-    /// §2.5 `terminal_entry_retention_seconds`). Bounds pool memory; must exceed
-    /// `total-retry-timeout-seconds`.
+    /// Retention of a terminal buffer-pool tombstone before eviction, in seconds.
     #[arg(long = "rcs-filter.terminal-entry-retention-seconds", default_value = "300")]
     pub terminal_entry_retention_seconds: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
 pub struct FlashblocksP2pArgs {
+    /// Enable libp2p networking for flashblock propagation
+    #[arg(
+        long = "flashblocks.p2p_enabled",
+        env = "FLASHBLOCK_P2P_ENABLED",
+        default_value = "false"
+    )]
+    pub p2p_enabled: bool,
+
     /// Port for the flashblocks p2p node
     #[arg(long = "flashblocks.p2p_port", env = "FLASHBLOCK_P2P_PORT", default_value = "9009")]
     pub p2p_port: u16,
