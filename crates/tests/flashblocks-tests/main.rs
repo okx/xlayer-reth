@@ -915,7 +915,7 @@ async fn fb_subscription_test() -> Result<()> {
     let (ws_stream_rpc, _) = connect_async(ws_url_rpc).await?;
     let (_, mut read_rpc) = ws_stream_rpc.split();
 
-    let mut count: HashMap<String, u64> = HashMap::new();
+    let mut expected = HashSet::new();
     for i in 0..num_txs {
         let tx_hash = operations::native_balance_transfer(
             operations::DEFAULT_L2_NETWORK_URL_FB,
@@ -925,38 +925,68 @@ async fn fb_subscription_test() -> Result<()> {
         )
         .await?;
         println!("Sent tx {}: {}", i + 1, tx_hash);
-        count.insert(tx_hash, 0);
+        expected.insert(tx_hash);
     }
     println!(
         "Waiting for {num_txs} txs to appear in flashblocks (timeout: {WEB_SOCKET_TIMEOUT:?})..."
     );
 
-    // Read flashblocks until all txs are found or timeout
-    let _ = tokio::time::timeout(WEB_SOCKET_TIMEOUT, async {
+    let new_counts =
+        || expected.iter().cloned().map(|tx_hash| (tx_hash, 0)).collect::<HashMap<_, _>>();
+    let mut seen_seq = new_counts();
+    let mut seen_seq2 = new_counts();
+    let mut seen_rpc = new_counts();
+
+    // Read flashblocks until every transaction has been observed by all three sources.
+    let result = tokio::time::timeout(WEB_SOCKET_TIMEOUT, async {
         loop {
-            // Check if all transactions have been seen exactly twice
-            let all_found = count.values().all(|&c| c >= 3);
+            let all_found = expected.iter().all(|tx_hash| {
+                seen_seq.get(tx_hash).copied().unwrap_or_default() > 0
+                    && seen_seq2.get(tx_hash).copied().unwrap_or_default() > 0
+                    && seen_rpc.get(tx_hash).copied().unwrap_or_default() > 0
+            });
             if all_found {
-                break;
+                return Ok::<(), eyre::Error>(());
             }
 
             tokio::select! {
                 msg_seq = read_seq.next() => {
-                    // Process message from sequencer stream
-                    if let Some(Ok(Message::Text(msg))) = msg_seq {
-                        operations::process_flashblock_message(&msg, &mut count, current_block_number, "SEQ");
+                    match msg_seq {
+                        Some(Ok(Message::Text(msg))) => operations::process_flashblock_message(
+                            &msg,
+                            &mut seen_seq,
+                            current_block_number,
+                            "SEQ",
+                        ),
+                        Some(Ok(_)) => {}
+                        Some(Err(err)) => return Err(eyre::eyre!("SEQ stream error: {err}")),
+                        None => return Err(eyre::eyre!("SEQ stream closed unexpectedly")),
                     }
                 }
                 msg_seq2 = read_seq2.next() => {
-                    // Process message from sequencer stream
-                    if let Some(Ok(Message::Text(msg))) = msg_seq2 {
-                        operations::process_flashblock_message(&msg, &mut count, current_block_number, "SEQ2");
+                    match msg_seq2 {
+                        Some(Ok(Message::Text(msg))) => operations::process_flashblock_message(
+                            &msg,
+                            &mut seen_seq2,
+                            current_block_number,
+                            "SEQ2",
+                        ),
+                        Some(Ok(_)) => {}
+                        Some(Err(err)) => return Err(eyre::eyre!("SEQ2 stream error: {err}")),
+                        None => return Err(eyre::eyre!("SEQ2 stream closed unexpectedly")),
                     }
                 }
                 msg_rpc = read_rpc.next() => {
-                    // Process message from RPC stream
-                    if let Some(Ok(Message::Text(msg))) = msg_rpc {
-                        operations::process_flashblock_message(&msg, &mut count, current_block_number, "RPC");
+                    match msg_rpc {
+                        Some(Ok(Message::Text(msg))) => operations::process_flashblock_message(
+                            &msg,
+                            &mut seen_rpc,
+                            current_block_number,
+                            "RPC",
+                        ),
+                        Some(Ok(_)) => {}
+                        Some(Err(err)) => return Err(eyre::eyre!("RPC stream error: {err}")),
+                        None => return Err(eyre::eyre!("RPC stream closed unexpectedly")),
                     }
                 }
             }
@@ -964,11 +994,29 @@ async fn fb_subscription_test() -> Result<()> {
     })
     .await;
 
-    for (tx_hash, &count_val) in &count {
-        assert_eq!(
-            count_val, 3,
-            "Transaction {tx_hash} appeared {count_val} times, expected exactly 3"
-        );
+    match result {
+        Ok(result) => result?,
+        Err(_) => {
+            let missing = expected
+                .iter()
+                .filter_map(|tx_hash| {
+                    let sources = [("SEQ", &seen_seq), ("SEQ2", &seen_seq2), ("RPC", &seen_rpc)]
+                        .into_iter()
+                        .filter_map(|(source, seen)| {
+                            (seen.get(tx_hash).copied().unwrap_or_default() == 0).then_some(source)
+                        })
+                        .collect::<Vec<_>>();
+
+                    (!sources.is_empty())
+                        .then(|| format!("{tx_hash}: missing from {}", sources.join(", ")))
+                })
+                .collect::<Vec<_>>();
+
+            return Err(eyre::eyre!(
+                "timed out after {WEB_SOCKET_TIMEOUT:?}; {}",
+                missing.join("; ")
+            ));
+        }
     }
 
     Ok(())
