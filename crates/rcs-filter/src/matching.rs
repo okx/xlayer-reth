@@ -3,17 +3,21 @@
 //! (`deny > audit > allow`, both intra-log and cross-log).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::ControlFlow;
 
 use alloy_dyn_abi::{DynSolEvent, DynSolType, DynSolValue};
 use alloy_primitives::{Address, Log};
 use serde_json::Value;
+use thiserror::Error;
 
 use crate::client::ActionItem;
 use crate::handle::ScreenInput;
-use crate::rules::{truthy, Action, CompiledEvent, CompiledRule, RuleSet, TimeoutAction};
+use crate::rules::{
+    truthy, Action, CompiledEvent, CompiledRule, RuleSet, TimeoutAction,
+    MAX_COMPLETE_EVENT_BINDINGS_PER_EVALUATION,
+};
 
-type ActionDedupKey = (usize, String, String, String);
-type ActionsByLog = BTreeMap<String, BTreeMap<ActionDedupKey, ActionItem>>;
+type ActionsByLog = BTreeMap<String, BTreeMap<usize, ActionItem>>;
 
 #[cfg(test)]
 std::thread_local! {
@@ -36,14 +40,46 @@ pub enum MatchOutcome {
     },
 }
 
-/// Runs the full screening algorithm for one transaction. Zero network IO.
+/// Resource-budget failure detected before visiting complete event bindings.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum MatchError {
+    #[error("rule '{rule_id}' complete event binding count overflowed")]
+    BindingCountOverflow { rule_id: String },
+    #[error(
+        "rule '{rule_id}' would raise the complete event binding count to {attempted}, exceeding the per-transaction budget of {limit}"
+    )]
+    BindingBudgetExceeded { rule_id: String, attempted: usize, limit: usize },
+}
+
+/// Fallible screening entry used by callers that can surface malformed/error outcomes.
+pub fn try_evaluate(rules: &RuleSet, input: &ScreenInput) -> Result<MatchOutcome, MatchError> {
+    evaluate_checked(rules, input)
+}
+
+fn checked_binding_count(candidate_counts: impl IntoIterator<Item = usize>) -> Option<usize> {
+    candidate_counts.into_iter().try_fold(1usize, usize::checked_mul)
+}
+
+/// Runs the full screening algorithm for one transaction. Resource-budget errors fail closed;
+/// callers with a malformed/error channel should use [`try_evaluate`] to preserve the reason.
 pub fn evaluate(rules: &RuleSet, input: &ScreenInput) -> MatchOutcome {
+    match try_evaluate(rules, input) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            tracing::warn!(target: "rcs_filter", %error, "matching budget exceeded; failing closed");
+            MatchOutcome::Deny
+        }
+    }
+}
+
+fn evaluate_checked(rules: &RuleSet, input: &ScreenInput) -> Result<MatchOutcome, MatchError> {
     // Merge audit rules at the physical-log level. Multiple rules can match the same log, but
     // RCS must receive that event only once per audit type or it would account the same action
     // multiple times.
     let mut actions_by_log = ActionsByLog::new();
     let mut has_audit = false;
     let mut timeout_action = TimeoutAction::Allow;
+    let mut complete_binding_count = 0usize;
 
     for &idx in &candidate_rule_indices(rules, input.logs) {
         let rule = &rules.rules[idx];
@@ -60,37 +96,70 @@ pub fn evaluate(rules: &RuleSet, input: &ScreenInput) -> MatchOutcome {
             continue;
         }
 
-        // Stage two: build variable bindings (decode matched logs; null for unmatched events).
-        let (bindings, matched) = build_bindings(rule, input);
-        if matched.is_empty() {
-            continue;
+        // Stage two: decode every physical match. Missing events contribute one null candidate,
+        // then complete bindings are visited lazily instead of materializing their Cartesian
+        // product.
+        let candidates: Vec<Vec<Option<MatchedEvent>>> = rule
+            .events
+            .iter()
+            .map(|event| {
+                let matched = find_logs_for_event(event, input.logs);
+                if matched.is_empty() {
+                    vec![None]
+                } else {
+                    matched.into_iter().map(Some).collect()
+                }
+            })
+            .collect();
+        let rule_binding_count = checked_binding_count(candidates.iter().map(Vec::len))
+            .ok_or_else(|| MatchError::BindingCountOverflow { rule_id: rule.id.clone() })?;
+        complete_binding_count = complete_binding_count
+            .checked_add(rule_binding_count)
+            .ok_or_else(|| MatchError::BindingCountOverflow { rule_id: rule.id.clone() })?;
+        if complete_binding_count > MAX_COMPLETE_EVENT_BINDINGS_PER_EVALUATION {
+            return Err(MatchError::BindingBudgetExceeded {
+                rule_id: rule.id.clone(),
+                attempted: complete_binding_count,
+                limit: MAX_COMPLETE_EVENT_BINDINGS_PER_EVALUATION,
+            });
         }
-        if !truthy(&rule.condition, &bindings) {
-            continue;
-        }
+        let mut current = Vec::with_capacity(candidates.len());
+        let mut visit = |binding: &[Option<MatchedEvent>]| {
+            // A literal-true rule with only null event bindings has no physical trigger.
+            if !binding.iter().any(Option::is_some) {
+                return ControlFlow::Continue(());
+            }
+            let bindings = build_bindings(rule, input, binding);
+            if !truthy(&rule.condition, &bindings) {
+                return ControlFlow::Continue(());
+            }
 
-        // Stage three: action merge with deny short-circuit.
-        match rule.action {
-            Action::Deny => return MatchOutcome::Deny,
-            Action::Allow => { /* allow never overrides deny/audit; no state change */ }
-            Action::Audit => {
-                has_audit = true;
-                timeout_action = timeout_action.stricter(rule.audit_timeout_action);
-                let items = build_action_items(&matched);
-                for audit_type in &rule.audit_types {
-                    let by_log = actions_by_log.entry(audit_type.clone()).or_default();
-                    for (log_index, item) in &items {
-                        let key = (
-                            *log_index,
-                            item.name.clone(),
-                            item.address.clone(),
-                            serde_json::to_string(&item.params)
-                                .expect("ABI-decoded JSON values are serializable"),
-                        );
-                        by_log.entry(key).or_insert_with(|| item.clone());
+            // Stage three: action merge with deny short-circuit.
+            match rule.action {
+                Action::Deny => ControlFlow::Break(MatchOutcome::Deny),
+                Action::Allow => ControlFlow::Continue(()),
+                Action::Audit => {
+                    has_audit = true;
+                    timeout_action = timeout_action.stricter(rule.audit_timeout_action);
+                    for audit_type in &rule.audit_types {
+                        let by_log = actions_by_log.entry(audit_type.clone()).or_default();
+                        for (event, matched) in rule.events.iter().zip(binding) {
+                            let Some(matched) = matched else { continue };
+                            by_log.entry(matched.log_index).or_insert_with(|| ActionItem {
+                                name: event.var_name.clone(),
+                                address: matched.address.clone(),
+                                params: matched.params.clone(),
+                            });
+                        }
                     }
+                    ControlFlow::Continue(())
                 }
             }
+        };
+        if let ControlFlow::Break(outcome) =
+            visit_bindings(0, &candidates, &mut current, &mut visit)
+        {
+            return Ok(outcome);
         }
     }
 
@@ -99,13 +168,14 @@ pub fn evaluate(rules: &RuleSet, input: &ScreenInput) -> MatchOutcome {
             .into_iter()
             .map(|(audit_type, by_log)| (audit_type, by_log.into_values().collect()))
             .collect();
-        MatchOutcome::Audit { actions, timeout_action }
+        Ok(MatchOutcome::Audit { actions, timeout_action })
     } else {
-        MatchOutcome::Allow
+        Ok(MatchOutcome::Allow)
     }
 }
 
 /// A matched named event and the physical transaction log that produced it.
+#[derive(Clone)]
 struct MatchedEvent {
     log_index: usize,
     address: String,
@@ -129,13 +199,14 @@ fn candidate_rule_indices(rules: &RuleSet, logs: &[Log]) -> Vec<usize> {
     set.into_iter().collect()
 }
 
-/// Builds JSONLogic bindings for a rule and the per-event decoded match set. Tx-level vars
+/// Builds JSONLogic bindings for one complete physical-log combination. Tx-level vars
 /// (`contract_address`, `origin`, `value`, `nonce`) plus `<name>.<param>` / `<name>.address`
 /// per declared event; unmatched events bind all their variables to `null` (contract §3.2).
 fn build_bindings(
     rule: &CompiledRule,
     input: &ScreenInput,
-) -> (crate::rules::Bindings, BTreeMap<String, MatchedEvent>) {
+    binding: &[Option<MatchedEvent>],
+) -> crate::rules::Bindings {
     let mut b = crate::rules::Bindings::new();
     b.insert(
         "contract_address".to_string(),
@@ -145,19 +216,15 @@ fn build_bindings(
     b.insert("value".to_string(), Value::String(input.value.to_string()));
     b.insert("nonce".to_string(), Value::Number(input.nonce.into()));
 
-    let mut matched: BTreeMap<String, MatchedEvent> = BTreeMap::new();
-
-    for event in &rule.events {
-        match find_log_for_event(event, input.logs) {
-            Some((log_index, log, params)) => {
-                let addr = addr_lower(log.address);
-                for (pname, pval) in &params {
+    for (event, matched) in rule.events.iter().zip(binding) {
+        match matched {
+            Some(matched) => {
+                for (pname, pval) in &matched.params {
                     b.insert(format!("{}.{}", event.var_name, pname), pval.clone());
                 }
-                b.insert(format!("{}.address", event.var_name), Value::String(addr.clone()));
-                matched.insert(
-                    event.var_name.clone(),
-                    MatchedEvent { log_index, address: addr, params },
+                b.insert(
+                    format!("{}.address", event.var_name),
+                    Value::String(matched.address.clone()),
                 );
             }
             None => {
@@ -169,46 +236,63 @@ fn build_bindings(
         }
     }
 
-    (b, matched)
+    b
 }
 
-/// Turns the matched event set into indexed submit items so cross-rule merging can identify
-/// multiple matches of the same physical log.
-fn build_action_items(matched: &BTreeMap<String, MatchedEvent>) -> Vec<(usize, ActionItem)> {
-    matched
-        .iter()
-        .map(|(name, event)| {
-            (
-                event.log_index,
-                ActionItem {
-                    name: name.clone(),
-                    address: event.address.clone(),
-                    params: event.params.clone(),
-                },
-            )
+/// Visits every complete event binding in candidate order without allocating the Cartesian
+/// product. A visitor can break immediately, which is used to return a pure deny verdict.
+fn visit_bindings<F>(
+    event_idx: usize,
+    candidates: &[Vec<Option<MatchedEvent>>],
+    current: &mut Vec<Option<MatchedEvent>>,
+    visit: &mut F,
+) -> ControlFlow<MatchOutcome>
+where
+    F: FnMut(&[Option<MatchedEvent>]) -> ControlFlow<MatchOutcome>,
+{
+    if event_idx == candidates.len() {
+        return visit(current);
+    }
+
+    for candidate in &candidates[event_idx] {
+        current.push(candidate.clone());
+        if let ControlFlow::Break(outcome) =
+            visit_bindings(event_idx + 1, candidates, current, visit)
+        {
+            current.pop();
+            return ControlFlow::Break(outcome);
+        }
+        current.pop();
+    }
+    ControlFlow::Continue(())
+}
+
+/// Returns whether a physical log has the topic shape required before attempting ABI decode.
+fn event_matches_shape(event: &CompiledEvent, log: &Log) -> bool {
+    if event.anonymous {
+        log.data.topics().len() == event.inputs.iter().filter(|input| input.indexed).count()
+    } else {
+        log.data.topics().first() == Some(&event.topic0)
+    }
+}
+
+/// Finds every successfully decoded physical log for an event in EVM log order.
+fn find_logs_for_event(event: &CompiledEvent, logs: &[Log]) -> Vec<MatchedEvent> {
+    logs.iter()
+        .enumerate()
+        .filter_map(|(log_index, log)| {
+            if !event_matches_shape(event, log) {
+                return None;
+            }
+            #[cfg(test)]
+            TEST_DECODE_ATTEMPTS.with(|attempts| attempts.set(attempts.get() + 1));
+            decode_event(event, log).map(|params| MatchedEvent {
+                log_index,
+                address: addr_lower(log.address),
+                params,
+            })
         })
         .collect()
-}
-
-/// Finds the first log matching an event's `topic0` (contract §3.2: first log only, no
-/// multi-log pairing).
-fn find_log_for_event<'a>(
-    event: &CompiledEvent,
-    logs: &'a [Log],
-) -> Option<(usize, &'a Log, BTreeMap<String, Value>)> {
-    logs.iter().enumerate().find_map(|(index, log)| {
-        if !event.anonymous && log.data.topics().first() != Some(&event.topic0) {
-            return None;
-        }
-        if event.anonymous
-            && log.data.topics().len() != event.inputs.iter().filter(|input| input.indexed).count()
-        {
-            return None;
-        }
-        #[cfg(test)]
-        TEST_DECODE_ATTEMPTS.with(|attempts| attempts.set(attempts.get() + 1));
-        decode_event(event, log).map(|params| (index, log, params))
-    })
 }
 
 /// ABI-decodes a matched log into named JSON values following the event's declared input order
@@ -352,6 +436,211 @@ mod tests {
     }
 
     #[test]
+    fn later_matching_log_denies_and_discards_collected_audit_actions() {
+        let audit = erc20_audit_rule("audit-first", "transfer");
+        let mut deny = erc20_audit_rule("deny-later", "transfer");
+        deny.action = Action::Deny;
+        deny.condition = json!({
+            "==": [
+                {"var": "transfer.from"},
+                golden::BLACKLISTED_FROM
+            ]
+        });
+        let rules = load_rules(1, 1, vec![audit, deny]);
+        let logs = [
+            log_builder::erc20_transfer(
+                golden::token_x(),
+                golden::bridge_erc20(),
+                golden::recipient(),
+                golden::one_token(),
+            ),
+            log_builder::erc20_transfer(
+                golden::token_x(),
+                golden::blacklisted_from(),
+                golden::recipient(),
+                golden::one_token(),
+            ),
+        ];
+
+        assert_eq!(evaluate(&rules, &transfer_input(&logs)), MatchOutcome::Deny);
+    }
+
+    #[test]
+    fn later_matching_log_is_included_in_audit_actions() {
+        let mut audit = erc20_audit_rule("audit-later", "transfer");
+        audit.condition = json!({
+            "==": [
+                {"var": "transfer.from"},
+                golden::BLACKLISTED_FROM
+            ]
+        });
+        let rules = load_rules(1, 1, vec![audit]);
+        let logs = [
+            log_builder::erc20_transfer(
+                golden::token_x(),
+                golden::bridge_erc20(),
+                golden::recipient(),
+                U256::from(1),
+            ),
+            log_builder::erc20_transfer(
+                golden::token_x(),
+                golden::blacklisted_from(),
+                golden::recipient(),
+                U256::from(2),
+            ),
+        ];
+
+        let MatchOutcome::Audit { actions, .. } = evaluate(&rules, &transfer_input(&logs)) else {
+            panic!("later matching physical log must produce Audit")
+        };
+        assert_eq!(actions["quota"].len(), 1);
+        assert_eq!(actions["quota"][0].params["from"], json!(golden::BLACKLISTED_FROM));
+        assert_eq!(actions["quota"][0].params["value"], json!("2"));
+    }
+
+    #[test]
+    fn identical_physical_logs_at_distinct_indexes_are_all_preserved() {
+        let rules = load_rules(1, 1, vec![erc20_audit_rule("audit-both", "transfer")]);
+        let log = log_builder::erc20_transfer(
+            golden::token_x(),
+            golden::bridge_erc20(),
+            golden::recipient(),
+            golden::one_token(),
+        );
+        let logs = [log.clone(), log];
+
+        let MatchOutcome::Audit { actions, .. } = evaluate(&rules, &transfer_input(&logs)) else {
+            panic!("both physical logs must produce Audit")
+        };
+        assert_eq!(actions["quota"].len(), 2);
+        assert_eq!(actions["quota"][0], actions["quota"][1]);
+    }
+
+    #[test]
+    fn within_budget_non_first_complete_multi_event_binding_is_evaluated() {
+        let raw: RawRule = serde_json::from_value(json!({
+            "id": "paired-events",
+            "event_abis": {
+                "event_a": {
+                    "type": "event",
+                    "name": "EventA",
+                    "inputs": [],
+                    "anonymous": false
+                },
+                "event_b": {
+                    "type": "event",
+                    "name": "EventB",
+                    "inputs": [],
+                    "anonymous": false
+                }
+            },
+            "audit_types": ["custom"],
+            "condition": {
+                "and": [
+                    {"==": [{"var": "event_a.address"}, golden::CLAIM_CONTRACT]},
+                    {"==": [{"var": "event_b.address"}, golden::RECIPIENT]}
+                ]
+            },
+            "action": "audit"
+        }))
+        .unwrap();
+        let rules = load_rules(1, 1, vec![raw]);
+        let logs = [
+            empty_event_log(golden::token_x(), "EventA"),
+            empty_event_log(golden::claim_contract(), "EventB"),
+            empty_event_log(golden::claim_contract(), "EventA"),
+            empty_event_log(golden::recipient(), "EventB"),
+        ];
+
+        let MatchOutcome::Audit { actions, .. } = evaluate(&rules, &transfer_input(&logs)) else {
+            panic!("non-first complete binding must produce Audit")
+        };
+        let custom = &actions["custom"];
+        assert_eq!(custom.len(), 2);
+        assert_eq!(custom[0].name, "event_a");
+        assert_eq!(custom[0].address, golden::CLAIM_CONTRACT);
+        assert_eq!(custom[1].name, "event_b");
+        assert_eq!(custom[1].address, golden::RECIPIENT);
+    }
+
+    #[test]
+    fn literal_true_rule_without_any_physical_log_allows() {
+        for action in [Action::Deny, Action::Audit] {
+            let mut rule = audit_rule("no-log", "event", "Event", json!([]), "custom");
+            rule.action = action;
+            let rules = load_rules(1, 1, vec![rule]);
+
+            assert_eq!(evaluate(&rules, &transfer_input(&[])), MatchOutcome::Allow);
+        }
+    }
+
+    #[test]
+    fn complete_binding_count_rejects_usize_multiplication_overflow() {
+        assert_eq!(checked_binding_count([usize::MAX, 2]), None);
+    }
+
+    #[test]
+    fn excessive_complete_bindings_are_rejected_and_fail_closed() {
+        let raw: RawRule = serde_json::from_value(json!({
+            "id": "excessive-bindings",
+            "event_abis": {
+                "a": {"type": "event", "name": "A", "inputs": [], "anonymous": true},
+                "b": {"type": "event", "name": "B", "inputs": [], "anonymous": true}
+            },
+            "audit_types": ["custom"],
+            "condition": false,
+            "action": "audit"
+        }))
+        .unwrap();
+        let rules = load_rules(1, 1, vec![raw]);
+        // 65 × 65 = 4,225 complete bindings, just over the intended 4,096 budget.
+        let logs = (0..65)
+            .map(|_| Log {
+                address: golden::token_x(),
+                data: LogData::new_unchecked(vec![], Bytes::new()),
+            })
+            .collect::<Vec<_>>();
+        let input = transfer_input(&logs);
+
+        assert!(matches!(
+            try_evaluate(&rules, &input),
+            Err(MatchError::BindingBudgetExceeded { .. })
+        ));
+        assert_eq!(evaluate(&rules, &input), MatchOutcome::Deny);
+    }
+
+    #[test]
+    fn complete_binding_budget_is_accumulated_across_candidate_rules() {
+        let rule = |id: &str| -> RawRule {
+            serde_json::from_value(json!({
+                "id": id,
+                "event_abis": {
+                    "a": {"type": "event", "name": "A", "inputs": [], "anonymous": true},
+                    "b": {"type": "event", "name": "B", "inputs": [], "anonymous": true}
+                },
+                "audit_types": ["custom"],
+                "condition": false,
+                "action": "audit"
+            }))
+            .unwrap()
+        };
+        let rules = load_rules(1, 1, vec![rule("first"), rule("second")]);
+        // Each rule has 46 × 46 = 2,116 bindings (individually below budget), but the
+        // evaluation total is 4,232 and must be rejected before recursing into rule two.
+        let logs = (0..46)
+            .map(|_| Log {
+                address: golden::token_x(),
+                data: LogData::new_unchecked(vec![], Bytes::new()),
+            })
+            .collect::<Vec<_>>();
+
+        assert!(matches!(
+            try_evaluate(&rules, &transfer_input(&logs)),
+            Err(MatchError::BindingBudgetExceeded { .. })
+        ));
+    }
+
+    #[test]
     fn filter_skip_contract_mismatch_decodes_zero_logs() {
         let mut raw: RawRule = serde_json::from_str(golden::RULE_SCENARIO_A).unwrap();
         raw.contract_address = Some(golden::CLAIM_CONTRACT.to_string());
@@ -410,10 +699,11 @@ mod tests {
             golden::one_token(),
         )];
         let input = transfer_input(&logs);
-        let (bindings, matched) = build_bindings(&rules.rules[0], &input);
-        assert_eq!(bindings["companion.address"], Value::Null);
-        assert!(!matched.contains_key("companion"));
-        assert!(matches!(evaluate(&rules, &input), MatchOutcome::Audit { .. }));
+        let MatchOutcome::Audit { actions, .. } = evaluate(&rules, &input) else {
+            panic!("missing companion must bind null and satisfy the condition")
+        };
+        assert_eq!(actions["custom"].len(), 1);
+        assert_eq!(actions["custom"][0].name, "transfer");
     }
 
     #[test]
@@ -554,7 +844,7 @@ mod tests {
     }
 
     #[test]
-    fn distinct_aliases_on_same_log_are_preserved() {
+    fn distinct_aliases_on_same_log_are_deduplicated_by_audit_type_and_log_index() {
         let rules = load_rules(
             1,
             1,
@@ -582,13 +872,48 @@ mod tests {
         match evaluate(&rules, &input) {
             MatchOutcome::Audit { actions, .. } => {
                 let quota = actions.get("quota").expect("quota key");
-                assert_eq!(quota.len(), 2);
+                assert_eq!(quota.len(), 1);
                 assert_eq!(quota[0].name, "first_transfer");
-                assert_eq!(quota[1].name, "second_transfer");
                 assert_eq!(quota[0].params.get("value").unwrap(), golden::ONE_TOKEN);
             }
             other => panic!("expected Audit, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn same_physical_log_is_kept_independently_for_distinct_audit_types() {
+        let rules = load_rules(
+            1,
+            1,
+            vec![
+                erc20_audit_rule("quota", "quota_transfer"),
+                audit_rule(
+                    "custom",
+                    "custom_transfer",
+                    "Transfer",
+                    json!([
+                        {"name": "from", "type": "address", "indexed": true},
+                        {"name": "to", "type": "address", "indexed": true},
+                        {"name": "value", "type": "uint256", "indexed": false}
+                    ]),
+                    "custom",
+                ),
+            ],
+        );
+        let logs = [log_builder::erc20_transfer(
+            golden::token_x(),
+            golden::bridge_erc20(),
+            golden::recipient(),
+            golden::one_token(),
+        )];
+
+        let MatchOutcome::Audit { actions, .. } = evaluate(&rules, &transfer_input(&logs)) else {
+            panic!("both audit types must be preserved")
+        };
+        assert_eq!(actions["quota"].len(), 1);
+        assert_eq!(actions["quota"][0].name, "quota_transfer");
+        assert_eq!(actions["custom"].len(), 1);
+        assert_eq!(actions["custom"][0].name, "custom_transfer");
     }
 
     #[test]
@@ -745,7 +1070,7 @@ mod tests {
     }
 
     #[test]
-    fn anonymous_non_indexed_event_and_first_successful_log() {
+    fn anonymous_non_indexed_event_preserves_all_successful_logs() {
         let raw = r#"{"id":"anon","event_abis":{"message":{"type":"event","name":"Message","inputs":[],"anonymous":true}},"audit_types":["custom"],"condition":true,"action":"audit"}"#;
         let rules = load_rules(1, 1, vec![serde_json::from_str(raw).unwrap()]);
         let logs = vec![
@@ -767,8 +1092,9 @@ mod tests {
         let MatchOutcome::Audit { actions, .. } = evaluate(&rules, &input) else {
             panic!("expected audit")
         };
-        assert_eq!(actions["custom"].len(), 1);
+        assert_eq!(actions["custom"].len(), 2);
         assert_eq!(actions["custom"][0].address, golden::TOKEN_X);
+        assert_eq!(actions["custom"][1].address, golden::CLAIM_CONTRACT);
     }
 
     #[test]

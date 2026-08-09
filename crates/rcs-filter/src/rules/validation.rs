@@ -77,6 +77,13 @@ pub fn compile_rule(raw: RawRule) -> std::result::Result<CompiledRule, String> {
     if raw.event_abis.is_empty() {
         return Err("event_abis is empty".to_string());
     }
+    if raw.event_abis.len() > super::MAX_EVENTS_PER_RULE {
+        return Err(format!(
+            "event_abis declares {} aliases; at most {} are allowed",
+            raw.event_abis.len(),
+            super::MAX_EVENTS_PER_RULE
+        ));
+    }
     if raw.action == Action::Audit && raw.audit_types.is_empty() {
         return Err("audit rule has no audit_types".to_string());
     }
@@ -230,6 +237,24 @@ mod tests {
     fn empty_event_abis_rejected() {
         let json = r#"{"id":"r","event_abis":{},"condition":true,"action":"deny"}"#;
         assert!(compile_rule(parse(json)).is_err());
+    }
+
+    #[test]
+    fn event_alias_depth_above_eight_is_rejected() {
+        let mut raw = parse(
+            r#"{"id":"deep","event_abis":{"e":{"type":"event","name":"E","inputs":[],"anonymous":false}},"condition":true,"action":"deny"}"#,
+        );
+        let event = raw.event_abis.remove("e").unwrap();
+        for index in 0..8 {
+            raw.event_abis.insert(format!("e{index}"), event.clone());
+        }
+        assert!(compile_rule(raw.clone()).is_ok(), "eight aliases must remain valid");
+        raw.event_abis.insert("e8".to_string(), event);
+
+        let set = load_rules(1, 1, vec![raw]);
+        assert!(set.rules.is_empty());
+        assert_eq!(set.rejected.len(), 1);
+        assert!(set.rejected[0].reason.contains("at most 8"));
     }
 
     #[test]

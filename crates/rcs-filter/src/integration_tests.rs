@@ -1575,6 +1575,27 @@ fn transfer_batch_approval_consistency_is_array_exact() {
     assert_eq!(changed_handle.screen_tx(&scenario_a_input(golden::tx_a(), &changed)), Screen::Drop);
 }
 
+#[test]
+fn later_physical_log_changes_approval_consistency_hash() {
+    let rules = scenario_a_rules();
+    let original = vec![transfer_log("100"), transfer_log("200")];
+    let handle = FilterHandle::for_test(enabled_config(), rules, Arc::new(TestClock::new(START)));
+    assert_eq!(
+        handle.screen_tx(&scenario_a_input(golden::tx_a(), &original)),
+        Screen::AuditPending
+    );
+    handle.with_pool(|pool| {
+        pool.apply_submit_response_current(&[golden::TX_A.to_string()], START);
+        pool.apply_query_status_current(&golden::tx_a(), "approved", START);
+    });
+
+    let changed_later_log = vec![transfer_log("100"), transfer_log("201")];
+    assert_eq!(
+        handle.screen_tx(&scenario_a_input(golden::tx_a(), &changed_later_log)),
+        Screen::Drop
+    );
+}
+
 /// FR-5 adjudication mapping: `Submitted → Pending` (any non-absent response) then
 /// `Pending → Approved` (status=approved), driven through `query_once`.
 #[tokio::test]

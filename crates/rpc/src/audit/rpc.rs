@@ -1,10 +1,9 @@
 //! `xlayer_auditTransactions` JSON-RPC method: builds deposit txs from the request and executes
-//! them **one at a time, in order**, against chain-tip state — but only commits a tx's state if
-//! it classifies as `Allow`. A `Deny` tx's state is discarded (never committed); an `Audit` tx's
-//! state is also discarded, and the loop stops immediately — every tx after it in the batch is
-//! reported as `Unknown` without ever being executed (its correct execution basis depends on
-//! whether the `Audit` tx's eventual allow/deny decision, made later by RCS, actually happens on
-//! chain — see `docs/superpowers/specs/2026-07-24-audit-transactions-multiround-rpc-design.md`).
+//! them **one at a time, in order**, against chain-tip state. `Allow` commits full state. `Deny`
+//! discards the simulated state and continues. `Audit` discards the simulated state and stops,
+//! leaving the tail `Unknown`. Native blacklist interception occurs inside EVM execution before
+//! matcher classification; RCS synthetic-ban replay is responsible for making denied force
+//! deposits reach that path.
 //! A tx whose `source_hash` is in the request's `known_allowed` set skips this classification
 //! entirely — it's executed and its state committed unconditionally as `Allow` (see
 //! `AuditTransactionsRequest::known_allowed`'s doc comment for why this bypass is necessary).
@@ -37,19 +36,16 @@ use super::deposit::{build_deposit_tx, DepositTxRequest};
 use super::verdict::AuditResult;
 use super::verdict::Verdict;
 
-/// Decides what to do with one just-classified tx's state during the single-pass execution
-/// loop: commit its state only if `Allow`; discard it (never commit) for `Deny` or `Audit`;
-/// stop executing the rest of the batch only for `Audit`. `Verdict::Unknown`/`Verdict::Malformed`
-/// are never produced by `verdict_for` (the only caller of this function's `verdict` input), so
-/// they're intentionally not handled here.
+/// Decides whether to commit one classified transaction's full simulated state and whether
+/// ordered execution should continue. A blacklist FailedDeposit is produced only by the EVM's
+/// native blacklist interceptor before classification, never synthesized here.
 fn commit_and_continue(verdict: Verdict) -> (bool, bool) {
     match verdict {
         Verdict::Allow => (true, true),
         Verdict::Deny => (false, true),
         Verdict::Audit => (false, false),
-        Verdict::Unknown | Verdict::Malformed => {
-            unreachable!("verdict_for never produces {verdict:?}")
-        }
+        Verdict::Malformed => (false, true),
+        Verdict::Unknown => unreachable!("verdict_for never produces {verdict:?}"),
     }
 }
 
@@ -92,11 +88,11 @@ fn known_allowed_result(tx_hash: alloy_primitives::B256, source_hash: &str) -> A
 pub struct AuditTransactionsRequest {
     pub rules: Vec<RawRule>,
     pub txs: Vec<DepositTxRequest>,
-    /// `source_hash` values RCS has already resolved to Allow (a formerly-`audit`-verdict
-    /// deposit that RCS's adjudicator approved in an earlier round). Executed and committed
-    /// unconditionally, skipping rule (re-)classification — a `quota`-type rule match is
-    /// unconditional on the tx's own logs and has no memory of a prior decision, so
-    /// re-classifying it would just produce `audit` again forever. See
+    /// `source_hash` values RCS has already resolved to Allow: both original deposits that
+    /// RCS's adjudicator approved in an earlier round and synthetic ban deposits prepended for
+    /// replay. Executed and committed unconditionally, skipping rule (re-)classification — a
+    /// `quota`-type rule match is unconditional on the tx's own logs and has no memory of a
+    /// prior decision, so re-classifying it would just produce `audit` again forever. See
     /// `docs/superpowers/specs/2026-07-24-audit-transactions-multiround-rpc-design.md` §5.5.
     #[serde(default)]
     pub known_allowed: Vec<String>,
@@ -281,6 +277,11 @@ mod algorithm_tests {
     #[test]
     fn audit_discards_and_stops() {
         assert_eq!(commit_and_continue(Verdict::Audit), (false, false));
+    }
+
+    #[test]
+    fn malformed_discards_and_continues() {
+        assert_eq!(commit_and_continue(Verdict::Malformed), (false, true));
     }
 
     use super::super::deposit::DepositTxRequest;
