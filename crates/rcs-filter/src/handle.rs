@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use alloy_primitives::{Address, Log, B256, U256};
+use tracing::warn;
 
 use crate::client::RcsClient;
 use crate::clock::Clock;
@@ -233,7 +234,20 @@ impl FilterHandle {
 
         // Fresh evaluation.
         let rules = self.shared.current_rules();
-        match matching::evaluate(&rules, input) {
+        let outcome = match matching::try_evaluate(&rules, input) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                warn!(
+                    target: "rcs_filter",
+                    tx_hash = %input.tx_hash,
+                    %error,
+                    "matching budget exceeded; denying transaction"
+                );
+                self.shared.metrics.deny_total.increment(1);
+                return Screen::Deny;
+            }
+        };
+        match outcome {
             MatchOutcome::Allow => {
                 let concurrent = {
                     let pool = self.shared.pool_lock();
@@ -425,9 +439,18 @@ impl FilterHandle {
             // current logs and compare to the submit-time hash. Transition to a terminal
             // tombstone either way (no RCS cancel call on mismatch, TD §4.8).
             BufferStatus::Approved => {
-                let consistent = match matching::evaluate(&rule_snapshot, input) {
-                    MatchOutcome::Audit { actions, .. } => {
+                let consistent = match matching::try_evaluate(&rule_snapshot, input) {
+                    Ok(MatchOutcome::Audit { actions, .. }) => {
                         quota_hash::encode_and_hash(&actions) == stored_hash
+                    }
+                    Err(error) => {
+                        warn!(
+                            target: "rcs_filter",
+                            tx_hash = %input.tx_hash,
+                            %error,
+                            "matching budget exceeded during consistency check"
+                        );
+                        false
                     }
                     _ => false,
                 };
@@ -502,8 +525,9 @@ impl FilterHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rules::load_rules;
+    use crate::rules::{load_rules, RawRule};
     use crate::test_support::{golden, log_builder, TestClock};
+    use alloy_primitives::{Bytes, LogData};
     use std::str::FromStr;
 
     fn handle_with_scenario_a() -> FilterHandle {
@@ -564,6 +588,26 @@ mod tests {
         };
         assert_eq!(h.screen_tx(&input), Screen::Deny);
         assert!(h.buffer_status(&golden::tx_b()).is_none());
+    }
+
+    #[test]
+    fn excessive_complete_bindings_deny_without_buffering() {
+        let raw: RawRule = serde_json::from_str(
+            r#"{"id":"excessive","event_abis":{"a":{"type":"event","name":"A","inputs":[],"anonymous":true},"b":{"type":"event","name":"B","inputs":[],"anonymous":true}},"audit_types":["custom"],"condition":true,"action":"audit"}"#,
+        )
+        .unwrap();
+        let rules = load_rules(1, 1, vec![raw]);
+        let h = FilterHandle::for_test(FilterConfig::default(), rules, Arc::new(TestClock::new(1)));
+        let logs = (0..65)
+            .map(|_| Log {
+                address: golden::token_x(),
+                data: LogData::new_unchecked(vec![], Bytes::new()),
+            })
+            .collect::<Vec<_>>();
+        let input = scenario_a_input(&logs);
+
+        assert_eq!(h.screen_tx(&input), Screen::Deny);
+        assert!(h.buffer_status(&input.tx_hash).is_none());
     }
 
     #[test]

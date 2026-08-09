@@ -1,7 +1,7 @@
 //! Pure per-tx verdict classification for `xlayer_auditTransactions` (Task 4).
 //!
 //! Classifies one already-executed deposit transaction's logs against a rule set using the
-//! same [`rcs_filter::matching::evaluate`] pure function the look-ahead engine's design is
+//! same [`rcs_filter::matching::try_evaluate`] pure function the look-ahead engine's design is
 //! built around. This module does no execution and no network IO — unlike
 //! [`rcs_filter::handle::FilterHandle::screen_tx`], it never touches a `BufferPool`.
 
@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use alloy_primitives::{Address, Log, B256, U256};
 use rcs_filter::client::ActionItem;
 use rcs_filter::handle::ScreenInput;
-use rcs_filter::matching::{evaluate, MatchOutcome};
+use rcs_filter::matching::{try_evaluate, MatchOutcome};
 use rcs_filter::rules::RuleSet;
 use serde::Serialize;
 
@@ -40,8 +40,9 @@ pub struct AuditResult {
 }
 
 impl AuditResult {
-    /// Builds a `Malformed` result for a request that failed `build_deposit_tx` (Task 3), so
-    /// it never reaches this module's `verdict_for`.
+    /// Builds a `Malformed` result for a request that cannot be classified, either because
+    /// `build_deposit_tx` failed or because matching exceeded its resource budget. The empty
+    /// `tx_hash` consistently indicates that no authoritative screening verdict was produced.
     pub fn malformed(source_hash: String) -> Self {
         Self { tx_hash: String::new(), source_hash, verdict: Verdict::Malformed, actions: None }
     }
@@ -68,20 +69,29 @@ pub fn verdict_for(
 ) -> AuditResult {
     let input =
         ScreenInput { tx_hash, origin: from, tx_to: to, nonce: 0, value, block_height: 0, logs };
-    match evaluate(rules, &input) {
-        MatchOutcome::Allow => AuditResult {
+    match try_evaluate(rules, &input) {
+        Err(error) => {
+            tracing::warn!(
+                target: "xlayer_audit_rpc",
+                source_hash = %req.source_hash,
+                %error,
+                "matching budget exceeded; returning malformed result"
+            );
+            AuditResult::malformed(req.source_hash.clone())
+        }
+        Ok(MatchOutcome::Allow) => AuditResult {
             tx_hash: format!("{tx_hash:#x}"),
             source_hash: req.source_hash.clone(),
             verdict: Verdict::Allow,
             actions: None,
         },
-        MatchOutcome::Deny => AuditResult {
+        Ok(MatchOutcome::Deny) => AuditResult {
             tx_hash: format!("{tx_hash:#x}"),
             source_hash: req.source_hash.clone(),
             verdict: Verdict::Deny,
             actions: None,
         },
-        MatchOutcome::Audit { actions, .. } => AuditResult {
+        Ok(MatchOutcome::Audit { actions, .. }) => AuditResult {
             tx_hash: format!("{tx_hash:#x}"),
             source_hash: req.source_hash.clone(),
             verdict: Verdict::Audit,
@@ -93,6 +103,7 @@ pub fn verdict_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::{Bytes, LogData};
     use rcs_filter::rules::{load_rules, RawRule};
     use rcs_filter::test_support::log_builder::erc20_transfer;
 
@@ -259,6 +270,60 @@ mod tests {
         assert_eq!(item.name, "transfer");
         assert_eq!(item.address, format!("{:#x}", token()));
         assert_eq!(item.params.get("value").and_then(|v| v.as_str()), Some("2000000000000000000"));
+    }
+
+    #[test]
+    fn audit_verdict_returns_every_physical_log_in_evm_order() {
+        let req = sample_request();
+        let first_value = U256::from(1);
+        let second_value = U256::from(2);
+        let logs = [
+            erc20_transfer(token(), origin(), recipient(), first_value),
+            erc20_transfer(token(), origin(), recipient(), second_value),
+        ];
+
+        let result = verdict_for(
+            &req,
+            origin(),
+            Some(recipient()),
+            B256::ZERO,
+            U256::ZERO,
+            &logs,
+            &audit_quota_rule(),
+        );
+
+        assert_eq!(result.verdict, Verdict::Audit);
+        let actions = result.actions.expect("audit verdict must carry actions");
+        let values = actions["quota"]
+            .iter()
+            .map(|item| item.params["value"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(values, ["1", "2"]);
+    }
+
+    #[test]
+    fn excessive_complete_bindings_are_reported_as_malformed() {
+        let raw: RawRule = serde_json::from_str(
+            r#"{"id":"excessive","event_abis":{"a":{"type":"event","name":"A","inputs":[],"anonymous":true},"b":{"type":"event","name":"B","inputs":[],"anonymous":true}},"audit_types":["custom"],"condition":true,"action":"audit"}"#,
+        )
+        .unwrap();
+        let rules = load_rules(1, 0, vec![raw]);
+        let logs = (0..65)
+            .map(|_| Log { address: token(), data: LogData::new_unchecked(vec![], Bytes::new()) })
+            .collect::<Vec<_>>();
+
+        let result = verdict_for(
+            &sample_request(),
+            origin(),
+            Some(recipient()),
+            B256::ZERO,
+            U256::ZERO,
+            &logs,
+            &rules,
+        );
+
+        assert_eq!(result.verdict, Verdict::Malformed);
+        assert!(result.actions.is_none());
     }
 
     #[test]
