@@ -1,5 +1,5 @@
 //! [`FilterHandle`] — the synchronous entry the block builder calls per transaction, plus
-//! the owner of shared filter state and background workers (TD §4.2/§4.7).
+//! the owner of shared filter state and background workers.
 //!
 //! `screen_tx` performs **zero network IO**: dedup short-circuit → in-memory match/merge →
 //! buffer-pool bookkeeping. All RCS traffic happens on the [`crate::worker`] tasks spawned
@@ -38,7 +38,7 @@ pub enum TerminalReason {
     FailCloseTimeout,
 }
 
-/// The screening decision returned to the builder hot path (TD §4.2).
+/// The screening decision returned to the builder hot path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
     /// Package normally (no rule required action, or an already-approved-and-consistent tx).
@@ -66,7 +66,7 @@ pub enum PreScreen {
     Drop,
 }
 
-/// Input to [`FilterHandle::screen_tx`], borrowed from the builder loop (TD §4.2).
+/// Input to [`FilterHandle::screen_tx`], borrowed from the builder loop.
 pub struct ScreenInput<'a> {
     pub tx_hash: B256,
     pub origin: Address,
@@ -85,7 +85,7 @@ pub struct ScreenInput<'a> {
 #[derive(Clone)]
 pub(crate) struct Shared {
     pub config: FilterConfig,
-    /// Atomically hot-swapped rule snapshot (TD §4.9; `Arc<RwLock<Arc<..>>>` per R-8, no
+    /// Atomically hot-swapped rule snapshot (`Arc<RwLock<Arc<..>>>`, with no
     /// new dependency — hot path takes a read lock and clones the inner `Arc`).
     pub rules: Arc<RwLock<Arc<RuleSet>>>,
     pub pool: Arc<Mutex<BufferPool>>,
@@ -221,7 +221,7 @@ impl FilterHandle {
     /// Screens one transaction (synchronous, no network IO). See [`Screen`].
     pub fn screen_tx(&self, input: &ScreenInput) -> Screen {
         // Stage zero: dedup short-circuit — a non-terminal buffered entry is reused without
-        // re-decoding or re-submitting (FR-4 stage zero).
+        // re-decoding or re-submitting during the first screening stage.
         let existing = {
             let pool = self.shared.pool_lock();
             pool.get(&input.tx_hash).map(|e| {
@@ -398,7 +398,7 @@ impl FilterHandle {
 
     /// Handles a transaction that already has a buffer-pool entry (dedup short-circuit).
     /// Terminal tombstones map deterministically without re-screening; the in-flight and
-    /// `Approved` cases are handled per FR-1/FR-7.
+    /// `Approved` cases are handled separately by the consistency check.
     fn screen_existing(
         &self,
         input: &ScreenInput,
@@ -422,7 +422,7 @@ impl FilterHandle {
             }
 
             // Terminal: dropped (denied/outdated/fail-close/consistency-mismatch). Never
-            // packaged, never re-submitted, never re-admitted this build cycle (G2/G3).
+            // packaged, never re-submitted, and never re-admitted this build cycle.
             BufferStatus::Dropped => {
                 if !self.shared.pool_lock().matches(
                     &input.tx_hash,
@@ -435,9 +435,9 @@ impl FilterHandle {
                 Screen::Drop
             }
 
-            // Approved → FR-7 pre-package consistency check: re-simulate the quota from the
+            // Approved → pre-package consistency check: re-simulate the quota from the
             // current logs and compare to the submit-time hash. Transition to a terminal
-            // tombstone either way (no RCS cancel call on mismatch, TD §4.8).
+            // tombstone either way (no RCS cancel call on mismatch).
             BufferStatus::Approved => {
                 let consistent = match matching::try_evaluate(&rule_snapshot, input) {
                     Ok(MatchOutcome::Audit { actions, .. }) => {
@@ -616,7 +616,7 @@ mod tests {
         assert_eq!(h.screen_tx(&scenario_a_input(&[])), Screen::Allow);
     }
 
-    // ---- G1-G4: builder-visible terminal tombstone semantics ------------------------------
+    // ---- Builder-visible terminal tombstone semantics ------------------------------------
 
     fn handle_and_clock(start: u64) -> (FilterHandle, std::sync::Arc<TestClock>) {
         let rules = load_rules(1, 1, vec![serde_json::from_str(golden::RULE_SCENARIO_A).unwrap()]);
@@ -650,8 +650,8 @@ mod tests {
         )
     }
 
-    /// FR-10 scenario c (denied → drop). Denied tombstones the tx as `Dropped`; it is never
-    /// packaged or re-submitted, and re-screening requests tx-pool eviction (G3).
+    /// A denied decision tombstones the tx as `Dropped`; it is never
+    /// packaged or re-submitted, and re-screening requests tx-pool eviction.
     #[test]
     fn scenario_c_denied_drops_and_never_resubmits() {
         let (h, _clock) = handle_and_clock(1_751_000_000);
@@ -676,7 +676,7 @@ mod tests {
         });
     }
 
-    /// FR-10 scenario d (pending → approved → outdated → drop). The first `outdated`
+    /// For a pending → approved → outdated flow, the first `outdated`
     /// observation drops the tx; re-screening never returns `AuditApproved` and the
     /// consistency check is never triggered (it went straight to `Dropped`).
     #[test]
@@ -698,8 +698,8 @@ mod tests {
         assert_eq!(h.screen_tx(&input), Screen::Drop);
     }
 
-    /// FR-6 §6.5 fail-open: an audit tx whose `audit_timeout_action=allow` exceeds the 90s
-    /// outer timeout is released into the block via `TimedOutAllow → AuditApproved` (G1),
+    /// Fail-open behavior: an audit tx whose `audit_timeout_action=allow` exceeds the 90s
+    /// outer timeout is released into the block via `TimedOutAllow → AuditApproved`,
     /// deterministically on every subsequent round (no clock reset, no re-buffer).
     #[test]
     fn timed_out_allow_is_terminal_allow() {
@@ -721,7 +721,7 @@ mod tests {
         assert_eq!(h.screen_tx(&input), Screen::AuditApproved);
     }
 
-    /// FR-7 §6.6 consistency pass: approved + matching re-simulation → release.
+    /// Consistency pass: approved + matching re-simulation → release.
     #[test]
     fn approved_consistency_pass_is_attempt_scoped() {
         let (h, _clock) = handle_and_clock(1_751_000_000);
@@ -827,7 +827,7 @@ mod tests {
         assert_eq!(h.pre_screen(&golden::tx_a()), PreScreen::Drop);
     }
 
-    /// FR-7 §6.6 consistency mismatch (G2): approved but the pre-package re-simulation yields
+    /// Consistency mismatch: approved but the pre-package re-simulation yields
     /// a different quota → hard drop, no RCS cancel, never re-admitted.
     #[test]
     fn approved_consistency_mismatch_hard_drops() {

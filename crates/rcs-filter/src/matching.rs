@@ -1,4 +1,4 @@
-//! Per-transaction screening algorithm (FR-4, TD §4.6): filter-skip (zero-decode) →
+//! Per-transaction screening algorithm: filter-skip (zero-decode) →
 //! topic0 candidate lookup → event decode → JSONLogic eval → action merge
 //! (`deny > audit > allow`, both intra-log and cross-log).
 
@@ -84,7 +84,7 @@ fn evaluate_checked(rules: &RuleSet, input: &ScreenInput) -> Result<MatchOutcome
     for &idx in &candidate_rule_indices(rules, input.logs) {
         let rule = &rules.rules[idx];
 
-        // Stage one: filter-skip (contract §3.1, zero decode).
+        // Stage one: filter-skip with zero decoding.
         if let Some(ca) = rule.contract_address
             && input.tx_to != Some(ca)
         {
@@ -201,7 +201,7 @@ fn candidate_rule_indices(rules: &RuleSet, logs: &[Log]) -> Vec<usize> {
 
 /// Builds JSONLogic bindings for one complete physical-log combination. Tx-level vars
 /// (`contract_address`, `origin`, `value`, `nonce`) plus `<name>.<param>` / `<name>.address`
-/// per declared event; unmatched events bind all their variables to `null` (contract §3.2).
+/// per declared event; unmatched events bind all their variables to `null`.
 fn build_bindings(
     rule: &CompiledRule,
     input: &ScreenInput,
@@ -352,7 +352,7 @@ fn dyn_value_to_json(v: &DynSolValue) -> Value {
     }
 }
 
-/// Lower-cased `0x`-prefixed hex form of an address (no EIP-55 checksum, contract §4.8).
+/// Lower-cased `0x`-prefixed hex form of an address (no EIP-55 checksum).
 fn addr_lower(a: Address) -> String {
     format!("{a:#x}")
 }

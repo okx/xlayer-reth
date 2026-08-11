@@ -1,13 +1,13 @@
-//! Background workers (TD §4.7/§4.9). All RCS network IO lives here; the hot path
+//! Background workers. All RCS network IO lives here; the hot path
 //! ([`crate::handle::FilterHandle::screen_tx`]) never blocks on the network.
 //!
 //! Four cooperating tokio tasks, each run under a supervisor ([`spawn_supervised`]) so a
 //! panic is logged (never silent) and the task self-heals:
-//! - **rules**: FR-2 asynchronous initial load (unbounded exponential backoff, empty rules
-//!   until ready) then FR-3 hot-reload (`content_version`-triggered atomic swap).
-//! - **submit**: FR-5 batch submit every `batch_window`.
-//! - **query**: FR-5 adjudication poll, mapping RCS status → buffer transitions.
-//! - **timeout**: FR-6 timeout tick (outer 90s fallback + 8s/20s stalls) + terminal-tombstone
+//! - **rules**: asynchronous initial load (unbounded exponential backoff, empty rules until
+//!   ready), then hot-reload (`content_version`-triggered atomic swap).
+//! - **submit**: batch submit every `batch_window`.
+//! - **query**: adjudication poll, mapping RCS status → buffer transitions.
+//! - **timeout**: timeout tick (outer 90s fallback + 8s/20s stalls) + terminal-tombstone
 //!   eviction (bounds pool memory).
 
 use std::sync::atomic::Ordering;
@@ -31,7 +31,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Delay before a supervised worker is restarted after an unexpected exit/panic.
 const SUPERVISOR_RESTART_BACKOFF: Duration = Duration::from_secs(1);
 
-/// Spawns all background workers under supervision. No-op when the filter is disabled (FR-9).
+/// Spawns all background workers under supervision. No-op when the filter is disabled.
 /// Returns the supervisor task handles; aborting them (on [`crate::FilterHandle`] drop) stops
 /// the workers and prevents leaked tasks.
 pub(crate) fn spawn(shared: Shared, client: Arc<dyn RcsClient>) -> Vec<JoinHandle<()>> {
@@ -99,9 +99,9 @@ where
     })
 }
 
-/// FR-2 asynchronous initial load followed by FR-3 hot-reload polling.
+/// Asynchronous initial load followed by hot-reload polling.
 async fn rules_task(shared: Shared, client: Arc<dyn RcsClient>) {
-    // FR-2: retry until a valid, supported rule set is loaded. Screening remains live with
+    // Retry until a valid, supported rule set is loaded. Screening remains live with
     // an empty snapshot until then; readiness metrics make that fail-open window observable.
     let mut backoff =
         RetryBackoff::new(shared.config.retry_initial_backoff, shared.config.retry_max_backoff);
@@ -127,9 +127,9 @@ async fn rules_task(shared: Shared, client: Arc<dyn RcsClient>) {
     }
     shared.metrics.rules_retry_delay_seconds.set(0.0);
 
-    // FR-3: poll `content_version`; only pull the full `/rules` body on change. The lightweight
+    // Poll `content_version`; only pull the full `/rules` body on change. The lightweight
     // probe also carries `protocol_version`, so an unsupported version is filtered out *here*
-    // without pulling the body every tick (#5 busy-loop suppression). Because the decision is
+    // without pulling the body every tick. Because the decision is
     // re-derived from each probe (no sticky "rejected version" state), a later protocol fix —
     // even one that keeps the same `content_version` — recovers automatically on the next poll.
     let interval = shared.config.rules_version_poll_interval;
@@ -202,7 +202,7 @@ pub(crate) async fn load_and_install(
     Ok(true)
 }
 
-/// FR-5 batch-submit loop.
+/// Batch-submit loop.
 async fn submit_task(shared: Shared, client: Arc<dyn RcsClient>) {
     let mut backoff =
         RetryBackoff::new(shared.config.retry_initial_backoff, shared.config.retry_max_backoff);
@@ -233,7 +233,7 @@ async fn submit_task(shared: Shared, client: Arc<dyn RcsClient>) {
     }
 }
 
-/// FR-5 adjudication poll loop.
+/// Adjudication poll loop.
 async fn query_task(shared: Shared, client: Arc<dyn RcsClient>) {
     let mut backoff =
         RetryBackoff::new(shared.config.retry_initial_backoff, shared.config.retry_max_backoff);
@@ -428,7 +428,7 @@ fn error_class(error: &crate::FilterError) -> &'static str {
     }
 }
 
-/// FR-6 timeout tick loop + terminal-tombstone eviction (bounds pool memory).
+/// Timeout tick loop + terminal-tombstone eviction (bounds pool memory).
 async fn timeout_task(shared: Shared) {
     loop {
         tokio::time::sleep(POLL_INTERVAL).await;

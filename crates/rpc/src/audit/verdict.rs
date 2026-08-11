@@ -1,4 +1,4 @@
-//! Pure per-tx verdict classification for `xlayer_auditTransactions` (Task 4).
+//! Pure per-transaction verdict classification for `xlayer_auditTransactions`.
 //!
 //! Classifies one already-executed deposit transaction's logs against a rule set using the
 //! same [`rcs_filter::matching::try_evaluate`] pure function the look-ahead engine's design is
@@ -23,9 +23,8 @@ pub enum Verdict {
     Allow,
     Deny,
     Audit,
-    /// Never executed/classified because an earlier tx in the same batch resolved to `Audit`
-    /// and the handler stopped executing the rest — see
-    /// `docs/superpowers/specs/2026-07-24-audit-transactions-multiround-rpc-design.md`.
+    /// Never executed/classified because an earlier transaction in the same batch resolved to
+    /// `Audit` and the handler stopped executing the rest.
     Unknown,
     Malformed,
 }
@@ -55,7 +54,7 @@ impl AuditResult {
 }
 
 /// Classifies one already-executed deposit transaction against `rules`. `tx_hash` and `logs`
-/// come from the caller's EVM execution (Task 5); this function does no execution itself —
+/// come from the caller's EVM execution; this function does no execution itself —
 /// zero network IO, zero side effects (unlike `FilterHandle::screen_tx`, this never touches a
 /// `BufferPool`).
 pub fn verdict_for(
@@ -144,8 +143,8 @@ mod tests {
     }
 
     /// Deny rule keyed on `{"var":"value"}` (in addition to the triggering ERC20 Transfer
-    /// event) — deny only fires above a threshold. This exercises the exact bug fixed in
-    /// Task 1: with `value` still hardcoded to `U256::ZERO`, this transaction (whose real
+    /// event) — deny only fires above a threshold. This exercises the regression where `value`
+    /// was hardcoded to `U256::ZERO`; this transaction (whose real
     /// value is one token, above the half-token threshold) would have wrongly evaluated to
     /// `Allow` instead of `Deny`.
     fn deny_above_threshold_rule() -> RuleSet {

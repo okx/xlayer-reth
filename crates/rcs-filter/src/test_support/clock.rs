@@ -1,10 +1,10 @@
-//! Deterministic, injectable test clock (TD prohibition on hidden time sources).
+//! Deterministic, injectable test clock that avoids hidden time sources.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::clock::Clock;
 
-/// A manually-advanced clock for deterministic FR-6 timeout tests.
+/// A manually-advanced clock for deterministic timeout tests.
 #[derive(Debug)]
 pub struct TestClock {
     now: AtomicU64,
