@@ -1,5 +1,5 @@
 //! Rule data model: raw (wire) shapes deserialized from RCS, and compiled shapes used by
-//! the matching hot path. See contract §3.
+//! the matching hot path.
 
 use std::collections::HashMap;
 
@@ -7,7 +7,7 @@ use alloy_dyn_abi::DynSolType;
 use alloy_primitives::{Address, B256};
 use serde::{Deserialize, Serialize};
 
-/// Rule action (contract §3.6). Priority when merging: `deny > audit > allow`.
+/// Rule action. Priority when merging: `deny > audit > allow`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Action {
@@ -20,9 +20,9 @@ pub enum Action {
     Audit,
 }
 
-/// Fallback applied when RCS is unresponsive past `total_retry_timeout` (contract §3.6).
+/// Fallback applied when RCS is unresponsive past `total_retry_timeout`.
 /// `allow` = fail-open, `deny` = fail-close. Omitted `audit_timeout_action` defaults to
-/// `allow` (contract §3.6 disambiguation / ADR-0002).
+/// `allow`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TimeoutAction {
@@ -32,7 +32,7 @@ pub enum TimeoutAction {
 
 impl TimeoutAction {
     /// Returns the stricter of two timeout actions (`deny` wins), used when a tx matches
-    /// several audit rules with differing `audit_timeout_action` (FR-6, TD §4.7).
+    /// several audit rules with differing `audit_timeout_action`.
     pub fn stricter(self, other: TimeoutAction) -> TimeoutAction {
         match (self, other) {
             (TimeoutAction::Deny, _) | (_, TimeoutAction::Deny) => TimeoutAction::Deny,
@@ -42,7 +42,7 @@ impl TimeoutAction {
 }
 
 /// A single ABI input declaration inside an [`EventAbi`]. `name` is `Option` so the
-/// loader can detect the "missing name" rejection case (contract §3.1(1)/§3.2).
+/// loader can detect and reject a missing name.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AbiInput {
     #[serde(default)]
@@ -52,7 +52,7 @@ pub struct AbiInput {
     pub indexed: bool,
 }
 
-/// A named event declaration (contract §3.2). The map key in [`RawRule::event_abis`] is
+/// A named event declaration. The map key in [`RawRule::event_abis`] is
 /// the rule-local name; `name` here is the on-chain Solidity event name used for topic0.
 #[derive(Debug, Clone, Deserialize)]
 pub struct EventAbi {
@@ -67,7 +67,7 @@ fn default_audit_types() -> Vec<String> {
     vec!["quota".to_string()]
 }
 
-/// Raw rule as delivered by RCS `GET /rules` (contract §3.1). `condition` is kept as a raw
+/// Raw rule as delivered by RCS `GET /rules`. `condition` is kept as a raw
 /// JSON value (may be the literal `true` or a JSONLogic object).
 #[derive(Debug, Clone, Deserialize)]
 pub struct RawRule {
@@ -122,7 +122,7 @@ pub struct CompiledRule {
     pub audit_timeout_action: TimeoutAction,
 }
 
-/// One rule dropped during [`super::load_rules`] (FR-8: per-rule id + why it failed), surfaced
+/// One rule dropped during [`super::load_rules`] (per-rule id + why it failed), surfaced
 /// so callers can decide whether a partially-invalid batch is still safe to install rather than
 /// silently running with fewer active rules than the source actually declared.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,7 +132,7 @@ pub struct RejectedRule {
 }
 
 /// An immutable, validated rule set snapshot plus its topic0 index. Swapped atomically on
-/// hot-reload (TD §4.9); the hot path only ever reads a fully-built snapshot.
+/// hot-reload; the hot path only ever reads a fully-built snapshot.
 #[derive(Debug, Clone, Default)]
 pub struct RuleSet {
     pub protocol_version: u32,

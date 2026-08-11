@@ -1,10 +1,10 @@
-//! Integration tests for the RCS-facing worker layer (spec §6.4 worked example + §7.2
-//! integration checklist). Two flavours, both network-free and deterministic:
+//! Integration tests for the RCS-facing worker layer. Two flavours, both network-free and
+//! deterministic:
 //!
 //! - **Worker-function tests** drive the `pub(crate)` [`crate::worker`] entry points
 //!   (`load_and_install` / `submit_once` / `query_once`) directly against a
 //!   [`MockRcsClient`] — no spawning, no timers, fully deterministic. These pin the
-//!   contract wire payload (§6.4 断言点1) and every status → buffer transition.
+//!   exact wire payload and every status → buffer transition.
 //! - **Orchestration tests** spawn the real [`FilterHandle`] with its four background
 //!   tasks under a paused tokio clock, driving virtual time so the loops (initial-load retry
 //!   retry, hot-reload polling, batch submit, adjudication poll, timeout tick) actually run.
@@ -77,7 +77,7 @@ fn transfer_log(amount: &str) -> Log {
     )
 }
 
-/// The scenario-a transaction (contract §4 constants): `tx_hash=TX_A`, `origin=ORIGIN`,
+/// The scenario-a transaction: `tx_hash=TX_A`, `origin=ORIGIN`,
 /// `tx.to=CLAIM_CONTRACT`, `nonce=1`, `block_height=1_000_000`.
 fn scenario_a_input(tx_hash: B256, logs: &[Log]) -> ScreenInput<'_> {
     ScreenInput {
@@ -629,7 +629,7 @@ async fn stale_query_response_does_not_approve_reinserted_lifecycle() {
     assert_eq!(shared.pool_lock().get(&golden::tx_a()).unwrap().status, BufferStatus::Submitted);
 }
 
-/// §6.4 断言点1 + FR-10 AC1: the submit payload matches contract §4 scenario a **verbatim**,
+/// The submit payload matches scenario a **verbatim**,
 /// and an accepted hash advances `NotSubmitted → Submitted`.
 #[tokio::test]
 async fn submit_once_builds_contract_scenario_a_payload_verbatim() {
@@ -640,7 +640,7 @@ async fn submit_once_builds_contract_scenario_a_payload_verbatim() {
 
     worker::submit_once(&shared, &client).await.expect("submit ok");
 
-    // Wire payload — every field against contract §4 scenario a.
+    // Wire payload — every field must match scenario a.
     let req = mock.last_submit().expect("a submit request was recorded");
     assert_eq!(req.xlayer_block_height, 1_000_000);
     assert_eq!(req.txs.len(), 1);
@@ -664,7 +664,7 @@ async fn submit_once_builds_contract_scenario_a_payload_verbatim() {
     );
 }
 
-/// FR-5 AC2: a hash returned only in `rejected_malformed` (never in `accepted`) stays
+/// A hash returned only in `rejected_malformed` (never in `accepted`) stays
 /// `NotSubmitted` for a later retry.
 #[tokio::test]
 async fn submit_once_keeps_rejected_malformed_not_submitted() {
@@ -682,7 +682,7 @@ async fn submit_once_keeps_rejected_malformed_not_submitted() {
     );
 }
 
-/// FR-5: transactions are submitted grouped by `xlayer_block_height` — one request per height.
+/// Transactions are submitted grouped by `xlayer_block_height` — one request per height.
 #[tokio::test]
 async fn submit_once_groups_by_block_height() {
     let mock = Arc::new(MockRcsClient::new());
@@ -1130,7 +1130,7 @@ async fn unknown_audit_type_is_a_global_submit_barrier() {
     task.await.unwrap().unwrap();
 }
 
-/// FR-2 startup load: a supported protocol version installs the rules and latches `ready`.
+/// At startup, a supported protocol version installs the rules and latches `ready`.
 #[tokio::test]
 async fn load_and_install_installs_and_marks_ready() {
     let mock = Arc::new(MockRcsClient::new());
@@ -1144,7 +1144,7 @@ async fn load_and_install_installs_and_marks_ready() {
     assert_eq!(shared.rules.read().unwrap().rules.len(), 1);
 }
 
-/// FR-3 §5.3: an unsupported `protocol_version` is rejected — `Ok(false)`, rules untouched,
+/// An unsupported `protocol_version` is rejected — `Ok(false)`, rules untouched,
 /// `ready` not latched (initial loading keeps retrying; runtime keeps the old rules).
 #[tokio::test]
 async fn load_and_install_rejects_unsupported_protocol() {
@@ -1160,7 +1160,7 @@ async fn load_and_install_rejects_unsupported_protocol() {
     assert_eq!(shared.rules.read().unwrap().rules.len(), 0, "rules untouched");
 }
 
-/// FR-2: an unreachable RCS surfaces as a transport error (the caller retries with backoff).
+/// An unreachable RCS surfaces as a transport error (the caller retries with backoff).
 #[tokio::test]
 async fn load_and_install_errors_when_unavailable() {
     let mock = Arc::new(MockRcsClient::new());
@@ -1219,7 +1219,7 @@ async fn it_malformed_reload_keeps_old_rules() {
     assert_eq!(current.content_version, 1);
 }
 
-/// FR-8: a rule that deserializes fine (unlike `it_malformed_reload_keeps_old_rules`'s
+/// A rule that deserializes fine (unlike `it_malformed_reload_keeps_old_rules`'s
 /// wire-decode failure above) but fails `compile_rule`'s semantic validation (here: empty
 /// `event_abis`, a "dead rule" that could never match anything) must reject the *entire*
 /// update, not silently install the one valid sibling rule and drop the bad one. Regression
@@ -1596,7 +1596,7 @@ fn later_physical_log_changes_approval_consistency_hash() {
     );
 }
 
-/// FR-5 adjudication mapping: `Submitted → Pending` (any non-absent response) then
+/// Adjudication mapping: `Submitted → Pending` (any non-absent response) then
 /// `Pending → Approved` (status=approved), driven through `query_once`.
 #[tokio::test]
 async fn query_once_maps_submitted_through_pending_to_approved() {
@@ -1624,7 +1624,7 @@ async fn query_once_maps_submitted_through_pending_to_approved() {
     );
 }
 
-/// §7.2 scenario c: a `denied` status tombstones the entry as `Dropped` in place.
+/// A `denied` status tombstones the entry as `Dropped` in place.
 #[tokio::test]
 async fn denied_emits_one_discard_event() {
     let mock = Arc::new(MockRcsClient::new());
@@ -1637,7 +1637,7 @@ async fn denied_emits_one_discard_event() {
         shared.pool.lock().unwrap().insert(e);
     }
 
-    // Filter must not branch on `reason` (contract §2.5) — only log it.
+    // Filter must not branch on `reason` — only log it.
     mock.register_query_state_with_reason(
         golden::TX_C,
         "denied",
@@ -1775,7 +1775,7 @@ fn channel_lag_reconciles_all_dropped_hashes() {
     assert!(hashes.contains(&golden::tx_d()));
 }
 
-/// An absent tx_hash (RCS has never seen it / already swept, contract §2.5) leaves the entry
+/// An absent tx_hash (RCS has never seen it / already swept) leaves the entry
 /// untouched — no optimistic pass; the timeout task owns the fallback.
 #[tokio::test]
 async fn query_once_absent_status_leaves_entry_untouched() {
@@ -1817,7 +1817,7 @@ async fn wait_ready(h: &FilterHandle) {
     panic!("filter never became ready");
 }
 
-/// §6.4 worked example, end-to-end through the real workers: screen → batch submit (payload
+/// Worked example, end-to-end through the real workers: screen → batch submit (payload
 /// captured) → adjudication poll to Approved → pre-package consistency pass → release.
 #[tokio::test(start_paused = true)]
 async fn e2e_scenario_a_happy_path() {
@@ -1849,7 +1849,7 @@ async fn e2e_scenario_a_happy_path() {
     assert_eq!(h.buffer_status(&golden::tx_a()), Some(BufferStatus::Approved));
 }
 
-/// §7.2 scenario b: a `deny` rule match drops the tx locally and produces **zero** RCS
+/// A `deny` rule match drops the tx locally and produces **zero** RCS
 /// permission-request calls (no submit, no query).
 #[tokio::test(start_paused = true)]
 async fn scenario_b_deny_makes_zero_rcs_calls() {
@@ -1883,7 +1883,7 @@ async fn scenario_b_deny_makes_zero_rcs_calls() {
     assert_eq!(mock.call_count("query"), 0);
 }
 
-/// §7.2 "节点启动时无法连接 RCS": block production stays live with empty rules while the
+/// When the node cannot reach RCS at startup, block production stays live with empty rules while the
 /// rules worker retries, then readiness latches once RCS returns.
 #[tokio::test(start_paused = true)]
 async fn startup_retries_until_rcs_available_then_recovers() {
@@ -1910,8 +1910,8 @@ async fn startup_retries_until_rcs_available_then_recovers() {
     assert!(h.is_ready(), "filter recovers once RCS is reachable");
 }
 
-/// §7.2 "规则热更新": a `content_version` bump reloads rules for **new** transactions, while a
-/// transaction already buffered keeps its cached decision (§3.1 — no re-match on hot-reload).
+/// A `content_version` bump reloads rules for **new** transactions, while a transaction already
+/// buffered keeps its cached decision and is not matched again after hot-reload.
 #[tokio::test(start_paused = true)]
 async fn hot_reload_applies_to_new_tx_but_not_buffered() {
     let mock = Arc::new(MockRcsClient::new());
@@ -1952,7 +1952,7 @@ async fn hot_reload_applies_to_new_tx_but_not_buffered() {
     assert_eq!(h.screen_tx(&changed), Screen::Drop);
 }
 
-/// §7.2 "protocol_version 不支持" (runtime): a version bump advertising an unsupported
+/// At runtime, a version bump advertising an unsupported
 /// protocol is rejected — the node keeps the old rules and keeps mining (stays ready).
 #[tokio::test(start_paused = true)]
 async fn unsupported_protocol_at_runtime_keeps_old_rules() {
@@ -1974,7 +1974,7 @@ async fn unsupported_protocol_at_runtime_keeps_old_rules() {
     assert_eq!(h.screen_tx(&fresh), Screen::AuditPending);
 }
 
-/// §2.4 grace period: an audit tx whose RCS is unavailable for 50s (< the 90s outer timeout)
+/// An audit tx whose RCS is unavailable for 50s (< the 90s outer timeout)
 /// must not be resolved early. Recovery preserves its original retry clock and allows RCS to
 /// complete adjudication before the outer deadline.
 #[tokio::test(start_paused = true)]
@@ -2046,7 +2046,7 @@ async fn approved_outage_past_total_timeout_still_checks_consistency() {
     assert_eq!(h.buffer_status(&golden::tx_a()), Some(BufferStatus::Dropped));
 }
 
-/// §7.2 "NotSubmitted 循环重试后最终恢复": submit fails while RCS is down (tx stays
+/// Submit fails while RCS is down (tx stays
 /// NotSubmitted and is retried), then the whole flow completes once RCS returns.
 #[tokio::test(start_paused = true)]
 async fn not_submitted_loop_recovers_after_rcs_returns() {
@@ -2087,7 +2087,7 @@ async fn not_submitted_loop_recovers_after_rcs_returns() {
     assert_eq!(h.screen_tx(&input), Screen::AuditApproved);
 }
 
-/// #3: a terminal tombstone is evicted by the timeout task once it is older than
+/// A terminal tombstone is evicted by the timeout task once it is older than
 /// `terminal_entry_retention`, so the pool does not grow without bound.
 #[tokio::test(start_paused = true)]
 async fn terminal_tombstone_is_pruned_after_retention() {
@@ -2275,7 +2275,7 @@ fn it_pending_transactions_do_not_execute_each_flashblock() {
     assert_eq!(executions, 0);
 }
 
-/// #5 + F1: an unsupported protocol advertised by the lightweight probe is filtered out
+/// An unsupported protocol advertised by the lightweight probe is filtered out
 /// without ever pulling the full `/rules` body (busy-loop suppression), and — crucially — a
 /// later protocol fix that keeps the *same* `content_version` recovers automatically (no sticky
 /// rejected-version state).
@@ -2328,7 +2328,7 @@ async fn unsupported_protocol_skips_pull_and_recovers_without_content_bump() {
     assert_eq!(h.screen_tx(&input), Screen::Deny, "recovered rules took effect");
 }
 
-/// #4: a poisoned pool mutex (a panic while the lock was held) does not permanently brick the
+/// A poisoned pool mutex (a panic while the lock was held) does not permanently brick the
 /// filter — the poison-recovering accessor still hands back the guard.
 #[test]
 fn pool_lock_recovers_from_poisoning() {
@@ -2345,7 +2345,7 @@ fn pool_lock_recovers_from_poisoning() {
     assert!(shared.pool_lock().is_empty());
 }
 
-/// #4: the rules `RwLock` also recovers from poisoning — `current_rules`/`rules_write` must
+/// The rules `RwLock` also recovers from poisoning — `current_rules`/`rules_write` must
 /// keep working so a panic while the write lock was held cannot brick rule access.
 #[test]
 fn rules_lock_recovers_from_poisoning() {

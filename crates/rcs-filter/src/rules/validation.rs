@@ -1,8 +1,8 @@
-//! Rule loading + per-rule validation (FR-8) and topic0 index construction.
+//! Rule loading, per-rule validation, and topic0 index construction.
 //!
 //! Validation is **per-rule**: an invalid rule is rejected whole (not field-ignored, not
 //! whole-package-failed) and logged at `warn` with its id and reason; all other rules stay
-//! in effect (contract §3.1, TD §4.5).
+//! in effect.
 
 use std::str::FromStr;
 
@@ -15,13 +15,13 @@ use super::model::{
     TimeoutAction,
 };
 
-/// Fixed ERC20 `Transfer` quota shape (ordered input names) — contract §3.3.
+/// Fixed ERC20 `Transfer` quota shape (ordered input names).
 const ERC20_TRANSFER_SHAPE: &[&str] = &["from", "to", "value"];
-/// Fixed ERC1155 `TransferSingle` quota shape (ordered input names) — contract §3.3.
+/// Fixed ERC1155 `TransferSingle` quota shape (ordered input names).
 const ERC1155_TRANSFER_SINGLE_SHAPE: &[&str] = &["operator", "from", "to", "id", "value"];
 /// ERC1155 `TransferBatch` quota shape advertised by the RCS rule ABI.
 const ERC1155_TRANSFER_BATCH_SHAPE: &[&str] = &["operator", "from", "to", "ids", "values"];
-/// The only audit type implemented today (contract §2.4).
+/// The only audit type implemented today.
 const QUOTA: &str = "quota";
 
 /// Loads and validates a batch of raw rules into an immutable [`RuleSet`] snapshot with a
@@ -70,10 +70,10 @@ pub fn load_rules(protocol_version: u32, content_version: u64, raw: Vec<RawRule>
 }
 
 /// Validates and compiles a single raw rule. Returns `Err(reason)` when the rule must be
-/// rejected (FR-8 conditions), `Ok` otherwise. `audit_timeout_action` is defaulted to
-/// `allow` for `audit` rules that omit it (contract §3.6 disambiguation).
+/// rejected, `Ok` otherwise. `audit_timeout_action` defaults to `allow` for `audit` rules that
+/// omit it.
 pub fn compile_rule(raw: RawRule) -> std::result::Result<CompiledRule, String> {
-    // (3) event_abis empty → reject (dead rule).
+    // Reject an empty event_abis map because the rule could never match.
     if raw.event_abis.is_empty() {
         return Err("event_abis is empty".to_string());
     }
@@ -96,8 +96,7 @@ pub fn compile_rule(raw: RawRule) -> std::result::Result<CompiledRule, String> {
     let mut events = Vec::with_capacity(raw.event_abis.len());
     for (var_name, abi) in &raw.event_abis {
         let compiled = compile_event(var_name, abi)?;
-        // (2) quota fixed-shape: for audit rules whose audit_types includes "quota", every
-        // declared event must match one of the fixed shapes (contract §3.3).
+        // For quota audit rules, every declared event must match one of the fixed shapes.
         if is_quota_audit && !matches_quota_shape(&compiled) {
             return Err(format!(
                 "event '{var_name}' does not match a fixed quota shape (ERC20 Transfer / ERC1155 TransferSingle / ERC1155 TransferBatch)"
@@ -109,18 +108,18 @@ pub fn compile_rule(raw: RawRule) -> std::result::Result<CompiledRule, String> {
     let contract_address = parse_opt_address(&raw.contract_address, "contract_address")?;
     let origin = parse_opt_address(&raw.origin, "origin")?;
 
-    // contract_address is a review-only warning (TD §4.6 stage-one note): it must be left
+    // contract_address is a review-only warning: it must be left
     // empty for events that can be produced via intermediate contracts (ERC20/1155
     // transfers), otherwise legitimate hits are silently skipped. Not an auto-reject.
     if contract_address.is_some() {
         warn!(
             target: "rcs_filter",
             rule_id = %raw.id,
-            "rule declares contract_address; verify the event can only be triggered by a direct call (contract §3.1)"
+            "rule declares contract_address; verify the event can only be triggered by a direct call"
         );
     }
 
-    // (4) audit rule without audit_timeout_action → default allow.
+    // An audit rule without audit_timeout_action defaults to allow.
     let audit_timeout_action = raw.audit_timeout_action.unwrap_or(TimeoutAction::Allow);
 
     Ok(CompiledRule {
@@ -152,7 +151,7 @@ fn compile_event(var_name: &str, abi: &EventAbi) -> std::result::Result<Compiled
     }
 
     for input in &abi.inputs {
-        // (1) inputs[].name must be present and unique within the event → else reject.
+        // inputs[].name must be present and unique within the event.
         let name = input
             .name
             .clone()
@@ -180,7 +179,7 @@ fn compile_event(var_name: &str, abi: &EventAbi) -> std::result::Result<Compiled
     })
 }
 
-/// Whether a compiled event's ordered input names match a fixed quota shape (contract §3.3).
+/// Whether a compiled event's ordered input names match a fixed quota shape.
 fn matches_quota_shape(event: &CompiledEvent) -> bool {
     let names: Vec<&str> = event.inputs.iter().map(|i| i.name.as_str()).collect();
     names == ERC20_TRANSFER_SHAPE

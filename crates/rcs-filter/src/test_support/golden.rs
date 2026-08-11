@@ -1,4 +1,4 @@
-//! Golden fixtures — verbatim from contract §4. Both teams reuse these exact constants.
+//! Golden fixtures shared by the filter and integration tests.
 
 use std::str::FromStr;
 
@@ -19,13 +19,13 @@ pub const BLACKLISTED_FROM: &str = "0x0606060606060606060606060606060606060606";
 /// Scenario b originating EOA.
 pub const ORIGIN_B: &str = "0x0707070707070707070707070707070707070707";
 
-/// Fixed tx hashes (contract §4).
+/// Fixed transaction hashes.
 pub const TX_A: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 pub const TX_B: &str = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 pub const TX_C: &str = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 pub const TX_D: &str = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 
-/// One token = 18-digit precision integer string (contract §4).
+/// One token as an 18-digit precision integer string.
 pub const ONE_TOKEN: &str = "1000000000000000000";
 /// Three tokens (scenario c requested amount).
 pub const THREE_TOKENS: &str = "3000000000000000000";

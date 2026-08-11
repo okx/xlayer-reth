@@ -1,4 +1,4 @@
-//! Error types for the RCS Filter (library crate → typed `thiserror` errors, TD §4.1).
+//! Typed `thiserror` errors for the RCS Filter library.
 
 use thiserror::Error;
 
@@ -35,7 +35,7 @@ pub enum FilterError {
     Config(String),
 
     /// One or more rules in an otherwise well-formed `/rules` response failed per-rule
-    /// validation (FR-8, e.g. empty `event_abis`, duplicate id, invalid JSONLogic). Surfaced as
+    /// validation (e.g. empty `event_abis`, duplicate id, invalid JSONLogic). Surfaced as
     /// an error — rather than silently installing the valid subset — so a partially-invalid
     /// batch never replaces the currently-active rule set.
     #[error("rule set contains {0} invalid rule(s), rejecting entire update: {1:?}")]

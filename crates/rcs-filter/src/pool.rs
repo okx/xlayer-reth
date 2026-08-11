@@ -1,7 +1,7 @@
-//! Buffer pool + audit state machine (FR-5/FR-6, TD §4.7).
+//! Buffer pool and audit state machine.
 //!
 //! `bufferPool[tx_hash]` is a Filter-local side table (distinct from the RCS-facing
-//! `status` in contract §2.5). It tracks adjudication progress across block-building rounds;
+//! `status`). It tracks adjudication progress across block-building rounds;
 //! terminal discard outcomes are also applied to the builder transaction pool.
 //!
 //! Terminal outcomes do **not** remove the entry — they transition it to a builder-visible
@@ -13,7 +13,7 @@
 //! and keeps the tx out of the submit / query / timeout scans for the rest of
 //! the build cycle. To bound memory over the node's (unbounded) lifetime, tombstones are
 //! evicted by [`BufferPool::prune_terminal`] once they have been terminal for longer than
-//! `terminal_entry_retention_seconds` (contract §2.5). Non-terminal state is removed when the
+//! `terminal_entry_retention_seconds`. Non-terminal state is removed when the
 //! exact transaction generation is no longer present in txpool.
 
 use std::collections::{BTreeMap, HashMap};
@@ -25,7 +25,7 @@ use crate::client::ActionItem;
 use crate::config::FilterConfig;
 use crate::rules::{RuleSet, TimeoutAction};
 
-/// In-memory audit state (TD §4.7). `TimedOutAllow` and `Dropped` are **terminal
+/// In-memory audit state. `TimedOutAllow` and `Dropped` are **terminal
 /// tombstones** kept in the pool (not removed) so the outcome is visible to the builder's
 /// `screen_tx` on the next round without re-screening from scratch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,7 +79,7 @@ pub struct BufferEntry {
     pub generation: u64,
     pub tx_hash: B256,
     pub origin: Address,
-    /// `tx.to` — submitted verbatim as `contract_address` (observational, contract §2.4).
+    /// `tx.to` — submitted verbatim as `contract_address` for observation.
     pub contract_address: Address,
     pub nonce: u64,
     pub block_height: u64,
@@ -89,9 +89,9 @@ pub struct BufferEntry {
     /// The exact rule snapshot used to produce `actions`. Approved transactions are re-evaluated
     /// against this snapshot so a hot reload cannot change an in-flight decision.
     pub rule_snapshot: Arc<RuleSet>,
-    /// keccak256 of the canonical `actions.quota` computed at submit time (FR-7).
+    /// keccak256 of the canonical `actions.quota` computed at submit time.
     pub quota_consistency_hash: B256,
-    /// Merged fallback action across matched audit rules (FR-6).
+    /// Merged fallback action across matched audit rules.
     pub timeout_action: TimeoutAction,
     /// Unix seconds when the entry first entered `NotSubmitted` (cumulative timeout base).
     pub first_not_submitted_at: u64,
@@ -137,7 +137,7 @@ impl BufferPool {
     }
 
     /// Whether an entry exists (including a terminal tombstone). Presence drives the dedup
-    /// short-circuit (FR-4 stage zero); `screen_tx` inspects the status to decide the reuse.
+    /// short-circuit; `screen_tx` inspects the status to decide the reuse.
     pub fn contains(&self, tx_hash: &B256) -> bool {
         self.entries.contains_key(tx_hash)
     }
@@ -284,8 +284,7 @@ impl BufferPool {
     }
 
     /// Applies a `202` submit response: `accepted` hashes in `NotSubmitted` advance to
-    /// `Submitted`; a hash only in `rejected_malformed` stays `NotSubmitted` for retry
-    /// (FR-5, contract §2.4).
+    /// `Submitted`; a hash only in `rejected_malformed` stays `NotSubmitted` for a later retry.
     pub fn apply_submit_response(
         &mut self,
         accepted: &[String],
@@ -316,9 +315,9 @@ impl BufferPool {
         resolved
     }
 
-    /// Applies an RCS query `status` for `tx_hash` (contract §2.5 → TD §4.7). `denied` /
-    /// `outdated` tombstone the entry as `Dropped` in place (G3: no removal → no re-buffer /
-    /// re-submit) and return `Some(Resolution::Discard)` for logging. Unrecognized/absent
+    /// Applies an RCS query `status` for `tx_hash`. `denied` /
+    /// `outdated` tombstone the entry as `Dropped` in place (no removal, re-buffer, or re-submit)
+    /// and return `Some(Resolution::Discard)` for logging. Unrecognized/absent
     /// statuses are left to [`Self::check_timeouts`] (no optimistic pass). Terminal entries
     /// are ignored.
     pub fn apply_query_status(
@@ -352,7 +351,7 @@ impl BufferPool {
                 None
             }
             // denied / outdated → tombstone as Dropped (RCS `denied`/`outdated` both map to
-            // local discard). Kept in place so the tx is not re-submitted (G3).
+            // local discard). Kept in place so the tx is not re-submitted.
             "denied" | "outdated" => {
                 entry.status = BufferStatus::Dropped;
                 entry.last_transition_at = now;
@@ -362,7 +361,7 @@ impl BufferPool {
                     QueryResolution::Denied
                 })
             }
-            // Unrecognized status → no terminal state; fall through to FR-6 timeout.
+            // Unrecognized status → no terminal state; fall through to timeout handling.
             _ => None,
         }
     }
@@ -406,8 +405,8 @@ impl BufferPool {
         resolved
     }
 
-    /// Advances timeout-driven transitions (FR-6). Outer fallback (cumulative > total
-    /// retry timeout) is evaluated **before** the regular per-state stalls (TD §4.7).
+    /// Advances timeout-driven transitions. Outer fallback (cumulative > total retry timeout)
+    /// is evaluated **before** the regular per-state stalls.
     /// Terminal tombstones are skipped (no re-resolution, no clock reset). On outer-fallback
     /// the entry is tombstoned in place (`TimedOutAllow` for fail-open, `Dropped` for
     /// fail-close) — not removed — and the resolution is returned for logging.
@@ -446,8 +445,8 @@ impl BufferPool {
 
     /// Evicts terminal tombstones (`TimedOutAllow`/`Dropped`) that have been terminal for
     /// longer than `retention` seconds, bounding pool memory over the node's lifetime
-    /// (contract §2.5 `terminal_entry_retention_seconds`). Non-terminal entries are not pruned by
-    /// age: retryable states use the FR-6 outer timeout, while `Approved` remains subject to its
+    /// (`terminal_entry_retention_seconds`). Non-terminal entries are not pruned by age: retryable
+    /// states use the outer timeout, while `Approved` remains subject to its
     /// RCS/consistency lifecycle and builder-side txpool-presence reconciliation.
     /// Retention exceeds `total_retry_timeout` so a tombstone is not evicted while a still-live
     /// duplicate of the tx might be re-screened within the same adjudication window; a tx still
@@ -545,7 +544,7 @@ mod tests {
                     QueryResolution::Denied
                 })
             );
-            // G3: tombstoned in place (not removed) so it is not re-submitted.
+            // Tombstoned in place (not removed) so it is not re-submitted.
             assert_eq!(pool.get(&hash).unwrap().status, BufferStatus::Dropped);
             assert!(pool.not_submitted().is_empty());
             assert!(pool.in_flight_hashes().is_empty());
@@ -726,7 +725,7 @@ mod tests {
         pool.insert(entry(0, TimeoutAction::Allow));
         assert!(pool.check_timeouts(&cfg, 90).is_empty());
         assert_eq!(pool.get(&hash).unwrap().status, BufferStatus::NotSubmitted);
-        // 91s → fail-open release, tombstoned in place (G1), NOT removed.
+        // 91s → fail-open release, tombstoned in place, NOT removed.
         let out = pool.check_timeouts(&cfg, 91);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].2, Resolution::ReleaseForPackaging);

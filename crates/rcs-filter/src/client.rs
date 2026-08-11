@@ -1,5 +1,5 @@
-//! RCS REST client (contract §2). The filter is a **client only** — it never exposes a
-//! REST service. Message schemas are transcribed verbatim from the binding contract §2;
+//! RCS REST client. The filter is a **client only** — it never exposes a REST service.
+//! Message schemas match the RCS wire protocol;
 //! the [`RcsClient`] trait is injected so tests can supply a hand-written double and
 //! integration tests a real-HTTP mock.
 
@@ -15,7 +15,7 @@ use crate::error::{FilterError, Result};
 /// unbounded allocation during response decoding.
 const MAX_RESPONSE_BODY_BYTES: usize = 16 * 1024 * 1024;
 
-/// `GET /rules` response (contract §2.2). `rules` may be an empty array.
+/// `GET /rules` response. `rules` may be an empty array.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RulesResponse {
     pub protocol_version: u32,
@@ -23,16 +23,16 @@ pub struct RulesResponse {
     pub rules: Vec<crate::rules::RawRule>,
 }
 
-/// `GET /rules/version` response (contract §2.3) — no `rules`.
+/// `GET /rules/version` response — no `rules`.
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub struct VersionResponse {
     pub protocol_version: u32,
     pub content_version: u64,
 }
 
-/// One decoded audit event as submitted to RCS (contract §2.4 `actions[<type>][]`).
+/// One decoded audit event as submitted to RCS in `actions[<type>][]`.
 /// `params` values are kept as strings (addresses lower-cased hex, uint256 decimal) to
-/// preserve 18-digit precision (contract §4).
+/// preserve 18-digit precision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionItem {
     /// Rule-local event name (the `event_abis` map key).
@@ -45,26 +45,26 @@ pub struct ActionItem {
     pub params: BTreeMap<String, serde_json::Value>,
 }
 
-/// One transaction in a `POST /permission-requests/submit` batch (contract §2.4).
+/// One transaction in a `POST /permission-requests/submit` batch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SubmitTx {
     pub tx_hash: String,
     pub origin: String,
-    /// `tx.to` — observational/audit only (contract §2.4).
+    /// `tx.to` — observational/audit only.
     pub contract_address: String,
     pub nonce: u64,
     /// `{ audit_type: [ActionItem] }`; today the only key is `"quota"`.
     pub actions: BTreeMap<String, Vec<ActionItem>>,
 }
 
-/// `POST /permission-requests/submit` request body (contract §2.4).
+/// `POST /permission-requests/submit` request body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SubmitRequest {
     pub xlayer_block_height: u64,
     pub txs: Vec<SubmitTx>,
 }
 
-/// `POST /permission-requests/submit` `202 Accepted` response (contract §2.4). Both fields
+/// `POST /permission-requests/submit` `202 Accepted` response. Both fields
 /// are plain `tx_hash` string arrays.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SubmitResponse {
@@ -72,7 +72,7 @@ pub struct SubmitResponse {
     pub rejected_malformed: Vec<String>,
 }
 
-/// `GET /permission-requests/query` mutually-exclusive query modes (contract §2.5).
+/// `GET /permission-requests/query` mutually-exclusive query modes.
 #[derive(Debug, Clone)]
 pub enum QueryParams {
     /// `?status=pending|approved|denied|outdated`
@@ -81,7 +81,7 @@ pub enum QueryParams {
     TxHashes(Vec<String>),
 }
 
-/// One adjudication result row (contract §2.5).
+/// One adjudication result row.
 #[derive(Debug, Clone, Deserialize)]
 pub struct QueryTx {
     pub tx_hash: String,
@@ -94,23 +94,23 @@ pub struct QueryTx {
     pub reason: Option<String>,
 }
 
-/// `GET /permission-requests/query` `200 OK` response (contract §2.5). A `tx_hash` the RCS
+/// `GET /permission-requests/query` `200 OK` response. A `tx_hash` the RCS
 /// has never seen (or already swept) is silently absent — not an error.
 #[derive(Debug, Clone, Deserialize)]
 pub struct QueryResponse {
     pub txs: Vec<QueryTx>,
 }
 
-/// Client for the four RCS REST endpoints (contract §2). Injected so tests can mock it.
+/// Client for the four RCS REST endpoints. Injected so tests can mock it.
 #[async_trait]
 pub trait RcsClient: Send + Sync + std::fmt::Debug {
-    /// `GET /rules` — full rule pull (contract §2.2).
+    /// `GET /rules` — full rule pull.
     async fn get_rules(&self) -> Result<RulesResponse>;
-    /// `GET /rules/version` — lightweight version probe (contract §2.3).
+    /// `GET /rules/version` — lightweight version probe.
     async fn get_rules_version(&self) -> Result<VersionResponse>;
-    /// `POST /permission-requests/submit` — batch submit, expects `202` (contract §2.4).
+    /// `POST /permission-requests/submit` — batch submit, expects `202`.
     async fn submit(&self, req: SubmitRequest) -> Result<SubmitResponse>;
-    /// `GET /permission-requests/query` — adjudication poll (contract §2.5).
+    /// `GET /permission-requests/query` — adjudication poll.
     async fn query(&self, q: QueryParams) -> Result<QueryResponse>;
 }
 

@@ -11,7 +11,7 @@
 //! Authoritative wire/rule contract: the RCS-Filter API contract (Binding) and the XLayer
 //! Filter technical design, both maintained in the team wiki (not in-repo).
 //!
-//! Key design principles (TD §3.4):
+//! Key design principles:
 //! 1. The synchronous entry [`FilterHandle::screen_tx`] performs zero network IO — only
 //!    in-memory dedup / matching / merge on the block-building hot path.
 //! 2. All RCS network IO happens on background tokio workers ([`worker`]).

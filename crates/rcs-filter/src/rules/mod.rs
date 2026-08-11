@@ -1,7 +1,7 @@
 //! Rule model, loading/validation, JSONLogic evaluator and topic0 index.
 //!
-//! Wire rule schema is deserialized from the RCS `GET /rules` response (contract §3);
-//! validated per-rule (FR-8), compiled into [`CompiledRule`] with a precomputed `topic0`
+//! Wire rule schema is deserialized from the RCS `GET /rules` response, validated per-rule,
+//! and compiled into [`CompiledRule`] with a precomputed `topic0`
 //! per named event, and indexed by `topic0 → [rule index]` for fast candidate lookup.
 
 mod jsonlogic;

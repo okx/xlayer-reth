@@ -1,10 +1,10 @@
-//! Injectable clock (TD prohibition: no hidden time sources — inject a `Clock` trait and
+//! Injectable clock with no hidden time sources: inject a `Clock` trait and
 //! mock it in tests). Time is expressed as Unix seconds, matching the RCS `decided_at`
-//! and the golden-fixture timeline (contract §4).
+//! and the golden-fixture timeline.
 
 use std::fmt::Debug;
 
-/// Abstraction over "current wall-clock time in Unix seconds" so timeout logic (FR-6) is
+/// Abstraction over "current wall-clock time in Unix seconds" so timeout logic is
 /// deterministically testable via [`crate::test_support::TestClock`].
 pub trait Clock: Send + Sync + Debug {
     /// Current time in Unix seconds.

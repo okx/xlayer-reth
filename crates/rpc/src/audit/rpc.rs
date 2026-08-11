@@ -92,8 +92,7 @@ pub struct AuditTransactionsRequest {
     /// RCS's adjudicator approved in an earlier round and synthetic ban deposits prepended for
     /// replay. Executed and committed unconditionally, skipping rule (re-)classification — a
     /// `quota`-type rule match is unconditional on the tx's own logs and has no memory of a
-    /// prior decision, so re-classifying it would just produce `audit` again forever. See
-    /// `docs/superpowers/specs/2026-07-24-audit-transactions-multiround-rpc-design.md` §5.5.
+    /// prior decision, so re-classifying it would just produce `audit` again forever.
     #[serde(default)]
     pub known_allowed: Vec<String>,
 }

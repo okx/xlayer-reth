@@ -1,10 +1,10 @@
-//! `quota_consistency_hash` canonical encoding + keccak256 (FR-7, TD §4.8, ADR-0003).
+//! `quota_consistency_hash` canonical encoding and keccak256 hashing.
 //!
 //! This is a **Filter-local** mechanism — it never appears in any RCS↔Filter message. The
 //! same function is used both at submit time and at the pre-package re-simulation so the two
-//! hashes are directly comparable (R-5: no encoding drift). It hashes a **canonical
+//! hashes are directly comparable without encoding drift. It hashes a **canonical
 //! structured encoding** of `actions.quota`, never a JSON string, so JSON surface
-//! differences (key order / whitespace) do not change the hash (FR-7 AC3).
+//! differences (key order / whitespace) do not change the hash.
 
 use std::collections::BTreeMap;
 
@@ -12,7 +12,7 @@ use alloy_primitives::{keccak256, Address, B256};
 
 use crate::client::ActionItem;
 
-/// The audit type covered by the consistency hash (only `actions.quota`, TD §4.8).
+/// The audit type covered by the consistency hash (only `actions.quota`).
 const QUOTA: &str = "quota";
 
 /// Computes the consistency hash over `actions.quota`. Determinism comes from:
@@ -122,7 +122,7 @@ mod tests {
     #[test]
     fn param_insertion_order_hashes_equal() {
         // Same semantic content, params inserted in different order → canonical (BTreeMap)
-        // ordering makes the hash identical (FR-7 AC3: not a JSON-string hash).
+        // ordering makes the hash identical; this is not a JSON-string hash.
         let mut a_params = BTreeMap::new();
         a_params.insert(
             "from".to_string(),

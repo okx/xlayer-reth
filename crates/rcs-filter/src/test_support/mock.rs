@@ -1,6 +1,5 @@
-//! Hand-written [`RcsClient`] test double with the FR-10 control plane (TD §4.10). In-memory
-//! and network-free — suitable for module tests. Golden payloads are registered verbatim
-//! from contract §4 via [`crate::test_support::golden`].
+//! Hand-written [`RcsClient`] test double. It is in-memory and network-free, making it suitable
+//! for module tests. Golden payloads come from [`crate::test_support::golden`].
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -32,7 +31,7 @@ struct MockState {
     submit_rejected: Vec<String>,
     query_states: HashMap<String, QueryState>,
     calls: Vec<String>,
-    /// Every `submit` request body received (in order), for payload-verbatim assertions (§6.4).
+    /// Every `submit` request body received in order, for exact-payload assertions.
     submitted: Vec<SubmitRequest>,
     queried_modes: Vec<String>,
     failed_query_statuses: HashSet<String>,
@@ -75,12 +74,12 @@ impl MockRcsClient {
         self.lock().rules = parsed;
     }
 
-    /// Bumps `content_version` (simulates an RCS-side rule content change, FR-3).
+    /// Bumps `content_version` to simulate an RCS-side rule content change.
     pub fn bump_rules_version(&self) {
         self.lock().content_version += 1;
     }
 
-    /// Overrides the advertised `protocol_version` (FR-2/FR-3 unsupported-version tests).
+    /// Overrides the advertised `protocol_version` for unsupported-version tests.
     pub fn set_rules_protocol_version(&self, pv: u32) {
         self.lock().protocol_version = pv;
     }
@@ -120,12 +119,12 @@ impl MockRcsClient {
         );
     }
 
-    /// Removes a registered query state (tx becomes silently absent, contract §2.5).
+    /// Removes a registered query state so the transaction becomes silently absent.
     pub fn unregister_query_state(&self, tx_hash: &str) {
         self.lock().query_states.remove(tx_hash);
     }
 
-    /// Makes all endpoints fail as if RCS is unreachable (FR-2/FR-6 fault injection).
+    /// Makes all endpoints fail as if RCS is unreachable.
     pub fn set_unavailable(&self, unavailable: bool) {
         self.lock().unavailable = unavailable;
     }
@@ -211,7 +210,7 @@ impl RcsClient for MockRcsClient {
             return Err(FilterError::Transport("mock submit group unavailable".into()));
         }
         s.submitted.push(req.clone());
-        // Default: echo all submitted hashes as accepted (idempotent RCS, contract §2.4).
+        // Default: echo all submitted hashes as accepted (idempotent RCS).
         let accepted = s
             .submit_accepted
             .clone()

@@ -1,10 +1,10 @@
-//! Minimal JSONLogic evaluator covering the contract §3.5 operator subset:
+//! Minimal JSONLogic evaluator covering the supported operator subset:
 //! `var`, `==`, `!=`, `in`, `and`, `or`, `!`, `>`, `>=`, `<`, `<=`, and the literal `true`.
 //!
 //! Inputs: a JSONLogic expression as [`serde_json::Value`] plus a bindings map
 //! (`variable name → value`). Numeric comparisons coerce both sides to `uint256`
-//! (contract §3.5: uint256 carried as decimal string / JSON number). Variables absent from
-//! the bindings (e.g. a named event with no matching log) resolve to `null` (contract §3.2).
+//! (uint256 carried as decimal string / JSON number). Variables absent from the bindings
+//! (e.g. a named event with no matching log) resolve to `null`.
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -164,7 +164,7 @@ fn value_eq((l, r): &(Value, Value)) -> bool {
 }
 
 /// `in` membership: `[needle, haystack]` where haystack is an array (blacklist/whitelist)
-/// or a string (substring). Contract §3.5.
+/// or a string (substring).
 fn eval_in(arg: &Value, b: &Bindings) -> bool {
     let (needle, hay) = two(arg, b);
     match hay {
