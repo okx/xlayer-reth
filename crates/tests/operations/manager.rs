@@ -16,11 +16,11 @@ pub const DEFAULT_L2_CHAIN_ID: u64 = 195;
 /// Default L2 sequencer URL for testing
 pub const DEFAULT_L2_SEQ_URL: &str = "http://localhost:8123";
 /// Default L2 RPC node URL for testing
-pub const DEFAULT_L2_NETWORK_URL: &str = "http://localhost:8124";
+pub const DEFAULT_L2_NETWORK_URL: &str = "http://localhost:8223";
 // Default L2 RPC node with flashblocks enabled
-pub const DEFAULT_L2_NETWORK_URL_FB: &str = "http://localhost:8124";
+pub const DEFAULT_L2_NETWORK_URL_FB: &str = "http://localhost:8223";
 // Default L2 RPC node with flashblocks disabled
-pub const DEFAULT_L2_NETWORK_URL_NO_FB: &str = "http://localhost:8128";
+pub const DEFAULT_L2_NETWORK_URL_NO_FB: &str = "http://localhost:8224";
 /// Default Flashblocks WebSocket URL for testing
 pub const DEFAULT_SEQ_FLASHBLOCKS_WS_URL: &str = "ws://localhost:11111";
 /// Default Flashblocks WebSocket URL for testing
