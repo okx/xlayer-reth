@@ -155,6 +155,35 @@ async fn test_gasless_debug_trace_transaction() {
     );
 }
 
+/// Regression: a mined gasless (zero-priced) tx must report `gasPrice == 0x0` via
+/// `eth_getTransactionByHash`. op-alloy derives the effective gas price as
+/// `effective_tip_per_gas(base_fee) + base_fee`, which for a zero-fee tx collapses to `base_fee`
+/// (not 0) and disagrees with the receipt and the gasless executor. The RPC fix clears `base_fee`
+/// for zero-fee non-deposit txs so the derivation falls back to `max_fee_per_gas` (== 0); this test
+/// pins that behavior.
+#[tokio::test]
+async fn test_gasless_tx_rpc_gas_price_is_zero() {
+    let seq_url = operations::manager::DEFAULT_L2_SEQ_URL;
+    let amount = U256::from(1u64);
+    let to_address = operations::manager::DEFAULT_L2_NEW_ACC1_ADDRESS;
+
+    let tx_hash = operations::gasless_zero_price_transfer(seq_url, amount, to_address)
+        .await
+        .expect("gasless tx should be accepted and mined by the sequencer");
+    operations::wait_for_tx_mined(seq_url, &tx_hash)
+        .await
+        .expect("gasless tx should be mined with a successful receipt");
+
+    let client = operations::create_test_client(seq_url);
+    let tx = operations::eth_get_transaction_by_hash(&client, &tx_hash)
+        .await
+        .expect("gasless tx should be retrievable by hash");
+    assert_eq!(
+        tx["gasPrice"], "0x0",
+        "gasless tx must report gasPrice 0x0 via eth_getTransactionByHash, got {tx}"
+    );
+}
+
 /// A zero-priced (`maxFeePerGas == 0`) call object whose `to`/input match the whitelisted gasless
 /// target, so it should be detected as gasless on the RPC re-execution path. `from` is the rich
 /// account (funded). The explicit zero fee caps force the base-fee check that the gasless path must

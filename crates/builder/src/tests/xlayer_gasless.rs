@@ -64,7 +64,7 @@ const BASEFEE_STORE_PROBE_BYTECODE: [u8; 6] = [0x48, 0x60, 0x00, 0x35, 0x55, 0x0
 
 /// `BASEFEE_REVERT_PROBE` runtime bytecode: `BASEFEE; POP; PUSH1 0x00; PUSH1 0x00; REVERT`.
 /// Reads the base fee then reverts with empty return data — exercises the execution-failure receipt
-/// path (§5.3).
+/// path.
 const BASEFEE_REVERT_PROBE_BYTECODE: [u8; 7] = [0x48, 0x50, 0x60, 0x00, 0x60, 0x00, 0xfd];
 
 /// Builds the in-process node config with a custom `OpChainSpec` that:
@@ -109,9 +109,9 @@ fn gasless_node_config_opt(
         );
     }
 
-    // Deploy the BASEFEE probes used by the same-block isolation tests (§5.2/§5.3/§5.4). They are
-    // inert for the other gasless tests (nothing calls their addresses), so deploying them here
-    // keeps a single gasless genesis helper.
+    // Deploy the BASEFEE probes used by the same-block isolation tests. They are inert for the
+    // other gasless tests (nothing calls their addresses), so deploying them here keeps a single
+    // gasless genesis helper.
     for (address, code) in [
         (BASEFEE_STORE_PROBE, BASEFEE_STORE_PROBE_BYTECODE.as_slice()),
         (BASEFEE_REVERT_PROBE, BASEFEE_REVERT_PROBE_BYTECODE.as_slice()),
@@ -417,7 +417,8 @@ async fn gasless_block_gas_limit_caps_and_resets(rbuilder: LocalInstance) -> eyr
     // Submit 55 gasless txs (one from each pre-funded random signer, nonce 0)
     let mut gasless_hashes = Vec::with_capacity(NUM_GASLESS_SIGNERS);
     for signer in GASLESS_SIGNERS.iter() {
-        let (encoded, tx_hash) = build_zero_priced_transfer_from(signer, 0, 1_000);
+        let (encoded, tx_hash) =
+            build_zero_priced_transfer_from(signer, /* nonce */ 0, /* value */ 1_000);
         let _pending = provider.send_raw_transaction(encoded.as_slice()).await?;
         gasless_hashes.push(tx_hash);
     }
@@ -486,26 +487,22 @@ static GASLESS_SIGNERS: std::sync::LazyLock<[crate::signer::Signer; NUM_GASLESS_
     std::sync::LazyLock::new(|| core::array::from_fn(|_| crate::signer::Signer::random()));
 
 // ---------------------------------------------------------------------------
-// Same-block base-fee validation-bypass isolation tests (PRD §5.2 / §5.3 / §5.4)
+// Same-block base-fee validation-bypass isolation tests
 //
-// These prove the Optimism per-tx `cfg.disable_base_fee` toggle is applied *and restored* around a
-// single gasless tx, so it never leaks base-fee-validation relaxation into a later tx in the same
-// block. All three tests supply their txs directly via payload attributes with `no_tx_pool = true`
-// (they route through `execute_sequencer_transactions`) because reth's pool best-iterator filters
-// `max_fee_per_gas < block base fee` — a zero-priced gasless tx and an underpriced sentinel could
-// not both survive the mempool path over a non-zero base fee.
+// Prove the per-tx `cfg.disable_base_fee` toggle is restored after a single gasless tx, so it never
+// leaks base-fee relaxation into a later tx in the same block. Txs are supplied via payload
+// attributes (`no_tx_pool = true`); the pool best-iterator would drop the underpriced sentinel
+// (`max_fee_per_gas < base fee`).
 //
-// Key proof shape (all three): after the gasless tx, a *non-gasless* "underpriced sentinel" whose
-// `max_fee_per_gas` is below the header base fee is offered. Its exclusion proves base-fee
-// validation was re-enabled (the cfg toggle was restored) — reading `BASEFEE` in a normal tx alone
-// cannot prove this because the opcode returns the real header base fee regardless of the
-// validation flag.
+// Proof shape: after the gasless tx, a non-gasless "underpriced sentinel" (`max_fee_per_gas` below
+// the header base fee) is offered. Its exclusion proves base-fee validation was re-enabled — reading
+// `BASEFEE` alone can't, since the opcode returns the real base fee regardless of the flag.
 // ---------------------------------------------------------------------------
 
-/// Non-zero genesis base fee for the isolation tests (PRD §5.1 recommends `100`), also passed as
-/// `min_base_fee` when building. The built block's own base fee decays from this genesis value by
-/// one EIP-1559 step (the `min_base_fee` floor only applies to the *next* block), but stays far above
-/// the underpriced sentinel's `max_fee_per_gas`, which is all the isolation proof needs.
+/// Non-zero genesis base fee for the isolation tests, also passed as `min_base_fee` when building.
+/// The built block's own base fee decays from this by one EIP-1559 step (the floor only applies to
+/// the *next* block) but stays far above the underpriced sentinel's `max_fee_per_gas`, which is all
+/// the isolation proof needs.
 const ISOLATION_BASE_FEE: u64 = 100;
 
 /// A `max_fee_per_gas` of `1`, far below the built block's header base fee — makes a non-gasless tx
@@ -518,7 +515,7 @@ const SUFFICIENT_MAX_FEE: u128 = 1_000_000_000;
 
 /// A gas limit below the 21_000 intrinsic-gas floor. A gasless-recognized tx with this limit fails
 /// validation on intrinsic gas *after* the gasless cfg override is enabled — exercising the
-/// Optimism `transact_raw` error-return restore path (§5.4).
+/// error-return restore path.
 const INSUFFICIENT_GAS_LIMIT: u64 = 20_000;
 
 /// A gas limit large enough for a `BASEFEE` + cold `SSTORE` call.
@@ -607,7 +604,7 @@ async fn build_isolation_block(
 }
 
 /// Reads [`BASEFEE_STORE_PROBE`] storage `slot` and asserts it equals `expected_base_fee` (the
-/// actual built-block header base fee, per §5.2 — never a genesis constant).
+/// actual built-block header base fee — never a genesis constant).
 async fn assert_probe_recorded_base_fee(
     provider: &alloy_provider::RootProvider<op_alloy_network::Optimism>,
     slot: u64,
@@ -622,7 +619,7 @@ async fn assert_probe_recorded_base_fee(
     Ok(())
 }
 
-/// §5.2 same-block success-path isolation. Ordered in one block: (1) a gasless BASEFEE-probe tx,
+/// Same-block success-path isolation. Ordered in one block: (1) a gasless BASEFEE-probe tx,
 /// (2) an underpriced sentinel, (3) a valid normal BASEFEE-probe tx. Asserts the gasless tx is
 /// included and succeeds, the sentinel is excluded (proving base-fee validation was restored after
 /// the gasless tx), the normal tx is included and succeeds, and both probes recorded the real
@@ -638,9 +635,11 @@ async fn gasless_same_block_success_isolation(rbuilder: LocalInstance) -> eyre::
     // nonce 0: gasless probe → included; nonce 1: sentinel (underpriced) → excluded; nonce 1 again:
     // normal probe → included (reuses the sentinel's would-be nonce, so exclusion is purely a
     // base-fee decision, not a nonce gap).
-    let (gasless_tx, gasless_hash) = build_gasless_store_probe_tx(0, 1);
-    let (sentinel_tx, sentinel_hash) = build_underpriced_sentinel(1);
-    let (normal_tx, normal_hash) = build_normal_store_probe_tx(1, 2);
+    let (gasless_tx, gasless_hash) =
+        build_gasless_store_probe_tx(/* nonce */ 0, /* slot */ 1);
+    let (sentinel_tx, sentinel_hash) = build_underpriced_sentinel(/* nonce */ 1);
+    let (normal_tx, normal_hash) =
+        build_normal_store_probe_tx(/* nonce */ 1, /* slot */ 2);
 
     let block = build_isolation_block(
         &driver,
@@ -686,7 +685,7 @@ async fn gasless_same_block_success_isolation(rbuilder: LocalInstance) -> eyre::
     Ok(())
 }
 
-/// §5.3 same-block REVERT-path isolation. Ordered in one block: (1) a gasless BASEFEE-then-REVERT
+/// Same-block REVERT-path isolation. Ordered in one block: (1) a gasless BASEFEE-then-REVERT
 /// tx, (2) an underpriced sentinel, (3) a valid normal BASEFEE-probe tx. Asserts the revert tx is
 /// included with a failed receipt and consumes its nonce (so the normal tx uses the incremented
 /// nonce), the sentinel is excluded, the normal tx is included, and the normal probe recorded the
@@ -702,10 +701,16 @@ async fn gasless_same_block_revert_isolation(rbuilder: LocalInstance) -> eyre::R
     // nonce 0: gasless REVERT probe → included with failed receipt, consumes nonce. nonce 1:
     // sentinel (underpriced) → excluded. nonce 1: normal probe → included (uses the incremented
     // nonce, proving the revert tx consumed nonce 0).
-    let (revert_tx, revert_hash) =
-        sign_funded_call(0, 0, PROBE_CALL_GAS_LIMIT, BASEFEE_REVERT_PROBE, Bytes::new());
-    let (sentinel_tx, sentinel_hash) = build_underpriced_sentinel(1);
-    let (normal_tx, normal_hash) = build_normal_store_probe_tx(1, 3);
+    let (revert_tx, revert_hash) = sign_funded_call(
+        /* nonce */ 0,
+        /* max_fee_per_gas */ 0,
+        PROBE_CALL_GAS_LIMIT,
+        BASEFEE_REVERT_PROBE,
+        Bytes::new(),
+    );
+    let (sentinel_tx, sentinel_hash) = build_underpriced_sentinel(/* nonce */ 1);
+    let (normal_tx, normal_hash) =
+        build_normal_store_probe_tx(/* nonce */ 1, /* slot */ 3);
 
     let block = build_isolation_block(
         &driver,
@@ -738,7 +743,7 @@ async fn gasless_same_block_revert_isolation(rbuilder: LocalInstance) -> eyre::R
     Ok(())
 }
 
-/// §5.4 same-block validation-failure isolation. Ordered in one block: (1) a gasless-recognized tx
+/// Same-block validation-failure isolation. Ordered in one block: (1) a gasless-recognized tx
 /// that fails validation on insufficient intrinsic gas (failure occurs *after* the gasless cfg
 /// override is enabled), (2) an underpriced sentinel with the same nonce, (3) a valid normal
 /// BASEFEE-probe tx with the same nonce. Asserts the failed gasless tx is excluded with no receipt
@@ -757,10 +762,14 @@ async fn gasless_same_block_validation_failure_isolation(
     // All three use nonce 0: the failed gasless tx must not consume the nonce, so the sentinel and
     // the normal tx are offered at the same nonce. Inclusion of the normal tx at nonce 0 proves the
     // failed tx consumed nothing.
-    let (failed_tx, failed_hash) =
-        build_gasless_store_probe_tx_with_gas(0, 4, INSUFFICIENT_GAS_LIMIT);
-    let (sentinel_tx, sentinel_hash) = build_underpriced_sentinel(0);
-    let (normal_tx, normal_hash) = build_normal_store_probe_tx(0, 4);
+    let (failed_tx, failed_hash) = build_gasless_store_probe_tx_with_gas(
+        /* nonce */ 0,
+        /* slot */ 4,
+        INSUFFICIENT_GAS_LIMIT,
+    );
+    let (sentinel_tx, sentinel_hash) = build_underpriced_sentinel(/* nonce */ 0);
+    let (normal_tx, normal_hash) =
+        build_normal_store_probe_tx(/* nonce */ 0, /* slot */ 4);
 
     let block = build_isolation_block(
         &driver,
@@ -796,7 +805,7 @@ async fn gasless_same_block_validation_failure_isolation(
 }
 
 /// Gasless call to [`BASEFEE_STORE_PROBE`] with an explicit `gas_limit`, for the intrinsic-gas
-/// validation-failure case (§5.4).
+/// validation-failure case.
 fn build_gasless_store_probe_tx_with_gas(nonce: u64, slot: u64, gas_limit: u64) -> (Vec<u8>, B256) {
     sign_funded_call(nonce, 0, gas_limit, BASEFEE_STORE_PROBE, probe_slot_calldata(slot))
 }
