@@ -104,6 +104,18 @@ test include_e2e="false" include_flashblocks="false":
         cargo $CMD -p xlayer-e2e-test --test flashblocks_tests $E2E_FLAGS
     fi
 
+# Run the XLayer Go E2E harness with a full dependency build (contracts-bedrock
+# artifacts + the debug XLayer Reth binary), delegating to the tests module. Args
+# forward package selection / test filter / go test flags. Depends on
+# ensure-tempdir so just can always write its shebang temp files.
+e2e *args: ensure-tempdir
+    cd tests && just e2e {{args}}
+
+# Run the XLayer Go E2E harness against already-built artifacts (no contracts or
+# Rust build), delegating to the tests module.
+e2e-no-build *args: ensure-tempdir
+    cd tests && just e2e-no-build {{args}}
+
 # Format only workspace members. `cargo fmt --all` ALSO descends into local submodules.
 check-format:
     bash -c 'set -uo pipefail; fail=0; for p in $(cargo metadata --no-deps --format-version 1 | jq -r ".packages[].name"); do cargo +nightly fmt -p "$p" -- --check || fail=1; done; exit $fail'

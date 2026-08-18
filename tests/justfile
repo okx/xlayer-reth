@@ -1,0 +1,47 @@
+# XLayer Go E2E test-module command entry points.
+#
+# Two entries mirror the two supported flows: `e2e` builds the dependencies
+# (contracts-bedrock artifacts + the debug XLayer Reth execution client) and then
+# runs the selected tests; `e2e-no-build` runs against already-built artifacts and
+# triggers no contracts or Rust build. Both forward package selection, a test-name
+# filter, and arbitrary `go test` arguments, and default to every module package
+# when no package is given.
+
+set positional-arguments
+
+repo_root := justfile_directory() / ".."
+optimism_root := env_var_or_default("OPTIMISM_ROOT", repo_root / "deps" / "optimism")
+reth_bin := env_var_or_default("XLAYER_RETH_BIN", repo_root / "target" / "debug" / "xlayer-reth-node")
+
+# Concurrency and timeout defaults (independently overridable): one package
+# worker, four in-package parallel tests, five-minute per-test-process hard limit.
+pkg_workers := env_var_or_default("E2E_PKG_WORKERS", "1")
+in_pkg_parallel := env_var_or_default("E2E_PARALLEL", "4")
+test_timeout := env_var_or_default("E2E_TIMEOUT", "5m")
+
+default:
+    @just --list
+
+# Build contracts-bedrock artifacts and the debug XLayer Reth binary, then run the
+# selected tests. With no package argument, every module package runs.
+e2e *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ( cd "{{repo_root}}" && cargo build -p xlayer-reth-node )
+    ( cd "{{optimism_root}}/packages/contracts-bedrock" && just build )
+    cd "{{justfile_directory()}}"
+    pkgs=("$@")
+    if [ ${#pkgs[@]} -eq 0 ]; then pkgs=("./..."); fi
+    OPTIMISM_ROOT="{{optimism_root}}" XLAYER_RETH_BIN="{{reth_bin}}" \
+      go test -p {{pkg_workers}} -parallel {{in_pkg_parallel}} -timeout {{test_timeout}} "${pkgs[@]}"
+
+# Run the selected tests against existing artifacts without any build step. With no
+# package argument, every module package runs.
+e2e-no-build *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "{{justfile_directory()}}"
+    pkgs=("$@")
+    if [ ${#pkgs[@]} -eq 0 ]; then pkgs=("./..."); fi
+    OPTIMISM_ROOT="{{optimism_root}}" XLAYER_RETH_BIN="{{reth_bin}}" \
+      go test -p {{pkg_workers}} -parallel {{in_pkg_parallel}} -timeout {{test_timeout}} "${pkgs[@]}"
