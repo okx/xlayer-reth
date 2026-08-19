@@ -86,6 +86,19 @@ check:
 
 fix: fix-format fix-clippy
 
+# Build dependencies then run the Go E2E harness under tests/. Arguments are
+# forwarded to `go test` (package selection, -run filters, go test flags). The
+# repository tempdir is created first so just never fails writing temp files.
+[positional-arguments]
+e2e *args: ensure-tempdir
+    cd tests && just e2e "$@"
+
+# Run the Go E2E harness against existing artifacts without building first.
+# Arguments are forwarded to `go test` exactly as with `e2e`.
+[positional-arguments]
+e2e-no-build *args: ensure-tempdir
+    cd tests && just e2e-no-build "$@"
+
 # Run `just test true` to run e2e tests.
 test include_e2e="false" include_flashblocks="false":
     #!/usr/bin/env bash

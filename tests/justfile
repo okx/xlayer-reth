@@ -1,0 +1,47 @@
+set positional-arguments := true
+
+# Package-level worker count: how many test packages run at once. Kept at one so
+# only a single devnet is being brought up at a time by default.
+package_workers := "1"
+# In-package parallelism: how many tests inside one package run concurrently.
+# Four keeps enough throughput while bounding the number of simultaneous devnets
+# so local ephemeral TCP ports are not exhausted.
+in_package_parallel := "4"
+# Hard wall-clock limit for a single test process; a hung scenario is killed.
+test_timeout := "5m"
+
+repo_root := justfile_directory() / ".."
+
+default:
+    @just --list
+
+# Build the contracts-bedrock artifacts and the debug-profile XLayer reth
+# execution client the devnet nodes run, then execute the selected Go E2E tests.
+# Any arguments are forwarded verbatim to `go test`, so callers can select
+# packages, filter cases with -run, and pass arbitrary go test flags.
+[positional-arguments]
+e2e *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    forge build --root "{{repo_root}}/deps/optimism/packages/contracts-bedrock"
+    cargo build --manifest-path "{{repo_root}}/Cargo.toml" -p xlayer-reth-node
+    exec just --justfile "{{justfile()}}" \
+        package_workers="{{package_workers}}" \
+        in_package_parallel="{{in_package_parallel}}" \
+        test_timeout="{{test_timeout}}" \
+        e2e-no-build "$@"
+
+# Run the selected Go E2E tests against already-built contract artifacts and an
+# existing XLayer reth binary, without triggering any contracts or Rust build.
+# With no package argument every package in the module runs.
+[positional-arguments]
+e2e-no-build *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export OPTIMISM_ROOT="${OPTIMISM_ROOT:-{{repo_root}}/deps/optimism}"
+    export XLAYER_RETH_BIN="${XLAYER_RETH_BIN:-{{repo_root}}/target/debug/xlayer-reth-node}"
+    cd "{{justfile_directory()}}"
+    if [ "$#" -eq 0 ]; then
+        set -- ./...
+    fi
+    exec go test -p "{{package_workers}}" -parallel "{{in_package_parallel}}" -timeout "{{test_timeout}}" "$@"
