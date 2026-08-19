@@ -53,6 +53,9 @@ pub struct BuilderArgs {
 
     #[command(flatten)]
     pub flashblocks: FlashblocksArgs,
+
+    #[command(flatten)]
+    pub rcs_filter: RcsFilterArgs,
 }
 
 impl BuilderArgs {
@@ -187,6 +190,88 @@ impl Default for FlashblocksArgs {
     }
 }
 
+/// RCS Filter (rule-driven transaction risk-control interception) configuration.
+/// Flattened into [`BuilderArgs`]. The master switch and timeouts are read once at startup.
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
+pub struct RcsFilterArgs {
+    /// Master switch. `false` fully bypasses filtering.
+    #[arg(
+        id = "rcs-filter.enabled",
+        long = "rcs-filter.enabled",
+        default_value = "false",
+        env = "RCS_FILTER_ENABLED"
+    )]
+    pub enabled: bool,
+
+    /// RCS REST base URL. Required when the switch is enabled.
+    #[arg(id = "rcs-filter.rcs-base-url", long = "rcs-filter.rcs-base-url", env = "RCS_BASE_URL")]
+    pub rcs_base_url: Option<String>,
+
+    /// TCP connect timeout for RCS requests in milliseconds.
+    #[arg(
+        long = "rcs-filter.connect-timeout-ms",
+        env = "RCS_CONNECT_TIMEOUT_MS",
+        default_value = "1000"
+    )]
+    pub connect_timeout_ms: u64,
+
+    /// Total RCS request timeout, including response body, in milliseconds.
+    #[arg(
+        long = "rcs-filter.request-timeout-ms",
+        env = "RCS_REQUEST_TIMEOUT_MS",
+        default_value = "3000"
+    )]
+    pub request_timeout_ms: u64,
+
+    /// Initial worker retry delay in milliseconds.
+    #[arg(
+        long = "rcs-filter.retry-initial-backoff-ms",
+        env = "RCS_RETRY_INITIAL_BACKOFF_MS",
+        default_value = "200"
+    )]
+    pub retry_initial_backoff_ms: u64,
+
+    /// Maximum worker retry delay in milliseconds.
+    #[arg(
+        long = "rcs-filter.retry-max-backoff-ms",
+        env = "RCS_RETRY_MAX_BACKOFF_MS",
+        default_value = "5000"
+    )]
+    pub retry_max_backoff_ms: u64,
+
+    /// Batch-submit accumulation window in milliseconds.
+    #[arg(long = "rcs-filter.batch-window-ms", default_value = "200")]
+    pub batch_window_ms: u64,
+
+    /// Maximum number of independent block-height submit groups in flight at once.
+    #[arg(
+        long = "rcs-filter.submit-max-concurrency",
+        env = "RCS_SUBMIT_MAX_CONCURRENCY",
+        default_value = "1"
+    )]
+    pub submit_max_concurrency: usize,
+
+    /// Submitted confirmation timeout in seconds.
+    #[arg(long = "rcs-filter.submitted-confirmation-timeout-seconds", default_value = "8")]
+    pub submitted_confirmation_timeout_seconds: u64,
+
+    /// Pending risk-module unresponsive timeout in seconds.
+    #[arg(long = "rcs-filter.risk-module-unresponsive-timeout-seconds", default_value = "20")]
+    pub risk_module_unresponsive_timeout_seconds: u64,
+
+    /// Cumulative fail-open/fail-close fallback timeout in seconds.
+    #[arg(long = "rcs-filter.total-retry-timeout-seconds", default_value = "90")]
+    pub total_retry_timeout_seconds: u64,
+
+    /// Rules-version poll interval in milliseconds.
+    #[arg(long = "rcs-filter.rules-version-poll-interval-ms", default_value = "2000")]
+    pub rules_version_poll_interval_ms: u64,
+
+    /// Retention of a terminal buffer-pool tombstone before eviction, in seconds.
+    #[arg(long = "rcs-filter.terminal-entry-retention-seconds", default_value = "300")]
+    pub terminal_entry_retention_seconds: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
 pub struct FlashblocksP2pArgs {
     /// Enable libp2p networking for flashblock propagation
@@ -234,4 +319,36 @@ pub struct FlashblocksP2pArgs {
         default_value = "false"
     )]
     pub p2p_process_full_payload: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+
+    use clap::{CommandFactory, Parser};
+    use reth_optimism_cli::commands::Commands;
+
+    #[test]
+    fn rcs_submit_concurrency_cli_metadata_has_default_and_env() {
+        let command = crate::args::Cli::command();
+        let node = command.find_subcommand("node").unwrap();
+        let argument = node
+            .get_arguments()
+            .find(|argument| argument.get_long() == Some("rcs-filter.submit-max-concurrency"))
+            .unwrap();
+        assert_eq!(argument.get_default_values(), [OsStr::new("1")]);
+        assert_eq!(argument.get_env(), Some(OsStr::new("RCS_SUBMIT_MAX_CONCURRENCY")));
+    }
+
+    #[test]
+    fn rcs_submit_concurrency_cli_override_is_parsed() {
+        let args = crate::args::Cli::parse_from([
+            "dummy",
+            "node",
+            "--rcs-filter.submit-max-concurrency",
+            "4",
+        ]);
+        let Commands::Node(node) = args.command else { unreachable!() };
+        assert_eq!(node.ext.rcs_filter.submit_max_concurrency, 4);
+    }
 }
