@@ -119,6 +119,17 @@ Derive findings by structural comparison of the REF_OLD tree vs the REF_NEW tree
 
 Walk each checklist dimension (Section 3) against the merged tree and ask the standard question: *is there an input for which the two trees emit different consensus outputs?* Every such input region is a candidate finding for Section 5; the tree path IS the trigger derivation.
 
+**Opcode observability analysis** — for every hunk that touches the EVM environment, execution context, or gas accounting, enumerate which EVM opcodes could *observe* the change and derive triggers as "a tx executing opcode X reads a different value across refs" (each is a candidate state-root/receipts finding, since observed values flow into storage, logs, and control flow):
+
+- Block env mutation (`BlockEnv`/`CfgEnv` fields set, zeroed, or restored around a tx): `BASEFEE` (0x48), `COINBASE` (0x41), `TIMESTAMP` (0x42), `NUMBER` (0x43), `PREVRANDAO` (0x44), `GASLIMIT` (0x45), `CHAINID` (0x46), `BLOBBASEFEE` (0x4A), `BLOCKHASH` (0x40)
+- Tx env / fee handling changes (fee skips, price overrides, sponsor/gasless paths): `GASPRICE` (0x3A), `ORIGIN` (0x32), `CALLER` (0x33)
+- Balance-crediting order or fee-vault changes: `BALANCE` (0x31), `SELFBALANCE` (0x47) — a contract reading its own or a vault's balance mid-tx sees the difference
+- Gas accounting, refund, warming/access-list changes: `GAS` (0x5A) — any change to when/how much gas is charged is observable by a contract that branches on remaining gas; also dynamic-cost opcodes `SLOAD`/`SSTORE`/`*CALL`/`EXTCODE*` under warming rule changes
+- Code/state introspection after write-ordering changes: `EXTCODESIZE`/`EXTCODEHASH`/`EXTCODECOPY` (0x3B/0x3F/0x3C), `SELFDESTRUCT` (0xFF) re-create semantics
+- New/changed precompiles or opcode gas tables behind a fork gate: list the affected opcodes/precompile addresses and mark findings fork-conditional on that activation
+
+A mitigation that "only" tweaks the environment a tx runs under (e.g. zeroing base fee to bypass a fee check) is a consensus change if ANY opcode can read it — say which opcode, and the trigger is a tx using it.
+
 While building the trees, specifically hunt for:
 
 - Behavior changes hidden as "refactors" (reordered match arms, changed default branches, `saturating_*` ↔ `checked_*` ↔ raw arithmetic swaps, integer type/width changes, float anywhere near consensus)
@@ -170,7 +181,19 @@ Each finding uses the 6-field template from Section 5.
 
 **Verdict**: `NO CONSENSUS RISK FOUND` / `RELEASE BLOCKED (fork-certain findings)` / `VERIFY BEFORE RELEASE (fork-plausible/conditional findings)`.
 
+## Fan-out protocol (large diffs)
+
+For large diffs (>50 consensus-relevant files or a major dependency bump), fan out sub-agents — but shard by **bounded file batches, never by checklist dimension**. A per-dimension agent inherits an unbounded scope, overflows its context ingesting diffs, and dies silently, losing all its work.
+
+1. **Plan batches from sizes.** Run `git diff --stat REF_OLD REF_NEW` (and the submodule equivalent) and partition the consensus-relevant files into batches of **≤10 files AND ≤1,500 changed lines** each. Every batch gets ALL 7 checklist dimensions applied to it.
+2. **Bounded reads inside each agent.** Diff one file at a time (`git diff REF_OLD REF_NEW -- <file>`), never a directory. For any file with >800 changed lines, first list hunk locations (`git diff -U0 REF_OLD REF_NEW -- <file> | rg '^@@'`), then load only the relevant hunks/functions via targeted `git show`/`sed` ranges — never the whole diff at once.
+3. **Persist incrementally.** Give each agent a scratchpad file path (`<scratchpad>/adversarial-check/<batch-id>.md`). After EACH file it analyzes, the agent must append: file name, verdict (clean/finding/non-consensus + one line why), and any finding in the Section 5 template. The final agent message is just a pointer to this file plus a summary — the file, not the message, is the source of truth.
+4. **Report and terminate on completion — never idle.** Each agent's prompt must state: when your batch is done, your FINAL message must contain the complete report (findings + coverage + non-consensus list + anything unverifiable), and then your task is over — do not wait for further instructions, do not go idle, do not ask what to do next. The orchestrator treats an idle/available notification from a sub-agent as "finished": immediately harvest its report (final message or scratchpad file) and shut it down.
+5. **Supervise and resume.** After spawning, the orchestrator tracks completion. If an agent dies or goes unreachable, read its scratchpad file to see which files it covered, and spawn a fresh agent for ONLY the remaining files. Never re-spawn the original unbounded scope.
+6. **Cap concurrency** at 4 agents; queue remaining batches.
+7. **Merge from the scratchpad files**, then reconcile cross-batch interactions (e.g. a flag defined in one batch, consumed in another) in the orchestrator before writing the report.
+
 ## Notes
 
-- Effort scales with diff size: for large diffs (>50 consensus-relevant files or a major dependency bump), fan out one sub-analysis per checklist dimension and merge, rather than skimming everything in one pass.
 - The absence of findings is a claim too — only output `NO CONSENSUS RISK FOUND` after every consensus-relevant hunk has actually been read, and say so explicitly if anything was skipped.
+- Dependency drift that lives outside the repo (crates.io bumps, git-dep rev moves that aren't vendored) cannot be diffed here: report old→new versions and recommend running this checklist against the dependency's own diff — do not silently mark it clean.
