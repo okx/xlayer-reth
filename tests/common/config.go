@@ -13,8 +13,11 @@ const (
 	// contracts-bedrock artifacts and devstack packages used to build a devnet.
 	EnvOptimismRoot = "OPTIMISM_ROOT"
 	// EnvRethExecutionBinary locates the prebuilt XLayer reth execution client
-	// used as the L2 execution layer for every devnet node.
-	EnvRethExecutionBinary = "XLAYER_RETH_BIN"
+	// used as the L2 execution layer for every devnet node. This is the same
+	// variable op-devstack's rustbin reads to run a prebuilt op-reth binary
+	// instead of building it, so one value both configures the harness and
+	// selects the node binary.
+	EnvRethExecutionBinary = "RUST_BINARY_PATH_OP_RETH"
 )
 
 // ConsensusClient is fixed for XLayer devnets: the L2 consensus layer is always

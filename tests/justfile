@@ -23,7 +23,7 @@ default:
 e2e *args:
     #!/usr/bin/env bash
     set -euo pipefail
-    forge build --root "{{repo_root}}/deps/optimism/packages/contracts-bedrock"
+    forge build --root "{{repo_root}}/deps/optimism/packages/contracts-bedrock" --skip "/**/test/**"
     cargo build --manifest-path "{{repo_root}}/Cargo.toml" -p xlayer-reth-node
     exec just --justfile "{{justfile()}}" \
         package_workers="{{package_workers}}" \
@@ -39,7 +39,11 @@ e2e-no-build *args:
     #!/usr/bin/env bash
     set -euo pipefail
     export OPTIMISM_ROOT="${OPTIMISM_ROOT:-{{repo_root}}/deps/optimism}"
-    export XLAYER_RETH_BIN="${XLAYER_RETH_BIN:-{{repo_root}}/target/debug/xlayer-reth-node}"
+    # The devstack op-reth node resolver (rustbin) runs the prebuilt binary at
+    # RUST_BINARY_PATH_OP_RETH instead of building op-reth from the monorepo, so
+    # every XLayer L2 execution node runs the prebuilt XLayer reth binary. This is
+    # also the single execution-binary path the harness config reads.
+    export RUST_BINARY_PATH_OP_RETH="${RUST_BINARY_PATH_OP_RETH:-{{repo_root}}/target/debug/xlayer-reth-node}"
     cd "{{justfile_directory()}}"
     if [ "$#" -eq 0 ]; then
         set -- ./...

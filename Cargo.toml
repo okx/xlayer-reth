@@ -21,7 +21,6 @@ members = [
     "crates/legacy-rpc",
     "crates/monitor",
     "crates/rpc",
-    "crates/tests",
     "crates/version",
     "crates/builder/src/tests/framework/macros",
 
