@@ -10,6 +10,15 @@ Given two git refs (commit hashes and/or tags), derive the diff between them and
 TRIGGER when: user runs `/adversarial-check <ref1> <ref2>`, or asks to "check consensus safety between two commits/tags/versions", "will this diff fork the chain", "adversarial check".
 DO NOT TRIGGER when: user asks for a general code review (use `pr-review`) or a security audit.
 
+## Hard constraints: static analysis only — NEVER build or execute
+
+This skill is a pure static-reasoning exercise over git history. Building this workspace takes enormous CPU/time and adds nothing the diff can't tell you.
+
+- **NEVER run** `cargo build`, `cargo check`, `cargo clippy`, `cargo test`, `cargo nextest`, `cargo install`, `cargo run`, `just build*`/`just check`/`just test`, `docker build`, or any command that compiles code or executes the node/tests. This applies to every sub-agent spawned by this skill — repeat the prohibition verbatim in their prompts.
+- **NEVER modify the working tree** (no checkout, no submodule update, no cargo metadata/tree, which may touch the lockfile or network). Read code exclusively via `git log`, `git diff REF_OLD REF_NEW -- <path>`, `git show <ref>:<path>`, and `git -C <submodule> …` equivalents.
+- The only permitted evidence is: the diff hunks, file contents at the two refs, commit messages, and manifest/lockfile contents at the two refs.
+- Where only a build could settle a question (does it compile, which rev does cargo actually resolve, does a test pass), record it as an **open question** or a **verification suggestion** in the report — for humans/CI to run later — never execute it yourself.
+
 ## Inputs
 
 Two git refs are **required**: `REF_OLD` and `REF_NEW` (commit hashes, tags, or branch names).
@@ -86,9 +95,31 @@ Adversarial probes to apply per dimension (non-exhaustive — invent more from t
 
 **Cross-version pairing matters**: the fleet upgrades gradually. Always evaluate the mixed topology — REF_NEW sequencer + REF_OLD replicas, and the reverse. A change that is self-consistent within one binary still forks the network if build (new) and import (old) disagree.
 
-### 4. Read the diff hunks, not just names
+### 4. Build an abstract state/logic tree from the diff — read hunks, not just names
 
-For every file classified in Section 2, read the actual diff (`git diff REF_OLD REF_NEW -- <path>`) and, where the hunk is ambiguous, read surrounding context at both refs (`git show REF_OLD:<path>`, `git show REF_NEW:<path>`). Specifically hunt for:
+For every file classified in Section 2, read the actual diff (`git diff REF_OLD REF_NEW -- <path>`) and, where the hunk is ambiguous, read surrounding context at both refs (`git show REF_OLD:<path>`, `git show REF_NEW:<path>`). **Never compile or execute anything** — all reasoning is done on this abstraction:
+
+For each consensus-relevant hunk, model the changed function as an abstract tree and compare the two versions node by node:
+
+```
+input domain (tx fields, block/header fields, timestamps, config flags, prior state)
+  └─ guard/branch conditions (in evaluation order)
+       └─ state transitions taken on each branch (writes: nonce/balance/storage/code;
+          accumulators: gas, fees, logs; early returns / errors)
+            └─ consensus outputs produced (state root input set, receipts, gas used,
+               accept/reject + error variant, header fields)
+```
+
+Derive findings by structural comparison of the REF_OLD tree vs the REF_NEW tree:
+
+- **Branch set changed**: a guard added/removed/reordered → find the input region that lands in different branches across refs.
+- **Same branch, different transition**: identical condition but the write/accumulation differs (order, width, rounding, saturation) → find the value range where results differ.
+- **Input domain changed**: a field/flag/default now feeds the decision → the fleet-wide value of that input becomes a fork switch.
+- **Output mapping changed**: same post-state but different externalization (receipt fields, error variant, header default) → check which consensus assertion consumes it.
+
+Walk each checklist dimension (Section 3) against the merged tree and ask the standard question: *is there an input for which the two trees emit different consensus outputs?* Every such input region is a candidate finding for Section 5; the tree path IS the trigger derivation.
+
+While building the trees, specifically hunt for:
 
 - Behavior changes hidden as "refactors" (reordered match arms, changed default branches, `saturating_*` ↔ `checked_*` ↔ raw arithmetic swaps, integer type/width changes, float anywhere near consensus)
 - Conditionals gated on config/env/CLI flags — a flag defaulting differently across the fleet is a consensus fork switch
@@ -110,9 +141,9 @@ A finding is only reportable with a concrete scenario:
 
 If a suspected divergence cannot be traced to a concrete trigger, keep it as an **open question**, not a finding.
 
-### 6. Verification suggestions
+### 6. Verification suggestions (for humans/CI to run — never executed by this skill)
 
-For each finding (and for dependency bumps), suggest the cheapest decisive check, e.g.:
+These go into the report as recommendations only; per the hard constraints above, this skill never builds or runs anything itself. For each finding (and for dependency bumps), suggest the cheapest decisive check, e.g.:
 
 - Unit test asserting identical output across the two behaviors at the boundary value
 - `replayor` / block replay of a historical range under REF_NEW, comparing state roots against canon
