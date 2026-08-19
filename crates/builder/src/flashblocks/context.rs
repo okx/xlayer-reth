@@ -296,8 +296,11 @@ impl FlashblocksBuilderCtx {
         let is_gasless = self.is_gasless(evm, tx)?;
         let mut tx_env = self.evm_config.tx_env(tx);
         tx_env.set_gasless(is_gasless);
-        // New gasless design (kona 1.6.0): no separate fee hook. With `is_gasless` set on the tx
-        // env, `OpEvm::transact_raw` zeroes the base fee for this tx and `OpHandler` skips fee
+        // Gasless design (kona 1.6.0): no separate fee hook. With `is_gasless` set on the tx env,
+        // the Optimism execution layer temporarily toggles `cfg.disable_base_fee` for this single
+        // tx — a base-fee *validation* bypass only — and restores it after the tx returns (including
+        // on error), so the toggle never leaks into the next tx in the block. `block.basefee` is
+        // never mutated (`BASEFEE` still reports the real header base fee) and `OpHandler` skips fee
         // charge/reimbursement/reward, so a plain `transact` applies the full gasless policy.
         let result = evm.transact(tx_env)?;
         Ok((result, is_gasless))
@@ -433,7 +436,9 @@ impl FlashblocksBuilderCtx {
 
     /// Executes cached transactions received via P2P, used to replay previously sequenced flashblock
     /// transactions when the builder changes before the full block is built.
-    /// Detects whether `tx` should execute gaslessly and runs it through the gasless fee hook.
+    /// Detects whether each `tx` should execute gaslessly and, if so, executes it through the
+    /// standard EVM entry with a transaction-scoped base-fee validation bypass (see
+    /// [`Self::transact_maybe_gasless`]) — not a separate fee hook.
     pub(super) fn execute_cached_flashblocks_transactions(
         &self,
         info: &mut ExecutionInfo,
@@ -678,9 +683,11 @@ impl FlashblocksBuilderCtx {
             }
 
             let tx_simulation_start_time = Instant::now();
-            // Gasless: zero-priced, whitelisted txs are executed with the base-fee check relaxed
-            // (gated on the chain's gasless contract approving the tx). Non-gasless txs are
-            // unaffected — see [`Self::transact_maybe_gasless`].
+            // Gasless: zero-priced, whitelisted txs are executed with a transaction-scoped base-fee
+            // validation bypass (a per-tx `cfg.disable_base_fee` toggle applied and restored by the
+            // Optimism layer, never a `block.basefee` mutation), gated on the chain's gasless
+            // contract approving the tx. Non-gasless txs are unaffected — see
+            // [`Self::transact_maybe_gasless`].
             let (ResultAndState { result, state }, is_gasless) =
                 match self.transact_maybe_gasless(&mut evm, &tx) {
                     Ok(res) => res,
