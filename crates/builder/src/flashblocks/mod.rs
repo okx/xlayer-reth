@@ -6,7 +6,9 @@ use core::{
     net::{Ipv4Addr, SocketAddr},
     time::Duration,
 };
+use rcs_filter::{FilterConfig, FilterHandle, ReqwestRcsClient, SystemClock};
 use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
+use std::sync::Arc;
 
 mod best_txs;
 mod builder;
@@ -150,6 +152,9 @@ pub struct BuilderConfig {
 
     /// Configuration values that are specific to the flashblocks builder.
     pub flashblocks: FlashblocksConfig,
+
+    /// RCS Filter handle. `None` when the master switch is disabled.
+    pub rcs_filter: Option<Arc<FilterHandle>>,
 }
 
 impl core::fmt::Debug for BuilderConfig {
@@ -169,6 +174,7 @@ impl core::fmt::Debug for BuilderConfig {
             .field("flashblocks", &self.flashblocks)
             .field("max_gas_per_txn", &self.max_gas_per_txn)
             .field("gasless_block_gas_limit", &self.gasless_block_gas_limit)
+            .field("rcs_filter_enabled", &self.rcs_filter.is_some())
             .finish()
     }
 }
@@ -184,6 +190,7 @@ impl Default for BuilderConfig {
             max_gas_per_txn: None,
             gasless_block_gas_limit: None,
             flashblocks: FlashblocksConfig::default(),
+            rcs_filter: None,
         }
     }
 }
@@ -202,6 +209,7 @@ impl TryFrom<BuilderArgs> for BuilderConfig {
         let disable_async_calculate_state_root =
             args.flashblocks.flashblocks_disable_async_calculate_state_root;
         let number_contract_address = args.flashblocks.flashblocks_number_contract_address;
+        let rcs_filter = build_rcs_filter_handle(&args.rcs_filter)?;
 
         Ok(Self {
             builder_signer: args.builder_signer,
@@ -229,8 +237,57 @@ impl TryFrom<BuilderArgs> for BuilderConfig {
                 ws_subscriber_limit: args.flashblocks.ws_subscriber_limit,
                 replay_from_persistence_file: args.flashblocks.replay_from_persistence_file,
             },
+            rcs_filter,
         })
     }
+}
+
+/// Builds the RCS Filter handle from CLI args. A disabled filter is a full bypass.
+fn build_rcs_filter_handle(
+    args: &crate::args::RcsFilterArgs,
+) -> eyre::Result<Option<Arc<FilterHandle>>> {
+    let Some(config) = build_rcs_filter_config(args)? else { return Ok(None) };
+    let client = Arc::new(
+        ReqwestRcsClient::with_timeouts(
+            config.rcs_base_url.clone(),
+            config.connect_timeout,
+            config.request_timeout,
+        )
+        .map_err(|error| eyre::eyre!(error.to_string()))?,
+    );
+    Ok(Some(FilterHandle::spawn(config, client, Arc::new(SystemClock))))
+}
+
+fn build_rcs_filter_config(
+    args: &crate::args::RcsFilterArgs,
+) -> eyre::Result<Option<FilterConfig>> {
+    if !args.enabled {
+        return Ok(None);
+    }
+    let rcs_base_url = args.rcs_base_url.clone().ok_or_else(|| {
+        eyre::eyre!("rcs-filter enabled but --rcs-filter.rcs-base-url is missing")
+    })?;
+    let config = FilterConfig {
+        enabled: true,
+        rcs_base_url,
+        connect_timeout: Duration::from_millis(args.connect_timeout_ms),
+        request_timeout: Duration::from_millis(args.request_timeout_ms),
+        retry_initial_backoff: Duration::from_millis(args.retry_initial_backoff_ms),
+        retry_max_backoff: Duration::from_millis(args.retry_max_backoff_ms),
+        batch_window: Duration::from_millis(args.batch_window_ms),
+        submit_max_concurrency: args.submit_max_concurrency,
+        submitted_confirmation_timeout: Duration::from_secs(
+            args.submitted_confirmation_timeout_seconds,
+        ),
+        risk_module_unresponsive_timeout: Duration::from_secs(
+            args.risk_module_unresponsive_timeout_seconds,
+        ),
+        total_retry_timeout: Duration::from_secs(args.total_retry_timeout_seconds),
+        rules_version_poll_interval: Duration::from_millis(args.rules_version_poll_interval_ms),
+        terminal_entry_retention: Duration::from_secs(args.terminal_entry_retention_seconds),
+    };
+    config.validate().map_err(|error| eyre::eyre!(error.to_string()))?;
+    Ok(Some(config))
 }
 
 impl BuilderConfig {
@@ -239,5 +296,47 @@ impl BuilderConfig {
             return 0;
         }
         self.block_time.as_millis().div_ceil(self.flashblocks.interval.as_millis()) as u64
+    }
+}
+
+#[cfg(test)]
+mod rcs_filter_config_tests {
+    use super::*;
+
+    fn enabled_args() -> crate::args::RcsFilterArgs {
+        let mut args = crate::args::BuilderArgs::default().rcs_filter;
+        args.enabled = true;
+        args.rcs_base_url = Some("http://rcs.test".to_string());
+        args.submit_max_concurrency = 1;
+        args
+    }
+
+    #[test]
+    fn invalid_submit_concurrency_fails_before_workers_start() {
+        for invalid in [0, rcs_filter::config::MAX_SUBMIT_CONCURRENCY + 1] {
+            let mut args = enabled_args();
+            args.submit_max_concurrency = invalid;
+            let error = build_rcs_filter_handle(&args).unwrap_err();
+            assert!(error.to_string().contains("submit_max_concurrency"));
+        }
+    }
+
+    #[test]
+    fn submit_concurrency_is_mapped_into_filter_config() {
+        let default = build_rcs_filter_config(&enabled_args()).unwrap().unwrap();
+        assert_eq!(default.submit_max_concurrency, 1);
+
+        let mut overridden = enabled_args();
+        overridden.submit_max_concurrency = 4;
+        let config = build_rcs_filter_config(&overridden).unwrap().unwrap();
+        assert_eq!(config.submit_max_concurrency, 4);
+    }
+
+    #[test]
+    fn disabled_filter_bypasses_config_and_handle_construction() {
+        let mut args = crate::args::BuilderArgs::default().rcs_filter;
+        args.submit_max_concurrency = 0;
+        assert!(build_rcs_filter_config(&args).unwrap().is_none());
+        assert!(build_rcs_filter_handle(&args).unwrap().is_none());
     }
 }

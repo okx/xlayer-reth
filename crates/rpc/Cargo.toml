@@ -24,18 +24,24 @@ reth-storage-api.workspace = true
 
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
+alloy-evm.workspace = true
+alloy-op-evm.workspace = true
 alloy-primitives.workspace = true
+op-alloy-consensus.workspace = true
 op-alloy-network.workspace = true
 op-revm.workspace = true
+
+rcs-filter.workspace = true
 
 jsonrpsee.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
+revm.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
 
 [lints]
 workspace = true
-

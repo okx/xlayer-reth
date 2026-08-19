@@ -28,7 +28,9 @@ use xlayer_flashblocks::subscription::FlashblocksPubSub;
 use xlayer_legacy_rpc::{layer::LegacyRpcRouterLayer, LegacyRpcRouterConfig};
 use xlayer_monitor::{start_monitor_handle, RpcMonitorLayer, XLayerMonitor};
 use xlayer_rpc::xlayer_ext::{XlayerRpcExt, XlayerRpcExtApiServer};
-use xlayer_rpc::{FlashblocksEthApiExt, FlashblocksEthApiOverrideServer};
+use xlayer_rpc::{
+    FlashblocksEthApiExt, FlashblocksEthApiOverrideServer, XlayerAuditApiServer, XlayerAuditRpc,
+};
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
@@ -191,6 +193,14 @@ fn main() {
                         xlayer_rpc,
                     ))?;
                     info!(target: "reth::cli", "xlayer rpc extension enabled");
+
+                    // Register the side-effect-free L1 deposit audit RPC.
+                    let xlayer_audit_rpc =
+                        XlayerAuditRpc { backend: new_op_eth_api.clone() };
+                    ctx.modules.merge_configured(XlayerAuditApiServer::into_rpc(
+                        xlayer_audit_rpc,
+                    ))?;
+                    info!(target: "reth::cli", "xlayer audit rpc extension enabled");
 
                     // Register X Layer flashblocks-aware transaction_count override.
                     // `add_or_replace_if_module_configured` (not `merge_configured`)

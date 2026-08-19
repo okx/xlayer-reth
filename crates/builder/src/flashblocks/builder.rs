@@ -2,7 +2,7 @@ use crate::{
     flashblocks::{
         best_txs::BestFlashblocksTxs,
         builder_tx::FlashblocksBuilderTx,
-        context::FlashblocksBuilderCtx,
+        context::{FlashblocksBuilderCtx, TransactionLimits},
         generator::{BlockCell, BuildArguments, PayloadBuilder},
         timing::FlashblockScheduler,
         utils::{
@@ -341,6 +341,7 @@ where
             // approving the tx.
             gasless_contract: self.evm_config.gasless_contract(),
             gasless_block_gas_limit: self.config.gasless_block_gas_limit,
+            filter: self.config.rcs_filter.clone(),
         })
     }
 
@@ -383,23 +384,28 @@ where
 
         // Check if need to rebuild from external p2p payload cache. If cache hit but the sequence contains
         // no transactions, we can continue the build from fresh since no replaying required.
-        let rebuild_external_payload = self
-            .p2p_cache
-            .get_flashblocks_sequence_txs::<OpTransactionSigned>(ctx.parent().hash())
-            .filter(|cached_txs| !cached_txs.is_empty())
-            .map(|cached_txs| {
-                // The execution result is discarded here since even on replay errors, we will resolve the
-                // payload till whichever point the replay failed.
-                let _ = ctx
-                    .execute_cached_flashblocks_transactions(&mut info, &mut state, cached_txs)
-                    .inspect_err(|e| {
-                        warn!(
-                            target: "payload_builder",
-                            "Failed replaying external cached flashblocks sequence fully, error: {e}",
-                        );
-                    });
-            })
-            .is_some();
+        // External sequences do not carry an authenticated RCS decision. When filtering is
+        // enabled, build locally from txpool so every transaction crosses the screening path.
+        let rebuild_external_payload = if self.config.rcs_filter.is_some() {
+            false
+        } else {
+            self.p2p_cache
+                .get_flashblocks_sequence_txs::<OpTransactionSigned>(ctx.parent().hash())
+                .filter(|cached_txs| !cached_txs.is_empty())
+                .map(|cached_txs| {
+                    // The execution result is discarded here since even on replay errors, we will resolve the
+                    // payload till whichever point the replay failed.
+                    let _ = ctx
+                        .execute_cached_flashblocks_transactions(&mut info, &mut state, cached_txs)
+                        .inspect_err(|e| {
+                            warn!(
+                                target: "payload_builder",
+                                "Failed replaying external cached flashblocks sequence fully, error: {e}",
+                            );
+                        });
+                })
+                .is_some()
+        };
 
         // We add first builder tx right after deposits
         // For X Layer - skip if replaying
@@ -722,9 +728,12 @@ where
             info,
             state,
             best_txs,
-            target_gas_for_batch.min(ctx.block_gas_limit()),
-            target_da_for_batch,
-            target_da_footprint_for_batch,
+            &self.pool,
+            TransactionLimits {
+                block_gas: target_gas_for_batch.min(ctx.block_gas_limit()),
+                block_da: target_da_for_batch,
+                block_da_footprint: target_da_footprint_for_batch,
+            },
         )
         .wrap_err("failed to execute best transactions")?;
 

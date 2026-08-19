@@ -21,6 +21,7 @@ use core::fmt::Debug;
 use op_alloy_consensus::{OpDepositReceipt, OpTxType};
 use op_revm::{L1BlockInfo, OpSpecId};
 
+use rcs_filter::{FilterHandle, PreScreen, Screen, ScreenInput};
 use reth_basic_payload_builder::PayloadConfig;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_evm::{
@@ -45,7 +46,7 @@ use reth_optimism_txpool::{
 use reth_payload_builder::PayloadId;
 use reth_primitives_traits::{InMemorySize, SealedHeader, SignedTransaction};
 use reth_revm::{context::Block, State};
-use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction};
+use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction, TransactionPool};
 use revm::{
     context::result::ResultAndState, inspector::NoOpInspector, interpreter::as_u64_saturated,
     DatabaseCommit,
@@ -84,6 +85,16 @@ pub struct FlashblocksBuilderCtx {
     pub gasless_contract: Option<GaslessContract>,
     /// Per-block gas budget for gasless transactions (in gas units). `None` = unlimited.
     pub gasless_block_gas_limit: Option<u64>,
+    /// RCS Filter handle. `None` when the risk-control master switch is disabled.
+    pub filter: Option<Arc<FilterHandle>>,
+}
+
+/// Per-flashblock execution capacity passed to the transaction executor.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct TransactionLimits {
+    pub block_gas: u64,
+    pub block_da: Option<u64>,
+    pub block_da_footprint: Option<u64>,
 }
 
 impl FlashblocksBuilderCtx {
@@ -542,9 +553,8 @@ impl FlashblocksBuilderCtx {
         info: &mut ExecutionInfo,
         db: &mut State<impl Database>,
         best_txs: &mut impl PayloadTxsBounds,
-        block_gas_limit: u64,
-        block_da_limit: Option<u64>,
-        block_da_footprint_limit: Option<u64>,
+        tx_pool: &impl TransactionPool,
+        limits: TransactionLimits,
     ) -> Result<Option<()>, PayloadBuilderError> {
         let execute_txs_start_time = Instant::now();
         let mut num_txs_considered = 0;
@@ -560,9 +570,9 @@ impl FlashblocksBuilderCtx {
         debug!(
             target: "payload_builder",
             id = ?self.payload_id(),
-            block_da_limit = ?block_da_limit,
+            block_da_limit = ?limits.block_da,
             tx_da_limit = ?tx_da_limit,
-            block_gas_limit = ?block_gas_limit,
+            block_gas_limit = ?limits.block_gas,
             "Executing best transactions",
         );
 
@@ -615,12 +625,12 @@ impl FlashblocksBuilderCtx {
             // ensure we still have capacity for this transaction
             if let Err(result) = info.is_tx_over_limits(
                 tx_da_size,
-                block_gas_limit,
+                limits.block_gas,
                 tx_da_limit,
-                block_da_limit,
+                limits.block_da,
                 tx.gas_limit(),
                 info.da_footprint_scalar,
-                block_da_footprint_limit,
+                limits.block_da_footprint,
             ) {
                 // we can't fit this transaction into the block, so we need to mark it as
                 // invalid which also removes all dependent transaction from
@@ -640,6 +650,24 @@ impl FlashblocksBuilderCtx {
             // check if the job was cancelled, if so we can exit early
             if self.cancel.is_cancelled() {
                 return Ok(Some(()));
+            }
+
+            // Reuse in-flight RCS state before repeating EVM execution. Deferring a transaction
+            // only removes it and its nonce descendants from this iterator, not from txpool.
+            if let Some(filter) = self.filter.as_ref() {
+                match filter.pre_screen(&tx_hash) {
+                    PreScreen::Execute => {}
+                    PreScreen::Defer => {
+                        best_txs.mark_invalid(tx.signer(), tx.nonce());
+                        continue;
+                    }
+                    PreScreen::Drop => {
+                        best_txs.mark_invalid(tx.signer(), tx.nonce());
+                        let removed = tx_pool.remove_transaction(tx_hash).is_some();
+                        filter.record_txpool_discard(removed);
+                        continue;
+                    }
+                }
             }
 
             // Once the per-block gasless budget is spent, skip further gasless candidates without
@@ -761,6 +789,45 @@ impl FlashblocksBuilderCtx {
             {
                 best_txs.mark_invalid(tx.signer(), tx.nonce());
                 continue;
+            }
+
+            // Run rule-driven RCS screening after simulation and before committing any state.
+            if let Some(filter) = self.filter.as_ref() {
+                let decision = filter.screen_tx(&ScreenInput {
+                    tx_hash,
+                    origin: tx.signer(),
+                    tx_to: tx.to(),
+                    nonce: tx.nonce(),
+                    value: tx.value(),
+                    block_height: self.block_number(),
+                    logs: result.logs(),
+                });
+                match decision {
+                    Screen::Allow | Screen::AuditApproved => {}
+                    Screen::Deny => {
+                        best_txs.mark_invalid(tx.signer(), tx.nonce());
+                        let removed = tx_pool.remove_transaction(tx_hash).is_some();
+                        filter.record_txpool_discard(removed);
+                        continue;
+                    }
+                    Screen::Drop => {
+                        best_txs.mark_invalid(tx.signer(), tx.nonce());
+                        let removed = tx_pool.remove_transaction(tx_hash).is_some();
+                        filter.record_txpool_discard(removed);
+                        if !removed {
+                            debug!(
+                                target: "rcs_filter",
+                                %tx_hash,
+                                "terminally rejected transaction was already absent from txpool"
+                            );
+                        }
+                        continue;
+                    }
+                    Screen::AuditPending => {
+                        best_txs.mark_invalid(tx.signer(), tx.nonce());
+                        continue;
+                    }
+                }
             }
 
             info.cumulative_gas_used += gas_used;

@@ -1,0 +1,30 @@
+[package]
+name = "rcs-filter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+alloy-primitives.workspace = true
+alloy-dyn-abi.workspace = true
+alloy-sol-types.workspace = true
+tokio = { workspace = true }
+reqwest = { workspace = true, features = ["query"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+futures-util.workspace = true
+reth-metrics.workspace = true
+metrics.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+metrics-util.workspace = true
+
+[lints]
+workspace = true
