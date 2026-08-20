@@ -16,7 +16,8 @@ This skill is a pure static-reasoning exercise over git history. Building this w
 
 - **NEVER run** `cargo build`, `cargo check`, `cargo clippy`, `cargo test`, `cargo nextest`, `cargo install`, `cargo run`, `just build*`/`just check`/`just test`, `docker build`, or any command that compiles code or executes the node/tests. This applies to every sub-agent spawned by this skill — repeat the prohibition verbatim in their prompts.
 - **NEVER modify the working tree** (no checkout, no submodule update, no cargo metadata/tree, which may touch the lockfile or network). Read code exclusively via `git log`, `git diff REF_OLD REF_NEW -- <path>`, `git show <ref>:<path>`, and `git -C <submodule> …` equivalents.
-- The only permitted evidence is: the diff hunks, file contents at the two refs, commit messages, and manifest/lockfile contents at the two refs.
+- **Stay on the current branch — never read other branches.** All analysis is confined to commits reachable from the current branch's `HEAD` (enforced by the ref validation in Inputs). Never enumerate, resolve, or read commits from any other branch: no `git log <other-branch>`, no `git show <other-branch>:<path>`, no `git diff` against a ref outside the current branch's history, no `git branch -a`/`git for-each-ref` sweeps to discover other branches, and no fetching other branches. If a trail of evidence appears to lead to a commit not on the current branch, record it as an open question — do not follow it. Repeat this prohibition verbatim in every sub-agent prompt, alongside the build/execute prohibition.
+- The only permitted evidence is: the diff hunks, file contents at the two refs, commit messages, and manifest/lockfile contents at the two refs — all from the current branch's history.
 - Where only a build could settle a question (does it compile, which rev does cargo actually resolve, does a test pass), record it as an **open question** or a **verification suggestion** in the report — for humans/CI to run later — never execute it yourself.
 
 ## Inputs
@@ -30,6 +31,11 @@ Two git refs are **required**: `REF_OLD` and `REF_NEW` (commit hashes, tags, or 
   git rev-parse --verify --quiet <ref>^{commit}
   ```
   If a ref is unknown, try `git fetch --tags` once, then report failure to the user.
+- **Both refs must lie on the current branch.** After resolving, verify each ref is an ancestor of (or equal to) the current branch's `HEAD`:
+  ```bash
+  git merge-base --is-ancestor <ref>^{commit} HEAD
+  ```
+  If either check fails, the ref belongs to another branch (or is ahead of the checkout) — **abort and report which ref is outside the current branch**; do not fetch, resolve, or analyze commits from other branches, and do not fall back to a nearest merge-base. Ref names that are other branches' heads are rejected by this same check, not special-cased.
 
 ## Instructions
 
