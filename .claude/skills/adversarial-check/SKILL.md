@@ -85,8 +85,8 @@ For each dimension, ask: **"construct an input (tx, block, timing, history) for 
 
 Adversarial probes to apply per dimension (non-exhaustive — invent more from the actual diff):
 
-1. **Admission**: A tx/payload valid under REF_OLD but rejected under REF_NEW (or vice versa)? Changed error variants that alter engine-API accept/reject? Deposit/system tx checks tightened or loosened? Boundary values (max gas limit, empty payload, zero-gas tx, malformed but previously tolerated encodings)?
-2. **EVM semantics**: Precompile behavior at edge inputs (empty input, max length, invalid points)? Opcode gas or output changes? Fork-activation off-by-one — behavior AT the activation timestamp/block vs one before/after? Revert data propagation changes?
+1. **Admission**: A tx/payload valid under REF_OLD but rejected under REF_NEW (or vice versa)? Changed error variants that alter engine-API accept/reject? Deposit/system tx checks tightened or loosened? Boundary values (max gas limit, empty payload, zero-gas tx, malformed but previously tolerated encodings)? Opcode-legality changes in payload content — init-code/deployed-code rules (`0xEF` prefix per EIP-3541, init-code size per EIP-3860, code-size cap) or fork-gated opcode sets accepting a deployment on one ref and rejecting it on the other?
+2. **EVM semantics**: Precompile behavior at edge inputs (empty input, max length, invalid points)? Opcode gas or output changes? Unusual opcodes in the tx payload — invalid/undefined opcodes, truncated `PUSH`, jump-dest analysis, fork-gated opcodes — handled identically (see the unusual-opcode trigger sweep in Section 4)? Fork-activation off-by-one — behavior AT the activation timestamp/block vs one before/after? Revert data propagation changes?
 3. **State writes**: Ordering of writes changed? Self-destruct + re-create in same tx/block? Touched-but-empty account handling? Cache vs DB read divergence (e.g. raw-cache eviction, stale reads)? Balance changes moved to a different point in the tx lifecycle?
 4. **Gas/fees**: Rounding or overflow behavior in fee math? L1 data fee computed from different input (pre/post compression, different cost function)? Refund cap edges? Fee vault address or crediting-order changes? Base fee computation at block-gas boundary values?
 5. **Block output**: Tx ordering rules changed (pool priority, sender nonce grouping, gasless/RSC filters admitting different sets)? Receipt field or bloom construction changes? Header field defaults (extraData, withdrawalsRoot, requestsHash) at fork boundaries?
@@ -129,6 +129,17 @@ Walk each checklist dimension (Section 3) against the merged tree and ask the st
 - New/changed precompiles or opcode gas tables behind a fork gate: list the affected opcodes/precompile addresses and mark findings fork-conditional on that activation
 
 A mitigation that "only" tweaks the environment a tx runs under (e.g. zeroing base fee to bypass a fee check) is a consensus change if ANY opcode can read it — say which opcode, and the trigger is a tx using it.
+
+**Unusual-opcode trigger sweep** — when constructing trigger inputs, do not stop at mainstream opcodes; adversarial payloads live in the rarely-executed corners. For every hunk touching the interpreter, opcode tables, code analysis/decoding, contract creation, or call handling, ask whether an *unusual* opcode sequence in the tx payload (calldata-driven code path, init code, or deployed bytecode) behaves differently across refs:
+
+- **Invalid/undefined opcodes**: `INVALID` (0xFE) vs genuinely unassigned opcodes — same exception kind, same gas consumption (all-remaining vs charged) across refs? A change here diverges gas used and receipts.
+- **Malformed bytecode edges**: `PUSHn` truncated at end of code, jump-destination analysis changes (`JUMPDEST` validity inside push data), code ending mid-instruction — accepted/decoded identically?
+- **Deployment legality**: `0xEF`-prefixed code rejection (EIP-3541), max init-code size (EIP-3860), max deployed-code size — one ref rejecting/reverting a create that the other accepts is a direct state-root divergence.
+- **Re-create / redeploy semantics**: `CREATE2` to a previously self-destructed or existing address, `SELFDESTRUCT` + re-create in the same tx/block, nonce/code-hash checks on collision.
+- **Newer/fork-gated opcodes**: `PUSH0` (0x5F), `TLOAD`/`TSTORE` (0x5C/0x5D), `MCOPY` (0x5E), blob opcodes — available and identically priced at the same fork boundary on both refs? An opcode legal on one ref and invalid on the other is fork-certain once triggered.
+- **Call-shape edges**: `DELEGATECALL`/`STATICCALL`/`CALLCODE` into precompile addresses, calls at max depth (1024), zero-gas calls, `RETURNDATACOPY` beyond return-data size — exception kind and gas identical?
+
+Each hit is a finding whose trigger is simply "a tx whose payload executes this opcode sequence" — cheap for an adversary to craft, so default the likelihood to **critical (reachable by any user tx)** unless a fork gate or admission filter provably blocks it.
 
 While building the trees, specifically hunt for:
 
