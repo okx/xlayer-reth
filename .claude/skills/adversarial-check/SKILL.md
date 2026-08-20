@@ -87,25 +87,159 @@ Treat as consensus-relevant by default:
 
 For each dimension, ask: **"construct an input (tx, block, timing, history) for which REF_OLD and REF_NEW give different answers in the 'typical assertion' column."** Every hit is a finding.
 
+Overall guidelines, applying to every dimension:
+
+- For every affected execution path, enumerate and review every reachable Rust `enum` variant and every conditional branch (`if`/`else`, `match` arms, guards, early returns, and `?` error propagation). Map each branch to a concrete triggering input and expected observable result; do not validate only the nominal success path or assume an untested arm is semantically equivalent.
+- Do not limit the review to comparing REF_OLD with REF_NEW. Also examine whether the execution paths introduced or modified for the new feature can alter the consensus semantics of existing features. In most cases, these interactions can be identified by tracing every affected execution path in REF_NEW.
+
 | # | Boundary | Key content to probe | Typical assertion (must be identical across refs) |
 |---|---|---|---|
-| 1 | **Admission verification** | Block header fields, transaction validity, payload attributes, system/deposit transaction legality | Accept/reject decision AND error type consistency |
-| 2 | **EVM semantics** (revm) | Opcodes, precompiles, revert paths, exceptions, fork activation boundaries | Return value, logs, exception kind consistency |
-| 3 | **State writes** | Nonce, balance, code, storage, self-destruct | Post-state and **state root** consistency |
-| 4 | **Gas and fees** (optimism/op-reth) | Gas accounting, refunds, L1 data fee, base fee, fee vaults | Gas used and balance changes consistency |
-| 5 | **Block output** | Transaction ordering, receipts, bloom, header fields | **Block hash** and **receipts root** consistency |
-| 6 | **Derivation and rollback** | L1 origin, head, channel, batch handling | Head and derivation results consistent before/after reorg |
-| 7 | **Multipath implementation** | Block build vs import, serial vs parallel execution, live sync vs backfill vs replay vs proof generation | ALL consensus-key outputs identical on every path |
+| 1 | **Txpool admission & candidate selection** | Validators, subpools, ordering/replacement rules, gasless admission, candidate iterators | Accept/reject, rejection class, subpool, replacement result, candidate tx set |
+| 2 | **Consensus pre-execution validation** | Header/payload checks, tx env validation, balance/nonce/gas guards, error → Engine API mapping | Tx/block acceptance decision; no state or counter commits on invalid input |
+| 3 | **EVM execution semantics & control flow** | Opcodes, precompiles, env fields, frames, error propagation, fork gating | Execution status, return/revert data, logs, observable opcode values, halt category |
+| 4 | **State transition, commit & rollback** | Journal checkpoints, commit timing, exclusion paths, block finalization | Per-tx state diffs, post-state, **state root**; empty delta on failure/exclusion |
+| 5 | **Gas & fee accounting** | Gas counters, refunds, fee formulas, vaults, L1 data / operator fees | `gasUsed`, cumulative gas, refunds, effective price, all balance deltas |
+| 6 | **Receipts, header fields & block commitments** | Receipt construction, header assembly, encoding, roots/hashes | Receipts, bloom, header fields, tx/receipt/state roots, **block hash** |
+| 7 | **Payload build/import & Flashblock path equivalence** | Default builder, `no_tx_pool`, Flashblock build/replay, engine import, backfill | Same inputs ⇒ identical included set, results, post-state, roots, block hash on every path |
 
-Adversarial probes to apply per dimension (non-exhaustive — invent more from the actual diff):
+Detailed probes per dimension (non-exhaustive — invent more from the actual diff):
 
-1. **Admission**: A tx/payload valid under REF_OLD but rejected under REF_NEW (or vice versa)? Changed error variants that alter engine-API accept/reject? Deposit/system tx checks tightened or loosened? Boundary values (max gas limit, empty payload, zero-gas tx, malformed but previously tolerated encodings)? Opcode-legality changes in payload content — init-code/deployed-code rules (`0xEF` prefix per EIP-3541, init-code size per EIP-3860, code-size cap) or fork-gated opcode sets accepting a deployment on one ref and rejecting it on the other?
-2. **EVM semantics**: Precompile behavior at edge inputs (empty input, max length, invalid points)? Opcode gas or output changes? Unusual opcodes in the tx payload — invalid/undefined opcodes, truncated `PUSH`, jump-dest analysis, fork-gated opcodes — handled identically (see the unusual-opcode trigger sweep in Section 4)? Fork-activation off-by-one — behavior AT the activation timestamp/block vs one before/after? Revert data propagation changes?
-3. **State writes**: Ordering of writes changed? Self-destruct + re-create in same tx/block? Touched-but-empty account handling? Cache vs DB read divergence (e.g. raw-cache eviction, stale reads)? Balance changes moved to a different point in the tx lifecycle?
-4. **Gas/fees**: Rounding or overflow behavior in fee math? L1 data fee computed from different input (pre/post compression, different cost function)? Refund cap edges? Fee vault address or crediting-order changes? Base fee computation at block-gas boundary values?
-5. **Block output**: Tx ordering rules changed (pool priority, sender nonce grouping, gasless/RSC filters admitting different sets)? Receipt field or bloom construction changes? Header field defaults (extraData, withdrawalsRoot, requestsHash) at fork boundaries?
-6. **Derivation/rollback**: Same L1 data deriving a different L2 block? Reorg handling leaving different head or stale state? Restart-after-crash replay reaching a different state than the live path did?
-7. **Multipath**: Block **built** by REF_NEW sequencer vs **imported** by REF_OLD replica — identical outputs? Parallel execution scheduling exposing order-dependence? Replay/backfill using a code path the live path doesn't share? Any state root computed by two different implementations in the same binary?
+#### Dimension 1: Txpool admission and candidate selection
+
+Key entry points include:
+
+- `deps/optimism/rust/op-reth/crates/txpool/src/validator.rs`
+- `deps/optimism/rust/op-reth/crates/txpool/src/xlayer_gasless.rs`
+- `deps/optimism/rust/op-reth/crates/txpool/src/pool.rs`
+- `best_transactions` / `execute_best_transactions` in `deps/optimism/rust/op-reth/crates/payload/src/builder.rs`
+
+When the diff changes a txpool validator, subpool, ordering, replacement rule, or iterator error path, check:
+
+- Does the same transaction change from accepted to rejected, or move among `pending`, `basefee`, `queued`, or other subpools? Cover `nonce < state_nonce`, `==`, and `>`, plus consecutive nonces and nonce gaps for one sender.
+- Did a balance boundary change? Cover balance sufficient only for `value`, only for the maximum L2 fee, for the L2 fee plus L1 data fee, exactly sufficient, and short by 1 wei. Confirm that gasless, normal, and deposit transactions do not incorrectly share one balance rule.
+- Did a fee-cap boundary change? Cover `max_fee_per_gas = 0`, `basefee - 1`, `basefee`, and `basefee + 1`, plus priority-fee, blob-fee, operator-fee, and L1-fee checks where applicable.
+- Do gasless admission and the block executor use the same contract address, state/header, and `(to, input, gas_limit)`? Cover whitelist allow and deny, allowance gas exactly at the cap and off by one, contract-call errors, and an unavailable latest header.
+- After a new head, base-fee change, or reorg, are existing transactions reclassified or revalidated? Can a previously accepted gasless transaction execute as non-gasless, or vice versa?
+- When one transaction from a sender fails, does the iterator skip only that transaction, skip all later nonces from that sender, or terminate the whole candidate iteration? Did a change among `mark_invalid`, `skip`, `continue`, and `break` alter the candidate set?
+- Did replacement rules or ordering keys change? Cover the same sender and nonce, equal tips, gasless mock tips, and percentile boundaries. Determine whether this is an intended producer-policy change or an allegedly equivalent implementation that changed the candidate set.
+- Does a `NoTxPool` payload still ignore the txpool completely? Ensure forced or payload-provided transactions cannot be affected accidentally by txpool filters, priority, or gasless mock prices.
+
+Typical assertions: identical txpool accept/reject decisions, permanent/temporary rejection class, subpool, replacement result, and candidate transaction set. Unless ordering is an explicit protocol rule, do not require blocks built under different txpool policies to have the same block hash.
+
+#### Dimension 2: Consensus pre-execution validation
+
+Key entry points include:
+
+- `validate_block_gas` and `execute_transaction_without_commit` in `deps/optimism/rust/alloy-op-evm/src/block/mod.rs`
+- `validate_env` and `validate_against_state_and_deduct_caller` in `deps/optimism/rust/op-revm/src/handler.rs`
+- Payload/header validation and the mapping of errors to Engine API `newPayload` results
+
+When the diff changes a pre-execution guard, transaction error, `?`, or early return, check:
+
+- Do normal, gasless, deposit, system-deposit, and post-execution transactions enter the correct branches? Are deposit/system-transaction rules accidentally relaxed or tightened before or after a fork?
+- Are baseline checks for `enveloped_tx`, transaction type, chain ID, signature, sender code, nonce, init-code size, and deployed-code size skipped, duplicated, or reordered?
+- Which parts must the sender's balance cover: `value`, maximum execution fee, L1 data fee, and operator fee? If gasless waives fees, does it still require `balance >= value`?
+- Does block-gas validation use the declared gas limit, actual EVM gas, canonical gas, or gas after refund? Cover remaining block gas exactly equal to and one below the required value, the Regolith deposit exception, and several consecutive transactions.
+- Do producer and verifier use the same counter definition and comparison boundary for DA footprint, blob gas, post-execution payload index/refund, and other block-level limits?
+- When the gasless allowance system call returns allow/deny, exceeds its gas cap, reverts, halts, or encounters a DB error, how is the transaction classified? Are its journal, warm accesses, logs, and temporary context fully discarded before the real transaction executes?
+- Does a new error variant actually change block validity, or only diagnostics? Follow it to the final Engine API result: `VALID`, `INVALID`, `SYNCING`, or `ACCEPTED`.
+- After every validation early return, do nonce, balance, journal, warm set, receipt count, cumulative gas, DA counters, and canonical head remain unchanged?
+
+Typical assertions: identical transaction/block acceptance decisions; invalid inputs commit no state or counters; when callers branch on error type, compare a stable error category and final payload status rather than the error string.
+
+#### Dimension 3: EVM execution semantics and control flow
+
+Key entry points include:
+
+- `OpEvm::transact_raw` in `deps/optimism/rust/alloy-op-evm/src/lib.rs`
+- The handler lifecycle in `deps/optimism/rust/op-revm/src/handler.rs`
+- Diffs to revm opcode tables, precompiles, frames, and the interpreter
+
+When the diff changes `BlockEnv`, `TxEnv`, `CfgEnv`, an opcode, a precompile, or error propagation, check:
+
+- Which opcodes can observe each modified environment field? At minimum map `block.basefee -> BASEFEE` and effective gas-price/transaction fee fields to `GASPRICE`; also check whether adjacent fields such as `NUMBER`, `TIMESTAMP`, `COINBASE`, `PREVRANDAO`, `GASLIMIT`, `BLOBBASEFEE`, and `CHAINID` are overwritten or restored together.
+- Is a temporary context change used only to bypass validation, or is it visible during contract execution? For example, temporarily setting `block.basefee` to zero changes fee validation, `BASEFEE`, and potentially fee calculations that depend on base fee.
+- Is the same behavior preserved for top-level calls, nested `CALL`, `STATICCALL`, `DELEGATECALL`, `CREATE`, `CREATE2`, and precompile paths?
+- Does a new or removed `return`, `?`, `map_err`, or guard bypass cleanup, context restoration, refund handling, beneficiary rewards, or execution-result normalization? Test revert, halt, OOG, invalid transaction, DB error, and inspector/hook errors, not only success.
+- Are temporary fields restored on every exit? Within one block, execute `special tx -> normal tx` and `special tx revert/OOG -> normal tx`; make the later transaction read the affected opcode and persist the value to storage.
+- Did propagation of revert data, return data, logs, or halt reasons change? Can an inner-frame revert be converted incorrectly into success/halt, or leave logs/state that should have rolled back?
+- Is fork/spec selection off by one? Exercise the same opcode or precompile immediately before activation, in the first active block, and after activation.
+- Can changes to Rust integer conversions, `checked_*`, `saturating_*`, defaults, or `unwrap_or_default` convert an exception into truncation/zero, or vice versa? Exercise zero, maximum, and off-by-one values.
+
+Typical assertions: identical execution status, return/revert data, logs, observable opcode values, halt category, and complete EVM context after the transaction.
+
+#### Dimension 4: State transition, commit, and rollback
+
+Focus on journal checkpoints, `ResultAndState`, `commit_transaction`, block finalization, system/predeploy calls, and paths that execute a candidate but exclude it from the block.
+
+When the diff changes account mutation, commit timing, or rollback, check:
+
+- When does the caller nonce increment for calls and creates, success/revert/halt, and deposit/gasless/normal transactions? A validation failure or excluded candidate must not leave a nonce change.
+- Did the order of value transfer, deposit minting, fee deduction/reimbursement, and beneficiary/vault crediting change? After an intermediate failure, only protocol-specified persistent effects may remain.
+- Did creation/deletion semantics change for code, storage, transient storage, self-destructed accounts, created accounts, or touched-empty accounts? Cover create/self-destruct/re-create in the same transaction and the same block.
+- Can a gasless whitelist/system call, simulation, or execute-then-exclude candidate leave state, logs, access warming, or cached reads? Can the next transaction observe phantom state or warming?
+- If post-processing fails after `execute_transaction_without_commit` succeeds, has any state patch already been applied? Can it later be committed during a retry, the next transaction, or block finalization?
+- Did the ordering of receipt/counter updates and DB commit change? What happens if a receipt is pushed but state commit fails, or state commits before receipt construction fails?
+- Can failure in block finalization, a post-block balance increment, or a system-contract update leave half of the block state committed?
+- Execute `tx1 -> tx2`, `tx1 revert -> tx2`, and `tx1 excluded -> tx2`; compare the nonce, balance, code, storage, and warm/cold state observed by `tx2`.
+
+Typical assertions: identical per-transaction account/storage diffs, final post-state, and `stateRoot`; an empty state delta for failure or exclusion paths; identical pre-state observed by the next transaction in the sequence.
+
+#### Dimension 5: Gas and fee accounting
+
+When the diff changes a gas counter, refund, fee formula, vault, or any `+/-`, `checked_*`, or `saturating_*` operation, first enumerate every gas quantity present in the code: declared gas limit, intrinsic gas, EVM gas used, canonical gas used, refunded gas, cumulative block gas, DA/blob gas, and state/reservoir gas. Then check:
+
+- Which gas quantity feeds each limit and receipt field, and is it the same for producer and verifier? In particular, ensure canonical gas after refund is not used accidentally to limit actual computation.
+- Which counters are incremented, decremented, or cleared on success, revert, halt/OOG, failed create, deposits before/after Regolith, and gasless execution? Does a new early return skip any update?
+- Is refund non-negative, capped by the relevant gas used, applied exactly once, and limited by the correct fork's refund cap? Cover `0`, exactly at the cap, cap ± 1, and refund greater than gas used.
+- Did the inputs to effective gas price, base fee, or priority fee change? Exercise `max_fee = basefee`, `basefee ± 1`, zero priority fee, and the priority-fee limit.
+- Are sender precharge, unused-gas reimbursement, beneficiary reward, base-fee vault, L1-fee vault, and operator-fee vault balance changes conserved without charging or refunding the same gas twice?
+- Does gasless waive only the fees specified by the protocol while preserving gas consumption, refund, and cumulative-gas semantics? It must not set `gasUsed` to zero merely because fees are waived, nor reward a beneficiary/vault with unpaid fees.
+- Did the ordering of deposit mint/value and fee deduction change? Did loading behavior for L1-fee metadata change when the metadata is absent?
+- Are the encoded transaction, compressed size, gas basis, and rounding used for L1-data/operator fees unchanged? Check large multiplication, division, rounding direction, and overflow paths.
+- Does a post-execution/SDM refund update both receipt gas and sender/beneficiary/vault balances? Updating only receipt gas directly produces a state-root divergence.
+
+Typical assertions: exact equality of per-transaction `gasUsed`, cumulative gas, block gas used, refund, effective gas price, and balance deltas for the sender, beneficiary, and every fee vault. Also assert fee-conservation relations instead of comparing only final balances.
+
+#### Dimension 6: Receipts, header fields, and block commitments
+
+This dimension covers consensus outputs after transaction order has been fixed. Do not review txpool priority or ordering policy here.
+
+When the diff changes receipt construction, header assembly, encoding, a root, or a hash, check:
+
+- Did receipt type, status/post-state, cumulative gas, logs or log order, or logs bloom change? Are OP/X Layer extension fields such as deposit nonce, deposit receipt version, and operator fee present only for the correct fork and transaction type?
+- Are receipts constructed correctly for success, revert/halt, deposit, gasless, and post-execution transactions? An excluded or validation-failed candidate must not produce a receipt.
+- Are `None`, `Some(0)`, an empty-list root, and an absent field kept distinct? At fork boundaries, do withdrawals root, requests hash, blob/DA fields, `extraData`, and similar fields use the correct presence and encoding?
+- Does header `gasUsed` use canonical gas or raw EVM gas as required? Do base fee, gas limit, timestamp, and L1-origin-derived fields come from the same payload attributes?
+- Is the transaction root computed from the exact ordered transaction bytes finally included in the block? Is the receipt root computed using the correct typed-receipt encoding? Does the state root correspond to that same committed state?
+- Is the block hash computed from the newly derived header fields rather than echoing a hash/root supplied in the input block?
+- Can a post-execution error make the producer drop a transaction while the importer rejects the block, or make the two paths choose different fallback values for a receipt/header field?
+
+Typical assertions: identical final ordered transaction bytes, complete receipts, logs bloom, consensus header fields, transaction root, receipt root, state root, and block hash. Report the earliest differing field before reporting its derived root/hash.
+
+#### Dimension 7: Payload build, import, and Flashblock path equivalence
+
+For xlayer-reth, compare the following paths; op-rbuilder is out of scope:
+
+- Optimism default payload builder: `deps/optimism/rust/op-reth/crates/payload/src/builder.rs`
+- The `no_tx_pool` payload-attributes path
+- X Layer local Flashblock build: `crates/builder/src/flashblocks/builder.rs`
+- External/cached Flashblock execution and replay: `crates/builder/src/flashblocks/handler.rs` and related cache/replay paths
+- Engine API import and canonical block execution of the final payload
+- Backfill, historical replay, or restart/resume paths where relevant
+
+Fix the same parent state, payload attributes, and ordered transaction list to remove txpool-selection noise, then check:
+
+- Are pre-execution system/deposit transactions, payload-provided transactions, builder transactions, and normal transactions inserted at the same positions? Can `no_tx_pool`, replay, or first/last-Flashblock conditions omit, duplicate, or reorder them?
+- Do the default builder, NoTxPool, and Flashblock paths use the same block-executor configuration, including chain spec, gasless contract, post-execution mode, DA configuration, and receipt builder?
+- When one transaction fails execution, does each path exclude only that transaction, skip later transactions from the same sender, continue to the next transaction, stop the current Flashblock, or invalidate the whole payload? Can these choices produce a different included set or pre-state?
+- Does segmented Flashblock execution produce the same final state, receipts, and counters as executing the same ordered list at once? Segment boundaries must not reset cumulative gas, DA footprint, warm state, post-execution entries, or builder-transaction state.
+- If partial replay of an external cached Flashblock fails, does the path resume at the failed item, fall back to a fresh build, or retain the successful prefix? If an error is logged and ignored, can old and new versions retain different prefix state?
+- Do P2P-received Flashblock execution, local Flashblock building, and final canonical import apply the same gasless, fee, and validation semantics to a transaction?
+- Cancellation, timeout, and fallback may select a different valid payload, but can they leave state/cache from a cancelled build that contaminates the next build?
+- Under a fork supported by both versions, is a candidate-built payload accepted by the old importer, and an old-built payload accepted by the candidate importer, with identical recomputed commitments?
+
+Typical assertions: given the same parent, attributes, and ordered transaction list, all paths produce the same included transaction set, per-transaction results, receipts, gas/fee deltas, post-state, roots, and block hash. If the input candidate sets differ, attribute that first to dimension 1 rather than misclassifying it as an execution-path inconsistency.
 
 **Cross-version pairing matters**: the fleet upgrades gradually. Always evaluate the mixed topology — REF_NEW sequencer + REF_OLD replicas, and the reverse. A change that is self-consistent within one binary still forks the network if build (new) and import (old) disagree.
 
