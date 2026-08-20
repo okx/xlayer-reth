@@ -1,20 +1,27 @@
 package flashblocks
 
 import (
+	"context"
 	"encoding/json"
+	"math/big"
+	"slices"
 	"testing"
+	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 
 	"github.com/ethereum-optimism/optimism/op-devstack/devtest"
 	"github.com/ethereum-optimism/optimism/op-devstack/presets"
+	"github.com/ethereum-optimism/optimism/op-service/client"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
+	"github.com/ethereum-optimism/optimism/op-service/txplan"
 
-	"github.com/okx/xlayer-reth/tests/common"
+	xcommon "github.com/okx/xlayer-reth/tests/common"
 )
 
 func xlayerBinaryOpts(t devtest.T) []presets.Option {
-	cfg, err := common.LoadXLayerConfig()
+	cfg, err := xcommon.LoadXLayerConfig()
 	t.Require().NoError(err, "harness config must load")
 	t.Require().NoError(cfg.RequireExecutionBinary(), "RUST_BINARY_PATH_OP_RETH must point to a built XLayer reth binary")
 	return []presets.Option{
@@ -28,16 +35,18 @@ func callRPC(t devtest.T, sys *presets.XLayerFlashblocks, out any, method string
 }
 
 // TestFlashblocks exercises the XLayer flashblocks topology (producer sequencer +
-// rpc1/rpc2 relays). All cases share a single devnet and run as subtests, since
-// the topology is identical and spinning it up costs far more than each case.
+// rpc1/rpc2 relays). All cases share a single devnet and run concurrently as
+// subtests, since the topology is identical and spinning it up costs far more
+// than each case.
 func TestFlashblocks(gt *testing.T) {
-	t := devtest.SerialT(gt)
+	t := devtest.ParallelT(gt)
 	sys := presets.NewXLayerFlashblocks(t, xlayerBinaryOpts(t)...)
 
 	// Smoke: the pending-tag RPC surface the built-in flashblocks builder feeds
 	// (pending block, balance, nonce, code, call, gas estimation) must respond
 	// without a process-level error while a flashblock overlay may be present.
 	gt.Run("Smoke", func(gt *testing.T) {
+		t := devtest.ParallelT(gt)
 		addr := sys.FunderL2.NewFundedEOA(eth.OneEther).Address()
 
 		var pendingBlock map[string]json.RawMessage
@@ -61,32 +70,91 @@ func TestFlashblocks(gt *testing.T) {
 		callRPC(t, sys, &estimate, "eth_estimateGas", call, "pending")
 	})
 
-	// RelayPending: both relay nodes (rpc1, rpc2), which subscribe to the
-	// producer's flashblocks stream, answer pending-tag queries — the relay-
-	// propagation surface without op-rbuilder/rollup-boost.
+	// RelayPending verifies that rpc1 and rpc2 observe the same transaction and
+	// state through the producer's flashblock stream before canonicalization,
+	// then discard that transaction from their pending overlays after inclusion.
 	gt.Run("RelayPending", func(gt *testing.T) {
-		var pendingRPC1 map[string]json.RawMessage
-		err1 := sys.L2ELRPC1.EthClient().RPC().CallContext(t.Ctx(), &pendingRPC1, "eth_getBlockByNumber", "pending", false)
-		t.Require().NoError(err1, "rpc1 relay must answer a pending query")
+		t := devtest.ParallelT(gt)
+		sender := sys.FunderL2.NewFundedEOA(eth.OneEther)
+		recipient := sys.Wallet.NewEOA(sys.L2EL).Address()
+		value := eth.OneHundredthEther
 
-		var pendingRPC2 map[string]json.RawMessage
-		err2 := sys.L2ELRPC2.EthClient().RPC().CallContext(t.Ctx(), &pendingRPC2, "eth_getBlockByNumber", "pending", false)
-		t.Require().NoError(err2, "rpc2 relay must answer a pending query")
-		// TODO: drive a transaction on the sequencer and assert the same flashblock
-		// pending state is observed on rpc1 and rpc2 before canonicalization, and that
-		// the overlay is dropped once the block is canonical. Requires the live devnet.
+		planned := txplan.NewPlannedTx(sender.Plan(), txplan.WithTo(&recipient), txplan.WithValue(value))
+		signed, err := planned.Signed.Eval(t.Ctx())
+		t.Require().NoError(err, "sign relay propagation transaction")
+		_, err = planned.Submitted.Eval(t.Ctx())
+		t.Require().NoError(err, "submit relay propagation transaction")
+		txHash := signed.Hash()
+
+		type pendingState struct {
+			blockHash    common.Hash
+			blockNumber  hexutil.Uint64
+			transactions []common.Hash
+			balance      *big.Int
+		}
+		readPending := func(rpcClient interface {
+			CallContext(ctx context.Context, result any, method string, args ...any) error
+		}) (pendingState, error) {
+			var block struct {
+				Hash         common.Hash    `json:"hash"`
+				Number       hexutil.Uint64 `json:"number"`
+				Transactions []common.Hash  `json:"transactions"`
+			}
+			if err := rpcClient.CallContext(t.Ctx(), &block, "eth_getBlockByNumber", "pending", false); err != nil {
+				return pendingState{}, err
+			}
+			var balance hexutil.Big
+			if err := rpcClient.CallContext(t.Ctx(), &balance, "eth_getBalance", recipient, "pending"); err != nil {
+				return pendingState{}, err
+			}
+			return pendingState{
+				blockHash:    block.Hash,
+				blockNumber:  block.Number,
+				transactions: block.Transactions,
+				balance:      new(big.Int).Set((*big.Int)(&balance)),
+			}, nil
+		}
+		contains := func(hashes []common.Hash, want common.Hash) bool {
+			return slices.Contains(hashes, want)
+		}
+
+		var rpc1Pending, rpc2Pending pendingState
+		t.Require().Eventually(func() bool {
+			var err1, err2 error
+			rpc1Pending, err1 = readPending(sys.L2ELRPC1.EthClient().RPC())
+			rpc2Pending, err2 = readPending(sys.L2ELRPC2.EthClient().RPC())
+			return err1 == nil && err2 == nil &&
+				contains(rpc1Pending.transactions, txHash) && contains(rpc2Pending.transactions, txHash) &&
+				rpc1Pending.balance.Cmp(value.ToBig()) == 0 && rpc2Pending.balance.Cmp(value.ToBig()) == 0
+		}, 3*time.Second, 20*time.Millisecond, "both relays must expose the transaction's flashblock state before canonicalization")
+		t.Require().Equal(rpc1Pending.blockNumber, rpc2Pending.blockNumber, "relays must expose the same pending block number")
+		t.Require().Equal(rpc1Pending.blockHash, rpc2Pending.blockHash, "relays must expose the same pending block hash")
+
+		_, err = planned.Success.Eval(t.Ctx())
+		t.Require().NoError(err, "relay propagation transaction must become canonical")
+		t.Require().Eventually(func() bool {
+			state1, err1 := readPending(sys.L2ELRPC1.EthClient().RPC())
+			state2, err2 := readPending(sys.L2ELRPC2.EthClient().RPC())
+			return err1 == nil && err2 == nil &&
+				!contains(state1.transactions, txHash) && !contains(state2.transactions, txHash)
+		}, 10*time.Second, 100*time.Millisecond, "canonical transaction must be removed from both relay pending overlays")
 	})
 
-	// EthSubscribeParamBoundaries: empty and invalid params must yield a stable,
-	// decidable error rather than a valid subscription (eth_subscribe over the HTTP
-	// transport also errors, which is a stable, decidable outcome for this check).
+	// EthSubscribeParamBoundaries uses its own WebSocket stream to the shared
+	// sequencer. Empty and invalid params must yield a stable, decidable error
+	// rather than a valid subscription, without requiring another node topology.
 	gt.Run("EthSubscribeParamBoundaries", func(gt *testing.T) {
+		t := devtest.ParallelT(gt)
+		stream, err := client.NewRPC(t.Ctx(), t.Logger(), sys.L2EL.Escape().UserRPC(), client.WithLazyDial())
+		t.Require().NoError(err, "open dedicated eth_subscribe stream")
+		t.Cleanup(stream.Close)
+
 		var emptyParamsResult json.RawMessage
-		emptyErr := sys.L2EL.EthClient().RPC().CallContext(t.Ctx(), &emptyParamsResult, "eth_subscribe")
+		emptyErr := stream.CallContext(t.Ctx(), &emptyParamsResult, "eth_subscribe")
 		t.Require().Error(emptyErr, "empty-parameter flashblocks subscribe must return a decidable error")
 
 		var invalidParamsResult json.RawMessage
-		invalidErr := sys.L2EL.EthClient().RPC().CallContext(t.Ctx(), &invalidParamsResult, "eth_subscribe", "not-a-valid-flashblocks-channel")
+		invalidErr := stream.CallContext(t.Ctx(), &invalidParamsResult, "eth_subscribe", "not-a-valid-flashblocks-channel")
 		t.Require().Error(invalidErr, "invalid-parameter flashblocks subscribe must return a decidable error")
 	})
 }

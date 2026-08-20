@@ -1,51 +1,79 @@
-set positional-arguments := true
+set positional-arguments
 
-# Package-level worker count: how many test packages run at once. Kept at one so
-# only a single devnet is being brought up at a time by default.
-package_workers := "1"
+# Repository root. Override REPO_ROOT with an absolute path when invoking this
+# justfile from a different checkout layout.
+REPO_ROOT := env_var_or_default("REPO_ROOT", justfile_directory() / "..")
+
+# L2 consensus client. The XLayer E2E suite currently supports op-node only.
+# kona-node cannot bootstrap an isolated validator from L1 alone: it waits for
+# an initial unsafe payload over L2 P2P before completing EL sync, while the
+# XLayer validator topology intentionally has L2 P2P disabled. Keep the
+# DEVSTACK_L2CL_KIND selector for upstream-fix verification and diagnostics.
+CONSENSUS_CLIENT := env_var_or_default("DEVSTACK_L2CL_KIND", "op-node")
+
+# Package-level worker count: how many test packages run at once. Override with
+# PACKAGE_WORKERS.
+PACKAGE_WORKERS := env_var_or_default("PACKAGE_WORKERS", "2")
 # In-package parallelism: how many tests inside one package run concurrently.
-# Four keeps enough throughput while bounding the number of simultaneous devnets
-# so local ephemeral TCP ports are not exhausted.
-in_package_parallel := "4"
+# This only affects test functions and subtests that call t.Parallel(). Override
+# with IN_PACKAGE_PARALLEL.
+IN_PACKAGE_PARALLEL := env_var_or_default("IN_PACKAGE_PARALLEL", "4")
 # Hard wall-clock limit for a single test process; a hung scenario is killed.
-test_timeout := "5m"
-
-repo_root := justfile_directory() / ".."
+# Override with TEST_TIMEOUT.
+TEST_TIMEOUT := env_var_or_default("TEST_TIMEOUT", "1m")
 
 default:
     @just --list
 
 # Build the contracts-bedrock artifacts and the debug-profile XLayer reth
-# execution client the devnet nodes run, then execute the selected Go E2E tests.
+# execution client, then execute the selected Go E2E tests with op-node. A
+# manually selected kona-node is built for diagnostics but is not supported by
+# the full suite; see CONSENSUS_CLIENT above.
 # Any arguments are forwarded verbatim to `go test`, so callers can select
 # packages, filter cases with -run, and pass arbitrary go test flags.
 [positional-arguments]
 e2e *args:
     #!/usr/bin/env bash
     set -euo pipefail
-    forge build --root "{{repo_root}}/deps/optimism/packages/contracts-bedrock" --skip "/**/test/**"
-    cargo build --manifest-path "{{repo_root}}/Cargo.toml" -p xlayer-reth-node
-    exec just --justfile "{{justfile()}}" \
-        package_workers="{{package_workers}}" \
-        in_package_parallel="{{in_package_parallel}}" \
-        test_timeout="{{test_timeout}}" \
-        e2e-no-build "$@"
+    source "{{ justfile_directory() }}/scripts/e2e-common.sh"
+    start_total_timer "e2e total time"
+    run_logged forge build \
+        --root "{{ REPO_ROOT }}/deps/optimism/packages/contracts-bedrock" \
+        --skip "/**/test/**"
+    run_logged cargo build \
+        --manifest-path "{{ REPO_ROOT }}/Cargo.toml" \
+        -p xlayer-reth-node
+    if [[ "{{ CONSENSUS_CLIENT }}" == "kona-node" ]]; then
+        run_logged cargo build \
+            --manifest-path "{{ REPO_ROOT }}/deps/optimism/rust/Cargo.toml" \
+            -p kona-node \
+            --bin kona-node
+    fi
+    run_e2e_tests \
+        "{{ REPO_ROOT }}" \
+        "{{ justfile_directory() }}" \
+        "{{ PACKAGE_WORKERS }}" \
+        "{{ IN_PACKAGE_PARALLEL }}" \
+        "{{ TEST_TIMEOUT }}" \
+        "{{ CONSENSUS_CLIENT }}" \
+        "$@"
 
-# Run the selected Go E2E tests against already-built contract artifacts and an
-# existing XLayer reth binary, without triggering any contracts or Rust build.
-# With no package argument every package in the module runs.
+# Run the selected Go E2E tests against already-built contract artifacts and
+# binaries without triggering a build. kona-node may be selected for diagnostics
+# but is not currently supported by the full suite; see CONSENSUS_CLIENT above.
+# With no package argument, or when the first argument is a go test flag, every
+# package in the module runs.
 [positional-arguments]
 e2e-no-build *args:
     #!/usr/bin/env bash
     set -euo pipefail
-    export OPTIMISM_ROOT="${OPTIMISM_ROOT:-{{repo_root}}/deps/optimism}"
-    # The devstack op-reth node resolver (rustbin) runs the prebuilt binary at
-    # RUST_BINARY_PATH_OP_RETH instead of building op-reth from the monorepo, so
-    # every XLayer L2 execution node runs the prebuilt XLayer reth binary. This is
-    # also the single execution-binary path the harness config reads.
-    export RUST_BINARY_PATH_OP_RETH="${RUST_BINARY_PATH_OP_RETH:-{{repo_root}}/target/debug/xlayer-reth-node}"
-    cd "{{justfile_directory()}}"
-    if [ "$#" -eq 0 ]; then
-        set -- ./...
-    fi
-    exec go test -p "{{package_workers}}" -parallel "{{in_package_parallel}}" -timeout "{{test_timeout}}" "$@"
+    source "{{ justfile_directory() }}/scripts/e2e-common.sh"
+    start_total_timer "e2e-no-build total time"
+    run_e2e_tests \
+        "{{ REPO_ROOT }}" \
+        "{{ justfile_directory() }}" \
+        "{{ PACKAGE_WORKERS }}" \
+        "{{ IN_PACKAGE_PARALLEL }}" \
+        "{{ TEST_TIMEOUT }}" \
+        "{{ CONSENSUS_CLIENT }}" \
+        "$@"

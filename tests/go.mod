@@ -17,6 +17,7 @@ replace github.com/ethereum/go-ethereum => github.com/ethereum-optimism/op-geth 
 require (
 	github.com/ethereum-optimism/optimism v0.0.0
 	github.com/ethereum/go-ethereum v1.17.0
+	github.com/lmittmann/w3 v0.20.7
 )
 
 require (
@@ -170,7 +171,6 @@ require (
 	github.com/libp2p/go-netroute v0.2.1 // indirect
 	github.com/libp2p/go-reuseport v0.4.0 // indirect
 	github.com/libp2p/go-yamux/v4 v4.0.1 // indirect
-	github.com/lmittmann/w3 v0.20.7 // indirect
 	github.com/marten-seemann/tcp v0.0.0-20210406111302-dfbc87cc63fd // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect

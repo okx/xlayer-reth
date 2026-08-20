@@ -67,10 +67,36 @@ func TestDerivedContractPaths(t *testing.T) {
 	}
 }
 
-func TestConsensusClientIsFixed(t *testing.T) {
+func TestConsensusClientDefaultsToOpNode(t *testing.T) {
 	cfg := &XLayerConfig{OptimismRoot: string(filepath.Separator) + "opt"}
-	if cfg.ConsensusClient() != "op-node" {
-		t.Fatalf("consensus client must be fixed to op-node; got %q", cfg.ConsensusClient())
+	if cfg.ConsensusClient() != ConsensusClientOpNode {
+		t.Fatalf("consensus client default = %q, want %q", cfg.ConsensusClient(), ConsensusClientOpNode)
+	}
+}
+
+func TestLoadSelectsKonaConsensusClient(t *testing.T) {
+	t.Setenv(EnvOptimismRoot, string(filepath.Separator)+"opt")
+	t.Setenv(EnvRethExecutionBinary, "")
+	t.Setenv(EnvConsensusClient, string(ConsensusClientKona))
+	cfg, err := LoadXLayerConfig()
+	if err != nil {
+		t.Fatalf("load kona-node configuration: %v", err)
+	}
+	if cfg.ConsensusClient() != ConsensusClientKona {
+		t.Fatalf("consensus client = %q, want %q", cfg.ConsensusClient(), ConsensusClientKona)
+	}
+}
+
+func TestLoadRejectsUnsupportedConsensusClient(t *testing.T) {
+	t.Setenv(EnvOptimismRoot, string(filepath.Separator)+"opt")
+	t.Setenv(EnvRethExecutionBinary, "")
+	t.Setenv(EnvConsensusClient, "unsupported-node")
+	_, err := LoadXLayerConfig()
+	if err == nil {
+		t.Fatal("expected unsupported consensus client to be rejected")
+	}
+	if !strings.Contains(err.Error(), EnvConsensusClient) {
+		t.Fatalf("error must name %s; got %v", EnvConsensusClient, err)
 	}
 }
 
@@ -78,6 +104,7 @@ func TestLoadReadsEnvOnce(t *testing.T) {
 	abs := string(filepath.Separator) + filepath.Join("srv", "optimism")
 	t.Setenv(EnvOptimismRoot, abs)
 	t.Setenv(EnvRethExecutionBinary, "")
+	t.Setenv(EnvConsensusClient, "")
 	cfg, err := LoadXLayerConfig()
 	if err != nil {
 		t.Fatalf("load with absolute root should succeed; got %v", err)

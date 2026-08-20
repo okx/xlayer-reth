@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/ethereum-optimism/optimism/op-devstack/sysgo"
 )
 
 // Environment variable names consumed by the harness. They are declared here so
-// the full set of external path inputs can be audited from a single location.
+// the external configuration surface can be audited from a single location.
 const (
 	// EnvOptimismRoot locates the Optimism monorepo checkout that supplies the
 	// contracts-bedrock artifacts and devstack packages used to build a devnet.
@@ -18,12 +20,20 @@ const (
 	// instead of building it, so one value both configures the harness and
 	// selects the node binary.
 	EnvRethExecutionBinary = "RUST_BINARY_PATH_OP_RETH"
+	// EnvConsensusClient is the upstream op-devstack selector for the L2
+	// consensus client. An empty value defaults to op-node.
+	EnvConsensusClient = "DEVSTACK_L2CL_KIND"
 )
 
-// ConsensusClient is fixed for XLayer devnets: the L2 consensus layer is always
-// op-node. It is expressed as a constant rather than a configurable value so the
-// harness cannot be pointed at a different consensus client.
-const ConsensusClient = "op-node"
+// ConsensusClient identifies an L2 consensus client supported by the XLayer
+// E2E harness. It aliases op-devstack's selector type so the harness and runtime
+// cannot drift onto different names.
+type ConsensusClient = sysgo.MixedL2CLKind
+
+const (
+	ConsensusClientOpNode = sysgo.MixedL2CLOpNode
+	ConsensusClientKona   = sysgo.MixedL2CLKona
+)
 
 // XLayerConfig is the single source of external run configuration for the XLayer
 // Go E2E harness. Every consumer (scenarios, devstack glue, RPC/sync helpers)
@@ -39,15 +49,23 @@ type XLayerConfig struct {
 	// RequireExecutionBinary enforces its presence for scenarios that start a
 	// devnet.
 	RethExecutionBinary string
+	// L2ConsensusClient selects the consensus client used for every XLayer L2
+	// node. LoadXLayerConfig obtains it from DEVSTACK_L2CL_KIND.
+	L2ConsensusClient ConsensusClient
 }
 
 // LoadXLayerConfig reads every harness environment variable exactly once,
 // applies defaults, validates the result, and returns an immutable config
 // object. It is the only environment entry point in the harness.
 func LoadXLayerConfig() (*XLayerConfig, error) {
+	consensusClient := ConsensusClient(os.Getenv(EnvConsensusClient))
+	if consensusClient == "" {
+		consensusClient = ConsensusClientOpNode
+	}
 	cfg := &XLayerConfig{
 		OptimismRoot:        os.Getenv(EnvOptimismRoot),
 		RethExecutionBinary: os.Getenv(EnvRethExecutionBinary),
+		L2ConsensusClient:   consensusClient,
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -60,7 +78,19 @@ func LoadXLayerConfig() (*XLayerConfig, error) {
 // misconfiguration surfaces as a clear message rather than a downstream devnet
 // failure.
 func (c *XLayerConfig) Validate() error {
-	return c.validateOptimismRoot()
+	if err := c.validateOptimismRoot(); err != nil {
+		return err
+	}
+	return c.validateConsensusClient()
+}
+
+func (c *XLayerConfig) validateConsensusClient() error {
+	switch c.ConsensusClient() {
+	case ConsensusClientOpNode, ConsensusClientKona:
+		return nil
+	default:
+		return fmt.Errorf("%s must be %q or %q; got %q", EnvConsensusClient, ConsensusClientOpNode, ConsensusClientKona, c.L2ConsensusClient)
+	}
 }
 
 // validateOptimismRoot enforces that OPTIMISM_ROOT is a non-empty absolute path.
@@ -109,9 +139,13 @@ func (c *XLayerConfig) GaslessDeployScript() string {
 	return filepath.Join(c.ContractsBedrockDir(), "scripts", "deploy", "DeployXlayerGaslessWhitelist.s.sol")
 }
 
-// ConsensusClient reports the fixed L2 consensus client for XLayer devnets.
-func (c *XLayerConfig) ConsensusClient() string {
-	return ConsensusClient
+// ConsensusClient reports the selected L2 consensus client, defaulting to
+// op-node for directly constructed zero-value configurations.
+func (c *XLayerConfig) ConsensusClient() ConsensusClient {
+	if c.L2ConsensusClient == "" {
+		return ConsensusClientOpNode
+	}
+	return c.L2ConsensusClient
 }
 
 // AuditablePaths returns the complete set of external path inputs keyed by their

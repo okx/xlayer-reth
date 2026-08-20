@@ -1,7 +1,9 @@
 package gasless
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"testing"
 	"time"
@@ -11,10 +13,12 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 
+	"github.com/ethereum-optimism/optimism/op-chain-ops/devkeys"
 	"github.com/ethereum-optimism/optimism/op-devstack/devtest"
 	"github.com/ethereum-optimism/optimism/op-devstack/dsl"
 	"github.com/ethereum-optimism/optimism/op-devstack/presets"
 	"github.com/ethereum-optimism/optimism/op-devstack/sysgo"
+	"github.com/ethereum-optimism/optimism/op-e2e/e2eutils/intentbuilder"
 	"github.com/ethereum-optimism/optimism/op-service/apis"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/txplan"
@@ -30,6 +34,19 @@ const gaslessGasLimit uint64 = 16_777_216
 // large enough for a native transfer carrying a short calldata probe.
 const gaslessTxGasLimit uint64 = 50_000
 
+// gaslessOwnerTxGasLimit avoids estimating later owner calls against canonical
+// state where the preceding initialize transaction is not visible yet.
+const gaslessOwnerTxGasLimit uint64 = 200_000
+
+// gaslessOwnerKey is prefunded in the L2 genesis. The faucet owns UserKey(10_000),
+// so this dedicated key cannot conflict with the faucet transaction manager.
+const gaslessOwnerKey devkeys.UserKey = 10_001
+
+// gaslessReceiptTimeout allows ample time for a transaction to cross multiple
+// block-production and L1-derivation cycles while still failing quickly when a
+// sequencer or validator stops making progress.
+const gaslessReceiptTimeout = 20 * time.Second
+
 // gaslessProbeData is a 4-byte calldata prefix carried by gasless transactions so
 // the whitelist's calldata-length guard (which rejects anything shorter than a
 // 4-byte selector) passes. An empty input can never be gasless.
@@ -37,8 +54,16 @@ var gaslessProbeData = common.FromHex("0xdeadbeef")
 
 func xlayerBinaryOpts(t devtest.T, cfg *xcommon.XLayerConfig) []presets.Option {
 	t.Require().NoError(cfg.RequireExecutionBinary(), "RUST_BINARY_PATH_OP_RETH must point to a built XLayer reth binary")
+
 	return []presets.Option{
 		presets.WithLocalContractSourcesAt(cfg.ForgeArtifactsDir()),
+		presets.WithDeployerOptions(func(t devtest.T, keys devkeys.Keys, builder intentbuilder.Builder) {
+			owner, err := keys.Address(gaslessOwnerKey)
+			t.Require().NoError(err, "derive gasless owner address")
+			for _, l2 := range builder.L2s() {
+				l2.WithPrefundedAccount(owner, *eth.OneEther.ToU256())
+			}
+		}),
 		// Enable the XLayer gasless transaction pool. With gasless enabled the pool
 		// admits zero-priced (maxFeePerGas == maxPriorityFeePerGas == 0) whitelisted
 		// transactions and assigns them a mock ordering tip, so no base-fee or
@@ -48,7 +73,7 @@ func xlayerBinaryOpts(t devtest.T, cfg *xcommon.XLayerConfig) []presets.Option {
 }
 
 func newXLayerGasless(gt *testing.T) (devtest.T, *presets.XLayer, *xcommon.XLayerConfig) {
-	t := devtest.SerialT(gt)
+	t := devtest.ParallelT(gt)
 	cfg, err := xcommon.LoadXLayerConfig()
 	t.Require().NoError(err, "harness config must load")
 	return t, presets.NewXLayer(t, xlayerBinaryOpts(t, cfg)...), cfg
@@ -95,22 +120,47 @@ func gaslessWhitelist() common.Address {
 	return sysgo.XLayerGaslessWhitelistProxy
 }
 
-// enableGaslessWhitelist initializes the genesis-installed whitelist with owner
-// as its owner, enables gasless, and registers target as a fully gasless target.
-// The three configuration calls are ordinary (fee-paying) transactions from the
-// owner; only calls to the registered target become gasless afterward.
-func enableGaslessWhitelist(owner *dsl.EOA, target common.Address) {
-	whitelist := gaslessWhitelist()
-	sendOwnerCall(owner, whitelist, packInitialize(owner.Address()))
-	sendOwnerCall(owner, whitelist, packSetGaslessEnabled(true))
-	sendOwnerCall(owner, whitelist, packSetFullyGaslessTarget(target, true, gaslessGasLimit))
+// gaslessOwner returns the dedicated account that xlayerBinaryOpts prefunds in
+// the L2 genesis, avoiding a faucet transaction during test setup.
+func gaslessOwner(t devtest.T, sys *presets.XLayer) *dsl.EOA {
+	priv := sys.L2Chain.Escape().Keys().Secret(gaslessOwnerKey)
+	return dsl.NewKey(t, priv).User(sys.L2EL)
 }
 
-// sendOwnerCall submits a fee-paying configuration transaction from owner to the
-// whitelist. Transact requires the transaction to be included with a successful
-// receipt, so a reverted configuration call fails the test.
-func sendOwnerCall(owner *dsl.EOA, to common.Address, data []byte) {
-	owner.Transact(owner.Plan(), txplan.WithTo(&to), txplan.WithData(data))
+// enableGaslessWhitelist initializes the genesis-installed whitelist with owner
+// as its owner, enables gasless, and registers target as a fully gasless target.
+// The three ordinary fee-paying transactions are broadcast with consecutive
+// nonces, then verified after the final transaction is included. This lets them
+// share one canonical block without losing per-call revert detection.
+func enableGaslessWhitelist(t devtest.T, owner *dsl.EOA, target common.Address) {
+	whitelist := gaslessWhitelist()
+	baseNonce := owner.PendingNonce()
+	calls := [][]byte{
+		packInitialize(owner.Address()),
+		packSetGaslessEnabled(true),
+		packSetFullyGaslessTarget(target, true, gaslessGasLimit),
+	}
+
+	plans := make([]*txplan.PlannedTx, len(calls))
+	for i, data := range calls {
+		plans[i] = txplan.NewPlannedTx(
+			owner.Plan(),
+			txplan.WithStaticNonce(baseNonce+uint64(i)),
+			txplan.WithTo(&whitelist),
+			txplan.WithData(data),
+			txplan.WithGasLimit(gaslessOwnerTxGasLimit),
+		)
+		_, err := plans[i].Submitted.Eval(t.Ctx())
+		t.Require().NoErrorf(err, "submit whitelist transaction %d", i)
+	}
+
+	// Inclusion of the highest nonce guarantees the preceding nonces were also
+	// consumed. Verify every receipt afterward because a reverted transaction
+	// consumes its nonce too, and checking only the last status would miss that.
+	_, err := plans[len(plans)-1].Submitted.Eval(t.Ctx())
+	t.Require().NoErrorf(err, "final whitelist transaction must be submitted")
+	_, err = plans[len(plans)-1].Success.Eval(t.Ctx())
+	t.Require().NoError(err, "final whitelist transaction must succeed")
 }
 
 // chainID reads the L2 chain id from the sequencer.
@@ -121,37 +171,42 @@ func chainID(t devtest.T, client apis.EthClient) *big.Int {
 	return (*big.Int)(&id)
 }
 
-// sendGaslessTransfer signs and submits a zero-priced (maxFeePerGas ==
-// maxPriorityFeePerGas == 0) transfer to a whitelisted target and returns its
-// hash. The explicit zero fee caps force the base-fee check that the gasless path
-// must relax; without gasless awareness the node rejects the transaction as
-// underpriced.
-func sendGaslessTransfer(t devtest.T, client apis.EthClient, sender *dsl.EOA, to common.Address, value *big.Int) common.Hash {
+// sendGaslessTransfers signs and submits zero-priced transfers with consecutive
+// nonces. Submitting a batch without waiting between transactions lets replay
+// tests place multiple gasless transactions in one canonical block.
+func sendGaslessTransfers(t devtest.T, client apis.EthClient, sender *dsl.EOA, to common.Address, values ...*big.Int) []common.Hash {
 	id := chainID(t, client)
 
 	var nonce hexutil.Uint64
 	err := client.RPC().CallContext(t.Ctx(), &nonce, "eth_getTransactionCount", sender.Address(), "pending")
 	t.Require().NoError(err, "read sender nonce")
 
-	tx := types.NewTx(&types.DynamicFeeTx{
-		ChainID:   id,
-		Nonce:     uint64(nonce),
-		GasTipCap: big.NewInt(0),
-		GasFeeCap: big.NewInt(0),
-		Gas:       gaslessTxGasLimit,
-		To:        &to,
-		Value:     value,
-		Data:      gaslessProbeData,
-	})
-	signed, err := types.SignTx(tx, types.LatestSignerForChainID(id), sender.Key().Priv())
-	t.Require().NoError(err, "sign gasless tx")
-	raw, err := signed.MarshalBinary()
-	t.Require().NoError(err, "encode gasless tx")
+	hashes := make([]common.Hash, len(values))
+	for i, value := range values {
+		tx := types.NewTx(&types.DynamicFeeTx{
+			ChainID:   id,
+			Nonce:     uint64(nonce) + uint64(i),
+			GasTipCap: big.NewInt(0),
+			GasFeeCap: big.NewInt(0),
+			Gas:       gaslessTxGasLimit,
+			To:        &to,
+			Value:     value,
+			Data:      gaslessProbeData,
+		})
+		signed, err := types.SignTx(tx, types.LatestSignerForChainID(id), sender.Key().Priv())
+		t.Require().NoError(err, "sign gasless tx %d", i)
+		raw, err := signed.MarshalBinary()
+		t.Require().NoError(err, "encode gasless tx %d", i)
 
-	var hash common.Hash
-	err = client.RPC().CallContext(t.Ctx(), &hash, "eth_sendRawTransaction", hexutil.Encode(raw))
-	t.Require().NoError(err, "zero-priced gasless transfer must be accepted by the node")
-	return hash
+		err = client.RPC().CallContext(t.Ctx(), &hashes[i], "eth_sendRawTransaction", hexutil.Encode(raw))
+		t.Require().NoError(err, "zero-priced gasless transfer %d must be accepted by the node", i)
+	}
+	return hashes
+}
+
+// sendGaslessTransfer submits one gasless transfer.
+func sendGaslessTransfer(t devtest.T, client apis.EthClient, sender *dsl.EOA, to common.Address, value *big.Int) common.Hash {
+	return sendGaslessTransfers(t, client, sender, to, value)[0]
 }
 
 // gaslessReceipt is the minimal receipt shape the gasless assertions need.
@@ -165,37 +220,36 @@ type gaslessReceipt struct {
 // hash and returns it. For the validator this proves it imported (and validated)
 // the block the sequencer produced.
 func waitForGaslessReceipt(t devtest.T, client apis.EthClient, hash common.Hash) gaslessReceipt {
-	deadline := time.Now().Add(90 * time.Second)
+	ctx, cancel := context.WithTimeout(t.Ctx(), gaslessReceiptTimeout)
+	defer cancel()
+
 	for {
 		var receipt *gaslessReceipt
-		err := client.RPC().CallContext(t.Ctx(), &receipt, "eth_getTransactionReceipt", hash)
+		err := client.RPC().CallContext(ctx, &receipt, "eth_getTransactionReceipt", hash)
+		if ctx.Err() != nil {
+			t.Require().NoError(ctx.Err(), "timed out waiting for gasless tx %s to be mined", hash)
+		}
 		t.Require().NoError(err, "poll gasless receipt")
 		if receipt != nil {
 			t.Require().Equal(hexutil.Uint64(1), receipt.Status, "gasless tx must be mined successfully")
 			return *receipt
 		}
-		t.Require().False(time.Now().After(deadline), "timed out waiting for gasless tx %s to be mined", hash)
-		time.Sleep(500 * time.Millisecond)
+
+		select {
+		case <-ctx.Done():
+			t.Require().NoError(ctx.Err(), "timed out waiting for gasless tx %s to be mined", hash)
+		case <-time.After(200 * time.Millisecond):
+		}
 	}
 }
 
-// blockRootAndHash fetches the (stateRoot, hash) of the block at blockNumber.
-func blockRootAndHash(t devtest.T, client apis.EthClient, blockNumber uint64) (common.Hash, common.Hash) {
-	var block struct {
-		StateRoot common.Hash `json:"stateRoot"`
-		Hash      common.Hash `json:"hash"`
-	}
-	err := client.RPC().CallContext(t.Ctx(), &block, "eth_getBlockByNumber", hexutil.EncodeUint64(blockNumber), false)
-	t.Require().NoError(err, "read block %d", blockNumber)
-	return block.StateRoot, block.Hash
-}
 
 // assertNodesAgree requires the sequencer and validator to compute the same
 // stateRoot and block hash for blockNumber — the core consensus-uniformity check
 // that both applied identical gasless fee/gas accounting.
 func assertNodesAgree(t devtest.T, seq, validator apis.EthClient, blockNumber uint64) {
-	seqRoot, seqHash := blockRootAndHash(t, seq, blockNumber)
-	valRoot, valHash := blockRootAndHash(t, validator, blockNumber)
+	seqRoot, seqHash := xcommon.BlockRootAndHash(t, seq, blockNumber)
+	valRoot, valHash := xcommon.BlockRootAndHash(t, validator, blockNumber)
 	t.Require().Equal(seqRoot, valRoot, "sequencer and validator must agree on stateRoot for gasless block %d", blockNumber)
 	t.Require().Equal(seqHash, valHash, "sequencer and validator must agree on hash for gasless block %d", blockNumber)
 }
@@ -216,27 +270,31 @@ func zeroFeeGaslessCall(from, to common.Address) map[string]any {
 }
 
 // TestGasless exercises the XLayer gasless (zero-priced) transaction path. All
-// cases share a single devnet and one whitelist setup — the topology and the
-// enable/whitelist precondition are identical across them — and run as subtests,
-// since spinning a devnet up (and re-running the whitelist configuration) costs
-// far more than each individual assertion.
+// cases share a single devnet and one immutable whitelist setup, then run as
+// parallel subtests with independently funded senders. Sharing the expensive
+// topology and setup keeps the cases isolated without serializing their waits.
 func TestGasless(gt *testing.T) {
+	start := time.Now()
 	t, sys, _ := newXLayerGasless(gt)
+
 	seq := sys.L2EL.EthClient()
 	validator := sys.L2ELRPC1.EthClient()
-
 	// One-time precondition shared by every subtest: enable the genesis-installed
-	// whitelist, register the transfer target, and fund a sender.
-	owner := sys.FunderL2.NewFundedEOA(eth.OneEther)
+	// whitelist and register the transfer target with the prefunded owner.
+	owner := gaslessOwner(t, sys)
 	target := sys.Wallet.NewEOA(sys.L2EL).Address()
-	enableGaslessWhitelist(owner, target)
-	sender := sys.FunderL2.NewFundedEOA(eth.OneEther)
+	enableGaslessWhitelist(t, owner, target)
+	now := time.Now()
+	fmt.Printf("TestGasless setup took %s (started at %s)\n",
+		now.Sub(start).Round(time.Second), start.Format(time.RFC3339))
 
 	// ZeroPriceTransfer: the sequencer mines a zero-priced transfer, the validator
 	// imports it at the same height and agrees on the post-execution state root,
 	// and the sequencer keeps producing blocks so a second gasless transfer lands
 	// in a later block the validator also follows.
 	gt.Run("ZeroPriceTransfer", func(gt *testing.T) {
+		t := devtest.ParallelT(gt)
+		sender := sys.FunderL2.NewFundedEOA(eth.OneEther)
 		hash1 := sendGaslessTransfer(t, seq, sender, target, big.NewInt(1))
 		seqReceipt1 := waitForGaslessReceipt(t, seq, hash1)
 		valReceipt1 := waitForGaslessReceipt(t, validator, hash1)
@@ -252,11 +310,26 @@ func TestGasless(gt *testing.T) {
 		assertNodesAgree(t, seq, validator, uint64(seqReceipt2.BlockNumber))
 	})
 
-	// DebugTrace: debug_traceTransaction succeeds for a mined gasless transaction
-	// rather than being rejected on a base-fee check.
+	// DebugTrace: tracing the second of two gasless transactions in the same block
+	// must replay the first with canonical gasless semantics instead of rejecting
+	// it because its zero fee cap is below the block base fee.
 	gt.Run("DebugTrace", func(gt *testing.T) {
-		hash := sendGaslessTransfer(t, seq, sender, target, big.NewInt(1))
-		waitForGaslessReceipt(t, seq, hash)
+		t := devtest.ParallelT(gt)
+		sender := sys.FunderL2.NewFundedEOA(eth.OneEther)
+
+		// A pair submitted immediately after a split pair's second receipt has a
+		// fresh block interval in which to enter together. Keep the retry bounded:
+		// failure means the harness could not establish the regression precondition.
+		var hash common.Hash
+		for attempt := 0; attempt < 3 && hash == (common.Hash{}); attempt++ {
+			hashes := sendGaslessTransfers(t, seq, sender, target, big.NewInt(1), big.NewInt(1))
+			first := waitForGaslessReceipt(t, seq, hashes[0])
+			second := waitForGaslessReceipt(t, seq, hashes[1])
+			if first.BlockHash == second.BlockHash {
+				hash = hashes[1]
+			}
+		}
+		t.Require().NotEqual(common.Hash{}, hash, "two consecutive gasless transactions must land in the same block")
 
 		var trace map[string]json.RawMessage
 		err := seq.RPC().CallContext(t.Ctx(), &trace, "debug_traceTransaction", hash)
@@ -269,6 +342,8 @@ func TestGasless(gt *testing.T) {
 	// TxRPCGasPriceIsZero: a mined gasless transaction reports a zero gas price via
 	// eth_getTransactionByHash.
 	gt.Run("TxRPCGasPriceIsZero", func(gt *testing.T) {
+		t := devtest.ParallelT(gt)
+		sender := sys.FunderL2.NewFundedEOA(eth.OneEther)
 		hash := sendGaslessTransfer(t, seq, sender, target, big.NewInt(1))
 		waitForGaslessReceipt(t, seq, hash)
 
@@ -283,6 +358,8 @@ func TestGasless(gt *testing.T) {
 	// EthCall: a zero-priced call to a whitelisted target executes on the
 	// gasless-aware eth_call path rather than being rejected by the base-fee check.
 	gt.Run("EthCall", func(gt *testing.T) {
+		t := devtest.ParallelT(gt)
+		sender := sys.FunderL2.NewFundedEOA(eth.OneEther)
 		call := zeroFeeGaslessCall(sender.Address(), target)
 		var result hexutil.Bytes
 		err := seq.RPC().CallContext(t.Ctx(), &result, "eth_call", call, "latest")
@@ -292,6 +369,8 @@ func TestGasless(gt *testing.T) {
 	// EthSimulateV1: eth_simulateV1 is gasless-aware for a zero-priced call bundle
 	// targeting a whitelisted address.
 	gt.Run("EthSimulateV1", func(gt *testing.T) {
+		t := devtest.ParallelT(gt)
+		sender := sys.FunderL2.NewFundedEOA(eth.OneEther)
 		bundle := map[string]any{
 			"blockStateCalls": []any{
 				map[string]any{
