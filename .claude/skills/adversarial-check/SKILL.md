@@ -143,12 +143,15 @@ While building the trees, specifically hunt for:
 
 A finding is only reportable with a concrete scenario:
 
-1. **Trigger input**: the specific tx/block/timing/history that reaches the changed code
-2. **Path under REF_OLD**: what executes, what output results
-3. **Path under REF_NEW**: what executes, what output results
-4. **Diverging assertion**: which consensus output differs (state root / block hash / receipts root / gas used / accept-reject)
-5. **Topology**: which node pairing forks (new-seq vs old-replica, old-seq vs new-replica, both)
-6. **Likelihood**: reachable by any user tx (critical), only by sequencer policy (high), only at fork boundary or via crafted input (medium), theoretical (low)
+1. **Location**: the relevant file(s) and line number(s) — `path/to/file.rs:123` (or `:123-145` for a range), one entry per ref when the line numbers differ across refs (`REF_OLD path:LL / REF_NEW path:LL`). Line numbers come from the diff hunks / `git show <ref>:<path>` — cite the lines of the changed guard/transition, not the whole function. Every finding MUST carry at least one `file:line` reference.
+2. **Trigger input**: the specific tx/block/timing/history that reaches the changed code
+3. **Path under REF_OLD**: what executes, what output results
+4. **Path under REF_NEW**: what executes, what output results
+5. **Diverging assertion**: which consensus output differs (state root / block hash / receipts root / gas used / accept-reject)
+6. **Topology**: which node pairing forks (new-seq vs old-replica, old-seq vs new-replica, both)
+7. **Likelihood**: reachable by any user tx (critical), only by sequencer policy (high), only at fork boundary or via crafted input (medium), theoretical (low)
+
+If a finding spans many files (e.g. a renamed flag consumed everywhere), cite the defining/deciding site(s) with line numbers and summarize the rest as "and N other call sites" — do not pad the finding with every occurrence.
 
 If a suspected divergence cannot be traced to a concrete trigger, keep it as an **open question**, not a finding.
 
@@ -173,7 +176,9 @@ Structure the output as:
 - 🟡 **Fork-conditional**: diverges only under specific config/topology/fork-boundary timing — document the constraint and verify
 - ⚪ **Open question**: suspicious change, no trigger derived — list what information would resolve it
 
-Each finding uses the 6-field template from Section 5.
+Each finding uses the 7-field template from Section 5 — the **Location** field (file path + line number(s)) is mandatory; a finding without a `file:line` reference is not reportable.
+
+**Key files to look at**: a table of the files behind the findings — `file` | `line(s)` | `finding(s) it supports` | `one-line reason`. If more than 10 files are implicated across all findings, list only the **top 10**, ranked by finding severity then by likelihood, and close the table with one line: "N other files implicated — see individual findings." Fork-certain findings' files always make the cut.
 
 **Checklist coverage table**: all 7 dimensions × (files touched, findings, verdict `CLEAN`/`FINDINGS`/`NOT-TOUCHED`).
 
@@ -187,7 +192,7 @@ For large diffs (>50 consensus-relevant files or a major dependency bump), fan o
 
 1. **Plan batches from sizes.** Run `git diff --stat REF_OLD REF_NEW` (and the submodule equivalent) and partition the consensus-relevant files into batches of **≤10 files AND ≤1,500 changed lines** each. Every batch gets ALL 7 checklist dimensions applied to it.
 2. **Bounded reads inside each agent.** Diff one file at a time (`git diff REF_OLD REF_NEW -- <file>`), never a directory. For any file with >800 changed lines, first list hunk locations (`git diff -U0 REF_OLD REF_NEW -- <file> | rg '^@@'`), then load only the relevant hunks/functions via targeted `git show`/`sed` ranges — never the whole diff at once.
-3. **Persist incrementally.** Give each agent a scratchpad file path (`<scratchpad>/adversarial-check/<batch-id>.md`). After EACH file it analyzes, the agent must append: file name, verdict (clean/finding/non-consensus + one line why), and any finding in the Section 5 template. The final agent message is just a pointer to this file plus a summary — the file, not the message, is the source of truth.
+3. **Persist incrementally.** Give each agent a scratchpad file path (`<scratchpad>/adversarial-check/<batch-id>.md`). After EACH file it analyzes, the agent must append: file name, verdict (clean/finding/non-consensus + one line why), and any finding in the Section 5 template — including the mandatory **Location** field with `file:line` references taken from the diff hunks, so the orchestrator never has to re-derive line numbers at merge time. The final agent message is just a pointer to this file plus a summary — the file, not the message, is the source of truth.
 4. **Report and terminate on completion — never idle.** Each agent's prompt must state: when your batch is done, your FINAL message must contain the complete report (findings + coverage + non-consensus list + anything unverifiable), and then your task is over — do not wait for further instructions, do not go idle, do not ask what to do next. The orchestrator treats an idle/available notification from a sub-agent as "finished": immediately harvest its report (final message or scratchpad file) and shut it down.
 5. **Supervise and resume.** After spawning, the orchestrator tracks completion. If an agent dies or goes unreachable, read its scratchpad file to see which files it covered, and spawn a fresh agent for ONLY the remaining files. Never re-spawn the original unbounded scope.
 6. **Cap concurrency** at 4 agents; queue remaining batches.
