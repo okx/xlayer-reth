@@ -55,6 +55,14 @@ git diff REF_OLD REF_NEW -- .gitmodules deps/
 
 Flag any version change to `revm`, `reth`/`reth-*`, `alloy-*`, `op-alloy-*`, `op-revm`, or the `optimism` submodule as **in-scope even though the Rust diff may look empty** — the consensus change lives in the dependency. When a consensus-critical dependency is bumped, list its old→new versions in the report and recommend running this same checklist against the dependency's own diff.
 
+**Locally-diffable dependency drift — diff it, don't defer it.** Before declaring a bumped dependency unverifiable, check whether its two revisions are readable from here:
+
+- **Submodule gitlink moved** (`deps/optimism` etc.): the objects usually already exist in the submodule's local git dir. Read them with `git -C deps/<sub> log --oneline OLD_SHA..NEW_SHA` (commit messages alone often name the behavior change) and `git -C deps/<sub> diff OLD_SHA NEW_SHA -- <consensus paths>`, applying this same checklist to the consensus-relevant hunks. If an object is missing, one bounded `git -C deps/<sub> fetch origin <sha>` attempt is permitted — objects only; still never `submodule update`, `checkout`, or anything that touches any working tree.
+- **Git-rev pin moved in Cargo.toml/Cargo.lock** (e.g. `okx/reth` rev A → rev B): check for a local clone of that repo (workspace sibling directories, cargo git checkouts) holding both revs and diff there the same way.
+- **crates.io version bump**: genuinely not diffable here — report old→new and recommend the dependency-side check.
+
+Only after these fail may a dependency bump be filed as an open question; say in the report which of the two revisions was unreadable and why.
+
 ### 2. Classify changed files onto the consensus surface
 
 Sort every changed file into one or more checklist dimensions (Section 3). Files that touch none of them (docs, CI, metrics naming, log messages, RPC read-only formatting) go to a **"declared non-consensus"** list — still shown in the report so the classification itself can be challenged.
@@ -130,6 +138,15 @@ Walk each checklist dimension (Section 3) against the merged tree and ask the st
 
 A mitigation that "only" tweaks the environment a tx runs under (e.g. zeroing base fee to bypass a fee check) is a consensus change if ANY opcode can read it — say which opcode, and the trigger is a tx using it.
 
+**Scoped-toggle restoration analysis** — for every hunk that mutates shared execution state on a per-tx or per-call scope (a `CfgEnv`/`BlockEnv` field toggled around one tx, a validation flag like `disable_base_fee`, a precompile set or gas table swapped in, a cache primed or bypassed), verify the set→restore pairing structurally, then hunt the leak:
+
+- **Every exit path restores**: success, revert, invalid-tx skip, and the error/`?` early-return paths — a toggle restored only on the happy path leaks on the first failing tx. Trace each `return`/`?` between set and restore in both trees.
+- **Same-block leakage**: if the toggle is NOT restored before the next tx executes, the next tx in the block runs under the relaxed/mutated rule — e.g. a base-fee validation bypass leaking lets an underpriced non-exempt tx into the block. The trigger is a two-tx sequence in one block: one tx that engages the toggle (or errors inside it), followed by one that is only valid/invalid depending on the leaked state. Derive it explicitly.
+- **Cross-ref scope mismatch**: one ref scoping the mutation per-tx and the other per-block (or not mutating at all) diverges block content and validation for the *follow-up* txs, even when the toggled tx itself executes identically — check the txs after the trigger, not just the trigger.
+- **Observability double-check**: a correctly-restored toggle can still be observable *during* the tx (see the opcode observability analysis above); a validation-only flag that no opcode reads and that restores on every path is the only clean outcome. State which of the two you verified.
+
+Each leak is a finding whose trigger is a same-block tx sequence — cheap for an adversary or even normal traffic to produce, so default likelihood to critical unless the toggle provably cannot be engaged by user txs.
+
 **Unusual-opcode trigger sweep** — when constructing trigger inputs, do not stop at mainstream opcodes; adversarial payloads live in the rarely-executed corners. For every hunk touching the interpreter, opcode tables, code analysis/decoding, contract creation, or call handling, ask whether an *unusual* opcode sequence in the tx payload (calldata-driven code path, init code, or deployed bytecode) behaves differently across refs:
 
 - **Invalid/undefined opcodes**: `INVALID` (0xFE) vs genuinely unassigned opcodes — same exception kind, same gas consumption (all-remaining vs charged) across refs? A change here diverges gas used and receipts.
@@ -187,6 +204,8 @@ Structure the output as:
 - 🟡 **Fork-conditional**: diverges only under specific config/topology/fork-boundary timing — document the constraint and verify
 - ⚪ **Open question**: suspicious change, no trigger derived — list what information would resolve it
 
+**Severity when the code lives in a dependency**: do not automatically cap a finding at fork-plausible just because the executing code sits in a bumped dependency rather than in this repo. When the divergence itself is pinned by in-repo evidence — the diff's own doc comments stating the mechanism (e.g. "zeroes the base fee for this tx"), or a behavioral test asserted on only one ref — rate the severity from that evidence: the divergence is established, and the unverified part is only its resolution, not its existence. Reserve the fork-plausible downgrade for cases where the *existence* of the behavioral difference is itself unconfirmed.
+
 Each finding uses the 7-field template from Section 5 — the **Location** field (file path + line number(s)) is mandatory; a finding without a `file:line` reference is not reportable.
 
 **Key files to look at**: a table of the files behind the findings — `file` | `line(s)` | `finding(s) it supports` | `one-line reason`. If more than 10 files are implicated across all findings, list only the **top 10**, ranked by finding severity then by likelihood, and close the table with one line: "N other files implicated — see individual findings." Fork-certain findings' files always make the cut.
@@ -212,4 +231,4 @@ For large diffs (>50 consensus-relevant files or a major dependency bump), fan o
 ## Notes
 
 - The absence of findings is a claim too — only output `NO CONSENSUS RISK FOUND` after every consensus-relevant hunk has actually been read, and say so explicitly if anything was skipped.
-- Dependency drift that lives outside the repo (crates.io bumps, git-dep rev moves that aren't vendored) cannot be diffed here: report old→new versions and recommend running this checklist against the dependency's own diff — do not silently mark it clean.
+- Dependency drift is only "outside the repo" after the locally-diffable checks in Section 1 fail (submodule objects, local clones of git-pinned deps). What remains genuinely unreadable (crates.io bumps, git revs with no local objects): report old→new versions and recommend running this checklist against the dependency's own diff — do not silently mark it clean.
