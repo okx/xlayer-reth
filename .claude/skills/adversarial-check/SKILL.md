@@ -16,13 +16,13 @@ This skill is a pure static-reasoning exercise over git history. Building this w
 
 - **NEVER run** `cargo build`, `cargo check`, `cargo clippy`, `cargo test`, `cargo nextest`, `cargo install`, `cargo run`, `just build*`/`just check`/`just test`, `docker build`, or any command that compiles code or executes the node/tests. This applies to every sub-agent spawned by this skill — repeat the prohibition verbatim in their prompts.
 - **NEVER modify the working tree** (no checkout, no submodule update, no cargo metadata/tree, which may touch the lockfile or network). Read code exclusively via `git log`, `git diff REF_OLD REF_NEW -- <path>`, `git show <ref>:<path>`, and `git -C <submodule> …` equivalents.
-- **Stay on the current branch — never read other branches.** All analysis is confined to commits reachable from the current branch's `HEAD` (enforced by the ref validation in Inputs). Never enumerate, resolve, or read commits from any other branch: no `git log <other-branch>`, no `git show <other-branch>:<path>`, no `git diff` against a ref outside the current branch's history, no `git branch -a`/`git for-each-ref` sweeps to discover other branches, and no fetching other branches. If a trail of evidence appears to lead to a commit not on the current branch, record it as an open question — do not follow it. Repeat this prohibition verbatim in every sub-agent prompt, alongside the build/execute prohibition.
-- The only permitted evidence is: the diff hunks, file contents at the two refs, commit messages, and manifest/lockfile contents at the two refs — all from the current branch's history.
+- **Stay within the two validated refs' histories — never browse other branches.** All analysis is confined to commits reachable from the current branch's `HEAD`, `REF_OLD`, or `REF_NEW` (the refs validated in Inputs — tags are permitted even when they lie off the current branch, since tags are immutable release pointers). Never enumerate, resolve, or read commits from any *branch* other than the current one: no `git log <other-branch>`, no `git show <other-branch>:<path>`, no `git diff` against a branch head outside the current branch's history, no `git branch -a`/`git for-each-ref` sweeps to discover other branches, and no fetching other branches. If a trail of evidence appears to lead to a commit outside the validated refs' histories, record it as an open question — do not follow it. Repeat this prohibition verbatim in every sub-agent prompt, alongside the build/execute prohibition.
+- The only permitted evidence is: the diff hunks, file contents at the two refs, commit messages, and manifest/lockfile contents at the two refs — all reachable from the validated refs or the current branch's `HEAD`.
 - Where only a build could settle a question (does it compile, which rev does cargo actually resolve, does a test pass), record it as an **open question** or a **verification suggestion** in the report — for humans/CI to run later — never execute it yourself.
 
 ## Inputs
 
-Two git refs are **required**: `REF_OLD` and `REF_NEW` (commit hashes, tags, or branch names).
+Two git refs are **required**: `REF_OLD` and `REF_NEW`. Tags are always acceptable (even when they lie on another line of history — releases are tagged across release branches); commit hashes and branch names are acceptable only when they lie on the current branch (see validation below).
 
 - If invoked as `/adversarial-check <ref1> <ref2>`, use them as `REF_OLD` and `REF_NEW` (older/currently-deployed first, newer/candidate second).
 - If fewer than two refs are given, ask the user for the missing ref(s). Do not guess.
@@ -31,11 +31,16 @@ Two git refs are **required**: `REF_OLD` and `REF_NEW` (commit hashes, tags, or 
   git rev-parse --verify --quiet <ref>^{commit}
   ```
   If a ref is unknown, try `git fetch --tags` once, then report failure to the user.
-- **Both refs must lie on the current branch.** After resolving, verify each ref is an ancestor of (or equal to) the current branch's `HEAD`:
+- **Each ref must be either on the current branch or a tag.** After resolving, accept a ref if it passes at least one of:
   ```bash
+  # (a) ancestor of (or equal to) the current branch's HEAD
   git merge-base --is-ancestor <ref>^{commit} HEAD
+
+  # (b) a tag — immutable release pointer, permitted even off the current branch
+  git rev-parse --verify --quiet "refs/tags/<ref>"
   ```
-  If either check fails, the ref belongs to another branch (or is ahead of the checkout) — **abort and report which ref is outside the current branch**; do not fetch, resolve, or analyze commits from other branches, and do not fall back to a nearest merge-base. Ref names that are other branches' heads are rejected by this same check, not special-cased.
+  If a ref passes neither check, it is a branch head or loose commit from another line of history — **abort and report which ref was rejected**; do not fetch or analyze other branches, and do not fall back to a nearest merge-base. Bare commit hashes are accepted only via check (a); other branches' heads fail both checks by construction.
+- **Divergent-history tag pairs**: when `REF_OLD` is not an ancestor of `REF_NEW` (common with release/hotfix tags carrying cherry-picks), state this explicitly in the report along with the merge-base (`git merge-base REF_OLD REF_NEW`). The analysis then has two consensus-relevant directions: `git log REF_OLD..REF_NEW` (changes added by the upgrade) **and** `git log REF_NEW..REF_OLD` (changes present in the deployed version that the upgrade *removes* — e.g. hotfix cherry-picks not yet forward-ported). Both directions feed the same checklist; a hotfix that exists only in `REF_OLD` and vanishes in `REF_NEW` is a prime fork candidate and must be called out under its own heading. The two-point diff `git diff REF_OLD REF_NEW` already covers the net file changes of both directions.
 
 ## Instructions
 
@@ -44,6 +49,10 @@ Two git refs are **required**: `REF_OLD` and `REF_NEW` (commit hashes, tags, or 
 ```bash
 # Commit-level context (what landed between the refs)
 git log --oneline --no-merges REF_OLD..REF_NEW
+
+# For divergent-history tag pairs only: what the upgrade REMOVES
+# (commits reachable from REF_OLD but not REF_NEW, e.g. hotfix cherry-picks)
+git log --oneline --no-merges REF_NEW..REF_OLD
 
 # Full change surface
 git diff --stat REF_OLD REF_NEW
