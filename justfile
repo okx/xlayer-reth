@@ -82,9 +82,10 @@ check:
     just sweep-check
     just check-format
     just check-clippy
+    just lint-go
     just test
 
-fix: fix-format fix-clippy
+fix: fix-format fix-clippy lint-go-fix
 
 # Build dependencies then run the Go E2E harness under tests/. Arguments are
 # forwarded to `go test` (package selection, -run filters, go test flags). The
@@ -98,6 +99,14 @@ e2e *args: ensure-tempdir ensure-submodules
 [positional-arguments]
 e2e-no-build *args: ensure-tempdir
     cd tests && just e2e-no-build "$@"
+
+# Lint the standalone Go module under tests/.
+lint-go: ensure-submodules
+    cd tests && just lint-go
+
+# Auto-format and lint the standalone Go module under tests/.
+lint-go-fix: ensure-submodules
+    cd tests && just lint-go-fix
 
 # Run `just test true` to run the full Go E2E suite after the Rust workspace
 # tests. Flashblocks is part of the regular Go E2E suite.

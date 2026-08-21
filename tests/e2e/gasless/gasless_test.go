@@ -243,7 +243,6 @@ func waitForGaslessReceipt(t devtest.T, client apis.EthClient, hash common.Hash)
 	}
 }
 
-
 // assertNodesAgree requires the sequencer and validator to compute the same
 // stateRoot and block hash for blockNumber — the core consensus-uniformity check
 // that both applied identical gasless fee/gas accounting.

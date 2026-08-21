@@ -25,6 +25,37 @@ TEST_TIMEOUT := env_var_or_default("TEST_TIMEOUT", "1m")
 default:
     @just --list
 
+# Lint the standalone Go E2E module. Build the gitignored op-core embed first
+# so vet works from a clean checkout.
+lint-go:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{ justfile_directory() }}/scripts/e2e-common.sh"
+    run_logged just \
+        --justfile "{{ REPO_ROOT }}/deps/optimism/justfile" \
+        build-superchain-go
+    printf 'Checking gofmt...\n'
+    unformatted="$(git ls-files -co --exclude-standard -- '*.go' | xargs gofmt -l)"
+    if [[ -n "$unformatted" ]]; then
+        printf 'Go files need formatting:\n%s\n' "$unformatted" >&2
+        exit 1
+    fi
+    run_logged go vet ./...
+    printf 'lint-go passed\n'
+
+# Apply the safe Go lint fix (gofmt), then verify the result with go vet.
+lint-go-fix:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{ justfile_directory() }}/scripts/e2e-common.sh"
+    run_logged just \
+        --justfile "{{ REPO_ROOT }}/deps/optimism/justfile" \
+        build-superchain-go
+    printf 'Formatting Go files...\n'
+    git ls-files -co --exclude-standard -z -- '*.go' | xargs -0 gofmt -w
+    run_logged go vet ./...
+    printf 'lint-go-fix passed\n'
+
 # Build the contracts-bedrock artifacts and the debug-profile XLayer reth
 # execution client, then execute the selected Go E2E tests with op-node. A
 # manually selected kona-node is built for diagnostics but is not supported by
