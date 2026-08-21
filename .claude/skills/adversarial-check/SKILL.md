@@ -16,7 +16,8 @@ This skill is a pure static-reasoning exercise over git history. Building this w
 
 - **NEVER run** `cargo build`, `cargo check`, `cargo clippy`, `cargo test`, `cargo nextest`, `cargo install`, `cargo run`, `just build*`/`just check`/`just test`, `docker build`, or any command that compiles code or executes the node/tests. This applies to every sub-agent spawned by this skill — repeat the prohibition verbatim in their prompts.
 - **NEVER modify the working tree** (no checkout, no submodule update, no cargo metadata/tree, which may touch the lockfile or network). Read code exclusively via `git log`, `git diff REF_OLD REF_NEW -- <path>`, `git show <ref>:<path>`, and `git -C <submodule> …` equivalents.
-- **Stay within the two validated refs' histories — never browse other branches.** All analysis is confined to commits reachable from the current branch's `HEAD`, `REF_OLD`, or `REF_NEW` (the refs validated in Inputs — tags are permitted even when they lie off the current branch, since tags are immutable release pointers). Never enumerate, resolve, or read commits from any *branch* other than the current one: no `git log <other-branch>`, no `git show <other-branch>:<path>`, no `git diff` against a branch head outside the current branch's history, no `git branch -a`/`git for-each-ref` sweeps to discover other branches, and no fetching other branches. If a trail of evidence appears to lead to a commit outside the validated refs' histories, record it as an open question — do not follow it. Repeat this prohibition verbatim in every sub-agent prompt, alongside the build/execute prohibition.
+- **EXCEPTION — remote reconciliation is required, not optional.** `git ls-remote <origin>` (read-only, no objects fetched, no working-tree change) MUST be run against the source-of-truth remote to resolve `REF_OLD`/`REF_NEW` — see Inputs. A stale local tag pointing at the wrong commit is the single most damaging failure this skill can make (the whole report is then about the wrong diff), so trusting local `git rev-parse` alone is forbidden. Fetching the authoritative **objects** for the two validated refs by SHA (`git fetch <origin> <sha>`) is likewise permitted — objects only, never a `checkout`/`pull`/`reset`/local-ref update. This is the ONE sanctioned network step besides the bounded submodule-object fetch in Section 1.
+- **Stay within the two validated refs' histories — never browse other branches.** All analysis is confined to commits reachable from the current branch's `HEAD`, `REF_OLD`, or `REF_NEW` (the refs validated in Inputs — tags are permitted even when they lie off the current branch, since tags are immutable release pointers). Never enumerate, resolve, or read commits from any *branch* other than the current one: no `git log <other-branch>`, no `git show <other-branch>:<path>`, no `git diff` against a branch head outside the current branch's history, no `git branch -a`/`git for-each-ref` sweeps to discover other branches, and no fetching other branches. If a trail of evidence appears to lead to a commit outside the validated refs' histories, record it as an open question — do not follow it. (This does not conflict with remote reconciliation: `ls-remote`-ing the exact `REF_OLD`/`REF_NEW` names the user supplied, to confirm the local objects match the server, is resolving the inputs — not discovering or reading other branches.) Repeat this prohibition verbatim in every sub-agent prompt, alongside the build/execute prohibition.
 - The only permitted evidence is: the diff hunks, file contents at the two refs, commit messages, and manifest/lockfile contents at the two refs — all reachable from the validated refs or the current branch's `HEAD`.
 - Where only a build could settle a question (does it compile, which rev does cargo actually resolve, does a test pass), record it as an **open question** or a **verification suggestion** in the report — for humans/CI to run later — never execute it yourself.
 
@@ -26,12 +27,27 @@ Two git refs are **required**: `REF_OLD` and `REF_NEW`. Tags are always acceptab
 
 - If invoked as `/adversarial-check <ref1> <ref2>`, use them as `REF_OLD` and `REF_NEW` (older/currently-deployed first, newer/candidate second).
 - If fewer than two refs are given, ask the user for the missing ref(s). Do not guess.
-- Validate both refs before anything else:
+- **Reconcile every ref against the upstream source (`origin`) BEFORE anything else — never trust a local tag.** A local tag or branch can be stale, or renamed/moved on the remote, and silently point at a different commit than the same-named ref on the server. Resolving with `git rev-parse` alone will happily return the stale local value and the entire analysis then runs against the wrong commit. So for each ref, the authoritative SHA is the **remote's**, and you must confirm the local object matches it:
   ```bash
-  git rev-parse --verify --quiet <ref>^{commit}
+  # 0. Identify the source-of-truth remote. Default to `origin` (the upstream the repo
+  #    was cloned from — e.g. the GitLab server). If there is no `origin`, run
+  #    `git remote -v` and pick the non-personal-fork upstream; if still ambiguous, ask.
+  SRC=origin
+
+  # 1. Ask the SERVER what this ref name points to — as a tag AND as a branch.
+  #    ls-remote is read-only network; it does not fetch objects or touch the working tree.
+  git ls-remote "$SRC" "refs/tags/<ref>" "refs/heads/<ref>" "<ref>"
+
+  # 2. Compare against the local resolution.
+  git rev-parse --verify --quiet "<ref>^{commit}"
   ```
-  If a ref is unknown, try `git fetch --tags` once, then report failure to the user.
-- **Each ref must be either on the current branch or a tag.** After resolving, accept a ref if it passes at least one of:
+  Then apply these rules:
+  - **The remote SHA wins.** If the local ref resolves to a different commit than the remote's `refs/tags/<ref>` (or `refs/heads/<ref>`), the local ref is **stale** — do NOT proceed on it. Fetch the authoritative object by SHA and pin the analysis to the remote value: `git fetch "$SRC" <remote-sha>` (objects only — still never `checkout`, `pull`, `submodule update`, or anything that moves the working tree or a local ref). Report the mismatch to the user (`local <sha> vs origin <sha>`) and use the remote SHA for all subsequent steps.
+  - **Tag/branch name collision.** If the server returns BOTH a `refs/tags/<ref>` and a `refs/heads/<ref>` and they differ, say so and default to the **tag** (releases are what get compared); note the branch SHA in the report. If only one exists, use it.
+  - **Ref unknown on the remote.** If `ls-remote` returns nothing for the name, it is not a real upstream ref — try `git fetch "$SRC" --tags` once in case of a brand-new tag, re-run `ls-remote`, and if still empty, abort and report failure to the user. Do not fall back to a local-only ref.
+  - **Bare commit SHA.** If the user passed a 40/7-hex commit hash rather than a name, there is nothing to reconcile — verify it resolves (`git rev-parse --verify`), and if the object is absent locally, `git fetch "$SRC" <sha>` (objects only).
+  - Record the resolved `REF_OLD`/`REF_NEW` SHAs (the remote-authoritative ones) in the report's Scope line, so the reader can confirm which commits were actually compared.
+- **Each ref must be either on the current branch or a tag.** After the remote-authoritative SHA is fixed, accept a ref if it passes at least one of:
   ```bash
   # (a) ancestor of (or equal to) the current branch's HEAD
   git merge-base --is-ancestor <ref>^{commit} HEAD
