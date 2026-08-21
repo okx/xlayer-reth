@@ -37,6 +37,9 @@ e2e *args:
     set -euo pipefail
     source "{{ justfile_directory() }}/scripts/e2e-common.sh"
     start_total_timer "e2e total time"
+    run_logged just \
+        --justfile "{{ REPO_ROOT }}/deps/optimism/justfile" \
+        build-superchain-go
     run_logged forge build \
         --root "{{ REPO_ROOT }}/deps/optimism/packages/contracts-bedrock" \
         --skip "/**/test/**"

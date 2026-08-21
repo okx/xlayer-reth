@@ -3,16 +3,17 @@ package flashblocks
 import (
 	"context"
 	"encoding/json"
-	"math/big"
-	"slices"
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/ethereum-optimism/optimism/op-devstack/devtest"
 	"github.com/ethereum-optimism/optimism/op-devstack/presets"
+	"github.com/ethereum-optimism/optimism/op-service/apis"
 	"github.com/ethereum-optimism/optimism/op-service/client"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/txplan"
@@ -32,6 +33,149 @@ func xlayerBinaryOpts(t devtest.T) []presets.Option {
 func callRPC(t devtest.T, sys *presets.XLayerFlashblocks, out any, method string, args ...any) {
 	err := sys.L2EL.EthClient().RPC().CallContext(t.Ctx(), out, method, args...)
 	t.Require().NoErrorf(err, "rpc %s must not return a process-level error", method)
+}
+
+type flashblockSubscriptionEvent struct {
+	Type        string                        `json:"type"`
+	Header      *types.Header                 `json:"header,omitempty"`
+	Transaction flashblockTransactionEnvelope `json:"transaction,omitempty"`
+}
+
+// flashblockTransactionEnvelope mirrors the flashblocks-specific event wrapper.
+// Its payload uses geth's canonical receipt type instead of duplicating RPC
+// receipt fields locally.
+type flashblockTransactionEnvelope struct {
+	TxHash  common.Hash    `json:"txHash"`
+	Receipt *types.Receipt `json:"receipt,omitempty"`
+}
+
+func subscribeRelayTransactions(t devtest.T, endpoint string, address common.Address) (<-chan flashblockSubscriptionEvent, <-chan error) {
+	rpcClient, err := client.NewRPC(t.Ctx(), t.Logger(), endpoint, client.WithLazyDial())
+	t.Require().NoError(err, "open relay flashblocks subscription stream")
+	t.Cleanup(rpcClient.Close)
+
+	events := make(chan flashblockSubscriptionEvent, 64)
+	filter := map[string]any{
+		"headerInfo": true,
+		"subTxFilter": map[string]any{
+			"subscribeAddresses": []common.Address{address},
+			"txReceipt":          true,
+		},
+	}
+	subscription, err := rpcClient.Subscribe(t.Ctx(), "eth", events, "flashblocks", filter)
+	t.Require().NoError(err, "subscribe to executed relay flashblocks")
+	t.Cleanup(subscription.Unsubscribe)
+	return events, subscription.Err()
+}
+
+func waitForRelayExecution(t devtest.T, events <-chan flashblockSubscriptionEvent, subscriptionErr <-chan error, relay string) {
+	ctx, cancel := context.WithTimeout(t.Ctx(), 5*time.Second)
+	defer cancel()
+	for {
+		select {
+		case event, ok := <-events:
+			t.Require().True(ok, "%s flashblocks event channel closed", relay)
+			if event.Type == "header" && event.Header != nil && event.Header.Number != nil && event.Header.Hash() != (common.Hash{}) {
+				return
+			}
+		case err, ok := <-subscriptionErr:
+			t.Require().True(ok, "%s flashblocks subscription error channel closed", relay)
+			t.Require().NoError(err, "%s flashblocks subscription failed", relay)
+		case <-ctx.Done():
+			t.Require().NoError(ctx.Err(), "timed out waiting for %s to execute a flashblock", relay)
+		}
+	}
+}
+
+func waitForCommonCanonicalBase(t devtest.T, sequencer, rpc1, rpc2 apis.EthClient) {
+	ctx, cancel := context.WithTimeout(t.Ctx(), 10*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	var sequencerHead, rpc1Head, rpc2Head *types.Header
+	var sequencerErr, rpc1Err, rpc2Err error
+	readLatest := func(rpcClient apis.EthClient) (*types.Header, error) {
+		return rpcClient.HeaderByLabel(ctx, eth.Unsafe)
+	}
+	headRef := func(header *types.Header) (uint64, common.Hash) {
+		if header == nil || header.Number == nil {
+			return 0, common.Hash{}
+		}
+		return header.Number.Uint64(), header.Hash()
+	}
+	for {
+		sequencerHead, sequencerErr = readLatest(sequencer)
+		rpc1Head, rpc1Err = readLatest(rpc1)
+		rpc2Head, rpc2Err = readLatest(rpc2)
+		sequencerNumber, sequencerHash := headRef(sequencerHead)
+		rpc1Number, rpc1Hash := headRef(rpc1Head)
+		rpc2Number, rpc2Hash := headRef(rpc2Head)
+		if sequencerErr == nil && rpc1Err == nil && rpc2Err == nil &&
+			sequencerHash != (common.Hash{}) &&
+			sequencerHash == rpc1Hash && sequencerHash == rpc2Hash {
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+			t.Require().NoError(ctx.Err(),
+				"timed out waiting for a common canonical flashblock base (sequencer=%d/%s err=%v, rpc1=%d/%s err=%v, rpc2=%d/%s err=%v)",
+				sequencerNumber, sequencerHash, sequencerErr,
+				rpc1Number, rpc1Hash, rpc1Err,
+				rpc2Number, rpc2Hash, rpc2Err)
+		case <-ticker.C:
+		}
+	}
+}
+
+func waitForRelayTransaction(t devtest.T, events <-chan flashblockSubscriptionEvent, subscriptionErr <-chan error, relay string, txHash common.Hash) flashblockSubscriptionEvent {
+	ctx, cancel := context.WithTimeout(t.Ctx(), 5*time.Second)
+	defer cancel()
+	var lastHeaderNumber uint64
+	for {
+		select {
+		case event, ok := <-events:
+			t.Require().True(ok, "%s flashblocks event channel closed", relay)
+			if event.Type == "header" && event.Header != nil && event.Header.Number != nil {
+				lastHeaderNumber = event.Header.Number.Uint64()
+			}
+			if event.Type == "transaction" && event.Transaction.TxHash == txHash {
+				return event
+			}
+		case err, ok := <-subscriptionErr:
+			t.Require().True(ok, "%s flashblocks subscription error channel closed", relay)
+			t.Require().NoError(err, "%s flashblocks subscription failed", relay)
+		case <-ctx.Done():
+			t.Require().NoError(ctx.Err(), "timed out waiting for %s flashblock transaction %s (last executed header=%d)", relay, txHash, lastHeaderNumber)
+		}
+	}
+}
+
+func waitForCanonicalRelayReceipt(t devtest.T, relay string, rpcClient apis.EthClient, txHash common.Hash, canonicalHash common.Hash) *types.Receipt {
+	ctx, cancel := context.WithTimeout(t.Ctx(), 10*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	var lastHash common.Hash
+	for {
+		receipt, err := rpcClient.TransactionReceipt(ctx, txHash)
+		if err == nil {
+			lastHash = receipt.BlockHash
+			if lastHash == canonicalHash {
+				return receipt
+			}
+		} else if err != ethereum.NotFound {
+			t.Require().NoError(err, "query %s transaction receipt", relay)
+		}
+
+		select {
+		case <-ctx.Done():
+			t.Require().NoError(ctx.Err(), "timed out waiting for %s canonical receipt %s (want block=%s, last block=%s)", relay, txHash, canonicalHash, lastHash)
+		case <-ticker.C:
+		}
+	}
 }
 
 // TestFlashblocks exercises the XLayer flashblocks topology (producer sequencer +
@@ -70,82 +214,84 @@ func TestFlashblocks(gt *testing.T) {
 		callRPC(t, sys, &estimate, "eth_estimateGas", call, "pending")
 	})
 
-	// RelayPending verifies that rpc1 and rpc2 observe the same transaction and
-	// state through the producer's flashblock stream before canonicalization,
-	// then discard that transaction from their pending overlays after inclusion.
+	// RelayPending subscribes before submission and uses executed flashblock
+	// events to verify that rpc1 and rpc2 execute the transaction successfully in
+	// the same pending block. After inclusion, both relays must expose the same
+	// canonical receipt and discard the transaction from their next overlays.
 	gt.Run("RelayPending", func(gt *testing.T) {
 		t := devtest.ParallelT(gt)
-		sender := sys.FunderL2.NewFundedEOA(eth.OneEther)
 		recipient := sys.Wallet.NewEOA(sys.L2EL).Address()
+		rpc1Events, rpc1SubscriptionErr := subscribeRelayTransactions(t, sys.L2ELRPC1.Escape().UserRPC(), recipient)
+		rpc2Events, rpc2SubscriptionErr := subscribeRelayTransactions(t, sys.L2ELRPC2.Escape().UserRPC(), recipient)
+
+		sender := sys.FunderL2.NewFundedEOA(eth.OneEther)
 		value := eth.OneHundredthEther
+		waitForRelayExecution(t, rpc1Events, rpc1SubscriptionErr, "rpc1")
+		waitForRelayExecution(t, rpc2Events, rpc2SubscriptionErr, "rpc2")
 
 		planned := txplan.NewPlannedTx(sender.Plan(), txplan.WithTo(&recipient), txplan.WithValue(value))
 		signed, err := planned.Signed.Eval(t.Ctx())
 		t.Require().NoError(err, "sign relay propagation transaction")
+		// A received flashblock can only be executed when its parent is already in
+		// the relay's canonical database. Wait until both relays have the current
+		// sequencer head, then broadcast immediately into the following pending
+		// revisions. Merely observing an older header event is not sufficient: a
+		// relay may subsequently fall behind while canonical payloads arrive.
+		waitForCommonCanonicalBase(t, sys.L2EL.EthClient(), sys.L2ELRPC1.EthClient(), sys.L2ELRPC2.EthClient())
 		_, err = planned.Submitted.Eval(t.Ctx())
 		t.Require().NoError(err, "submit relay propagation transaction")
 		txHash := signed.Hash()
 
-		type pendingState struct {
-			blockHash    common.Hash
-			blockNumber  hexutil.Uint64
-			transactions []common.Hash
-			balance      *big.Int
-		}
-		readPending := func(rpcClient interface {
+		rpc1Event := waitForRelayTransaction(t, rpc1Events, rpc1SubscriptionErr, "rpc1", txHash)
+		rpc2Event := waitForRelayTransaction(t, rpc2Events, rpc2SubscriptionErr, "rpc2", txHash)
+		t.Require().NotNil(rpc1Event.Transaction.Receipt, "rpc1 must expose the executed flashblock receipt")
+		t.Require().NotNil(rpc2Event.Transaction.Receipt, "rpc2 must expose the executed flashblock receipt")
+		t.Require().Equal(txHash, rpc1Event.Transaction.Receipt.TxHash, "rpc1 receipt must identify the submitted transaction")
+		t.Require().Equal(txHash, rpc2Event.Transaction.Receipt.TxHash, "rpc2 receipt must identify the submitted transaction")
+		t.Require().Equal(uint64(1), rpc1Event.Transaction.Receipt.Status, "rpc1 flashblock execution must succeed")
+		t.Require().Equal(uint64(1), rpc2Event.Transaction.Receipt.Status, "rpc2 flashblock execution must succeed")
+		t.Require().NotNil(rpc1Event.Transaction.Receipt.BlockNumber, "rpc1 receipt must identify its pending block")
+		t.Require().NotNil(rpc2Event.Transaction.Receipt.BlockNumber, "rpc2 receipt must identify its pending block")
+		t.Require().Equal(rpc1Event.Transaction.Receipt.BlockNumber.Uint64(), rpc2Event.Transaction.Receipt.BlockNumber.Uint64(), "relays must expose the same pending block number")
+		t.Require().Equal(rpc1Event.Transaction.Receipt.GasUsed, rpc2Event.Transaction.Receipt.GasUsed, "relays must produce the same pending execution result")
+
+		sequencerReceipt, err := planned.Included.Eval(t.Ctx())
+		t.Require().NoError(err, "relay propagation transaction must become canonical")
+		t.Require().Equal(uint64(1), sequencerReceipt.Status, "relay propagation transaction must succeed")
+		rpc1Receipt := waitForCanonicalRelayReceipt(t, "rpc1", sys.L2ELRPC1.EthClient(), txHash, sequencerReceipt.BlockHash)
+		rpc2Receipt := waitForCanonicalRelayReceipt(t, "rpc2", sys.L2ELRPC2.EthClient(), txHash, sequencerReceipt.BlockHash)
+		t.Require().Equal(sequencerReceipt.BlockHash, rpc1Receipt.BlockHash, "rpc1 canonical receipt must match the sequencer")
+		t.Require().Equal(sequencerReceipt.BlockHash, rpc2Receipt.BlockHash, "rpc2 canonical receipt must match the sequencer")
+
+		pendingContains := func(rpcClient interface {
 			CallContext(ctx context.Context, result any, method string, args ...any) error
-		}) (pendingState, error) {
+		}) (bool, error) {
 			var block struct {
-				Hash         common.Hash    `json:"hash"`
-				Number       hexutil.Uint64 `json:"number"`
-				Transactions []common.Hash  `json:"transactions"`
+				Transactions []common.Hash `json:"transactions"`
 			}
 			if err := rpcClient.CallContext(t.Ctx(), &block, "eth_getBlockByNumber", "pending", false); err != nil {
-				return pendingState{}, err
+				return false, err
 			}
-			var balance hexutil.Big
-			if err := rpcClient.CallContext(t.Ctx(), &balance, "eth_getBalance", recipient, "pending"); err != nil {
-				return pendingState{}, err
+			for _, hash := range block.Transactions {
+				if hash == txHash {
+					return true, nil
+				}
 			}
-			return pendingState{
-				blockHash:    block.Hash,
-				blockNumber:  block.Number,
-				transactions: block.Transactions,
-				balance:      new(big.Int).Set((*big.Int)(&balance)),
-			}, nil
+			return false, nil
 		}
-		contains := func(hashes []common.Hash, want common.Hash) bool {
-			return slices.Contains(hashes, want)
-		}
-
-		var rpc1Pending, rpc2Pending pendingState
 		t.Require().Eventually(func() bool {
-			var err1, err2 error
-			rpc1Pending, err1 = readPending(sys.L2ELRPC1.EthClient().RPC())
-			rpc2Pending, err2 = readPending(sys.L2ELRPC2.EthClient().RPC())
-			return err1 == nil && err2 == nil &&
-				contains(rpc1Pending.transactions, txHash) && contains(rpc2Pending.transactions, txHash) &&
-				rpc1Pending.balance.Cmp(value.ToBig()) == 0 && rpc2Pending.balance.Cmp(value.ToBig()) == 0
-		}, 3*time.Second, 20*time.Millisecond, "both relays must expose the transaction's flashblock state before canonicalization")
-		t.Require().Equal(rpc1Pending.blockNumber, rpc2Pending.blockNumber, "relays must expose the same pending block number")
-		t.Require().Equal(rpc1Pending.blockHash, rpc2Pending.blockHash, "relays must expose the same pending block hash")
-
-		_, err = planned.Success.Eval(t.Ctx())
-		t.Require().NoError(err, "relay propagation transaction must become canonical")
-		t.Require().Eventually(func() bool {
-			state1, err1 := readPending(sys.L2ELRPC1.EthClient().RPC())
-			state2, err2 := readPending(sys.L2ELRPC2.EthClient().RPC())
-			return err1 == nil && err2 == nil &&
-				!contains(state1.transactions, txHash) && !contains(state2.transactions, txHash)
+			rpc1Contains, err1 := pendingContains(sys.L2ELRPC1.EthClient().RPC())
+			rpc2Contains, err2 := pendingContains(sys.L2ELRPC2.EthClient().RPC())
+			return err1 == nil && err2 == nil && !rpc1Contains && !rpc2Contains
 		}, 10*time.Second, 100*time.Millisecond, "canonical transaction must be removed from both relay pending overlays")
 	})
 
-	// EthSubscribeParamBoundaries uses its own WebSocket stream to the shared
-	// sequencer. Empty and invalid params must yield a stable, decidable error
-	// rather than a valid subscription, without requiring another node topology.
+	// EthSubscribeParamBoundaries uses its own WebSocket stream to rpc1, where
+	// the custom flashblocks subscription API is enabled. Empty and invalid
+	// params must yield a stable, decidable error rather than a valid subscription.
 	gt.Run("EthSubscribeParamBoundaries", func(gt *testing.T) {
 		t := devtest.ParallelT(gt)
-		stream, err := client.NewRPC(t.Ctx(), t.Logger(), sys.L2EL.Escape().UserRPC(), client.WithLazyDial())
+		stream, err := client.NewRPC(t.Ctx(), t.Logger(), sys.L2ELRPC1.Escape().UserRPC(), client.WithLazyDial())
 		t.Require().NoError(err, "open dedicated eth_subscribe stream")
 		t.Cleanup(stream.Close)
 

@@ -120,12 +120,3 @@ func TestLoadReadsEnvOnce(t *testing.T) {
 		t.Fatalf("AuditablePaths must list %s", EnvRethExecutionBinary)
 	}
 }
-
-func TestAmountHelpersReuseOpService(t *testing.T) {
-	if GWei(1).String() == "" {
-		t.Fatal("GWei should produce a non-empty wei value via op-service/eth")
-	}
-	if Ether(1).String() == "" {
-		t.Fatal("Ether should produce a non-empty wei value via op-service/eth")
-	}
-}
