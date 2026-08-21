@@ -99,13 +99,13 @@ Only after these fail may a dependency bump be filed as an open question; say in
 Sort every changed file into one or more checklist dimensions (Section 3). Files that touch none of them (docs, CI, metrics naming, log messages, RPC read-only formatting) go to a **"declared non-consensus"** list — still shown in the report so the classification itself can be challenged.
 
 Treat as consensus-relevant by default:
-- EVM/execution: `revm`, evm config, precompiles, `execute`/`executor`, receipt builder
+- EVM/execution: `revm`, `op-revm`, `evm`, `op-evm`, `alloy-op-evm`, `reth`, `op-reth`, evm config, precompiles, `execute`/`executor`, receipt builder
 - Chainspec/hardforks: `crates/chainspec/`, fork activation timestamps/heights, genesis
 - Payload building & validation: payload builder, block assembly, tx pool → block ordering
 - Engine/consensus: newPayload/FCU handling, block validation, header checks
 - Gas/fees: L1 data fee, base fee, operator/vault fee logic, gas refunds
 - Derivation-adjacent state: anything altering what op-node sees via Engine API
-- DB/trie: state root computation, storage formats, pruning that affects historical execution
+- DB/trie: state root computation, trie caching (incremental/cached trie updates reused across blocks or flashblocks), storage formats, pruning that affects historical execution
 - Sync paths: live sync vs backfill vs replay executing the same block differently
 
 ### 3. Adversarial checklist (base — extend as the diff demands)
