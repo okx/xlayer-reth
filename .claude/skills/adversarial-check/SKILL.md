@@ -5,7 +5,7 @@ description: Adversarially compare two commits/tags to derive code execution pat
 
 # Skill: adversarial-check
 
-Given two git refs (commit hashes and/or tags), derive the diff between them and adversarially search for execution paths where the two versions could produce **different consensus outputs** — state root, block hash, receipts root, gas used, or accept/reject decisions. The goal is to find the edge case that forks the chain *before* it ships.
+Given two git refs (commit hashes and/or tags), derive the diff between them and adversarially search for execution paths that could produce **different consensus outputs** — state root, block hash, receipts root, gas used, or accept/reject decisions. The divergence to hunt is of two kinds, and both matter: **between the two refs** (REF_OLD vs REF_NEW, the classic upgrade fork) *and* **within REF_NEW itself** — two code paths in the candidate binary that must agree but might not (sequencer build vs importer/validator, default builder vs Flashblock build, producer vs verifier, local build vs P2P/cached replay). The goal is to find the edge case that forks the chain *before* it ships.
 
 TRIGGER when: user runs `/adversarial-check <ref1> <ref2>`, or asks to "check consensus safety between two commits/tags/versions", "will this diff fork the chain", "adversarial check".
 DO NOT TRIGGER when: user asks for a general code review (use `pr-review`) or a security audit.
@@ -157,6 +157,7 @@ Key entry points include:
 
 - `validate_block_gas` and `execute_transaction_without_commit` in `deps/optimism/rust/alloy-op-evm/src/block/mod.rs`
 - `validate_env` and `validate_against_state_and_deduct_caller` in `deps/optimism/rust/op-revm/src/handler.rs`
+- The reth handler **trait pipeline** that drives the above — review the trait impls, not only the free functions, since an override or a reordered stage changes what runs: `self.validate(evm)` → `validate_env` + `validate_initial_tx_gas`, then `self.pre_execution(evm, ..)` → `validate_against_state_and_deduct_caller`
 - Payload/header validation and the mapping of errors to Engine API `newPayload` results
 
 When the diff changes a pre-execution guard, transaction error, `?`, or early return, check:
@@ -177,13 +178,14 @@ Typical assertions: identical transaction/block acceptance decisions; invalid in
 Key entry points include:
 
 - `OpEvm::transact_raw` in `deps/optimism/rust/alloy-op-evm/src/lib.rs`
-- The handler lifecycle in `deps/optimism/rust/op-revm/src/handler.rs`
+- The handler lifecycle in `deps/optimism/rust/op-revm/src/handler.rs`, including the reth handler **trait stage** `self.execution(evm, ..)` (the frame loop) — review the trait impl, not only the free functions
+- Opcode implementations in `revm/crates/interpreter/src/instructions.rs` (revm is a workspace **dependency crate** — diff the pinned revm rev, not just in-repo code)
 - Diffs to revm opcode tables, precompiles, frames, and the interpreter
 
 When the diff changes `BlockEnv`, `TxEnv`, `CfgEnv`, an opcode, a precompile, or error propagation, check:
 
 - Which opcodes can observe each modified environment field? At minimum map `block.basefee -> BASEFEE` and effective gas-price/transaction fee fields to `GASPRICE`; also check whether adjacent fields such as `NUMBER`, `TIMESTAMP`, `COINBASE`, `PREVRANDAO`, `GASLIMIT`, `BLOBBASEFEE`, and `CHAINID` are overwritten or restored together.
-- Is a temporary context change used only to bypass validation, or is it visible during contract execution? For example, temporarily setting `block.basefee` to zero changes fee validation, `BASEFEE`, and potentially fee calculations that depend on base fee.
+- Is a temporary context change used only to bypass validation, or is it visible during contract execution? For example, temporarily setting `block.basefee` to zero changes fee validation, `BASEFEE`, and potentially fee calculations that depend on base fee. Treat any **newly introduced execution path** the same way — a new `if`/guard, a new branch only some txs or some configs take: enumerate which inputs enter each arm and the observable output each produces, because a new conditional is itself a fork switch when its predicate differs across refs or across the fleet.
 - Is the same behavior preserved for top-level calls, nested `CALL`, `STATICCALL`, `DELEGATECALL`, `CREATE`, `CREATE2`, and precompile paths?
 - Does a new or removed `return`, `?`, `map_err`, or guard bypass cleanup, context restoration, refund handling, beneficiary rewards, or execution-result normalization? Test revert, halt, OOG, invalid transaction, DB error, and inspector/hook errors, not only success.
 - Are temporary fields restored on every exit? Within one block, execute `special tx -> normal tx` and `special tx revert/OOG -> normal tx`; make the later transaction read the affected opcode and persist the value to storage.
@@ -203,6 +205,7 @@ When the diff changes account mutation, commit timing, or rollback, check:
 - Did the order of value transfer, deposit minting, fee deduction/reimbursement, and beneficiary/vault crediting change? After an intermediate failure, only protocol-specified persistent effects may remain.
 - Did creation/deletion semantics change for code, storage, transient storage, self-destructed accounts, created accounts, or touched-empty accounts? Cover create/self-destruct/re-create in the same transaction and the same block.
 - Can a gasless whitelist/system call, simulation, or execute-then-exclude candidate leave state, logs, access warming, or cached reads? Can the next transaction observe phantom state or warming?
+- Is any state/trie/overlay **cache reused across blocks (or across flashblocks)** without being invalidated when the underlying state moves? A pruned or stale cache entry — one that reflects a *different* block's state than the one being computed — feeding a state-root or storage-root computation produces a wrong root on the node that holds it. The XLayer flashblock **sequencer always uses such a cache**, so it is the highest-risk site (and a validator that caches can diverge too). Exercise: build block N with the cache warm, advance past persistence / prune, then build block N+1 touching a range the stale entry covers; the sequencer and an independent validator must compute the same root. (Note: before concluding a cache "drops" an update, apply the end-to-end reasoning gate below — confirm the input is a local delta and not cumulative state that is regenerated downstream.)
 - If post-processing fails after `execute_transaction_without_commit` succeeds, has any state patch already been applied? Can it later be committed during a retry, the next transaction, or block finalization?
 - Did the ordering of receipt/counter updates and DB commit change? What happens if a receipt is pushed but state commit fails, or state commits before receipt construction fails?
 - Can failure in block finalization, a post-block balance increment, or a system-contract update leave half of the block state committed?
@@ -217,7 +220,7 @@ When the diff changes a gas counter, refund, fee formula, vault, or any `+/-`, `
 - Which gas quantity feeds each limit and receipt field, and is it the same for producer and verifier? In particular, ensure canonical gas after refund is not used accidentally to limit actual computation.
 - Which counters are incremented, decremented, or cleared on success, revert, halt/OOG, failed create, deposits before/after Regolith, and gasless execution? Does a new early return skip any update?
 - Is refund non-negative, capped by the relevant gas used, applied exactly once, and limited by the correct fork's refund cap? Cover `0`, exactly at the cap, cap ± 1, and refund greater than gas used.
-- Did the inputs to effective gas price, base fee, or priority fee change? Exercise `max_fee = basefee`, `basefee ± 1`, zero priority fee, and the priority-fee limit.
+- Did the inputs to effective gas price, base fee, or priority fee change? Exercise the boundary `max_fee_per_gas == base_fee` (the point where the effective priority tip is exactly zero), `max_fee_per_gas == base_fee ± 1`, zero priority fee, and the priority-fee limit.
 - Are sender precharge, unused-gas reimbursement, beneficiary reward, base-fee vault, L1-fee vault, and operator-fee vault balance changes conserved without charging or refunding the same gas twice?
 - Does gasless waive only the fees specified by the protocol while preserving gas consumption, refund, and cumulative-gas semantics? It must not set `gasUsed` to zero merely because fees are waived, nor reward a beneficiary/vault with unpaid fees.
 - Did the ordering of deposit mint/value and fee deduction change? Did loading behavior for L1-fee metadata change when the metadata is absent?
@@ -251,6 +254,7 @@ For xlayer-reth, compare the following paths; op-rbuilder is out of scope:
 - X Layer local Flashblock build: `crates/builder/src/flashblocks/builder.rs`
 - External/cached Flashblock execution and replay: `crates/builder/src/flashblocks/handler.rs` and related cache/replay paths
 - Engine API import and canonical block execution of the final payload
+- The **validator / RPC (named) node** path: independent re-execution of the imported payload and any state/proof serving it performs — it must recompute identical commitments to the sequencer
 - Backfill, historical replay, or restart/resume paths where relevant
 
 Fix the same parent state, payload attributes, and ordered transaction list to remove txpool-selection noise, then check:
@@ -303,7 +307,7 @@ Walk each checklist dimension (Section 3) against the merged tree and ask the st
 
 A mitigation that "only" tweaks the environment a tx runs under (e.g. zeroing base fee to bypass a fee check) is a consensus change if ANY opcode can read it — say which opcode, and the trigger is a tx using it.
 
-**Scoped-toggle restoration analysis** — for every hunk that mutates shared execution state on a per-tx or per-call scope (a `CfgEnv`/`BlockEnv` field toggled around one tx, a validation flag like `disable_base_fee`, a precompile set or gas table swapped in, a cache primed or bypassed), verify the set→restore pairing structurally, then hunt the leak:
+**Scoped-toggle restoration analysis** — for every hunk that mutates shared execution state on a per-tx or per-call scope (a `CfgEnv`/`BlockEnv`/`TxEnv` field toggled around one tx, a validation flag like `disable_base_fee`, a precompile set or gas table swapped in, a cache primed or bypassed), verify the set→restore pairing structurally, then hunt the leak:
 
 - **Every exit path restores**: success, revert, invalid-tx skip, and the error/`?` early-return paths — a toggle restored only on the happy path leaks on the first failing tx. Trace each `return`/`?` between set and restore in both trees.
 - **Same-block leakage**: if the toggle is NOT restored before the next tx executes, the next tx in the block runs under the relaxed/mutated rule — e.g. a base-fee validation bypass leaking lets an underpriced non-exempt tx into the block. The trigger is a two-tx sequence in one block: one tx that engages the toggle (or errors inside it), followed by one that is only valid/invalid depending on the leaked state. Derive it explicitly.
@@ -327,7 +331,7 @@ While building the trees, specifically hunt for:
 
 - Behavior changes hidden as "refactors" (reordered match arms, changed default branches, `saturating_*` ↔ `checked_*` ↔ raw arithmetic swaps, integer type/width changes, float anywhere near consensus)
 - Conditionals gated on config/env/CLI flags — a flag defaulting differently across the fleet is a consensus fork switch
-- New early-returns or error paths that skip state writes previously applied (or vice versa)
+- New early-returns or error paths — including every Rust `?` propagation, `return`, and `map_err` — that skip state writes, counter updates, or cleanup previously applied (or vice versa). A `?` added mid-function is a silent early exit: it can leave partial state committed, bypass a scoped-toggle restore, or change which Engine API status the caller returns. Enumerate every `?`/`return` between a mutation and its intended cleanup.
 - `HashMap`/`HashSet` iteration feeding anything ordered (tx selection, trie input, receipts)
 - Time (`SystemTime`, `Instant`), randomness, or node-local state (pool contents, caches, peers) influencing block content or validation
 - Feature flags / `#[cfg]` differences that make two builds of the same ref behave differently
@@ -341,12 +345,20 @@ A finding is only reportable with a concrete scenario:
 3. **Path under REF_OLD**: what executes, what output results
 4. **Path under REF_NEW**: what executes, what output results
 5. **Diverging assertion**: which consensus output differs (state root / block hash / receipts root / gas used / accept-reject)
-6. **Topology**: which node pairing forks (new-seq vs old-replica, old-seq vs new-replica, both)
+6. **Topology**: which node pairing forks (new-seq vs old-replica, old-seq vs new-replica, new-seq vs validator/RPC node, or two paths within one binary) — include the validator/RPC (named) nodes that re-execute or serve state, not only the sequencer/replica pair
 7. **Likelihood**: reachable by any user tx (critical), only by sequencer policy (high), only at fork boundary or via crafted input (medium), theoretical (low)
 
 If a finding spans many files (e.g. a renamed flag consumed everywhere), cite the defining/deciding site(s) with line numbers and summarize the rest as "and N other call sites" — do not pad the finding with every occurrence.
 
 If a suspected divergence cannot be traced to a concrete trigger, keep it as an **open question**, not a finding.
+
+**End-to-end reasoning gate — mandatory before reporting any 🔴/🟠 finding.** This gate exists to filter false positives (a real one: an "incremental flashblock state root drops trie-node deletions" finding rated fork-certain, refuted by one E2E test, because the analysis stopped at a local cursor/overlay behavior and never reached the cumulative hashed-state input).
+
+Before reporting a high-impact finding, trace the **complete production path** from entry point and configuration through state lifecycle, cache/overlay behavior, persistence, and final consumer. Do not infer data loss from a local replace, reset, or isolated API behavior: verify whether the caller supplies **cumulative state**, whether earlier changes are **regenerated or merged downstream**, and whether the suspected value can actually **reach a divergent output**. If any critical link depends on an unverified assumption, downgrade the candidate to theoretical or omit it from the findings.
+
+- For state/trie/cache findings specifically, explicitly determine whether the input is a **local delta or cumulative state** before concluding that historical updates are dropped — e.g. a per-flashblock `TrieUpdates` overlay is only a node cache; the root is recomputed from the cumulative `HashedPostState` with `construct_prefix_sets()`, which forces every changed path (deletions included) to be re-walked, so a "the overlay hides the removal" argument is void unless you have followed the data flow to the function that attaches the *final* updates and confirmed it consumes the delta, not the cumulative state.
+- A finding may be rated **🔴 fork-certain only if the divergence is demonstrated end-to-end**, not merely inferred through this chain. If the finding's own verification step is "write a test / run replayor to confirm," it is by definition not yet demonstrated → cap it at **🟠 fork-plausible**. Never assert certainty and simultaneously request the test that would establish it.
+- Load-bearing `file:line` citations for a 🔴/🟠 finding must be verified to *do what the claim says* — read the function body and its callers at those exact lines, never infer behavior from a symbol name or an adjacent hunk.
 
 ### 6. Verification suggestions (for humans/CI to run — never executed by this skill)
 
