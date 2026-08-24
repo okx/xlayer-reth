@@ -177,8 +177,8 @@ just test
 # Run tests including e2e tests
 just test true
 
-# Run flashblocks tests
-just test false true
+# Run only flashblocks tests
+just e2e ./e2e/flashblocks
 
 # Auto-fix formatting and clippy issues
 just fix
@@ -193,52 +193,40 @@ just watch-check
 ## Testing
 ### End-to-end Testing
 
-To run end-to-end (e2e) tests, first build ``xlayer-reth`` Docker image in this repo:
+The Go E2E harness starts an isolated local devstack and shuts it down after the
+tests complete. Build the required artifacts and run the full suite with:
+
 ```
-just build-docker
+just e2e
 ```
 
-Next, you need to start a devnet using [xlayer-toolkit](https://github.com/okx/xlayer-toolkit/blob/main/devnet/README.md). Make sure you set the following environment variables in ``xlayer-toolkit/devnet/example.env``:
+When the artifacts are already built, skip the build step with:
+
 ```
-SEQ_TYPE=reth
-RPC_TYPE=reth
-ENABLE_INNERTX_RPC=true
+just e2e-no-build
 ```
 
-After devnet is started, run the e2e test:
+Arguments after the recipe name are forwarded to `go test`, for example:
+
 ```
-cargo test -p xlayer-e2e-test --test e2e_tests -- --nocapture --test-threads=1
-# or
-just test true
+just e2e-no-build ./e2e/gasless -count=1 -v
 ```
+
+For compatibility, `just test true` runs the Rust workspace tests followed by
+the full Go E2E suite.
 
 ### Flashblocks Tests
-Similar to e2e tests, first build ``xlayer-reth`` Docker image in this repo:
+
+Run only the flashblocks E2E package with:
+
 ```
-just build-docker
+just e2e ./e2e/flashblocks
 ```
 
-Next, you need to start a devnet using [xlayer-toolkit](https://github.com/okx/xlayer-toolkit/blob/main/devnet/README.md). Make sure you set the following environment variables in ``xlayer-toolkit/devnet/example.env``:
-```
-FLASHBLOCK_ENABLED=true
-FLASHBLOCK_P2P_ENABLED=true
-```
+Or reuse existing build artifacts:
 
-Also, start the 2nd RPC node under ``xlayer-toolkit/devnet``:
 ```
-./scripts/run-rpc2.sh
-```
-
-Then, in this repo, run:
-```
-cargo test -p xlayer-e2e-test --test flashblocks_tests -- --nocapture --test-threads=1
-# or
-just test false true
-```
-
-To run all flashblocks tests (including ignored tests, also requires 2nd RPC node to be running), run:
-```
-cargo test -p xlayer-e2e-test --test flashblocks_tests -- --include-ignored --nocapture --test-threads=1
+just e2e-no-build ./e2e/flashblocks
 ```
 
 ## Contributing
