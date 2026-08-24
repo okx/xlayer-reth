@@ -33,7 +33,7 @@ init-git:
 # Ensure submodules are initialized (used as dependency)
 [private]
 ensure-submodules:
-    @git submodule status | grep -q '^-' && git submodule update --init --recursive || true
+    @git submodule status --recursive | grep -q '^-' && git submodule update --init --recursive || true
 
 # Ensure tempdir exists for shebang recipes
 [private]
@@ -82,26 +82,46 @@ check:
     just sweep-check
     just check-format
     just check-clippy
+    just lint-go
     just test
 
-fix: fix-format fix-clippy
+fix: fix-format fix-clippy lint-go-fix
 
-# Run `just test true` to run e2e tests.
-test include_e2e="false" include_flashblocks="false":
+# Build dependencies then run the Go E2E harness under tests/. Arguments are
+# forwarded to `go test` (package selection, -run filters, go test flags). The
+# repository tempdir is created first so just never fails writing temp files.
+[positional-arguments]
+e2e *args: ensure-tempdir ensure-submodules
+    cd tests && just e2e "$@"
+
+# Run the Go E2E harness against existing artifacts without building first.
+# Arguments are forwarded to `go test` exactly as with `e2e`.
+[positional-arguments]
+e2e-no-build *args: ensure-tempdir
+    cd tests && just e2e-no-build "$@"
+
+# Lint the standalone Go module under tests/.
+lint-go: ensure-submodules
+    cd tests && just lint-go
+
+# Auto-format and lint the standalone Go module under tests/.
+lint-go-fix: ensure-submodules
+    cd tests && just lint-go-fix
+
+# Run `just test true` to run the full Go E2E suite after the Rust workspace
+# tests. Flashblocks is part of the regular Go E2E suite.
+test include_e2e="false":
     #!/usr/bin/env bash
     set -e
     if cargo nextest --version &>/dev/null; then
-        CMD="nextest run" E2E_FLAGS="--test-threads 1 --no-capture"
+        CMD="nextest run"
     else
-        CMD="test" E2E_FLAGS="-- --nocapture --test-threads=1"
+        CMD="test"
     fi
     echo "Running tests via cargo $CMD (include_e2e={{include_e2e}})"
-    cargo $CMD --workspace --exclude xlayer-e2e-test --all-features
+    cargo $CMD --workspace --all-features
     if [ "{{include_e2e}}" = "true" ]; then
-        cargo $CMD -p xlayer-e2e-test --test e2e_tests $E2E_FLAGS
-    fi
-    if [ "{{include_flashblocks}}" = "true" ]; then
-        cargo $CMD -p xlayer-e2e-test --test flashblocks_tests $E2E_FLAGS
+        just e2e
     fi
 
 # Format only workspace members. `cargo fmt --all` ALSO descends into local submodules.

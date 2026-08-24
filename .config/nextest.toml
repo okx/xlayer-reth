@@ -13,8 +13,3 @@ filter = "package(xlayer-builder) and test(flashblocks)"
 test-group = "flashblock-serial"
 # These tests are inherently slow (multiple blocks with 1s sleeps between them)
 slow-timeout = { period = "60s", terminate-after = 2 }
-
-[[profile.default.overrides]]
-# E2E tests get more time — they spin up nodes
-filter = "package(xlayer-e2e-test)"
-slow-timeout = { period = "60s", terminate-after = 5 }
