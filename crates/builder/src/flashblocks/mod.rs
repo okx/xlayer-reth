@@ -18,6 +18,7 @@ mod generator;
 mod handler;
 mod handler_ctx;
 mod service;
+mod throughput;
 mod timing;
 pub(crate) mod utils;
 

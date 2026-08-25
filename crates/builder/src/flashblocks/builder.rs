@@ -4,6 +4,7 @@ use crate::{
         builder_tx::FlashblocksBuilderTx,
         context::{FlashblocksBuilderCtx, TransactionLimits},
         generator::{BlockCell, BuildArguments, PayloadBuilder},
+        throughput::{format_gas_throughput, ExecutionThroughput},
         timing::FlashblockScheduler,
         utils::{
             cache::FlashblockPayloadsCache, execution::ExecutionInfo, wspub::WebSocketPublisher,
@@ -431,6 +432,10 @@ where
         // We should always calculate state root for fallback payload
         let (fallback_payload, fb_payload, bundle_state, new_tx_hashes) =
             build_block(&mut state, &ctx, &mut info, Some(&mut fb_state), true)?;
+        // Active execution/build time of the base flashblock: state access, sequencer/deposit
+        // execution, any cached-sequence replay, builder txs, and the full state-root-inclusive
+        // block assembly above. Captured before websocket publish so propagation is excluded.
+        let fallback_active_time = block_build_start_time.elapsed();
         // For X Layer - skip if replaying
         if !rebuild_external_payload {
             self.built_fb_payload_tx
@@ -438,6 +443,11 @@ where
                 .map_err(PayloadBuilderError::other)?;
         }
         let mut best_payload = (fallback_payload.clone(), bundle_state);
+
+        // Throughput accounting starts from the base flashblock the candidate inherits; each
+        // adopted flashblock adds its own active time as the loop proceeds.
+        let mut throughput = ExecutionThroughput::default();
+        throughput.record_flashblock(fallback_active_time);
 
         info!(
             target: "payload_builder",
@@ -473,7 +483,13 @@ where
             ctx.metrics.payload_num_tx_gauge.set(info.executed_transactions.len() as f64);
 
             // return early since we don't need to build a block with transactions from the pool
-            self.resolve_best_payload(&ctx, best_payload, fallback_payload, &resolve_payload);
+            self.resolve_best_payload(
+                &ctx,
+                best_payload,
+                fallback_payload,
+                &resolve_payload,
+                throughput,
+            );
             return Ok(());
         }
 
@@ -490,7 +506,13 @@ where
         // Get target number of flashblocks to build. If no flashblocks are scheduled, return early.
         let target_flashblocks = flashblock_scheduler.target_flashblocks();
         if target_flashblocks == 0 {
-            self.resolve_best_payload(&ctx, best_payload, fallback_payload, &resolve_payload);
+            self.resolve_best_payload(
+                &ctx,
+                best_payload,
+                fallback_payload,
+                &resolve_payload,
+                throughput,
+            );
             self.record_flashblocks_metrics(&ctx, 0, &info, 0);
             return Ok(());
         }
@@ -569,7 +591,13 @@ where
                 ctx = ctx.with_cancel(new_fb_cancel);
             } else {
                 // Channel closed - block building cancelled
-                self.resolve_best_payload(&ctx, best_payload, fallback_payload, &resolve_payload);
+                self.resolve_best_payload(
+                    &ctx,
+                    best_payload,
+                    fallback_payload,
+                    &resolve_payload,
+                    throughput,
+                );
                 self.record_flashblocks_metrics(
                     &ctx,
                     fb_state.flashblock_index().saturating_sub(1),
@@ -581,7 +609,13 @@ where
 
             // Check if we have reached target flashblocks count
             if fb_state.flashblock_index() > fb_state.target_flashblock_count() {
-                self.resolve_best_payload(&ctx, best_payload, fallback_payload, &resolve_payload);
+                self.resolve_best_payload(
+                    &ctx,
+                    best_payload,
+                    fallback_payload,
+                    &resolve_payload,
+                    throughput,
+                );
                 self.record_flashblocks_metrics(
                     &ctx,
                     fb_state.flashblock_index().saturating_sub(1),
@@ -601,6 +635,7 @@ where
                 &mut best_txs,
                 &block_cancel,
                 &mut best_payload,
+                &mut throughput,
             ) {
                 Ok(Some(next_fb_state)) => next_fb_state,
                 Ok(None) => {
@@ -609,6 +644,7 @@ where
                         best_payload,
                         fallback_payload,
                         &resolve_payload,
+                        throughput,
                     );
                     self.record_flashblocks_metrics(
                         &ctx,
@@ -632,6 +668,7 @@ where
                         best_payload,
                         fallback_payload,
                         &resolve_payload,
+                        throughput,
                     );
                     return Err(PayloadBuilderError::Other(err.into()));
                 }
@@ -655,6 +692,7 @@ where
         best_txs: &mut NextBestFlashblocksTxs<Pool>,
         block_cancel: &CancellationToken,
         best_payload: &mut (OpBuiltPayload, BundleState),
+        throughput: &mut ExecutionThroughput,
     ) -> eyre::Result<Option<FlashblocksState>> {
         let flashblock_index = fb_state.flashblock_index();
         let mut target_gas_for_batch = fb_state.target_gas_for_batch;
@@ -776,6 +814,12 @@ where
         ctx.metrics.total_block_built_duration.record(total_block_built_duration);
         ctx.metrics.total_block_built_gauge.set(total_block_built_duration);
 
+        // Active execution/build time for this flashblock batch: builder txs, txpool fetch,
+        // transaction execution, and the (possibly state-root-inclusive) block assembly above.
+        // Captured before websocket publish so propagation time is excluded, and only folded
+        // into the running total when this batch is adopted as the best payload below.
+        let flashblock_active_time = flashblock_build_start_time.elapsed();
+
         match build_result {
             Err(err) => {
                 ctx.metrics.invalid_built_blocks_count.increment(1);
@@ -793,6 +837,8 @@ where
                     .try_send(fb_payload)
                     .wrap_err("failed to send built payload to handler")?;
                 *best_payload = (new_payload, bundle_state);
+                // This batch is now inherited by the selected candidate; count its active time.
+                throughput.record_flashblock(flashblock_active_time);
 
                 // Record flashblock build duration
                 ctx.metrics.flashblock_build_duration.record(flashblock_build_start_time.elapsed());
@@ -854,6 +900,7 @@ where
         best_payload: (OpBuiltPayload, BundleState),
         fallback_payload: OpBuiltPayload,
         resolve_payload: &BlockCell<OpBuiltPayload>,
+        throughput: ExecutionThroughput,
     ) {
         if resolve_payload.get().is_some() {
             return;
@@ -871,11 +918,15 @@ where
                         best_payload.0.clone()
                     };
 
+                // The final state root is computed during resolution here, so the throughput log
+                // is emitted from inside `resolve_zero_state_root` once that call returns, with
+                // its full duration added exactly once as the finalization tail.
                 let state_root_ctx = CalculateStateRootContext {
                     best_payload,
                     parent_hash: ctx.parent().hash(),
                     built_payload_tx: self.built_payload_tx.clone(),
                     metrics: self.metrics.clone(),
+                    throughput,
                 };
 
                 // Async calculate state root
@@ -908,7 +959,12 @@ where
                     }
                 }
             }
-            _ => best_payload.0,
+            _ => {
+                // State root was already produced during the flashblock build, so its cost is
+                // already included in the recorded batch times; no finalization tail is added.
+                log_execution_throughput(&best_payload.0, throughput);
+                best_payload.0
+            }
         };
         resolve_payload.set(payload);
     }
@@ -1275,12 +1331,20 @@ struct CalculateStateRootContext {
     parent_hash: BlockHash,
     built_payload_tx: mpsc::Sender<OpBuiltPayload>,
     metrics: Arc<BuilderMetrics>,
+    /// Active execution/build time inherited from the flashblock batches, to which this call's
+    /// own duration is added as the finalization tail before the throughput log is emitted.
+    throughput: ExecutionThroughput,
 }
 
 fn resolve_zero_state_root(
     ctx: CalculateStateRootContext,
     state_provider: Box<dyn reth::providers::StateProvider>,
 ) -> Result<OpBuiltPayload, PayloadBuilderError> {
+    // Measure the entire call, entry to return: it covers the final state root, header/seal, the
+    // final block hash, and the executed-block/payload rebuild below. This is the finalization
+    // tail, counted exactly once and only on this resolve-stage path.
+    let resolve_start = Instant::now();
+    let inherited_throughput = ctx.throughput;
     let (state_root, trie_updates, hashed_state) =
         calculate_state_root_on_resolve(&ctx, state_provider)?;
 
@@ -1324,7 +1388,38 @@ fn resolve_zero_state_root(
         "Updated payload with calculated state root"
     );
 
+    // Emit the throughput log now that the final state root, block hash, and payload are ready,
+    // adding this whole call as the finalization tail so it is counted once.
+    let finalized = inherited_throughput.with_finalization_tail(resolve_start.elapsed());
+    log_execution_throughput(&updated_payload, finalized);
+
     Ok(updated_payload)
+}
+
+/// Emits the XLayer Flashblocks execution-throughput log for a finally-selected payload.
+///
+/// This reports the real builder EVM execution throughput and is intentionally distinct from
+/// reth's `Block added to canonical chain` log. It is emitted exactly once per selected payload:
+/// either here from the resolve path (with the finalization tail folded in) or from
+/// `resolve_best_payload` when the state root was already computed during the build.
+fn log_execution_throughput(payload: &OpBuiltPayload, throughput: ExecutionThroughput) {
+    let block = payload.block();
+    let header = block.header();
+    let gas_used = header.gas_used;
+    let processing_elapsed = throughput.processing_elapsed();
+    let gas_throughput = format_gas_throughput(gas_used, processing_elapsed);
+    info!(
+        target: "payload_builder",
+        payload_id = %payload.id(),
+        block_number = header.number,
+        block_hash = %block.hash(),
+        txs = block.body().transactions.len(),
+        gas_used,
+        ?processing_elapsed,
+        gas_throughput = gas_throughput.as_deref().unwrap_or("n/a"),
+        flashblocks = throughput.flashblocks(),
+        "XLayer flashblock execution throughput"
+    );
 }
 
 /// Calculates only the state root for an existing payload
