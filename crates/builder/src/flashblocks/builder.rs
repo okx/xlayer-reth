@@ -6,9 +6,7 @@ use crate::{
         generator::{BlockCell, BuildArguments, PayloadBuilder},
         timing::FlashblockScheduler,
         utils::{
-            cache::FlashblockPayloadsCache,
-            execution::{gas_throughput_per_sec, ExecutionInfo},
-            wspub::WebSocketPublisher,
+            cache::FlashblockPayloadsCache, execution::ExecutionInfo, wspub::WebSocketPublisher,
         },
         BuilderConfig,
     },
@@ -907,9 +905,9 @@ where
             return;
         }
 
-        // Copied out of `info` so the async state-root task can own them.
-        let active_execution_elapsed = info.active_execution_elapsed;
-        let inherited_flashblocks = info.inherited_flashblocks;
+        // Snapshot of the accumulated active execution/build accounting. `Copy`,
+        // so the background state-root task can own it without borrowing `info`.
+        let throughput = info.throughput();
 
         let payload = match best_payload.0.block().header().state_root {
             B256::ZERO => {
@@ -940,13 +938,7 @@ where
                             let finalize_start = Instant::now();
                             match resolve_zero_state_root(state_root_ctx, state_provider) {
                                 Ok(resolved) => {
-                                    let finalization_tail = finalize_start.elapsed();
-                                    log_flashblock_execution_throughput(
-                                        &resolved,
-                                        active_execution_elapsed,
-                                        inherited_flashblocks,
-                                        finalization_tail,
-                                    );
+                                    throughput.log(&resolved, finalize_start.elapsed());
                                     resolved
                                 }
                                 Err(err) => {
@@ -957,12 +949,7 @@ where
                                     );
                                     // No state root was computed, so there is no
                                     // finalization tail to add.
-                                    log_flashblock_execution_throughput(
-                                        &fallback_payload_for_resolve,
-                                        active_execution_elapsed,
-                                        inherited_flashblocks,
-                                        Duration::ZERO,
-                                    );
+                                    throughput.log(&fallback_payload_for_resolve, Duration::ZERO);
                                     fallback_payload_for_resolve
                                 }
                             }
@@ -977,13 +964,7 @@ where
                                 if let Ok(resolved) =
                                     resolve_zero_state_root(state_root_ctx, state_provider)
                                 {
-                                    let finalization_tail = finalize_start.elapsed();
-                                    log_flashblock_execution_throughput(
-                                        &resolved,
-                                        active_execution_elapsed,
-                                        inherited_flashblocks,
-                                        finalization_tail,
-                                    );
+                                    throughput.log(&resolved, finalize_start.elapsed());
                                 }
                                 // On error `resolve_zero_state_root` already logs.
                             }));
@@ -1001,12 +982,7 @@ where
                         );
                         // Parent state is unavailable, so no state root recalculation
                         // runs and there is no finalization tail.
-                        log_flashblock_execution_throughput(
-                            &fallback_payload_for_resolve,
-                            active_execution_elapsed,
-                            inherited_flashblocks,
-                            Duration::ZERO,
-                        );
+                        throughput.log(&fallback_payload_for_resolve, Duration::ZERO);
                         fallback_payload_for_resolve
                     }
                 }
@@ -1015,16 +991,10 @@ where
                 // State root was already computed during `build_block`, so its cost
                 // is already part of the accumulated active time and no finalization
                 // tail is added (never double-counted).
-                log_flashblock_execution_throughput(
-                    &best_payload.0,
-                    active_execution_elapsed,
-                    inherited_flashblocks,
-                    Duration::ZERO,
-                );
+                throughput.log(&best_payload.0, Duration::ZERO);
                 best_payload.0
             }
         };
-
         resolve_payload.set(payload);
     }
 
@@ -1383,40 +1353,6 @@ where
         bundle_state,
         new_tx_hashes,
     ))
-}
-
-/// Emits the single `XLayer flashblock execution throughput` log for a
-/// finally-selected payload. Reports the real EVM execution throughput — gas
-/// over accumulated active execution/build time plus the resolve-time
-/// finalization tail — rather than the engine-tree insertion time that Reth's
-/// canonical-chain log measures.
-fn log_flashblock_execution_throughput(
-    payload: &OpBuiltPayload,
-    active_execution_elapsed: Duration,
-    inherited_flashblocks: u64,
-    finalization_tail: Duration,
-) {
-    let processing_elapsed = active_execution_elapsed.saturating_add(finalization_tail);
-    let block = payload.block();
-    let gas_used = block.header().gas_used;
-    // A zero gas or zero elapsed input yields `None`; report it as 0.0 so the log
-    // never carries NaN, infinity, or a fabricated throughput. The raw gas_used
-    // and processing_elapsed are logged alongside for disambiguation.
-    let gas_throughput = gas_throughput_per_sec(gas_used, processing_elapsed).unwrap_or(0.0);
-
-    info!(
-        target: "payload_builder",
-        event = "flashblock_execution_throughput",
-        block_number = block.header().number,
-        block_hash = %block.hash(),
-        payload_id = %payload.id(),
-        txs = block.body().transactions.len(),
-        gas_used,
-        processing_elapsed = ?processing_elapsed,
-        gas_throughput,
-        flashblocks = inherited_flashblocks,
-        "XLayer flashblock execution throughput"
-    );
 }
 
 struct CalculateStateRootContext {
