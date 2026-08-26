@@ -1,12 +1,8 @@
 //! Heavily influenced by [reth](https://github.com/paradigmxyz/reth/blob/1e965caf5fa176f244a31c0d2662ba1b590938db/crates/optimism/payload/src/builder.rs#L570)
 use alloy_primitives::{Address, U256};
-use core::time::Duration;
 use derive_more::Display;
 use op_revm::OpTransactionError;
-use reth_optimism_node::OpBuiltPayload;
 use reth_optimism_primitives::{OpReceipt, OpTransactionSigned};
-use reth_primitives_traits::format_gas_throughput;
-use tracing::info;
 
 #[derive(Debug, Display)]
 pub enum TxnExecutionResult {
@@ -51,16 +47,6 @@ pub struct ExecutionInfo {
     pub da_footprint_scalar: Option<u16>,
     /// Optional blob fields for payload validation
     pub optional_blob_fields: Option<(Option<u64>, Option<u64>)>,
-    /// Accumulated active EVM execution and block-build time carried into the
-    /// finally-selected payload. Summed across the fallback base and every
-    /// flashblock batch that contributes to that payload. Deliberately excludes
-    /// flashblock scheduling waits, websocket/p2p propagation, pre-resolve
-    /// queuing, engine-tree insertion, and persistence, so it reflects the real
-    /// execution cost of producing the block rather than downstream handling.
-    pub active_execution_elapsed: Duration,
-    /// Number of flashblock batches whose execution is inherited by the final
-    /// payload (0 for a fallback-only / `no_tx_pool` payload).
-    pub inherited_flashblocks: u64,
 }
 
 impl ExecutionInfo {
@@ -77,31 +63,6 @@ impl ExecutionInfo {
             total_fees: U256::ZERO,
             da_footprint_scalar: None,
             optional_blob_fields: None,
-            active_execution_elapsed: Duration::ZERO,
-            inherited_flashblocks: 0,
-        }
-    }
-
-    /// Adds one active execution/build batch to the accumulated processing time.
-    /// Saturating so a pathological duration can never wrap.
-    pub fn add_active_execution(&mut self, elapsed: Duration) {
-        self.active_execution_elapsed = self.active_execution_elapsed.saturating_add(elapsed);
-    }
-
-    /// Records one flashblock batch inherited by the final payload: its active
-    /// execution/build time plus one towards the flashblock count.
-    pub fn record_flashblock_execution(&mut self, elapsed: Duration) {
-        self.add_active_execution(elapsed);
-        self.inherited_flashblocks += 1;
-    }
-
-    /// Immutable snapshot of the accumulated throughput accounting, used to emit
-    /// the execution-throughput log once the final payload is resolved. Returning
-    /// a `Copy` value lets the async state-root task own it without borrowing.
-    pub fn throughput(&self) -> FlashblockThroughput {
-        FlashblockThroughput {
-            active_execution_elapsed: self.active_execution_elapsed,
-            inherited_flashblocks: self.inherited_flashblocks,
         }
     }
 
@@ -155,159 +116,5 @@ impl ExecutionInfo {
             ));
         }
         Ok(())
-    }
-}
-
-/// Immutable, `Copy` snapshot of a payload's accumulated active execution/build
-/// accounting, produced by [`ExecutionInfo::throughput`]. Owns the behavior for
-/// emitting the single `XLayer flashblock execution throughput` log once the
-/// payload is finalized, reporting the real EVM execution throughput — gas over
-/// accumulated active execution/build time plus the resolve-stage finalization
-/// tail — rather than the engine-tree insertion time Reth's canonical-chain log
-/// measures.
-#[derive(Clone, Copy, Debug)]
-pub struct FlashblockThroughput {
-    /// Accumulated active execution/build time inherited by the final payload.
-    active_execution_elapsed: Duration,
-    /// Number of flashblock batches inherited by the final payload.
-    inherited_flashblocks: u64,
-}
-
-impl FlashblockThroughput {
-    /// Total processing time = accumulated active execution/build time plus the
-    /// resolve-stage `finalization_tail`. The tail is zero when the state root
-    /// was already computed during `build_block`, so it is never double-counted.
-    fn processing_elapsed(&self, finalization_tail: Duration) -> Duration {
-        self.active_execution_elapsed.saturating_add(finalization_tail)
-    }
-
-    /// Formats gas throughput via reth's [`format_gas_throughput`], guarding the
-    /// zero-elapsed boundary so the result is never `NaN`, infinity, or a
-    /// fabricated rate; a zero elapsed reports zero throughput.
-    fn formatted_gas_throughput(gas_used: u64, processing_elapsed: Duration) -> String {
-        if processing_elapsed.is_zero() {
-            return format_gas_throughput(0, Duration::from_secs(1));
-        }
-        format_gas_throughput(gas_used, processing_elapsed)
-    }
-
-    /// Emits the single execution-throughput INFO log for the finally-selected
-    /// `payload`. `finalization_tail` is the resolve-stage state-root
-    /// recalculation time (zero when none was performed for this payload).
-    pub fn log(self, payload: &OpBuiltPayload, finalization_tail: Duration) {
-        let processing_elapsed = self.processing_elapsed(finalization_tail);
-        let block = payload.block();
-        let gas_used = block.header().gas_used;
-        let gas_throughput = Self::formatted_gas_throughput(gas_used, processing_elapsed);
-
-        info!(
-            target: "payload_builder",
-            event = "flashblock_execution_throughput",
-            block_number = block.header().number,
-            block_hash = %block.hash(),
-            payload_id = %payload.id(),
-            txs = block.body().transactions.len(),
-            gas_used,
-            processing_elapsed = ?processing_elapsed,
-            gas_throughput = %gas_throughput,
-            flashblocks = self.inherited_flashblocks,
-            "XLayer flashblock execution throughput"
-        );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn throughput(active_ms: u64, flashblocks: u64) -> FlashblockThroughput {
-        FlashblockThroughput {
-            active_execution_elapsed: Duration::from_millis(active_ms),
-            inherited_flashblocks: flashblocks,
-        }
-    }
-
-    #[test]
-    fn processing_elapsed_adds_finalization_tail() {
-        let t = throughput(6, 2);
-        assert_eq!(t.processing_elapsed(Duration::from_millis(4)), Duration::from_millis(10));
-        // No resolve-stage recalculation → tail is zero, not double-counted.
-        assert_eq!(t.processing_elapsed(Duration::ZERO), Duration::from_millis(6));
-    }
-
-    #[test]
-    fn processing_elapsed_saturates() {
-        let t = FlashblockThroughput {
-            active_execution_elapsed: Duration::MAX,
-            inherited_flashblocks: 0,
-        };
-        assert_eq!(t.processing_elapsed(Duration::from_secs(1)), Duration::MAX);
-    }
-
-    #[test]
-    fn formatted_throughput_normal_uses_reth_units() {
-        // 21_000_000 gas over 1s => 21.00Mgas/second in reth's units.
-        let s = FlashblockThroughput::formatted_gas_throughput(21_000_000, Duration::from_secs(1));
-        assert_eq!(s, "21.00Mgas/second");
-    }
-
-    #[test]
-    fn formatted_throughput_zero_elapsed_is_not_nan_or_inf() {
-        // Zero elapsed with nonzero gas must not divide-by-zero into inf/NaN.
-        let s = FlashblockThroughput::formatted_gas_throughput(1_000_000, Duration::ZERO);
-        assert!(!s.contains("NaN") && !s.contains("inf"), "got {s}");
-        assert_eq!(s, "0.00Kgas/second");
-    }
-
-    #[test]
-    fn formatted_throughput_zero_gas_is_zero() {
-        let s = FlashblockThroughput::formatted_gas_throughput(0, Duration::from_millis(5));
-        assert!(!s.contains("NaN") && !s.contains("inf"));
-        assert_eq!(s, "0.00Kgas/second");
-    }
-
-    #[test]
-    fn formatted_throughput_both_zero_is_not_nan_or_inf() {
-        let s = FlashblockThroughput::formatted_gas_throughput(0, Duration::ZERO);
-        assert!(!s.contains("NaN") && !s.contains("inf"), "got {s}");
-    }
-
-    #[test]
-    fn throughput_snapshot_reflects_info() {
-        let mut info = ExecutionInfo::with_capacity(0);
-        info.add_active_execution(Duration::from_millis(3));
-        info.record_flashblock_execution(Duration::from_millis(7));
-        let t = info.throughput();
-        assert_eq!(t.active_execution_elapsed, Duration::from_millis(10));
-        assert_eq!(t.inherited_flashblocks, 1);
-    }
-
-    #[test]
-    fn add_active_execution_accumulates() {
-        let mut info = ExecutionInfo::with_capacity(0);
-        assert_eq!(info.active_execution_elapsed, Duration::ZERO);
-        info.add_active_execution(Duration::from_millis(3));
-        info.add_active_execution(Duration::from_millis(7));
-        assert_eq!(info.active_execution_elapsed, Duration::from_millis(10));
-        // Fallback contribution alone does not count as a flashblock.
-        assert_eq!(info.inherited_flashblocks, 0);
-    }
-
-    #[test]
-    fn record_flashblock_execution_counts_batches() {
-        let mut info = ExecutionInfo::with_capacity(0);
-        info.record_flashblock_execution(Duration::from_millis(2));
-        info.record_flashblock_execution(Duration::from_millis(4));
-        assert_eq!(info.active_execution_elapsed, Duration::from_millis(6));
-        assert_eq!(info.inherited_flashblocks, 2);
-    }
-
-    #[test]
-    fn add_active_execution_saturates() {
-        let mut info = ExecutionInfo::with_capacity(0);
-        info.add_active_execution(Duration::MAX);
-        info.add_active_execution(Duration::from_secs(1));
-        // Saturating add keeps it at MAX rather than wrapping/panicking.
-        assert_eq!(info.active_execution_elapsed, Duration::MAX);
     }
 }
