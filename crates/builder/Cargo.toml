@@ -150,6 +150,10 @@ reth-transaction-pool = { workspace = true, features = ["test-utils"] }
 [features]
 default = []
 
+# Gates X Layer tests that need Docker. Enable explicitly with
+# `just test false true`.
+xl-docker-tests = []
+
 testing = [
     "nanoid",
     "reth-ipc",

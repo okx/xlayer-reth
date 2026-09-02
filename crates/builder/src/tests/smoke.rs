@@ -2,6 +2,7 @@ use crate::{
     args::{BuilderArgs, FlashblocksArgs},
     tests::{BuilderTxValidation, LocalInstance, TransactionBuilderExt},
 };
+#[cfg(feature = "xl-docker-tests")]
 use alloy_primitives::TxHash;
 
 use core::{
@@ -9,6 +10,7 @@ use core::{
     time::Duration,
 };
 use macros::rb_test;
+#[cfg(feature = "xl-docker-tests")]
 use std::collections::HashSet;
 use tokio::{join, task::yield_now};
 use tracing::info;
@@ -17,7 +19,9 @@ use tracing::info;
 /// and that the block generator is functioning correctly.
 ///
 /// Generated blocks are also validated against an external op-reth node to
-/// ensure their correctness.
+/// ensure their correctness. Gated on `xl-docker-tests` because that validation
+/// step needs access to a Docker daemon on Linux.
+#[cfg(feature = "xl-docker-tests")]
 #[rb_test(args = BuilderArgs {
     flashblocks: FlashblocksArgs {
         enabled: true,
@@ -169,6 +173,8 @@ async fn test_no_tx_pool(rbuilder: LocalInstance) -> eyre::Result<()> {
     Ok(())
 }
 
+// Cross-validates against an external op-reth — gated on `xl-docker-tests`.
+#[cfg(feature = "xl-docker-tests")]
 #[rb_test(args = BuilderArgs {
     max_gas_per_txn: Some(25000),
     ..Default::default()
@@ -216,6 +222,8 @@ async fn chain_produces_big_tx_with_gas_limit(rbuilder: LocalInstance) -> eyre::
     Ok(())
 }
 
+// Cross-validates against an external op-reth — gated on `xl-docker-tests`.
+#[cfg(feature = "xl-docker-tests")]
 #[rb_test(args = BuilderArgs {
     ..Default::default()
 })]
