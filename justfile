@@ -110,16 +110,26 @@ lint-go-fix: ensure-submodules
 
 # Run `just test true` to run the full Go E2E suite after the Rust workspace
 # tests. Flashblocks is part of the regular Go E2E suite.
-test include_e2e="false":
+#
+# Set docker_tests=true to enable tests gated by the `xl-docker-tests` feature.
+test include_e2e="false" docker_tests="false": ensure-tempdir
     #!/usr/bin/env bash
-    set -e
+    set -euo pipefail
+
     if cargo nextest --version &>/dev/null; then
-        CMD="nextest run"
+        test_command=(cargo nextest run --workspace)
+        runner="cargo nextest run"
     else
-        CMD="test"
+        test_command=(cargo test --workspace)
+        runner="cargo test"
     fi
-    echo "Running tests via cargo $CMD (include_e2e={{include_e2e}})"
-    cargo $CMD --workspace --all-features
+
+    if [ "{{docker_tests}}" = "true" ]; then
+        test_command+=(--features xl-docker-tests)
+    fi
+
+    echo "Running tests via $runner (include_e2e={{include_e2e}}, docker_tests={{docker_tests}})"
+    "${test_command[@]}"
     if [ "{{include_e2e}}" = "true" ]; then
         just e2e
     fi
