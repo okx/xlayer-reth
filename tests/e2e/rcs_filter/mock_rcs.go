@@ -2,6 +2,7 @@ package rcs_filter
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -101,6 +102,15 @@ func (m *MockRCS) ContentVersion() uint64 {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.version
+}
+
+// RestoreEmptyRules reverts to an empty rule set at a higher content_version so the node hot-reloads
+// back to no filtering (recovery path).
+func (m *MockRCS) RestoreEmptyRules() {
+	m.mu.Lock()
+	m.version++
+	m.body = []byte(fmt.Sprintf(`{"protocol_version":1,"content_version":%d,"rules":[]}`, m.version))
+	m.mu.Unlock()
 }
 
 // SubmitCount / QueryCount return cumulative audit-endpoint hit counts.

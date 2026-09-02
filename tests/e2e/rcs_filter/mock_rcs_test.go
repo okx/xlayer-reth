@@ -56,3 +56,27 @@ func TestMockRCSVersionGatedActivation(t *testing.T) {
 		t.Fatalf("SubmitCount = %d, want 1", m.SubmitCount())
 	}
 }
+
+func TestMockRCSRestoreEmptyRules(t *testing.T) {
+	m := StartMockRCS(t)
+	defer m.Close()
+
+	m.ActivateEmergencyRules()
+	if got := len(getJSON(t, m.URL()+"/rules")["rules"].([]any)); got != 1 {
+		t.Fatalf("post-activation rules = %d, want 1", got)
+	}
+	activatedVersion := m.ContentVersion()
+
+	// Recovery: revert to an empty rule set at a higher content_version so the node hot-reloads.
+	m.RestoreEmptyRules()
+	if got := m.ContentVersion(); got <= activatedVersion {
+		t.Fatalf("restored content_version = %d, want > %d", got, activatedVersion)
+	}
+	v := getJSON(t, m.URL()+"/rules/version")
+	if got := v["content_version"].(float64); uint64(got) != m.ContentVersion() {
+		t.Fatalf("served content_version = %v, want %d", got, m.ContentVersion())
+	}
+	if got := len(getJSON(t, m.URL()+"/rules")["rules"].([]any)); got != 0 {
+		t.Fatalf("post-recovery rules = %d, want 0", got)
+	}
+}
