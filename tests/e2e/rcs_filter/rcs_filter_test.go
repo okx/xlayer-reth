@@ -2,14 +2,12 @@ package rcs_filter
 
 import (
 	"context"
-	"math/big"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/ethereum-optimism/optimism/op-devstack/devtest"
 	"github.com/ethereum-optimism/optimism/op-devstack/dsl"
@@ -129,16 +127,6 @@ func createIncluded(t devtest.T, sys *presets.XLayer, sender *dsl.EOA, initCode 
 	return included(t, sys, ptx, timeout)
 }
 
-// erc20TransferCalldata encodes transfer(address,uint256). Sent to a normal (codeless) target it
-// emits no log, so it exercises the "event-shaped call" deny path where topic0 no longer gates
-// rule eligibility; the deny decision rides on the tx-level contract_address regardless.
-func erc20TransferCalldata() []byte {
-	data := crypto.Keccak256([]byte("transfer(address,uint256)"))[:4]
-	data = append(data, common.LeftPadBytes(common.HexToAddress("0x00000000000000000000000000000000000d7777").Bytes(), 32)...)
-	data = append(data, common.LeftPadBytes(big.NewInt(1).Bytes(), 32)...)
-	return data
-}
-
 // contractInitBytecode returns minimal init code that deploys an empty contract and succeeds:
 // PUSH1 0x00 PUSH1 0x00 RETURN.
 func contractInitBytecode() []byte {
@@ -182,6 +170,14 @@ func TestEmergencyDenyAll(gt *testing.T) {
 	create := sys.FunderL2.NewFundedEOA(eth.OneEther)
 	exception := sys.FunderL2.NewFundedEOA(eth.OneEther)
 
+	// D6: deploy the emitter WHILE RULES ARE EMPTY so its creation tx is allowed and committed
+	// (its runtime code + a zero slot-0 baseline persist). Must precede activation — a creation
+	// submitted after activation would itself be denied by the contract-creation class. `event`
+	// owns it and later makes the (denied) emit call.
+	emitter := deployEmitter(t, sys, event)
+	baseSlot0 := readCounterSlot(t, sys, emitter)
+	t.Require().Equal(common.Hash{}, baseSlot0, "emitter counter (slot 0) must start at zero")
+
 	// Install the emergency rules and confirm they are actually live.
 	activateAndConfirmInstalled(t, sys, mock, native)
 
@@ -198,11 +194,15 @@ func TestEmergencyDenyAll(gt *testing.T) {
 		common.HexToAddress("0x00000000000000000000000000000000000d0002"), nil, denyReceiptTimeout),
 		"no-log call to a normal target must be denied")
 
-	// (c) event-shaped call to a normal target → denied (topic no longer gates eligibility).
-	t.Require().False(callIncluded(t, sys, event,
-		common.HexToAddress("0x00000000000000000000000000000000000d0003"),
-		erc20TransferCalldata(), denyReceiptTimeout),
-		"event-shaped call to a normal target must be denied")
+	// (c) event-emitting call → denied, EVEN THOUGH it really emits the rule-declared Transfer
+	// event (topic0 matches). Calls the pre-deployed emitter (a real event, not calldata that
+	// merely looks like one against a code-less address). Deny short-circuits BEFORE state commit,
+	// so the emitter's counter slot stays at baseline. This is the AC#9 event-class coverage the
+	// first round lacked (MR !72 review).
+	t.Require().False(callIncluded(t, sys, event, emitter, emitterCalldata(), denyReceiptTimeout),
+		"event-emitting call to the emitter must be denied even though it emits a matching Transfer")
+	t.Require().Equal(baseSlot0, readCounterSlot(t, sys, emitter),
+		"denied emit-call must not commit: emitter counter (slot 0) must be unchanged")
 
 	// (d) contract creation (to == nil) → denied.
 	t.Require().False(createIncluded(t, sys, create, contractInitBytecode(), denyReceiptTimeout),
