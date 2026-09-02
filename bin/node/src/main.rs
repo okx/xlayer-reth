@@ -47,6 +47,7 @@ struct Args {
 }
 
 fn main() {
+    // deps/optimism submodule pin: 7c7f833e8ced40d3240518d63acaeb9641c653e9 (v0.1.6-rc.2-3-g7c7f833e8c)
     xlayer_version::init_version!();
 
     reth_cli_util::sigsegv_handler::install();
