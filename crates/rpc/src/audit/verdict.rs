@@ -333,4 +333,46 @@ mod tests {
         assert_eq!(result.tx_hash, "");
         assert!(result.actions.is_none());
     }
+
+    /// Emergency "deny everything except TxBlacklist" rule, expressed against this module's
+    /// fixtures. Declares a carrier Transfer event (empty event_abis is rejected); the deny
+    /// decision rides on the tx-level `contract_address` condition.
+    fn emergency_deny_all_rule() -> RuleSet {
+        let json = r#"{
+          "id": "emergency-deny-all",
+          "event_abis": {
+            "transfer": {
+              "type": "event", "name": "Transfer",
+              "inputs": [
+                { "name": "from", "type": "address", "indexed": true },
+                { "name": "to", "type": "address", "indexed": true },
+                { "name": "value", "type": "uint256", "indexed": false }
+              ],
+              "anonymous": false
+            }
+          },
+          "condition": { "!=": [ { "var": "contract_address" }, "0xb1ac000000000000000000000000000000000001" ] },
+          "action": "deny"
+        }"#;
+        let raw: RawRule = serde_json::from_str(json).expect("valid rule json");
+        load_rules(1, 0, vec![raw])
+    }
+
+    #[test]
+    fn emergency_rule_denies_no_log_normal_target_via_shared_path() {
+        // AC#8 / G2: xlayer_auditTransactions shares try_evaluate, so a no-log tx to a normal
+        // business target now returns Deny (it would have returned Allow before XLOP-1191).
+        let req = sample_request();
+        let result = verdict_for(
+            &req,
+            origin(),
+            Some(recipient()), // normal business target, not the TxBlacklist contract
+            B256::ZERO,
+            U256::ZERO,
+            &[], // no logs
+            &emergency_deny_all_rule(),
+        );
+        assert_eq!(result.verdict, Verdict::Deny);
+        assert!(result.actions.is_none());
+    }
 }
