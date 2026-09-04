@@ -361,7 +361,7 @@ mod tests {
     #[test]
     fn emergency_rule_denies_no_log_normal_target_via_shared_path() {
         // AC#8 / G2: xlayer_auditTransactions shares try_evaluate, so a no-log tx to a normal
-        // business target now returns Deny (it would have returned Allow before XLOP-1191).
+        // business target now returns Deny (it would have returned Allow before the Emergency Deny-All change).
         let req = sample_request();
         let result = verdict_for(
             &req,

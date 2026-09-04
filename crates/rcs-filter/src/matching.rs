@@ -81,7 +81,7 @@ fn evaluate_checked(rules: &RuleSet, input: &ScreenInput) -> Result<MatchOutcome
     let mut timeout_action = TimeoutAction::Allow;
     let mut complete_binding_count = 0usize;
 
-    // Emergency Deny-All (XLOP-1191): evaluate every rule for every transaction. The legacy
+    // Emergency Deny-All: evaluate every rule for every transaction. The legacy
     // topic0 candidate index is intentionally bypassed here (see `candidate_rule_indices`).
     for idx in 0..rules.rules.len() {
         let rule = &rules.rules[idx];
@@ -193,7 +193,7 @@ struct MatchedEvent {
 /// deterministic deny short-circuit order.
 ///
 /// Retained but no longer consulted: `evaluate_checked` now evaluates every rule for every
-/// transaction (Emergency Deny-All, XLOP-1191). Kept as a ready-made fast-path for a future
+/// transaction (Emergency Deny-All). Kept as a ready-made fast-path for a future
 /// performance task — see Decision D1 in
 /// `docs/superpowers/plans/2026-09-02-emergency-deny-all-matcher-plan.md`.
 #[allow(dead_code)]
@@ -723,7 +723,7 @@ mod tests {
 
     #[test]
     fn literal_true_rule_without_any_physical_log_denies_but_never_audits() {
-        // Deny-All (XLOP-1191): a literal-true deny rule now denies a no-log transaction; a
+        // Deny-All: a literal-true deny rule now denies a no-log transaction; a
         // literal-true audit rule stays Allow because an all-null binding emits no audit content.
         let mut deny = audit_rule("no-log", "event", "Event", json!([]), "custom");
         deny.action = Action::Deny;
