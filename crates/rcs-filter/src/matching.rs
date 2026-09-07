@@ -81,7 +81,9 @@ fn evaluate_checked(rules: &RuleSet, input: &ScreenInput) -> Result<MatchOutcome
     let mut timeout_action = TimeoutAction::Allow;
     let mut complete_binding_count = 0usize;
 
-    for &idx in &candidate_rule_indices(rules, input.logs) {
+    // Emergency Deny-All: evaluate every rule for every transaction. The legacy
+    // topic0 candidate index is intentionally bypassed here (see `candidate_rule_indices`).
+    for idx in 0..rules.rules.len() {
         let rule = &rules.rules[idx];
 
         // Stage one: filter-skip with zero decoding.
@@ -125,10 +127,10 @@ fn evaluate_checked(rules: &RuleSet, input: &ScreenInput) -> Result<MatchOutcome
         }
         let mut current = Vec::with_capacity(candidates.len());
         let mut visit = |binding: &[Option<MatchedEvent>]| {
-            // A literal-true rule with only null event bindings has no physical trigger.
-            if !binding.iter().any(Option::is_some) {
-                return ControlFlow::Continue(());
-            }
+            // Missing events are null-bound; evaluate the condition for every binding, including
+            // no-log transactions. Whether any *physical* event backed this binding decides only
+            // whether an Audit may carry content (an all-null binding must never submit empties).
+            let has_physical = binding.iter().any(Option::is_some);
             let bindings = build_bindings(rule, input, binding);
             if !truthy(&rule.condition, &bindings) {
                 return ControlFlow::Continue(());
@@ -139,6 +141,11 @@ fn evaluate_checked(rules: &RuleSet, input: &ScreenInput) -> Result<MatchOutcome
                 Action::Deny => ControlFlow::Break(MatchOutcome::Deny),
                 Action::Allow => ControlFlow::Continue(()),
                 Action::Audit => {
+                    // Never emit an empty-action Audit: an all-null binding that satisfies an
+                    // audit condition submits no content to RCS. Treat it as a no-op.
+                    if !has_physical {
+                        return ControlFlow::Continue(());
+                    }
                     has_audit = true;
                     timeout_action = timeout_action.stricter(rule.audit_timeout_action);
                     for audit_type in &rule.audit_types {
@@ -184,6 +191,12 @@ struct MatchedEvent {
 
 /// Deduplicated candidate rule indices across all logs (topic0 index lookup), sorted for
 /// deterministic deny short-circuit order.
+///
+/// Retained but no longer consulted: `evaluate_checked` now evaluates every rule for every
+/// transaction (Emergency Deny-All). Kept as a ready-made fast-path for a future
+/// performance task — see Decision D1 in
+/// `docs/superpowers/plans/2026-09-02-emergency-deny-all-matcher-plan.md`.
+#[allow(dead_code)]
 fn candidate_rule_indices(rules: &RuleSet, logs: &[Log]) -> Vec<usize> {
     let mut set = BTreeSet::new();
     for log in logs {
@@ -435,6 +448,151 @@ mod tests {
         }
     }
 
+    /// Emergency "deny everything except the TxBlacklist contract" rule. Declares a carrier
+    /// Transfer event (empty event_abis is rejected by compile_rule); the deny decision rides on
+    /// the tx-level `contract_address` condition, so no-log / contract-creation txs are covered.
+    const TX_BLACKLIST: &str = "0xb1ac000000000000000000000000000000000001";
+
+    fn emergency_deny_all_rule() -> RuleSet {
+        let raw: RawRule = serde_json::from_value(json!({
+            "id": "emergency-deny-all",
+            "event_abis": {
+                "transfer": {
+                    "type": "event", "name": "Transfer",
+                    "inputs": [
+                        {"name": "from", "type": "address", "indexed": true},
+                        {"name": "to", "type": "address", "indexed": true},
+                        {"name": "value", "type": "uint256", "indexed": false}
+                    ],
+                    "anonymous": false
+                }
+            },
+            "condition": { "!=": [ {"var": "contract_address"}, TX_BLACKLIST ] },
+            "action": "deny"
+        }))
+        .unwrap();
+        load_rules(1, 1, vec![raw])
+    }
+
+    fn input_to(to: Option<Address>, logs: &[Log]) -> ScreenInput<'_> {
+        ScreenInput {
+            tx_hash: golden::tx_a(),
+            origin: golden::origin(),
+            tx_to: to,
+            nonce: 1,
+            value: U256::ZERO,
+            block_height: 1_000_000,
+            logs,
+        }
+    }
+
+    #[test]
+    fn no_log_tx_hits_contract_address_deny() {
+        // AC#1: a native/no-log transaction to a normal business target is denied.
+        let rules = emergency_deny_all_rule();
+        assert_eq!(
+            evaluate(&rules, &input_to(Some(golden::claim_contract()), &[])),
+            MatchOutcome::Deny
+        );
+    }
+
+    #[test]
+    fn blacklist_target_is_not_denied() {
+        // AC#3: a transaction whose `to` is the TxBlacklist contract must NOT be denied.
+        let rules = emergency_deny_all_rule();
+        let blacklist: Address = TX_BLACKLIST.parse().unwrap();
+        assert_eq!(evaluate(&rules, &input_to(Some(blacklist), &[])), MatchOutcome::Allow);
+    }
+
+    #[test]
+    fn contract_creation_is_denied() {
+        // AC#4: contract creation (tx.to == null) binds contract_address to null → denied.
+        let rules = emergency_deny_all_rule();
+        assert_eq!(evaluate(&rules, &input_to(None, &[])), MatchOutcome::Deny);
+    }
+
+    #[test]
+    fn no_log_tx_negative_condition_on_missing_event_field_denies() {
+        // AC#2: a deny rule whose condition tests a MISSING event field under null semantics.
+        let raw: RawRule = serde_json::from_value(json!({
+            "id": "deny-when-transfer-to-null",
+            "event_abis": {
+                "transfer": {
+                    "type": "event", "name": "Transfer",
+                    "inputs": [
+                        {"name": "from", "type": "address", "indexed": true},
+                        {"name": "to", "type": "address", "indexed": true},
+                        {"name": "value", "type": "uint256", "indexed": false}
+                    ],
+                    "anonymous": false
+                }
+            },
+            "condition": { "==": [ {"var": "transfer.to"}, null ] },
+            "action": "deny"
+        }))
+        .unwrap();
+        let rules = load_rules(1, 1, vec![raw]);
+        assert_eq!(
+            evaluate(&rules, &input_to(Some(golden::claim_contract()), &[])),
+            MatchOutcome::Deny
+        );
+    }
+
+    #[test]
+    fn unrelated_log_is_treated_as_missing_event_and_still_denies() {
+        // AC#5: a log unrelated to the rule's event decodes to nothing → missing event →
+        // the deny-all condition still fires on a no-matching-event transaction.
+        let rules = emergency_deny_all_rule();
+        let unrelated = empty_event_log(golden::token_x(), "SomethingElse");
+        assert_eq!(
+            evaluate(&rules, &input_to(Some(golden::claim_contract()), &[unrelated])),
+            MatchOutcome::Deny
+        );
+    }
+
+    #[test]
+    fn all_events_missing_audit_emits_no_action_and_allows() {
+        // AC#7: an audit rule whose condition holds ONLY under an all-null binding must not
+        // produce an Audit (no empty action, no submit) — it stays Allow.
+        let mut rule = audit_rule("audit-null", "event", "Event", json!([]), "custom");
+        rule.condition = json!(true);
+        let rules = load_rules(1, 1, vec![rule]);
+        assert_eq!(
+            evaluate(&rules, &input_to(Some(golden::claim_contract()), &[])),
+            MatchOutcome::Allow
+        );
+    }
+
+    #[test]
+    fn deny_beats_audit_under_all_null_bindings() {
+        // AC#6: with both an audit rule (no-op under all-null) and a deny rule (fires under
+        // all-null), the transaction is denied. Priority deny > audit > allow is preserved.
+        let mut audit = audit_rule("audit-null", "event", "Event", json!([]), "custom");
+        audit.condition = json!(true);
+        let deny: RawRule = serde_json::from_value(json!({
+            "id": "deny-null",
+            "event_abis": {
+                "transfer": {
+                    "type": "event", "name": "Transfer",
+                    "inputs": [
+                        {"name": "from", "type": "address", "indexed": true},
+                        {"name": "to", "type": "address", "indexed": true},
+                        {"name": "value", "type": "uint256", "indexed": false}
+                    ],
+                    "anonymous": false
+                }
+            },
+            "condition": true,
+            "action": "deny"
+        }))
+        .unwrap();
+        let rules = load_rules(1, 1, vec![audit, deny]);
+        assert_eq!(
+            evaluate(&rules, &input_to(Some(golden::claim_contract()), &[])),
+            MatchOutcome::Deny
+        );
+    }
+
     #[test]
     fn later_matching_log_denies_and_discards_collected_audit_actions() {
         let audit = erc20_audit_rule("audit-first", "transfer");
@@ -564,14 +722,17 @@ mod tests {
     }
 
     #[test]
-    fn literal_true_rule_without_any_physical_log_allows() {
-        for action in [Action::Deny, Action::Audit] {
-            let mut rule = audit_rule("no-log", "event", "Event", json!([]), "custom");
-            rule.action = action;
-            let rules = load_rules(1, 1, vec![rule]);
+    fn literal_true_rule_without_any_physical_log_denies_but_never_audits() {
+        // Deny-All: a literal-true deny rule now denies a no-log transaction; a
+        // literal-true audit rule stays Allow because an all-null binding emits no audit content.
+        let mut deny = audit_rule("no-log", "event", "Event", json!([]), "custom");
+        deny.action = Action::Deny;
+        let deny_rules = load_rules(1, 1, vec![deny]);
+        assert_eq!(evaluate(&deny_rules, &transfer_input(&[])), MatchOutcome::Deny);
 
-            assert_eq!(evaluate(&rules, &transfer_input(&[])), MatchOutcome::Allow);
-        }
+        let audit = audit_rule("no-log", "event", "Event", json!([]), "custom");
+        let audit_rules = load_rules(1, 1, vec![audit]);
+        assert_eq!(evaluate(&audit_rules, &transfer_input(&[])), MatchOutcome::Allow);
     }
 
     #[test]
@@ -965,15 +1126,18 @@ mod tests {
     }
 
     #[test]
-    fn malformed_log_cannot_trigger_literal_true_deny_or_audit() {
+    fn malformed_log_is_missing_event_denies_for_deny_allows_for_audit() {
+        // A signature-matching but undecodable log is a missing event (null binding). Under
+        // Deny-All that still denies for a deny rule; an audit rule stays Allow (no empty submit).
         let inputs = json!([
             {"name": "from", "type": "address", "indexed": true},
             {"name": "to", "type": "address", "indexed": true},
             {"name": "value", "type": "uint256", "indexed": false}
         ]);
-        for action in ["deny", "audit"] {
+        let expected = [(Action::Deny, MatchOutcome::Deny), (Action::Audit, MatchOutcome::Allow)];
+        for (action, want) in expected {
             let mut raw = erc20_audit_rule("malformed", "transfer");
-            raw.action = if action == "deny" { Action::Deny } else { Action::Audit };
+            raw.action = action;
             raw.event_abis.get_mut("transfer").unwrap().inputs =
                 serde_json::from_value(inputs.clone()).unwrap();
             let rules = load_rules(1, 1, vec![raw]);
@@ -991,7 +1155,7 @@ mod tests {
                 block_height: 1_000_000,
                 logs: &logs,
             };
-            assert_eq!(evaluate(&rules, &input), MatchOutcome::Allow);
+            assert_eq!(evaluate(&rules, &input), want);
         }
     }
 
