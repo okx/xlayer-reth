@@ -493,6 +493,42 @@ mod tests {
         assert!(matches!(compile(&cond, &mut i), CompiledCondition::Raw(_)));
     }
 
+    // Negative boundary: a static all-address `in` reached through a NON-boolean operator must
+    // never be lifted to `AddressSetIn`. `compile` recurses only into `and`/`or`/`!` (plus the
+    // top-level `in`), so any other parent falls through to the single `Raw` catch-all and the
+    // whole node stays `Raw`, evaluated verbatim by the linear evaluator. This test locks that
+    // scope so a future change cannot silently widen acceleration under a non-boolean operator.
+    #[test]
+    fn in_under_non_boolean_operator_stays_raw_and_matches_linear() {
+        let mut i = AddressSetInterner::new();
+        let a = A;
+        let b = B;
+        // Each condition embeds a static all-address `in` under a non-boolean parent.
+        let conds = [
+            json!({"==": [{"in": [{"var":"origin"}, [a, b]]}, true]}), // `in` as an `==` operand
+            json!({"var": ["x", {"in": [{"var":"origin"}, [a, b]]}]}), // `in` inside a `var` default
+            json!({">":  [{"in": [{"var":"origin"}, [a, b]]}, 0]}), // `in` inside a numeric compare
+        ];
+        let bindings = [
+            binds(&[("origin", json!(a))]),      // hit (listed)
+            binds(&[("origin", json!(b))]),      // listed
+            binds(&[("origin", json!("nope"))]), // non-address needle
+            Bindings::new(),                     // missing var → null needle
+        ];
+        let miss = binds(&[("origin", json!("0x0303030303030303030303030303030303030303"))]);
+        for cond in &conds {
+            assert!(validate(cond).is_ok(), "cond must validate: {cond}");
+            let compiled = compile(cond, &mut i);
+            // (a) overall Raw — the `in` was not specialized anywhere in the tree
+            assert!(matches!(compiled, CompiledCondition::Raw(_)), "must stay overall Raw: {cond}");
+            assert!(!contains_address_set(&compiled), "no AddressSetIn may appear: {cond}");
+            // (b) truthiness-exact vs the linear evaluator across the required bindings
+            for bset in bindings.iter().chain(std::iter::once(&miss)) {
+                assert_eq!(eval_compiled(&compiled, bset), truthy(cond, bset), "cond={cond}");
+            }
+        }
+    }
+
     #[test]
     fn literal_true_is_truthy() {
         assert!(truthy(&json!(true), &Bindings::new()));
