@@ -12,12 +12,45 @@ use std::str::FromStr;
 use alloy_primitives::{Address, U256};
 use serde_json::Value;
 
+use crate::rules::model::CompiledCondition;
+
 /// Variable bindings for one candidate rule evaluation.
 pub type Bindings = HashMap<String, Value>;
 
 /// Evaluates `expr` against `bindings` and returns whether the result is truthy.
 pub fn truthy(expr: &Value, bindings: &Bindings) -> bool {
     is_truthy(&eval(expr, bindings))
+}
+
+/// Per-`load_rules` interner: identical normalized address lists across the rules of one batch
+/// share a single `Arc<HashSet<Address>>`. The membership recognition that populates it is added
+/// alongside the fast-path node it feeds.
+#[derive(Default)]
+pub(crate) struct AddressSetInterner {}
+
+impl AddressSetInterner {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Compiles a validated JSONLogic expression into a [`CompiledCondition`]. Every node is stored
+/// verbatim as `Raw` here; specialized nodes are introduced alongside their evaluators.
+pub(crate) fn compile(expr: &Value, _interner: &mut AddressSetInterner) -> CompiledCondition {
+    CompiledCondition::Raw(expr.clone())
+}
+
+/// Evaluates a compiled condition to a boolean, mirroring [`truthy`] exactly. `Raw` defers to the
+/// raw-value evaluator; the specialized arms combine truthiness the same way the raw evaluator does
+/// for non-empty operand lists.
+pub(crate) fn eval_compiled(node: &CompiledCondition, b: &Bindings) -> bool {
+    match node {
+        CompiledCondition::Raw(v) => truthy(v, b),
+        CompiledCondition::AddressSetIn { orig, .. } => truthy(orig, b),
+        CompiledCondition::And(xs) => xs.iter().all(|x| eval_compiled(x, b)),
+        CompiledCondition::Or(xs) => xs.iter().any(|x| eval_compiled(x, b)),
+        CompiledCondition::Not(x) => !eval_compiled(x, b),
+    }
 }
 
 /// Validates the supported JSONLogic subset and operator arity at rule-load time.
@@ -234,6 +267,36 @@ mod tests {
 
     fn binds(pairs: &[(&str, Value)]) -> Bindings {
         pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+    }
+
+    #[test]
+    fn compiled_matches_truthy_for_all_shapes() {
+        let mut interner = AddressSetInterner::new();
+        let a = "0x0101010101010101010101010101010101010101";
+        let b = "0x0202020202020202020202020202020202020202";
+        let conds = [
+            json!({"in": [{"var": "origin"}, [a, b]]}),
+            json!({"in": [{"var": "origin"}, "0xdead"]}), // substring
+            json!({"==": [{"var": "origin"}, a]}),
+            json!({"and": [{"in": [{"var": "origin"}, [a]]}, {"==": [{"var": "x"}, 1]}]}),
+            json!({"or":  [{"in": [{"var": "origin"}, [a]]}, {"==": [{"var": "x"}, 1]}]}),
+            json!({"!": {"in": [{"var": "origin"}, [a]]}}),
+            json!({"and": []}),
+            json!({"or":  []}),
+        ];
+        let binding_sets = [
+            binds(&[("origin", json!(a))]),
+            binds(&[("origin", json!(b))]),
+            binds(&[("origin", json!("0xdeadbeef")), ("x", json!(1))]),
+            Bindings::new(),
+        ];
+        for cond in &conds {
+            assert!(validate(cond).is_ok());
+            let compiled = compile(cond, &mut interner);
+            for bset in &binding_sets {
+                assert_eq!(eval_compiled(&compiled, bset), truthy(cond, bset), "cond={cond}");
+            }
+        }
     }
 
     #[test]

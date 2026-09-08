@@ -17,9 +17,11 @@ pub const MAX_EVENTS_PER_RULE: usize = 8;
 /// bounding synchronous Filter and Audit RPC work to a predictable order of magnitude.
 pub const MAX_COMPLETE_EVENT_BINDINGS_PER_EVALUATION: usize = 4_096;
 
+/// Crate-internal: the compiled-condition evaluator used by the matching hot path.
+pub(crate) use jsonlogic::eval_compiled;
 pub use jsonlogic::{truthy, Bindings};
 pub use model::{
-    AbiInput, Action, CompiledEvent, CompiledInput, CompiledRule, EventAbi, RawRule, RejectedRule,
-    RuleSet, TimeoutAction,
+    AbiInput, Action, CompiledCondition, CompiledEvent, CompiledInput, CompiledRule, EventAbi,
+    RawRule, RejectedRule, RuleSet, TimeoutAction,
 };
 pub use validation::{compile_rule, load_rules};

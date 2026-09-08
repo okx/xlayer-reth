@@ -13,7 +13,7 @@ use thiserror::Error;
 use crate::client::ActionItem;
 use crate::handle::ScreenInput;
 use crate::rules::{
-    truthy, Action, CompiledEvent, CompiledRule, RuleSet, TimeoutAction,
+    eval_compiled, Action, CompiledEvent, CompiledRule, RuleSet, TimeoutAction,
     MAX_COMPLETE_EVENT_BINDINGS_PER_EVALUATION,
 };
 
@@ -132,7 +132,7 @@ fn evaluate_checked(rules: &RuleSet, input: &ScreenInput) -> Result<MatchOutcome
             // whether an Audit may carry content (an all-null binding must never submit empties).
             let has_physical = binding.iter().any(Option::is_some);
             let bindings = build_bindings(rule, input, binding);
-            if !truthy(&rule.condition, &bindings) {
+            if !eval_compiled(&rule.compiled_condition, &bindings) {
                 return ControlFlow::Continue(());
             }
 
