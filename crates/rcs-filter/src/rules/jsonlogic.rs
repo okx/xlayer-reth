@@ -35,17 +35,21 @@ impl AddressSetInterner {
         Self::default()
     }
 
-    /// Looks up by the cheap normalized key and builds the `HashSet` only on a miss, so repeated
-    /// identical lists do no redundant set construction — they only clone the shared `Arc`.
+    /// Interns a normalized address list to a shared `Arc<HashSet<Address>>` with a single keyed
+    /// probe. The key is normalized with `sort_unstable()` + `dedup()` — only element identity
+    /// matters for set membership, so a stable sort is unnecessary. `entry(..).or_insert_with_key`
+    /// then performs one `HashMap` lookup and builds the set once, inside the closure, only on a
+    /// miss (the closure receives a borrow of the just-inserted key). A repeated identical list
+    /// therefore clones the shared `Arc` without constructing a throwaway set and without a
+    /// `get`-then-`insert` double probe.
     fn intern(&mut self, mut addrs: Vec<Address>) -> Arc<HashSet<Address>> {
-        addrs.sort();
+        addrs.sort_unstable();
         addrs.dedup();
-        if let Some(existing) = self.by_addresses.get(&addrs) {
-            return Arc::clone(existing);
-        }
-        let set: Arc<HashSet<Address>> = Arc::new(addrs.iter().copied().collect());
-        self.by_addresses.insert(addrs, Arc::clone(&set));
-        set
+        Arc::clone(
+            self.by_addresses
+                .entry(addrs)
+                .or_insert_with_key(|k| Arc::new(k.iter().copied().collect())),
+        )
     }
 }
 
