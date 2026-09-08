@@ -6,8 +6,9 @@
 //! (uint256 carried as decimal string / JSON number). Variables absent from the bindings
 //! (e.g. a named event with no matching log) resolve to `null`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
+use std::sync::Arc;
 
 use alloy_primitives::{Address, U256};
 use serde_json::Value;
@@ -23,20 +24,62 @@ pub fn truthy(expr: &Value, bindings: &Bindings) -> bool {
 }
 
 /// Per-`load_rules` interner: identical normalized address lists across the rules of one batch
-/// share a single `Arc<HashSet<Address>>`. The membership recognition that populates it is added
-/// alongside the fast-path node it feeds.
+/// share a single `Arc<HashSet<Address>>`.
 #[derive(Default)]
-pub(crate) struct AddressSetInterner {}
+pub(crate) struct AddressSetInterner {
+    by_addresses: HashMap<Vec<Address>, Arc<HashSet<Address>>>,
+}
 
 impl AddressSetInterner {
     pub(crate) fn new() -> Self {
         Self::default()
     }
+
+    /// Looks up by the cheap normalized key and builds the `HashSet` only on a miss, so repeated
+    /// identical lists do no redundant set construction — they only clone the shared `Arc`.
+    fn intern(&mut self, mut addrs: Vec<Address>) -> Arc<HashSet<Address>> {
+        addrs.sort();
+        addrs.dedup();
+        if let Some(existing) = self.by_addresses.get(&addrs) {
+            return Arc::clone(existing);
+        }
+        let set: Arc<HashSet<Address>> = Arc::new(addrs.iter().copied().collect());
+        self.by_addresses.insert(addrs, Arc::clone(&set));
+        set
+    }
 }
 
-/// Compiles a validated JSONLogic expression into a [`CompiledCondition`]. Every node is stored
-/// verbatim as `Raw` here; specialized nodes are introduced alongside their evaluators.
-pub(crate) fn compile(expr: &Value, _interner: &mut AddressSetInterner) -> CompiledCondition {
+/// Returns `Some(Vec<Address>)` iff `haystack` is a non-empty array whose every element is a JSON
+/// string parseable to a valid address; otherwise `None` (the node keeps the linear path).
+fn static_address_list(haystack: &Value) -> Option<Vec<Address>> {
+    let Value::Array(items) = haystack else { return None };
+    if items.is_empty() {
+        return None;
+    }
+    items.iter().map(|it| it.as_str().and_then(|s| Address::from_str(s).ok())).collect()
+}
+
+/// Compiles a validated JSONLogic expression into a [`CompiledCondition`]. A top-level
+/// `{"in":[needle, [addr…]]}` whose right side is a static array of all-valid addresses becomes an
+/// O(1) `AddressSetIn` (its set interned); every other node is stored verbatim as `Raw`.
+pub(crate) fn compile(expr: &Value, interner: &mut AddressSetInterner) -> CompiledCondition {
+    if let Value::Object(map) = expr
+        && map.len() == 1
+    {
+        let (op, arg) = map.iter().next().expect("map has one entry");
+        if op == "in"
+            && let Value::Array(operands) = arg
+            && operands.len() == 2
+            && let Some(addrs) = static_address_list(&operands[1])
+        {
+            let set = interner.intern(addrs);
+            return CompiledCondition::AddressSetIn {
+                needle: operands[0].clone(),
+                set,
+                orig: expr.clone(),
+            };
+        }
+    }
     CompiledCondition::Raw(expr.clone())
 }
 
@@ -46,7 +89,13 @@ pub(crate) fn compile(expr: &Value, _interner: &mut AddressSetInterner) -> Compi
 pub(crate) fn eval_compiled(node: &CompiledCondition, b: &Bindings) -> bool {
     match node {
         CompiledCondition::Raw(v) => truthy(v, b),
-        CompiledCondition::AddressSetIn { orig, .. } => truthy(orig, b),
+        CompiledCondition::AddressSetIn { needle, set, orig } => match eval(needle, b) {
+            Value::String(s) => match Address::from_str(&s) {
+                Ok(addr) => set.contains(&addr),
+                Err(_) => truthy(orig, b),
+            },
+            _ => truthy(orig, b),
+        },
         CompiledCondition::And(xs) => xs.iter().all(|x| eval_compiled(x, b)),
         CompiledCondition::Or(xs) => xs.iter().any(|x| eval_compiled(x, b)),
         CompiledCondition::Not(x) => !eval_compiled(x, b),
@@ -297,6 +346,70 @@ mod tests {
                 assert_eq!(eval_compiled(&compiled, bset), truthy(cond, bset), "cond={cond}");
             }
         }
+    }
+
+    const A: &str = "0x0101010101010101010101010101010101010101";
+    const B: &str = "0x0202020202020202020202020202020202020202";
+
+    #[test]
+    fn recognizes_only_static_all_address_arrays() {
+        let mut i = AddressSetInterner::new();
+        assert!(matches!(
+            compile(&json!({"in": [{"var":"origin"}, [A, B]]}), &mut i),
+            CompiledCondition::AddressSetIn { .. }
+        ));
+        // non-accelerable → Raw
+        for cond in [
+            json!({"in": [{"var":"origin"}, [A, 1]]}), // mixed
+            json!({"in": [{"var":"origin"}, [A, "not-an-address"]]}), // bad element
+            json!({"in": [{"var":"origin"}, []]}),     // empty
+            json!({"in": [{"var":"origin"}, {"var":"list"}]}), // dynamic RHS
+            json!({"in": [{"var":"origin"}, "0xdead"]}), // substring
+            json!({"in": [1, [1, 2]]}),                // numeric array
+        ] {
+            assert!(matches!(compile(&cond, &mut i), CompiledCondition::Raw(_)), "cond={cond}");
+        }
+    }
+
+    #[test]
+    fn fast_path_hit_miss_case_and_duplicates_match_linear() {
+        let mut i = AddressSetInterner::new();
+        // checksummed + lowercase + duplicate entries in the list
+        let cond = json!({"in": [{"var":"origin"}, ["0x52908400098527886E0F7030069857D2E4169EE7",
+                                                     "0x52908400098527886e0f7030069857d2e4169ee7", B]]});
+        let compiled = compile(&cond, &mut i);
+        for probe in [json!("0x52908400098527886e0f7030069857d2e4169ee7"), json!(B), json!(A)] {
+            let bset = binds(&[("origin", probe.clone())]);
+            assert_eq!(eval_compiled(&compiled, &bset), truthy(&cond, &bset), "probe={probe}");
+        }
+    }
+
+    #[test]
+    fn non_address_needle_falls_back_to_linear() {
+        let mut i = AddressSetInterner::new();
+        let cond = json!({"in": [{"var":"origin"}, [A, B]]});
+        let compiled = compile(&cond, &mut i);
+        for probe in [Value::Null, json!(123), json!("not-an-address")] {
+            let bset = binds(&[("origin", probe.clone())]);
+            assert_eq!(eval_compiled(&compiled, &bset), truthy(&cond, &bset), "probe={probe}");
+        }
+        // missing var → null needle
+        assert_eq!(eval_compiled(&compiled, &Bindings::new()), truthy(&cond, &Bindings::new()));
+    }
+
+    #[test]
+    fn identical_normalized_lists_share_one_arc() {
+        let mut i = AddressSetInterner::new();
+        // same set, different order + case + a duplicate
+        let c1 = compile(&json!({"in": [{"var":"origin"}, [A, B]]}), &mut i);
+        let c2 = compile(&json!({"in": [{"var":"origin"}, [B, A, A]]}), &mut i);
+        let c3 = compile(&json!({"in": [{"var":"origin"}, [A]]}), &mut i); // different set
+        let get = |c: &CompiledCondition| match c {
+            CompiledCondition::AddressSetIn { set, .. } => set.clone(),
+            _ => panic!("expected AddressSetIn"),
+        };
+        assert!(Arc::ptr_eq(&get(&c1), &get(&c2)));
+        assert!(!Arc::ptr_eq(&get(&c1), &get(&c3)));
     }
 
     #[test]
