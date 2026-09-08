@@ -79,8 +79,51 @@ pub(crate) fn compile(expr: &Value, interner: &mut AddressSetInterner) -> Compil
                 orig: expr.clone(),
             };
         }
+
+        // Specialize a boolean combinator only when its compiled subtree can reach a fast
+        // membership node; otherwise it stays a `Raw` leaf. An empty `and`/`or` therefore also
+        // stays `Raw`, preserving the original falsy result rather than the `true` an empty
+        // `all()` would produce.
+        match op.as_str() {
+            "and" | "or" => {
+                if let Value::Array(items) = arg {
+                    let children: Vec<CompiledCondition> =
+                        items.iter().map(|it| compile(it, interner)).collect();
+                    if children.iter().any(contains_address_set) {
+                        return if op == "and" {
+                            CompiledCondition::And(children)
+                        } else {
+                            CompiledCondition::Or(children)
+                        };
+                    }
+                }
+            }
+            "!" => {
+                // The `!` operand is `x` or `[x]`; reuse the shared single-operand extraction.
+                let inner = first_operand(arg);
+                let child = compile(&inner, interner);
+                if contains_address_set(&child) {
+                    return CompiledCondition::Not(Box::new(child));
+                }
+            }
+            _ => {}
+        }
     }
     CompiledCondition::Raw(expr.clone())
+}
+
+/// Whether a compiled subtree contains at least one accelerable membership node. A boolean
+/// combinator is specialized only when doing so can actually reach such a node; otherwise it stays
+/// a `Raw` leaf, which also preserves the falsy result of an empty `and`/`or`.
+fn contains_address_set(c: &CompiledCondition) -> bool {
+    match c {
+        CompiledCondition::AddressSetIn { .. } => true,
+        CompiledCondition::And(xs) | CompiledCondition::Or(xs) => {
+            xs.iter().any(contains_address_set)
+        }
+        CompiledCondition::Not(x) => contains_address_set(x),
+        CompiledCondition::Raw(_) => false,
+    }
 }
 
 /// Evaluates a compiled condition to a boolean, mirroring [`truthy`] exactly. `Raw` defers to the
@@ -410,6 +453,44 @@ mod tests {
         };
         assert!(Arc::ptr_eq(&get(&c1), &get(&c2)));
         assert!(!Arc::ptr_eq(&get(&c1), &get(&c3)));
+    }
+
+    #[test]
+    fn combinators_with_accelerable_child_are_specialized_and_exact() {
+        let mut i = AddressSetInterner::new();
+        let a = A;
+        for cond in [
+            json!({"and": [{"in": [{"var":"origin"}, [a]]}, {"==": [{"var":"x"}, 1]}]}),
+            json!({"or":  [{"==": [{"var":"x"}, 1]}, {"in": [{"var":"origin"}, [a]]}]}),
+            json!({"!": {"in": [{"var":"origin"}, [a]]}}),
+        ] {
+            let compiled = compile(&cond, &mut i);
+            assert!(!matches!(compiled, CompiledCondition::Raw(_)), "should specialize: {cond}");
+            assert!(contains_address_set(&compiled));
+            for bset in [
+                binds(&[("origin", json!(a)), ("x", json!(1))]),
+                binds(&[("origin", json!(B)), ("x", json!(2))]),
+                Bindings::new(),
+            ] {
+                assert_eq!(eval_compiled(&compiled, &bset), truthy(&cond, &bset), "cond={cond}");
+            }
+        }
+    }
+
+    #[test]
+    fn empty_and_or_and_non_accelerable_combinators_stay_raw_and_false() {
+        let mut i = AddressSetInterner::new();
+        for cond in [json!({"and": []}), json!({"or": []})] {
+            let compiled = compile(&cond, &mut i);
+            assert!(
+                matches!(compiled, CompiledCondition::Raw(_)),
+                "empty combinator must stay Raw: {cond}"
+            );
+            assert!(!eval_compiled(&compiled, &Bindings::new())); // false, matches eval→Null
+        }
+        // combinator with no accelerable child stays Raw
+        let cond = json!({"and": [{"==": [{"var":"x"}, 1]}, {"==": [{"var":"y"}, 2]}]});
+        assert!(matches!(compile(&cond, &mut i), CompiledCondition::Raw(_)));
     }
 
     #[test]
