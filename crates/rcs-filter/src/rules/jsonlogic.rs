@@ -6,11 +6,14 @@
 //! (uint256 carried as decimal string / JSON number). Variables absent from the bindings
 //! (e.g. a named event with no matching log) resolve to `null`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
+use std::sync::Arc;
 
 use alloy_primitives::{Address, U256};
 use serde_json::Value;
+
+use crate::rules::model::CompiledCondition;
 
 /// Variable bindings for one candidate rule evaluation.
 pub type Bindings = HashMap<String, Value>;
@@ -18,6 +21,132 @@ pub type Bindings = HashMap<String, Value>;
 /// Evaluates `expr` against `bindings` and returns whether the result is truthy.
 pub fn truthy(expr: &Value, bindings: &Bindings) -> bool {
     is_truthy(&eval(expr, bindings))
+}
+
+/// Per-`load_rules` interner: identical normalized address lists across the rules of one batch
+/// share a single `Arc<HashSet<Address>>`.
+#[derive(Default)]
+pub(crate) struct AddressSetInterner {
+    by_addresses: HashMap<Vec<Address>, Arc<HashSet<Address>>>,
+}
+
+impl AddressSetInterner {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Interns a normalized address list to a shared `Arc<HashSet<Address>>` with a single keyed
+    /// probe. The key is normalized with `sort_unstable()` + `dedup()` — only element identity
+    /// matters for set membership, so a stable sort is unnecessary. `entry(..).or_insert_with_key`
+    /// then performs one `HashMap` lookup and builds the set once, inside the closure, only on a
+    /// miss (the closure receives a borrow of the just-inserted key). A repeated identical list
+    /// therefore clones the shared `Arc` without constructing a throwaway set and without a
+    /// `get`-then-`insert` double probe.
+    fn intern(&mut self, mut addrs: Vec<Address>) -> Arc<HashSet<Address>> {
+        addrs.sort_unstable();
+        addrs.dedup();
+        Arc::clone(
+            self.by_addresses
+                .entry(addrs)
+                .or_insert_with_key(|k| Arc::new(k.iter().copied().collect())),
+        )
+    }
+}
+
+/// Returns `Some(Vec<Address>)` iff `haystack` is a non-empty array whose every element is a JSON
+/// string parseable to a valid address; otherwise `None` (the node keeps the linear path).
+fn static_address_list(haystack: &Value) -> Option<Vec<Address>> {
+    let Value::Array(items) = haystack else { return None };
+    if items.is_empty() {
+        return None;
+    }
+    items.iter().map(|it| it.as_str().and_then(|s| Address::from_str(s).ok())).collect()
+}
+
+/// Compiles a validated JSONLogic expression into a [`CompiledCondition`]. A top-level
+/// `{"in":[needle, [addr…]]}` whose right side is a static array of all-valid addresses becomes an
+/// O(1) `AddressSetIn` (its set interned); every other node is stored verbatim as `Raw`.
+pub(crate) fn compile(expr: &Value, interner: &mut AddressSetInterner) -> CompiledCondition {
+    if let Value::Object(map) = expr
+        && map.len() == 1
+    {
+        let (op, arg) = map.iter().next().expect("map has one entry");
+        if op == "in"
+            && let Value::Array(operands) = arg
+            && operands.len() == 2
+            && let Some(addrs) = static_address_list(&operands[1])
+        {
+            let set = interner.intern(addrs);
+            return CompiledCondition::AddressSetIn {
+                needle: operands[0].clone(),
+                set,
+                orig: expr.clone(),
+            };
+        }
+
+        // Specialize a boolean combinator only when its compiled subtree can reach a fast
+        // membership node; otherwise it stays a `Raw` leaf. An empty `and`/`or` therefore also
+        // stays `Raw`, preserving the original falsy result rather than the `true` an empty
+        // `all()` would produce.
+        match op.as_str() {
+            "and" | "or" => {
+                if let Value::Array(items) = arg {
+                    let children: Vec<CompiledCondition> =
+                        items.iter().map(|it| compile(it, interner)).collect();
+                    if children.iter().any(contains_address_set) {
+                        return if op == "and" {
+                            CompiledCondition::And(children)
+                        } else {
+                            CompiledCondition::Or(children)
+                        };
+                    }
+                }
+            }
+            "!" => {
+                // The `!` operand is `x` or `[x]`; reuse the shared single-operand extraction.
+                let inner = first_operand(arg);
+                let child = compile(&inner, interner);
+                if contains_address_set(&child) {
+                    return CompiledCondition::Not(Box::new(child));
+                }
+            }
+            _ => {}
+        }
+    }
+    CompiledCondition::Raw(expr.clone())
+}
+
+/// Whether a compiled subtree contains at least one accelerable membership node. A boolean
+/// combinator is specialized only when doing so can actually reach such a node; otherwise it stays
+/// a `Raw` leaf, which also preserves the falsy result of an empty `and`/`or`.
+fn contains_address_set(c: &CompiledCondition) -> bool {
+    match c {
+        CompiledCondition::AddressSetIn { .. } => true,
+        CompiledCondition::And(xs) | CompiledCondition::Or(xs) => {
+            xs.iter().any(contains_address_set)
+        }
+        CompiledCondition::Not(x) => contains_address_set(x),
+        CompiledCondition::Raw(_) => false,
+    }
+}
+
+/// Evaluates a compiled condition to a boolean, mirroring [`truthy`] exactly. `Raw` defers to the
+/// raw-value evaluator; the specialized arms combine truthiness the same way the raw evaluator does
+/// for non-empty operand lists.
+pub(crate) fn eval_compiled(node: &CompiledCondition, b: &Bindings) -> bool {
+    match node {
+        CompiledCondition::Raw(v) => truthy(v, b),
+        CompiledCondition::AddressSetIn { needle, set, orig } => match eval(needle, b) {
+            Value::String(s) => match Address::from_str(&s) {
+                Ok(addr) => set.contains(&addr),
+                Err(_) => truthy(orig, b),
+            },
+            _ => truthy(orig, b),
+        },
+        CompiledCondition::And(xs) => xs.iter().all(|x| eval_compiled(x, b)),
+        CompiledCondition::Or(xs) => xs.iter().any(|x| eval_compiled(x, b)),
+        CompiledCondition::Not(x) => !eval_compiled(x, b),
+    }
 }
 
 /// Validates the supported JSONLogic subset and operator arity at rule-load time.
@@ -234,6 +363,174 @@ mod tests {
 
     fn binds(pairs: &[(&str, Value)]) -> Bindings {
         pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+    }
+
+    #[test]
+    fn compiled_matches_truthy_for_all_shapes() {
+        let mut interner = AddressSetInterner::new();
+        let a = "0x0101010101010101010101010101010101010101";
+        let b = "0x0202020202020202020202020202020202020202";
+        let conds = [
+            json!({"in": [{"var": "origin"}, [a, b]]}),
+            json!({"in": [{"var": "origin"}, "0xdead"]}), // substring
+            json!({"==": [{"var": "origin"}, a]}),
+            json!({"and": [{"in": [{"var": "origin"}, [a]]}, {"==": [{"var": "x"}, 1]}]}),
+            json!({"or":  [{"in": [{"var": "origin"}, [a]]}, {"==": [{"var": "x"}, 1]}]}),
+            json!({"!": {"in": [{"var": "origin"}, [a]]}}),
+            json!({"and": []}),
+            json!({"or":  []}),
+        ];
+        let binding_sets = [
+            binds(&[("origin", json!(a))]),
+            binds(&[("origin", json!(b))]),
+            binds(&[("origin", json!("0xdeadbeef")), ("x", json!(1))]),
+            Bindings::new(),
+        ];
+        for cond in &conds {
+            assert!(validate(cond).is_ok());
+            let compiled = compile(cond, &mut interner);
+            for bset in &binding_sets {
+                assert_eq!(eval_compiled(&compiled, bset), truthy(cond, bset), "cond={cond}");
+            }
+        }
+    }
+
+    const A: &str = "0x0101010101010101010101010101010101010101";
+    const B: &str = "0x0202020202020202020202020202020202020202";
+
+    #[test]
+    fn recognizes_only_static_all_address_arrays() {
+        let mut i = AddressSetInterner::new();
+        assert!(matches!(
+            compile(&json!({"in": [{"var":"origin"}, [A, B]]}), &mut i),
+            CompiledCondition::AddressSetIn { .. }
+        ));
+        // non-accelerable → Raw
+        for cond in [
+            json!({"in": [{"var":"origin"}, [A, 1]]}), // mixed
+            json!({"in": [{"var":"origin"}, [A, "not-an-address"]]}), // bad element
+            json!({"in": [{"var":"origin"}, []]}),     // empty
+            json!({"in": [{"var":"origin"}, {"var":"list"}]}), // dynamic RHS
+            json!({"in": [{"var":"origin"}, "0xdead"]}), // substring
+            json!({"in": [1, [1, 2]]}),                // numeric array
+        ] {
+            assert!(matches!(compile(&cond, &mut i), CompiledCondition::Raw(_)), "cond={cond}");
+        }
+    }
+
+    #[test]
+    fn fast_path_hit_miss_case_and_duplicates_match_linear() {
+        let mut i = AddressSetInterner::new();
+        // checksummed + lowercase + duplicate entries in the list
+        let cond = json!({"in": [{"var":"origin"}, ["0x52908400098527886E0F7030069857D2E4169EE7",
+                                                     "0x52908400098527886e0f7030069857d2e4169ee7", B]]});
+        let compiled = compile(&cond, &mut i);
+        for probe in [json!("0x52908400098527886e0f7030069857d2e4169ee7"), json!(B), json!(A)] {
+            let bset = binds(&[("origin", probe.clone())]);
+            assert_eq!(eval_compiled(&compiled, &bset), truthy(&cond, &bset), "probe={probe}");
+        }
+    }
+
+    #[test]
+    fn non_address_needle_falls_back_to_linear() {
+        let mut i = AddressSetInterner::new();
+        let cond = json!({"in": [{"var":"origin"}, [A, B]]});
+        let compiled = compile(&cond, &mut i);
+        for probe in [Value::Null, json!(123), json!("not-an-address")] {
+            let bset = binds(&[("origin", probe.clone())]);
+            assert_eq!(eval_compiled(&compiled, &bset), truthy(&cond, &bset), "probe={probe}");
+        }
+        // missing var → null needle
+        assert_eq!(eval_compiled(&compiled, &Bindings::new()), truthy(&cond, &Bindings::new()));
+    }
+
+    #[test]
+    fn identical_normalized_lists_share_one_arc() {
+        let mut i = AddressSetInterner::new();
+        // same set, different order + case + a duplicate
+        let c1 = compile(&json!({"in": [{"var":"origin"}, [A, B]]}), &mut i);
+        let c2 = compile(&json!({"in": [{"var":"origin"}, [B, A, A]]}), &mut i);
+        let c3 = compile(&json!({"in": [{"var":"origin"}, [A]]}), &mut i); // different set
+        let get = |c: &CompiledCondition| match c {
+            CompiledCondition::AddressSetIn { set, .. } => set.clone(),
+            _ => panic!("expected AddressSetIn"),
+        };
+        assert!(Arc::ptr_eq(&get(&c1), &get(&c2)));
+        assert!(!Arc::ptr_eq(&get(&c1), &get(&c3)));
+    }
+
+    #[test]
+    fn combinators_with_accelerable_child_are_specialized_and_exact() {
+        let mut i = AddressSetInterner::new();
+        let a = A;
+        for cond in [
+            json!({"and": [{"in": [{"var":"origin"}, [a]]}, {"==": [{"var":"x"}, 1]}]}),
+            json!({"or":  [{"==": [{"var":"x"}, 1]}, {"in": [{"var":"origin"}, [a]]}]}),
+            json!({"!": {"in": [{"var":"origin"}, [a]]}}),
+        ] {
+            let compiled = compile(&cond, &mut i);
+            assert!(!matches!(compiled, CompiledCondition::Raw(_)), "should specialize: {cond}");
+            assert!(contains_address_set(&compiled));
+            for bset in [
+                binds(&[("origin", json!(a)), ("x", json!(1))]),
+                binds(&[("origin", json!(B)), ("x", json!(2))]),
+                Bindings::new(),
+            ] {
+                assert_eq!(eval_compiled(&compiled, &bset), truthy(&cond, &bset), "cond={cond}");
+            }
+        }
+    }
+
+    #[test]
+    fn empty_and_or_and_non_accelerable_combinators_stay_raw_and_false() {
+        let mut i = AddressSetInterner::new();
+        for cond in [json!({"and": []}), json!({"or": []})] {
+            let compiled = compile(&cond, &mut i);
+            assert!(
+                matches!(compiled, CompiledCondition::Raw(_)),
+                "empty combinator must stay Raw: {cond}"
+            );
+            assert!(!eval_compiled(&compiled, &Bindings::new())); // false, matches eval→Null
+        }
+        // combinator with no accelerable child stays Raw
+        let cond = json!({"and": [{"==": [{"var":"x"}, 1]}, {"==": [{"var":"y"}, 2]}]});
+        assert!(matches!(compile(&cond, &mut i), CompiledCondition::Raw(_)));
+    }
+
+    // Negative boundary: a static all-address `in` reached through a NON-boolean operator must
+    // never be lifted to `AddressSetIn`. `compile` recurses only into `and`/`or`/`!` (plus the
+    // top-level `in`), so any other parent falls through to the single `Raw` catch-all and the
+    // whole node stays `Raw`, evaluated verbatim by the linear evaluator. This test locks that
+    // scope so a future change cannot silently widen acceleration under a non-boolean operator.
+    #[test]
+    fn in_under_non_boolean_operator_stays_raw_and_matches_linear() {
+        let mut i = AddressSetInterner::new();
+        let a = A;
+        let b = B;
+        // Each condition embeds a static all-address `in` under a non-boolean parent.
+        let conds = [
+            json!({"==": [{"in": [{"var":"origin"}, [a, b]]}, true]}), // `in` as an `==` operand
+            json!({"var": ["x", {"in": [{"var":"origin"}, [a, b]]}]}), // `in` inside a `var` default
+            json!({">":  [{"in": [{"var":"origin"}, [a, b]]}, 0]}), // `in` inside a numeric compare
+        ];
+        let bindings = [
+            binds(&[("origin", json!(a))]),      // hit (listed)
+            binds(&[("origin", json!(b))]),      // listed
+            binds(&[("origin", json!("nope"))]), // non-address needle
+            Bindings::new(),                     // missing var → null needle
+        ];
+        let miss = binds(&[("origin", json!("0x0303030303030303030303030303030303030303"))]);
+        for cond in &conds {
+            assert!(validate(cond).is_ok(), "cond must validate: {cond}");
+            let compiled = compile(cond, &mut i);
+            // (a) overall Raw — the `in` was not specialized anywhere in the tree
+            assert!(matches!(compiled, CompiledCondition::Raw(_)), "must stay overall Raw: {cond}");
+            assert!(!contains_address_set(&compiled), "no AddressSetIn may appear: {cond}");
+            // (b) truthiness-exact vs the linear evaluator across the required bindings
+            for bset in bindings.iter().chain(std::iter::once(&miss)) {
+                assert_eq!(eval_compiled(&compiled, bset), truthy(cond, bset), "cond={cond}");
+            }
+        }
     }
 
     #[test]

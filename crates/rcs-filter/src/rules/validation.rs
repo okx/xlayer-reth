@@ -10,6 +10,7 @@ use alloy_dyn_abi::DynSolType;
 use alloy_primitives::{keccak256, Address};
 use tracing::warn;
 
+use super::jsonlogic::{compile, AddressSetInterner};
 use super::model::{
     Action, CompiledEvent, CompiledInput, CompiledRule, EventAbi, RawRule, RejectedRule, RuleSet,
     TimeoutAction,
@@ -35,6 +36,8 @@ pub fn load_rules(protocol_version: u32, content_version: u64, raw: Vec<RawRule>
 
     let mut rules = Vec::new();
     let mut rejected = Vec::new();
+    // One interner per batch so identical normalized address lists across rules share one `Arc`.
+    let mut interner = AddressSetInterner::new();
     for rule in raw {
         let id = rule.id.clone();
         if id_counts.get(&id).copied().unwrap_or_default() > 1 {
@@ -43,7 +46,7 @@ pub fn load_rules(protocol_version: u32, content_version: u64, raw: Vec<RawRule>
             rejected.push(RejectedRule { id, reason });
             continue;
         }
-        match compile_rule(rule) {
+        match compile_rule_with_interner(rule, &mut interner) {
             Ok(compiled) => rules.push(compiled),
             Err(reason) => {
                 warn!(target: "rcs_filter", rule_id = %id, %reason, "rule rejected during load");
@@ -69,10 +72,20 @@ pub fn load_rules(protocol_version: u32, content_version: u64, raw: Vec<RawRule>
     RuleSet { protocol_version, content_version, rules, index, anonymous_index, rejected }
 }
 
-/// Validates and compiles a single raw rule. Returns `Err(reason)` when the rule must be
-/// rejected, `Ok` otherwise. `audit_timeout_action` defaults to `allow` for `audit` rules that
-/// omit it.
+/// Validates and compiles a single raw rule with a fresh single-use interner. This is the
+/// preserved public entry point; batch callers share address sets via
+/// [`compile_rule_with_interner`].
 pub fn compile_rule(raw: RawRule) -> std::result::Result<CompiledRule, String> {
+    compile_rule_with_interner(raw, &mut AddressSetInterner::new())
+}
+
+/// Validates and compiles a single raw rule, interning any static address-membership set through
+/// `interner`. Returns `Err(reason)` when the rule must be rejected, `Ok` otherwise.
+/// `audit_timeout_action` defaults to `allow` for `audit` rules that omit it.
+pub(crate) fn compile_rule_with_interner(
+    raw: RawRule,
+    interner: &mut AddressSetInterner,
+) -> std::result::Result<CompiledRule, String> {
     // Reject an empty event_abis map because the rule could never match.
     if raw.event_abis.is_empty() {
         return Err("event_abis is empty".to_string());
@@ -122,6 +135,9 @@ pub fn compile_rule(raw: RawRule) -> std::result::Result<CompiledRule, String> {
     // An audit rule without audit_timeout_action defaults to allow.
     let audit_timeout_action = raw.audit_timeout_action.unwrap_or(TimeoutAction::Allow);
 
+    // Compile the condition before `raw.condition` is moved into the struct literal below.
+    let compiled_condition = compile(&raw.condition, interner);
+
     Ok(CompiledRule {
         id: raw.id,
         contract_address,
@@ -131,6 +147,7 @@ pub fn compile_rule(raw: RawRule) -> std::result::Result<CompiledRule, String> {
         condition: raw.condition,
         action: raw.action,
         audit_timeout_action,
+        compiled_condition,
     })
 }
 
@@ -203,11 +220,55 @@ fn parse_opt_address(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rules::Action;
+    use crate::rules::{Action, CompiledCondition};
     use crate::test_support::golden;
+    use serde_json::{json, Value};
 
     fn parse(json: &str) -> RawRule {
         serde_json::from_str(json).expect("valid rule json")
+    }
+
+    /// Minimal single-event `deny` rule carrying the given condition, for exercising
+    /// condition compilation and cross-rule set interning.
+    fn deny_rule_with_condition(id: &str, condition: Value) -> RawRule {
+        serde_json::from_value(json!({
+            "id": id,
+            "event_abis": {
+                "e": {
+                    "type": "event",
+                    "name": "E",
+                    "inputs": [{"name": "a", "type": "address", "indexed": false}],
+                    "anonymous": false
+                }
+            },
+            "condition": condition,
+            "action": "deny"
+        }))
+        .expect("valid rule")
+    }
+
+    #[test]
+    fn load_rules_shares_arc_across_rules_and_standalone_compiles() {
+        // two rules, same static address list (different order) → one shared Arc
+        let a = "0x0101010101010101010101010101010101010101";
+        let b = "0x0202020202020202020202020202020202020202";
+        let raw = vec![
+            deny_rule_with_condition("r1", json!({"in": [{"var":"origin"}, [a, b]]})),
+            deny_rule_with_condition("r2", json!({"in": [{"var":"origin"}, [b, a]]})),
+        ];
+        let set = load_rules(1, 1, raw);
+        assert_eq!(set.rules.len(), 2);
+        let arc_of = |r: &CompiledRule| match &r.compiled_condition {
+            CompiledCondition::AddressSetIn { set, .. } => set.clone(),
+            other => panic!("expected AddressSetIn, got {other:?}"),
+        };
+        assert!(std::sync::Arc::ptr_eq(&arc_of(&set.rules[0]), &arc_of(&set.rules[1])));
+
+        // standalone compile_rule (fresh interner) still succeeds
+        let standalone =
+            compile_rule(deny_rule_with_condition("r3", json!({"in": [{"var":"origin"}, [a]]})))
+                .unwrap();
+        assert!(matches!(standalone.compiled_condition, CompiledCondition::AddressSetIn { .. }));
     }
 
     #[test]

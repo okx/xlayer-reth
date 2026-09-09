@@ -42,10 +42,10 @@ func newXLayerRCS(gt *testing.T) (devtest.T, *presets.XLayer, *MockRCS) {
 	opts := []presets.Option{
 		presets.WithLocalContractSourcesAt(cfg.ForgeArtifactsDir()),
 		// Enable the RCS filter and point it at the mock. Uses the same node-flag path as the
-		// gasless/rpc suites, so deps/optimism is untouched. `--rcs-filter.enabled` is a bool
-		// arg with an explicit default, so it must carry a value (`=true`).
+		// gasless/rpc suites, so deps/optimism is untouched. `--rcs-filter.enabled` is a boolean
+		// flag, so it is passed as a bare switch.
 		presets.WithOpRethOption(sysgo.OpRethWithExtraArgs(
-			"--rcs-filter.enabled=true",
+			"--rcs-filter.enabled",
 			"--rcs-filter.rcs-base-url="+mock.URL(),
 		)),
 	}

@@ -1,7 +1,8 @@
 //! Rule data model: raw (wire) shapes deserialized from RCS, and compiled shapes used by
 //! the matching hot path.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use alloy_dyn_abi::DynSolType;
 use alloy_primitives::{Address, B256};
@@ -108,6 +109,28 @@ pub struct CompiledEvent {
     pub topic0: B256,
 }
 
+/// A condition compiled once at rule load and evaluated on the matching hot path in place of
+/// walking the raw JSONLogic value. The tree is a hybrid: it specializes only the boolean
+/// combinators needed to reach an accelerable membership node plus the fast membership node
+/// itself; every other subtree is stored verbatim as [`CompiledCondition::Raw`] and evaluated by
+/// the existing raw-value evaluator, so non-specialized operators keep byte-for-byte semantics.
+#[derive(Debug, Clone)]
+pub enum CompiledCondition {
+    /// Static all-address `in` membership resolved to an O(1) set lookup. `orig` is the original
+    /// `{"in":[needle, [..]]}` value, retained for an exact linear fallback when the needle is not
+    /// a parseable address.
+    AddressSetIn {
+        needle: serde_json::Value,
+        set: Arc<HashSet<Address>>,
+        orig: serde_json::Value,
+    },
+    And(Vec<CompiledCondition>),
+    Or(Vec<CompiledCondition>),
+    Not(Box<CompiledCondition>),
+    /// Any other node — evaluated by the existing raw-value evaluator, unchanged.
+    Raw(serde_json::Value),
+}
+
 /// A rule that passed load validation and is ready for matching.
 #[derive(Debug, Clone)]
 pub struct CompiledRule {
@@ -120,6 +143,8 @@ pub struct CompiledRule {
     pub action: Action,
     /// Always resolved (defaults to `allow` when omitted for an `audit` rule).
     pub audit_timeout_action: TimeoutAction,
+    /// Compiled form of `condition`, evaluated on the matching hot path.
+    pub compiled_condition: CompiledCondition,
 }
 
 /// One rule dropped during [`super::load_rules`] (per-rule id + why it failed), surfaced
