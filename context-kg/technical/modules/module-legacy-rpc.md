@@ -20,7 +20,13 @@ Core routing logic implementing `RpcServiceT`:
 
 2. **`need_parse_block()`** — Methods requiring block parameter extraction for routing decisions
 
-3. **`need_try_local_then_legacy()`** — Methods to try local first, fall back to legacy: `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `debug_traceTransaction`
+2b. **Debug trace methods** — `debug_traceBlockByNumber`, `debug_traceBlockByHash`, `debug_traceTransaction`, `debug_traceCall` route deterministically by the target block's height vs. the cutoff (NOT try-local-then-legacy):
+   - `debug_traceBlockByNumber`: block number/tag at `params[0]`
+   - `debug_traceCall`: block number/tag at `params[1]` (absent ⇒ local)
+   - `debug_traceBlockByHash`: block hash at `params[0]`, resolved to a height locally, then compared
+   - `debug_traceTransaction`: the transaction's containing-block height (resolved locally via `eth_getTransactionByHash` → `blockNumber`), then compared — routes to legacy directly for historical txs, NOT conditioned on local trace success
+
+3. **`need_try_local_then_legacy()`** — Methods to try local first, fall back to legacy: `eth_getTransactionByHash`, `eth_getTransactionReceipt` (and the eth_* by-hash family). `debug_traceTransaction` is NO LONGER in this set — it uses the deterministic height-based handler above.
 
 **Routing Logic**:
 - Parse block parameter → determine if below cutoff → route to legacy or local
@@ -45,6 +51,6 @@ Core routing logic implementing `RpcServiceT`:
 ## Key Design Points
 
 1. **Cutoff = genesis block**: The cutoff block is the genesis block number of the X Layer chain. All blocks before it belong to the legacy chain.
-2. **Tag routing**: `latest`/`pending`/`safe`/`finalized` are NEVER routed to legacy. `earliest` is ALWAYS routed to legacy.
+2. **Tag routing**: For `eth_*` methods, `latest`/`pending`/`safe`/`finalized` are NEVER routed to legacy, and `earliest` IS routed to legacy (via `parse_block_param`, which maps `earliest`→`"0"`). For the four `debug` trace methods, ALL FIVE special tags — `latest`/`pending`/`safe`/`finalized`/**`earliest`** — are served LOCALLY, via a debug-only `is_special_block_tag` pre-check performed before any height comparison. This debug-vs-eth_* divergence on `earliest` is intentional (XLOP-1206): `parse_block_param` is NOT modified, so the eth_* `earliest`→legacy semantics are preserved.
 3. **Security**: All block hash inputs are validated via `is_valid_32_bytes_string()` before use in string interpolation to prevent JSON injection attacks.
 4. **Batch support**: The service handles batch requests by processing each request individually with the same routing logic.
