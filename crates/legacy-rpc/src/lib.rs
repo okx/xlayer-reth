@@ -170,6 +170,58 @@ impl<S> LegacyRpcRouterService<S> {
 
         Ok(txhash)
     }
+
+    /// Resolves the block height that contains the given transaction via the
+    /// local `eth_getTransactionByHash`, reading `result.blockNumber`.
+    ///
+    /// Used by `debug_traceTransaction` routing to compare the transaction's
+    /// block against the cutoff. Returns:
+    /// - `Ok(Some(height))` when the transaction is found with a numeric `blockNumber`
+    /// - `Ok(None)` when the transaction is not found locally (`result` is `null`)
+    /// - `Err(_)` when the hash is invalid, the response is unparseable, or a found
+    ///   transaction has a missing/non-numeric `blockNumber` (e.g. pending tx)
+    ///
+    /// The hash is validated with `is_valid_32_bytes_string` before interpolation
+    /// to prevent JSON injection.
+    pub async fn get_transaction_block_number(&self, hash: &str) -> Result<Option<u64>, String>
+    where
+        S: RpcServiceT<MethodResponse = MethodResponse> + Send + Sync + Clone + 'static,
+    {
+        // Validate the tx hash before using it to prevent JSON injection.
+        if !is_valid_32_bytes_string(hash) {
+            return Err(format!("Invalid tx hash format: {hash}"));
+        }
+
+        // Safe now that the hash is validated to contain only 0x + hex.
+        let params_str = format!(r#"["{hash}"]"#);
+        let method = "eth_getTransactionByHash";
+        let params_raw = RawValue::from_string(params_str)
+            .map_err(|e| format!("Failed to create JSON params: {e}"))?;
+        let id = Id::Number(1);
+
+        let request = Request::owned(method.into(), Some(params_raw), id);
+        let res = self.inner.call(request).await;
+
+        let response = serde_json::from_str::<serde_json::Value>(res.as_json().get())
+            .map_err(|e| e.to_string())?;
+
+        match response.get("result") {
+            // Transaction not found locally.
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(result) => {
+                let block_num = result
+                    .get("blockNumber")
+                    .and_then(|n| n.as_str())
+                    .and_then(|hex| u64::from_str_radix(hex.trim_start_matches("0x"), 16).ok());
+                match block_num {
+                    Some(n) => Ok(Some(n)),
+                    // Found but no numeric blockNumber (e.g. pending tx): treat as
+                    // a local/internal condition so the request stays local.
+                    None => Err("Missing or invalid blockNumber in transaction".to_string()),
+                }
+            }
+        }
+    }
 }
 
 /// Validates that a string is a valid 32-byte hexadecimal string (block hash or similar).

@@ -47,6 +47,8 @@ Response returned to user
 
 ## Routing Rules
 
+For `eth_*` methods:
+
 | Block Parameter | Routing |
 |-----------------|---------|
 | `"latest"`, `"pending"`, `"safe"`, `"finalized"` | Local |
@@ -54,6 +56,24 @@ Response returned to user
 | Hex number < cutoff | Legacy |
 | Hex number >= cutoff | Local |
 | Block hash | Resolve to number first via `eth_getBlockByHash`, then route by number |
+
+### Debug Trace Methods (`debug_traceBlockByNumber` / `debug_traceBlockByHash` / `debug_traceTransaction` / `debug_traceCall`)
+
+Routed deterministically by the target block's height vs. the cutoff, with one
+intentional divergence from the `eth_*` rules above — for these four methods the
+`earliest` tag routes to **Local** (XLOP-1206):
+
+| Block Parameter | Routing |
+|-----------------|---------|
+| `"latest"`, `"pending"`, `"safe"`, `"finalized"`, `"earliest"` (all five tags) | Local (debug `is_special_block_tag` pre-check, before height comparison) |
+| Hex number < cutoff | Legacy |
+| Hex number >= cutoff | Local |
+| `debug_traceBlockByHash` block hash | Resolve to height via `eth_getBlockByHash`; < cutoff → Legacy, >= cutoff → Local, not found → Legacy, invalid/error → Local |
+| `debug_traceTransaction` tx hash | Resolve tx's block height via `eth_getTransactionByHash` → `blockNumber`; < cutoff → Legacy (directly, no local trace), >= cutoff → Local, tx not found → Legacy, invalid/error → Local |
+| `debug_traceCall` block param absent | Local |
+
+The debug path does NOT modify `parse_block_param`; the eth_* `earliest`→Legacy
+semantics are preserved.
 
 ## Hybrid eth_getLogs
 

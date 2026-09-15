@@ -70,8 +70,15 @@ eth_getStorageAt              eth_call
 eth_getTransactionCount       eth_getProof
 eth_getBlockReceipts          eth_getLogs
 debug_traceBlockByNumber      debug_traceBlockByHash
-debug_traceTransaction
+debug_traceTransaction        debug_traceCall
 ```
+
+The four `debug` trace methods (`debug_traceBlockByNumber`, `debug_traceBlockByHash`,
+`debug_traceTransaction`, `debug_traceCall`) route deterministically by the target
+block's height vs. the cutoff. For these methods all five special block tags
+(`latest`/`pending`/`safe`/`finalized`/`earliest`) are served locally — note this
+diverges from the `eth_*` methods, where `earliest` is routed to legacy. See
+`core-flows/legacy-rpc-routing-flow.md` for the full per-method rules.
 
 ## Response Format
 

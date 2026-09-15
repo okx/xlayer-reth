@@ -163,6 +163,24 @@ Below are the XLayer-specific configuration options:
 --rpc.legacy-timeout <DUR>           # Timeout for legacy RPC requests (default: 30s)
 ```
 
+When `--rpc.legacy-url` is set, requests whose target block is below the cutoff
+(the chain's genesis height) are forwarded to the legacy endpoint; everything at
+or after the cutoff is served locally. In addition to the `eth_*` methods, the
+following four `debug` trace methods are routed by the cutoff:
+
+- `debug_traceBlockByNumber` — by the block number in `params[0]`
+- `debug_traceBlockByHash` — the block hash is resolved to a height locally, then compared
+- `debug_traceTransaction` — the transaction's block height is resolved locally, then compared
+- `debug_traceCall` — by the block number/tag in `params[1]` (absent ⇒ local)
+
+For these four `debug` methods, all five special block tags —
+`latest`, `pending`, `safe`, `finalized`, and `earliest` — are served **locally**.
+Note this differs from the `eth_*` methods, where `earliest` is routed to the
+legacy endpoint (the local node has no pre-genesis data). A request already
+routed to the legacy endpoint returns its error/timeout directly to the client
+with no local retry. If `--rpc.legacy-url` is unset, all four methods are served
+locally unchanged.
+
 ## Development
 
 ### Development Commands
