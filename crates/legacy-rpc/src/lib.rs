@@ -48,36 +48,16 @@ impl<S> LegacyRpcRouterService<S> {
         });
 
         match self.client.post(&self.config.legacy_endpoint).json(&body).send().await {
-            Ok(response) => match response.json::<serde_json::Value>().await {
-                Ok(json) => {
-                    if let Some(result) = json.get("result") {
-                        let payload = jsonrpsee_types::ResponsePayload::success(result).into();
-                        MethodResponse::response(request_id, payload, usize::MAX)
-                    } else if let Some(error) = json.get("error") {
-                        let code = error
-                            .get("code")
-                            .and_then(|c| c.as_i64())
-                            .unwrap_or(CALL_EXECUTION_FAILED_CODE as i64)
-                            as i32;
-                        let message = error
-                            .get("message")
-                            .and_then(|m| m.as_str())
-                            .unwrap_or("Legacy RPC error");
-                        MethodResponse::error(
-                            request_id,
-                            ErrorObject::owned(code, message, None::<()>),
-                        )
-                    } else {
-                        MethodResponse::error(
-                            request_id,
-                            ErrorObject::owned(
-                                INTERNAL_ERROR_CODE,
-                                "Invalid legacy response",
-                                None::<()>,
-                            ),
-                        )
-                    }
-                }
+            // Read the body as raw bytes and hand it to `build_legacy_response`,
+            // which captures the legacy `result`/`error` without walking the
+            // response's nested structure. Decoding the full body into a
+            // `serde_json::Value` here would cap nesting at the parser's default
+            // recursion limit and reject deep-but-valid results; forwarding the
+            // raw value avoids that limit and any recursion over response depth.
+            Ok(response) => match response.bytes().await {
+                Ok(bytes) => build_legacy_response(request_id, &bytes),
+                // Failure to read the response body is treated as a legacy parse
+                // failure, preserving the existing INTERNAL_ERROR contract.
                 Err(e) => MethodResponse::error(
                     request_id,
                     ErrorObject::owned(
@@ -221,6 +201,53 @@ impl<S> LegacyRpcRouterService<S> {
                 }
             }
         }
+    }
+}
+
+/// Builds the JSON-RPC response returned to the caller from a raw legacy RPC
+/// response body, reusing the caller's original request id.
+///
+/// The body's top-level fields are captured as unparsed [`RawValue`]s: serde_json
+/// scans a `RawValue` iteratively rather than materializing the nested value, so a
+/// legacy `result` of arbitrary depth is forwarded byte-for-byte without being
+/// bounded by the deserializer's nesting limit and without recursing over
+/// attacker-influenced response depth. A present-but-null `result` is retained
+/// because its map key still exists.
+///
+/// Error contract is preserved: a standard JSON-RPC error passes through its
+/// original `code`/`message`; a body carrying neither `result` nor `error`, and a
+/// body that is not valid JSON, both map to `INTERNAL_ERROR_CODE`.
+fn build_legacy_response(request_id: Id<'_>, body: &[u8]) -> MethodResponse {
+    match serde_json::from_slice::<std::collections::HashMap<String, Box<RawValue>>>(body) {
+        Ok(fields) => {
+            if let Some(result) = fields.get("result") {
+                // Forward the legacy result verbatim; serializing a RawValue emits
+                // its stored text directly, so deep results are not re-walked.
+                let payload = jsonrpsee_types::ResponsePayload::success(&**result).into();
+                MethodResponse::response(request_id, payload, usize::MAX)
+            } else if let Some(error) = fields.get("error") {
+                // Error objects are shallow; read code/message from the captured
+                // fragment to preserve passthrough of the legacy error.
+                let error: serde_json::Value =
+                    serde_json::from_str(error.get()).unwrap_or(serde_json::Value::Null);
+                let code = error
+                    .get("code")
+                    .and_then(|c| c.as_i64())
+                    .unwrap_or(CALL_EXECUTION_FAILED_CODE as i64) as i32;
+                let message =
+                    error.get("message").and_then(|m| m.as_str()).unwrap_or("Legacy RPC error");
+                MethodResponse::error(request_id, ErrorObject::owned(code, message, None::<()>))
+            } else {
+                MethodResponse::error(
+                    request_id,
+                    ErrorObject::owned(INTERNAL_ERROR_CODE, "Invalid legacy response", None::<()>),
+                )
+            }
+        }
+        Err(e) => MethodResponse::error(
+            request_id,
+            ErrorObject::owned(INTERNAL_ERROR_CODE, format!("Legacy parse error: {e}"), None::<()>),
+        ),
     }
 }
 
@@ -583,5 +610,149 @@ mod tests {
         // This should succeed but return None because the hex parsing fails
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
+    }
+
+    // ---- build_legacy_response: deep + contract-preserving forwarding -------
+
+    /// Builds a JSON-RPC response body whose `result` is `depth` levels of nested
+    /// single-key objects wrapping `leaf`. Assembled iteratively so the test
+    /// harness itself never recurses over the depth under test.
+    fn deep_object_body(id: u64, depth: usize, leaf: &str) -> String {
+        let mut body = format!(r#"{{"jsonrpc":"2.0","id":{id},"result":"#);
+        for _ in 0..depth {
+            body.push_str(r#"{"a":"#);
+        }
+        body.push_str(leaf);
+        for _ in 0..depth {
+            body.push('}');
+        }
+        body.push('}');
+        body
+    }
+
+    /// Same as [`deep_object_body`] but nests arrays instead of objects.
+    fn deep_array_body(id: u64, depth: usize, leaf: &str) -> String {
+        let mut body = format!(r#"{{"jsonrpc":"2.0","id":{id},"result":"#);
+        for _ in 0..depth {
+            body.push('[');
+        }
+        body.push_str(leaf);
+        for _ in 0..depth {
+            body.push(']');
+        }
+        body.push('}');
+        body
+    }
+
+    /// The reported failure reproduces around 550 levels; exceed it in tests.
+    const DEEP: usize = 600;
+
+    #[test]
+    fn deep_object_result_forwarded_without_parse_error() {
+        // Legacy body id differs from the caller's id to prove the response is
+        // rebuilt with the caller's request id, not the legacy body's id.
+        let body = deep_object_body(1, DEEP, r#""DEEP_LEAF_MARKER""#);
+        let resp = build_legacy_response(Id::Number(42), body.as_bytes());
+
+        assert!(resp.is_success(), "deep valid object result must be a success response");
+        let json = resp.as_json().get();
+        assert!(!json.contains("Legacy parse error"), "deep-but-valid JSON is not a parse error");
+        // The innermost value survives -> the entire nested structure was forwarded.
+        assert!(json.contains("DEEP_LEAF_MARKER"), "innermost value must be forwarded verbatim");
+        // Response carries the caller's original request id.
+        assert!(json.contains(r#""id":42"#), "response id must equal the caller's request id");
+    }
+
+    #[test]
+    fn deep_array_result_forwarded_without_parse_error() {
+        let body = deep_array_body(1, DEEP, r#""ARRAY_LEAF_MARKER""#);
+        let resp = build_legacy_response(Id::Number(1), body.as_bytes());
+
+        assert!(resp.is_success(), "deep valid array result must be a success response");
+        let json = resp.as_json().get();
+        assert!(!json.contains("Legacy parse error"));
+        assert!(json.contains("ARRAY_LEAF_MARKER"));
+    }
+
+    #[test]
+    fn shallow_object_result_round_trips() {
+        // Shallow results stay compatible with pre-fix behavior.
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":{"number":"0xf4240","hash":"0xabc"}}"#;
+        let resp = build_legacy_response(Id::Number(1), body.as_bytes());
+
+        assert!(resp.is_success());
+        let v: serde_json::Value = serde_json::from_str(resp.as_json().get()).unwrap();
+        assert_eq!(v["result"]["number"], serde_json::json!("0xf4240"));
+        assert_eq!(v["result"]["hash"], serde_json::json!("0xabc"));
+    }
+
+    #[test]
+    fn null_result_is_forwarded_as_null() {
+        // A present-but-null result must forward as null, not be mistaken for a
+        // response lacking `result`.
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":null}"#;
+        let resp = build_legacy_response(Id::Number(1), body.as_bytes());
+
+        assert!(resp.is_success(), "null result must be a success response");
+        let v: serde_json::Value = serde_json::from_str(resp.as_json().get()).unwrap();
+        assert!(v.get("result").is_some(), "result field must be present");
+        assert!(v["result"].is_null(), "result must remain null");
+    }
+
+    #[test]
+    fn scalar_results_preserve_type_and_value() {
+        let cases = [
+            ("true", serde_json::json!(true)),
+            ("12345", serde_json::json!(12345)),
+            (r#""hello""#, serde_json::json!("hello")),
+        ];
+        for (raw, expected) in cases {
+            let body = format!(r#"{{"jsonrpc":"2.0","id":1,"result":{raw}}}"#);
+            let resp = build_legacy_response(Id::Number(1), body.as_bytes());
+
+            assert!(resp.is_success(), "scalar result {raw} must be a success");
+            let v: serde_json::Value = serde_json::from_str(resp.as_json().get()).unwrap();
+            assert_eq!(v["result"], expected, "scalar {raw} must round-trip by type and value");
+        }
+    }
+
+    #[test]
+    fn legacy_error_is_passed_through() {
+        let body =
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"execution reverted"}}"#;
+        let resp = build_legacy_response(Id::Number(1), body.as_bytes());
+
+        assert!(resp.is_error(), "legacy error must remain an error response");
+        let v: serde_json::Value = serde_json::from_str(resp.as_json().get()).unwrap();
+        assert_eq!(v["error"]["code"], serde_json::json!(-32000), "error code must pass through");
+        assert_eq!(
+            v["error"]["message"],
+            serde_json::json!("execution reverted"),
+            "error message must pass through"
+        );
+    }
+
+    #[test]
+    fn malformed_body_maps_to_internal_error() {
+        let resp = build_legacy_response(Id::Number(1), b"{ not valid json ");
+
+        assert!(resp.is_error(), "malformed body must be an error, service stays up");
+        let v: serde_json::Value = serde_json::from_str(resp.as_json().get()).unwrap();
+        assert_eq!(v["error"]["code"], serde_json::json!(-32603));
+        assert!(
+            v["error"]["message"].as_str().unwrap().contains("Legacy parse error"),
+            "malformed body must report a legacy parse failure"
+        );
+    }
+
+    #[test]
+    fn response_without_result_or_error_maps_to_invalid() {
+        let body = r#"{"jsonrpc":"2.0","id":1}"#;
+        let resp = build_legacy_response(Id::Number(1), body.as_bytes());
+
+        assert!(resp.is_error());
+        let v: serde_json::Value = serde_json::from_str(resp.as_json().get()).unwrap();
+        assert_eq!(v["error"]["code"], serde_json::json!(-32603));
+        assert_eq!(v["error"]["message"], serde_json::json!("Invalid legacy response"));
     }
 }
