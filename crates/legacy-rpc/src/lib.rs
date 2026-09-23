@@ -207,8 +207,9 @@ impl<S> LegacyRpcRouterService<S> {
 /// Builds the JSON-RPC response returned to the caller from a raw legacy RPC
 /// response body, reusing the caller's original request id.
 ///
-/// The body's top-level fields are captured as unparsed [`RawValue`]s: serde_json
-/// scans a `RawValue` iteratively rather than materializing the nested value, so a
+/// The body's top-level fields are captured as unparsed [`RawValue`]s borrowed
+/// directly from `body` (no per-field heap allocation): serde_json scans a
+/// `RawValue` iteratively rather than materializing the nested value, so a
 /// legacy `result` of arbitrary depth is forwarded byte-for-byte without being
 /// bounded by the deserializer's nesting limit and without recursing over
 /// attacker-influenced response depth. A present-but-null `result` is retained
@@ -218,14 +219,14 @@ impl<S> LegacyRpcRouterService<S> {
 /// original `code`/`message`; a body carrying neither `result` nor `error`, and a
 /// body that is not valid JSON, both map to `INTERNAL_ERROR_CODE`.
 fn build_legacy_response(request_id: Id<'_>, body: &[u8]) -> MethodResponse {
-    match serde_json::from_slice::<std::collections::HashMap<String, Box<RawValue>>>(body) {
+    match serde_json::from_slice::<std::collections::HashMap<String, &RawValue>>(body) {
         Ok(fields) => {
-            if let Some(result) = fields.get("result") {
+            if let Some(&result) = fields.get("result") {
                 // Forward the legacy result verbatim; serializing a RawValue emits
                 // its stored text directly, so deep results are not re-walked.
-                let payload = jsonrpsee_types::ResponsePayload::success(&**result).into();
+                let payload = jsonrpsee_types::ResponsePayload::success(result).into();
                 MethodResponse::response(request_id, payload, usize::MAX)
-            } else if let Some(error) = fields.get("error") {
+            } else if let Some(&error) = fields.get("error") {
                 // Error objects are shallow; read code/message from the captured
                 // fragment to preserve passthrough of the legacy error.
                 let error: serde_json::Value =
