@@ -98,6 +98,25 @@ pub(super) struct TransactionLimits {
     pub block_da_footprint: Option<u64>,
 }
 
+/// Maps a non-`Complete` [`CaptureOutcome`] to a fail-closed screening decision, recording the
+/// matching local-deny reason metric exactly once. Returns `None` only for `Complete` (the caller
+/// screens the captured stream instead). An enabled filter receiving `Passthrough` is a
+/// state-machine bug and fails closed exactly like an observation-invariant violation — it is never
+/// allowed to fall back to raw logs.
+fn fail_closed_screen(filter: &FilterHandle, outcome: &CaptureOutcome) -> Option<Screen> {
+    match outcome {
+        CaptureOutcome::Complete(_) => None,
+        CaptureOutcome::LimitExceeded { .. } => {
+            filter.record_local_deny(LocalDenyReason::NativeTransferLimit);
+            Some(Screen::Deny)
+        }
+        CaptureOutcome::InvariantViolation { .. } | CaptureOutcome::Passthrough => {
+            filter.record_local_deny(LocalDenyReason::ObservationInvariant);
+            Some(Screen::Deny)
+        }
+    }
+}
+
 impl FlashblocksBuilderCtx {
     pub(super) fn with_cancel(self, cancel: CancellationToken) -> Self {
         Self { cancel, ..self }
@@ -846,8 +865,8 @@ impl FlashblocksBuilderCtx {
             // the raw logs; a budget overflow or observation-invariant failure fails closed to
             // `Screen::Deny` via the same downstream handling, never entering the pending buffer.
             if let Some(filter) = self.filter.as_ref() {
-                let decision = match &capture_outcome {
-                    CaptureOutcome::Complete(logs) => filter.screen_tx(&ScreenInput {
+                let decision = if let CaptureOutcome::Complete(logs) = &capture_outcome {
+                    filter.screen_tx(&ScreenInput {
                         tx_hash,
                         origin: tx.signer(),
                         tx_to: tx.to(),
@@ -855,17 +874,11 @@ impl FlashblocksBuilderCtx {
                         value: tx.value(),
                         block_height: self.block_number(),
                         logs,
-                    }),
-                    CaptureOutcome::LimitExceeded { .. } => {
-                        filter.record_local_deny(LocalDenyReason::NativeTransferLimit);
-                        Screen::Deny
-                    }
-                    // An enabled filter must never receive `Passthrough`; treat it, like any
-                    // invariant violation, as a fail-closed deny.
-                    CaptureOutcome::InvariantViolation { .. } | CaptureOutcome::Passthrough => {
-                        filter.record_local_deny(LocalDenyReason::ObservationInvariant);
-                        Screen::Deny
-                    }
+                    })
+                } else {
+                    // Every non-`Complete` outcome fails closed (budget overflow, observation
+                    // invariant, or — a state-machine bug — an enabled filter seeing `Passthrough`).
+                    fail_closed_screen(filter, &capture_outcome).unwrap_or(Screen::Deny)
                 };
                 match decision {
                     Screen::Allow | Screen::AuditApproved => {}
@@ -945,6 +958,55 @@ impl FlashblocksBuilderCtx {
             "Completed executing best transactions",
         );
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod capture_decision_tests {
+    use super::*;
+    use crate::flashblocks::rcs_capture::CaptureInvariantError;
+
+    fn test_filter() -> FilterHandle {
+        rcs_filter::FilterHandle::for_test(
+            rcs_filter::FilterConfig::default(),
+            rcs_filter::rules::RuleSet::default(),
+            Arc::new(rcs_filter::SystemClock),
+        )
+    }
+
+    #[test]
+    fn complete_is_not_fail_closed() {
+        let filter = test_filter();
+        assert_eq!(fail_closed_screen(&filter, &CaptureOutcome::Complete(vec![])), None);
+    }
+
+    #[test]
+    fn limit_exceeded_fails_closed() {
+        let filter = test_filter();
+        assert_eq!(
+            fail_closed_screen(&filter, &CaptureOutcome::LimitExceeded { attempted: 3, limit: 2 }),
+            Some(Screen::Deny)
+        );
+    }
+
+    #[test]
+    fn invariant_violation_fails_closed() {
+        let filter = test_filter();
+        let outcome = CaptureOutcome::InvariantViolation {
+            reason: CaptureInvariantError::RealLogMismatch {
+                first_bad_index: 0,
+                observed: 1,
+                expected: 2,
+            },
+        };
+        assert_eq!(fail_closed_screen(&filter, &outcome), Some(Screen::Deny));
+    }
+
+    #[test]
+    fn enabled_filter_passthrough_fails_closed() {
+        // Review-focus: an enabled filter must never reuse raw logs on a `Passthrough`.
+        let filter = test_filter();
+        assert_eq!(fail_closed_screen(&filter, &CaptureOutcome::Passthrough), Some(Screen::Deny));
     }
 }
 

@@ -185,6 +185,46 @@ impl RcsInspector {
         self.queue.push(QueuedLog::Virtual(native_transfer_log(from, to, value)));
     }
 
+    /// CALL-frame native-transfer decision, split out from the `call` hook so it is testable
+    /// without a full EVM context. `depth` is the journal depth at the frame (0 = top-level, which
+    /// carries only `tx.value` and is excluded). `transfer_value` is `CallInputs::transfer_value()`
+    /// — `Some` only for a real `CallValue::Transfer` (so DELEGATECALL/STATICCALL, whose value is
+    /// *apparent*, never reach here); zero-value and self-transfers (e.g. CALLCODE, whose caller and
+    /// target are the same) are filtered by [`Self::observe_native_transfer`].
+    fn record_call_observation(
+        &mut self,
+        depth: usize,
+        transfer_value: Option<U256>,
+        from: Address,
+        to: Address,
+    ) {
+        if depth > 0
+            && let Some(value) = transfer_value
+        {
+            self.observe_native_transfer(from, to, value, NativeTransferKind::Call);
+        }
+    }
+
+    /// CREATE/CREATE2-frame native-transfer decision, split out from the `create` hook for
+    /// testability. Top-level creations (`depth == 0`) and zero endowments generate no event; the
+    /// recipient is the created address.
+    fn record_create_observation(
+        &mut self,
+        depth: usize,
+        value: U256,
+        caller: Address,
+        created_address: Address,
+    ) {
+        if depth > 0 && !value.is_zero() {
+            self.observe_native_transfer(
+                caller,
+                created_address,
+                value,
+                NativeTransferKind::Create,
+            );
+        }
+    }
+
     /// Records a real EVM log into the unified ordered queue. No-op while inactive.
     pub fn record_real_log(&mut self, log: Log) {
         if !self.active {
@@ -302,19 +342,16 @@ where
         // Every CALL-type frame (incl. zero-value / DELEGATECALL / STATICCALL / CALLCODE) gets a
         // checkpoint so real logs it captured roll back if it reverts.
         self.push_checkpoint();
-        // Non-top-level real value transfers only. `transfer_value()` is `Some` solely for
-        // `CallValue::Transfer` (real CALL transfers) and `None` for apparent-value call types
-        // (DELEGATECALL / STATICCALL / CALLCODE), so those never generate a virtual event.
-        if context.journal().depth() > 0
-            && let Some(value) = inputs.transfer_value()
-        {
-            self.observe_native_transfer(
-                inputs.transfer_from(),
-                inputs.transfer_to(),
-                value,
-                NativeTransferKind::Call,
-            );
-        }
+        // `transfer_value()` is `Some` only for a real `CallValue::Transfer`; DELEGATECALL and
+        // STATICCALL carry an *apparent* value (`None`) and never generate an event. CALLCODE does
+        // report a transfer value, but its caller and target are the same account, so it is filtered
+        // as a self-transfer inside `observe_native_transfer`. Top-level (`depth == 0`) is excluded.
+        self.record_call_observation(
+            context.journal().depth(),
+            inputs.transfer_value(),
+            inputs.transfer_from(),
+            inputs.transfer_to(),
+        );
         None
     }
 
@@ -325,8 +362,11 @@ where
     fn create(&mut self, context: &mut CTX, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
         self.push_checkpoint();
         // Non-top-level CREATE/CREATE2 with a non-zero endowment. The recipient is the created
-        // address (nonce-derived for CREATE; salt/init-code-derived for CREATE2).
-        if context.journal().depth() > 0 && !inputs.value().is_zero() {
+        // address (nonce-derived for CREATE; salt/init-code-derived for CREATE2). The created-address
+        // derivation needs the context, so it is done here and handed to the (context-free) decision.
+        let depth = context.journal().depth();
+        let value = inputs.value();
+        if depth > 0 && !value.is_zero() {
             let caller = inputs.caller();
             let created_address = match inputs.scheme() {
                 CreateScheme::Create => {
@@ -340,12 +380,7 @@ where
                 }
                 _ => inputs.created_address(0),
             };
-            self.observe_native_transfer(
-                caller,
-                created_address,
-                inputs.value(),
-                NativeTransferKind::Create,
-            );
+            self.record_create_observation(depth, value, caller, created_address);
         }
         None
     }
@@ -681,5 +716,83 @@ mod tests {
         assert!(
             matches!(inspector.finish_capture(&[]), CaptureOutcome::Complete(v) if v.is_empty())
         );
+    }
+
+    // ---- Task 7: context-free CALL/CREATE hook decision logic ------------------------------------
+    // Exercise the field/depth decisions the revm hooks delegate to (the hooks themselves only
+    // extract depth/inputs from the EVM context). Runtime execution through OpEvm is the follow-up.
+
+    fn armed(limit: usize) -> RcsInspector {
+        let mut inspector = RcsInspector::new(limit);
+        inspector.start_capture();
+        inspector
+    }
+
+    #[test]
+    fn call_top_level_generates_no_event() {
+        // depth 0 = the tx's own top-level call; its value is top-level tx.value, excluded.
+        let mut i = armed(10);
+        i.record_call_observation(0, Some(U256::from(5u64)), addr(1), addr(2));
+        assert_eq!(i.observed_count, 0);
+    }
+
+    #[test]
+    fn call_internal_nonzero_transfer_is_observed() {
+        let mut i = armed(10);
+        i.record_call_observation(1, Some(U256::from(5u64)), addr(1), addr(2));
+        assert_eq!(i.observed_count, 1);
+        match i.finish_capture(&[]) {
+            CaptureOutcome::Complete(logs) => {
+                assert_eq!(logs.len(), 1);
+                assert_eq!(logs[0].address, NATIVE_ASSET_ADDRESS);
+                assert_eq!(logs[0].topics()[1], addr(1).into_word());
+                assert_eq!(logs[0].topics()[2], addr(2).into_word());
+            }
+            other => panic!("expected Complete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn call_apparent_value_generates_no_event() {
+        // DELEGATECALL / STATICCALL: transfer_value() is None.
+        let mut i = armed(10);
+        i.record_call_observation(1, None, addr(1), addr(2));
+        assert_eq!(i.observed_count, 0);
+    }
+
+    #[test]
+    fn call_self_transfer_generates_no_event() {
+        // CALLCODE reports a transfer value but caller == target, so it is a self-transfer.
+        let mut i = armed(10);
+        i.record_call_observation(1, Some(U256::from(5u64)), addr(1), addr(1));
+        assert_eq!(i.observed_count, 0);
+    }
+
+    #[test]
+    fn create_top_level_generates_no_event() {
+        let mut i = armed(10);
+        i.record_create_observation(0, U256::from(5u64), addr(1), addr(2));
+        assert_eq!(i.observed_count, 0);
+    }
+
+    #[test]
+    fn create_internal_endowment_is_observed_to_created_address() {
+        let mut i = armed(10);
+        let created = addr(9);
+        i.record_create_observation(1, U256::from(7u64), addr(1), created);
+        match i.finish_capture(&[]) {
+            CaptureOutcome::Complete(logs) => {
+                assert_eq!(logs.len(), 1);
+                assert_eq!(logs[0].topics()[2], created.into_word()); // recipient = created address
+            }
+            other => panic!("expected Complete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_zero_endowment_generates_no_event() {
+        let mut i = armed(10);
+        i.record_create_observation(1, U256::ZERO, addr(1), addr(2));
+        assert_eq!(i.observed_count, 0);
     }
 }
