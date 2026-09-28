@@ -14,14 +14,14 @@ use alloy_consensus::{
 use alloy_eips::eip2718::WithEncoded;
 use alloy_eips::{Encodable2718, Typed2718};
 use alloy_evm::Database;
-use alloy_op_evm::{block::receipt_builder::OpReceiptBuilder, block::OpTxEnv, OpEvm};
+use alloy_op_evm::{block::receipt_builder::OpReceiptBuilder, block::OpTxEnv, OpEvm, OpEvmContext};
 use alloy_primitives::{BlockHash, Bytes, U256};
 use alloy_rpc_types_eth::Withdrawals;
 use core::fmt::Debug;
 use op_alloy_consensus::{OpDepositReceipt, OpTxType};
 use op_revm::{L1BlockInfo, OpSpecId};
 
-use rcs_filter::{FilterHandle, PreScreen, Screen, ScreenInput};
+use rcs_filter::{FilterHandle, LocalDenyReason, PreScreen, Screen, ScreenInput};
 use reth_basic_payload_builder::PayloadConfig;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_evm::{
@@ -48,9 +48,10 @@ use reth_primitives_traits::{InMemorySize, SealedHeader, SignedTransaction};
 use reth_revm::{context::Block, State};
 use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction, TransactionPool};
 use revm::{
-    context::result::ResultAndState, inspector::NoOpInspector, interpreter::as_u64_saturated,
-    DatabaseCommit,
+    context::result::ResultAndState, interpreter::as_u64_saturated, DatabaseCommit, Inspector,
 };
+
+use super::rcs_capture::{CaptureOutcome, RcsCaptureControl, RcsInspector};
 
 /// Container type that holds all necessities to build a new payload.
 #[derive(Debug)]
@@ -282,17 +283,21 @@ impl FlashblocksBuilderCtx {
     /// (whitelisted) transactions would be rejected by base-fee validation even when gasless is
     /// enabled.
     #[allow(clippy::type_complexity)]
-    fn transact_maybe_gasless<DB>(
+    fn transact_maybe_gasless<DB, I>(
         &self,
-        evm: &mut OpEvm<DB, NoOpInspector, PrecompilesMap>,
+        evm: &mut OpEvm<DB, I, PrecompilesMap>,
         tx: &Recovered<OpTransactionSigned>,
     ) -> Result<
-        (ResultAndState<<OpEvm<DB, NoOpInspector, PrecompilesMap> as Evm>::HaltReason>, bool),
-        <OpEvm<DB, NoOpInspector, PrecompilesMap> as Evm>::Error,
+        (ResultAndState<<OpEvm<DB, I, PrecompilesMap> as Evm>::HaltReason>, bool, CaptureOutcome),
+        <OpEvm<DB, I, PrecompilesMap> as Evm>::Error,
     >
     where
         DB: Database,
+        I: Inspector<OpEvmContext<DB>> + RcsCaptureControl,
     {
+        // The gasless pre-check runs `getGaslessAllowance` as a system call on the same EVM. It
+        // MUST run with the inspector inactive so the native-transfer observation seam never
+        // captures anything from a non-real-user simulation.
         let is_gasless = self.is_gasless(evm, tx)?;
         let mut tx_env = self.evm_config.tx_env(tx);
         tx_env.set_gasless(is_gasless);
@@ -302,17 +307,30 @@ impl FlashblocksBuilderCtx {
         // on error), so the toggle never leaks into the next tx in the block. `block.basefee` is
         // never mutated (`BASEFEE` still reports the real header base fee) and `OpHandler` skips fee
         // charge/reimbursement/reward, so a plain `transact` applies the full gasless policy.
-        let result = evm.transact(tx_env)?;
-        Ok((result, is_gasless))
+        //
+        // Capture is armed only around the real candidate `evm.transact` and finished/aborted
+        // immediately on return, so every early exit downstream sees an inactive inspector.
+        evm.components_mut().1.start_capture();
+        match evm.transact(tx_env) {
+            Ok(result) => {
+                let capture = evm.components_mut().1.finish_capture(result.result.logs());
+                Ok((result, is_gasless, capture))
+            }
+            Err(err) => {
+                evm.components_mut().1.abort_capture();
+                Err(err)
+            }
+        }
     }
 
-    fn is_gasless<DB>(
+    fn is_gasless<DB, I>(
         &self,
-        evm: &mut OpEvm<DB, NoOpInspector, PrecompilesMap>,
+        evm: &mut OpEvm<DB, I, PrecompilesMap>,
         tx: &Recovered<OpTransactionSigned>,
-    ) -> Result<bool, <OpEvm<DB, NoOpInspector, PrecompilesMap> as Evm>::Error>
+    ) -> Result<bool, <OpEvm<DB, I, PrecompilesMap> as Evm>::Error>
     where
         DB: Database,
+        I: Inspector<OpEvmContext<DB>>,
     {
         if tx.is_deposit() || tx.max_fee_per_gas() != 0 {
             return Ok(false);
@@ -373,7 +391,7 @@ impl FlashblocksBuilderCtx {
                     ))
                 })?;
 
-            let (ResultAndState { result, state }, _is_gasless) =
+            let (ResultAndState { result, state }, _is_gasless, _capture) =
                 match self.transact_maybe_gasless(&mut evm, &sequencer_tx) {
                     Ok(res) => res,
                     Err(err) => {
@@ -498,7 +516,7 @@ impl FlashblocksBuilderCtx {
             }
 
             // Ensure transaction execution is valid.
-            let (ResultAndState { result, state }, _is_gasless) =
+            let (ResultAndState { result, state }, _is_gasless, _capture) =
                 match self.transact_maybe_gasless(&mut evm, &recovered_tx) {
                     Ok(res) => res,
                     Err(err) => {
@@ -556,6 +574,39 @@ impl FlashblocksBuilderCtx {
         tx_pool: &impl TransactionPool,
         limits: TransactionLimits,
     ) -> Result<Option<()>, PayloadBuilderError> {
+        // Two typed EVM-construction branches feed one generic loop. When the RCS Filter is enabled
+        // the RCS capture inspector becomes the composite's inner inspector so internal native-token
+        // transfers can be observed during the real-user candidate simulation; when it is disabled
+        // the zero-overhead no-op inspector is kept and behavior is unchanged.
+        if let Some(filter) = self.filter.clone() {
+            let inspector = RcsInspector::new(filter.max_native_transfers_per_tx());
+            let mut evm = self.evm_config.evm_with_env_and_inspector(
+                &mut *db,
+                self.evm_env.clone(),
+                inspector,
+            );
+            self.run_tx_loop(&mut evm, info, best_txs, tx_pool, limits)
+        } else {
+            let mut evm = self.evm_config.evm_with_env(&mut *db, self.evm_env.clone());
+            self.run_tx_loop(&mut evm, info, best_txs, tx_pool, limits)
+        }
+    }
+
+    /// The per-flashblock transaction simulation loop, generic over the inner inspector so the
+    /// Filter-disabled (`NoOpInspector`) and Filter-enabled (`RcsInspector`) EVMs share one body.
+    /// Native-transfer capture is driven through the [`RcsCaptureControl`] seam bound on `I`.
+    fn run_tx_loop<DB, I>(
+        &self,
+        evm: &mut OpEvm<DB, I, PrecompilesMap>,
+        info: &mut ExecutionInfo,
+        best_txs: &mut impl PayloadTxsBounds,
+        tx_pool: &impl TransactionPool,
+        limits: TransactionLimits,
+    ) -> Result<Option<()>, PayloadBuilderError>
+    where
+        DB: Database + DatabaseCommit,
+        I: Inspector<OpEvmContext<DB>> + RcsCaptureControl,
+    {
         let execute_txs_start_time = Instant::now();
         let mut num_txs_considered = 0;
         let mut num_txs_simulated = 0;
@@ -565,7 +616,6 @@ impl FlashblocksBuilderCtx {
         let base_fee = self.base_fee();
 
         let tx_da_limit = self.da_config.max_da_tx_size();
-        let mut evm = self.evm_config.evm_with_env(&mut *db, self.evm_env.clone());
 
         debug!(
             target: "payload_builder",
@@ -688,8 +738,8 @@ impl FlashblocksBuilderCtx {
             // Optimism layer, never a `block.basefee` mutation), gated on the chain's gasless
             // contract approving the tx. Non-gasless txs are unaffected — see
             // [`Self::transact_maybe_gasless`].
-            let (ResultAndState { result, state }, is_gasless) =
-                match self.transact_maybe_gasless(&mut evm, &tx) {
+            let (ResultAndState { result, state }, is_gasless, capture_outcome) =
+                match self.transact_maybe_gasless(&mut *evm, &tx) {
                     Ok(res) => res,
                     Err(err) => {
                         if let Some(err) = err.as_invalid_tx_err() {
@@ -791,17 +841,32 @@ impl FlashblocksBuilderCtx {
                 continue;
             }
 
-            // Run rule-driven RCS screening after simulation and before committing any state.
+            // Run rule-driven RCS screening after simulation and before committing any state. The
+            // observation stream (real logs interleaved with virtual native `Transfer`s) replaces
+            // the raw logs; a budget overflow or observation-invariant failure fails closed to
+            // `Screen::Deny` via the same downstream handling, never entering the pending buffer.
             if let Some(filter) = self.filter.as_ref() {
-                let decision = filter.screen_tx(&ScreenInput {
-                    tx_hash,
-                    origin: tx.signer(),
-                    tx_to: tx.to(),
-                    nonce: tx.nonce(),
-                    value: tx.value(),
-                    block_height: self.block_number(),
-                    logs: result.logs(),
-                });
+                let decision = match &capture_outcome {
+                    CaptureOutcome::Complete(logs) => filter.screen_tx(&ScreenInput {
+                        tx_hash,
+                        origin: tx.signer(),
+                        tx_to: tx.to(),
+                        nonce: tx.nonce(),
+                        value: tx.value(),
+                        block_height: self.block_number(),
+                        logs,
+                    }),
+                    CaptureOutcome::LimitExceeded { .. } => {
+                        filter.record_local_deny(LocalDenyReason::NativeTransferLimit);
+                        Screen::Deny
+                    }
+                    // An enabled filter must never receive `Passthrough`; treat it, like any
+                    // invariant violation, as a fail-closed deny.
+                    CaptureOutcome::InvariantViolation { .. } | CaptureOutcome::Passthrough => {
+                        filter.record_local_deny(LocalDenyReason::ObservationInvariant);
+                        Screen::Deny
+                    }
+                };
                 match decision {
                     Screen::Allow | Screen::AuditApproved => {}
                     Screen::Deny => {
@@ -840,7 +905,7 @@ impl FlashblocksBuilderCtx {
             // Push transaction changeset and calculate header bloom filter for receipt.
             let ctx = ReceiptBuilderCtx {
                 tx_type: tx.tx_type(),
-                evm: &evm,
+                evm: &*evm,
                 result,
                 state: &state,
                 cumulative_gas_used: info.cumulative_gas_used,
