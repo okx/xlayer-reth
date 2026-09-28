@@ -41,6 +41,8 @@ pub use client::{
 pub use clock::{Clock, SystemClock};
 pub use config::{FilterConfig, SUPPORTED_PROTOCOL_VERSIONS};
 pub use error::{FilterError, Result};
-pub use handle::{FilterHandle, PreScreen, Screen, ScreenInput, TerminalEvent, TerminalReason};
+pub use handle::{
+    FilterHandle, LocalDenyReason, PreScreen, Screen, ScreenInput, TerminalEvent, TerminalReason,
+};
 pub use pool::{BufferPool, BufferStatus};
 pub use rules::{Action, CompiledRule, RejectedRule, RuleSet, TimeoutAction};

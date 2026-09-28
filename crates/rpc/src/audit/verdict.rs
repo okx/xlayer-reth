@@ -11,7 +11,7 @@ use alloy_primitives::{Address, Log, B256, U256};
 use rcs_filter::client::ActionItem;
 use rcs_filter::handle::ScreenInput;
 use rcs_filter::matching::{try_evaluate, MatchOutcome};
-use rcs_filter::rules::RuleSet;
+use rcs_filter::rules::{RuleSet, DEFAULT_MAX_EVENT_BINDINGS_PER_TX};
 use serde::Serialize;
 
 use super::deposit::DepositTxRequest;
@@ -68,7 +68,9 @@ pub fn verdict_for(
 ) -> AuditResult {
     let input =
         ScreenInput { tx_hash, origin: from, tx_to: to, nonce: 0, value, block_height: 0, logs };
-    match try_evaluate(rules, &input) {
+    // The audit RPC path holds no FilterConfig, so it uses the default binding budget. This keeps
+    // its existing matcher-overflow `Malformed` semantics unchanged.
+    match try_evaluate(rules, &input, DEFAULT_MAX_EVENT_BINDINGS_PER_TX) {
         Err(error) => {
             tracing::warn!(
                 target: "xlayer_audit_rpc",

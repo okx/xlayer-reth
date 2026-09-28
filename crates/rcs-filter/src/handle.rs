@@ -66,6 +66,18 @@ pub enum PreScreen {
     Drop,
 }
 
+/// Why the builder locally denied a transaction before rule evaluation, driven by its native
+/// observation pipeline. A fixed, low-cardinality enum used as a metric label — never a dynamic
+/// error string. This crate stays revm-free; the builder maps its capture outcomes onto this enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalDenyReason {
+    /// The per-transaction internal native-transfer observation budget was exceeded.
+    NativeTransferLimit,
+    /// An observation invariant failed: the captured real-log subsequence did not match the
+    /// execution result, or an enabled filter received a passthrough capture outcome.
+    ObservationInvariant,
+}
+
 /// Input to [`FilterHandle::screen_tx`], borrowed from the builder loop.
 pub struct ScreenInput<'a> {
     pub tx_hash: B256,
@@ -218,6 +230,29 @@ impl FilterHandle {
         self.shared.pool_lock().len()
     }
 
+    /// The configured maximum internal native-transfer observation candidates per transaction.
+    /// This is the single source of truth for the builder's inspector budget; the builder reads it
+    /// here rather than duplicating it into its own context, so the two can never drift.
+    pub fn max_native_transfers_per_tx(&self) -> usize {
+        self.shared.config.max_native_transfers_per_tx
+    }
+
+    /// Records a builder-side local deny that bypassed rule evaluation (native-transfer budget
+    /// overflow or an observation invariant failure). Increments the total-deny metric once and the
+    /// matching reason metric once. Creates no buffer-pool entry and performs no txpool removal —
+    /// the shared builder `Screen::Deny` branch owns eviction.
+    pub fn record_local_deny(&self, reason: LocalDenyReason) {
+        self.shared.metrics.deny_total.increment(1);
+        match reason {
+            LocalDenyReason::NativeTransferLimit => {
+                self.shared.metrics.local_deny_native_transfer_limit_total.increment(1)
+            }
+            LocalDenyReason::ObservationInvariant => {
+                self.shared.metrics.local_deny_observation_invariant_total.increment(1)
+            }
+        }
+    }
+
     /// Screens one transaction (synchronous, no network IO). See [`Screen`].
     pub fn screen_tx(&self, input: &ScreenInput) -> Screen {
         // Stage zero: dedup short-circuit — a non-terminal buffered entry is reused without
@@ -234,7 +269,11 @@ impl FilterHandle {
 
         // Fresh evaluation.
         let rules = self.shared.current_rules();
-        let outcome = match matching::try_evaluate(&rules, input) {
+        let outcome = match matching::try_evaluate(
+            &rules,
+            input,
+            self.shared.config.max_event_bindings_per_tx,
+        ) {
             Ok(outcome) => outcome,
             Err(error) => {
                 warn!(
@@ -439,7 +478,14 @@ impl FilterHandle {
             // current logs and compare to the submit-time hash. Transition to a terminal
             // tombstone either way (no RCS cancel call on mismatch).
             BufferStatus::Approved => {
-                let consistent = match matching::try_evaluate(&rule_snapshot, input) {
+                // Uses the SAME configured budget as the first `screen_tx` so a transaction that
+                // passes first screening can never be dropped at consistency recompute for a
+                // divergent limit.
+                let consistent = match matching::try_evaluate(
+                    &rule_snapshot,
+                    input,
+                    self.shared.config.max_event_bindings_per_tx,
+                ) {
                     Ok(MatchOutcome::Audit { actions, .. }) => {
                         quota_hash::encode_and_hash(&actions) == stored_hash
                     }
@@ -567,6 +613,80 @@ mod tests {
         assert_eq!(h.buffered_len(), 1);
     }
 
+    // A single audit rule with two anonymous zero-topic events: K matching logs yield K × K
+    // complete bindings, a precise knob for the configurable binding budget.
+    fn two_event_rules() -> RuleSet {
+        let raw: RawRule = serde_json::from_value(serde_json::json!({
+            "id": "binding-budget",
+            "event_abis": {
+                "a": {"type": "event", "name": "A", "inputs": [], "anonymous": true},
+                "b": {"type": "event", "name": "B", "inputs": [], "anonymous": true}
+            },
+            "audit_types": ["custom"],
+            "condition": false,
+            "action": "audit"
+        }))
+        .unwrap();
+        load_rules(1, 1, vec![raw])
+    }
+
+    #[test]
+    fn screen_tx_uses_configured_event_binding_limit() {
+        let logs: Vec<Log> = (0..3)
+            .map(|_| Log {
+                address: golden::token_x(),
+                data: LogData::new_unchecked(vec![], Bytes::new()),
+            })
+            .collect();
+        let input = ScreenInput {
+            tx_hash: B256::repeat_byte(0x11),
+            origin: Address::repeat_byte(0x22),
+            tx_to: None,
+            nonce: 0,
+            value: U256::ZERO,
+            block_height: 0,
+            logs: &logs,
+        };
+        // Tight budget of 2: 3 × 3 = 9 bindings > 2 → fail-closed Deny (proves screen_tx reads
+        // the configured limit, not a fixed constant).
+        let tight = FilterHandle::for_test(
+            FilterConfig { max_event_bindings_per_tx: 2, ..FilterConfig::default() },
+            two_event_rules(),
+            Arc::new(TestClock::new(1)),
+        );
+        assert_eq!(tight.screen_tx(&input), Screen::Deny);
+        // Default budget (10,000): the same rule set does not overflow (condition false → Allow).
+        let generous = FilterHandle::for_test(
+            FilterConfig::default(),
+            two_event_rules(),
+            Arc::new(TestClock::new(1)),
+        );
+        assert_eq!(generous.screen_tx(&input), Screen::Allow);
+    }
+
+    #[test]
+    fn max_native_transfers_accessor_returns_config_value() {
+        let handle = FilterHandle::for_test(
+            FilterConfig { max_native_transfers_per_tx: 7, ..FilterConfig::default() },
+            RuleSet::default(),
+            Arc::new(TestClock::new(1)),
+        );
+        assert_eq!(handle.max_native_transfers_per_tx(), 7);
+    }
+
+    #[test]
+    fn record_local_deny_creates_no_buffer_entry() {
+        let handle = FilterHandle::for_test(
+            FilterConfig::default(),
+            RuleSet::default(),
+            Arc::new(TestClock::new(1)),
+        );
+        handle.record_local_deny(LocalDenyReason::NativeTransferLimit);
+        handle.record_local_deny(LocalDenyReason::ObservationInvariant);
+        // A local deny records metrics only; it must never enter the pending buffer.
+        assert_eq!(handle.buffered_len(), 0);
+    }
+
     #[test]
     fn deny_tx_returns_deny_without_buffering() {
         let rules = load_rules(1, 1, vec![serde_json::from_str(golden::RULE_SCENARIO_B).unwrap()]);
@@ -597,7 +717,13 @@ mod tests {
         )
         .unwrap();
         let rules = load_rules(1, 1, vec![raw]);
-        let h = FilterHandle::for_test(FilterConfig::default(), rules, Arc::new(TestClock::new(1)));
+        // Pin the binding budget to 4,096 so the 65 × 65 = 4,225 bindings below overflow it
+        // (the scenario predates the configurable budget, whose default is now 10,000).
+        let h = FilterHandle::for_test(
+            FilterConfig { max_event_bindings_per_tx: 4_096, ..FilterConfig::default() },
+            rules,
+            Arc::new(TestClock::new(1)),
+        );
         let logs = (0..65)
             .map(|_| Log {
                 address: golden::token_x(),

@@ -14,7 +14,7 @@ use crate::client::ActionItem;
 use crate::handle::ScreenInput;
 use crate::rules::{
     eval_compiled, Action, CompiledEvent, CompiledRule, RuleSet, TimeoutAction,
-    MAX_COMPLETE_EVENT_BINDINGS_PER_EVALUATION,
+    DEFAULT_MAX_EVENT_BINDINGS_PER_TX,
 };
 
 type ActionsByLog = BTreeMap<String, BTreeMap<usize, ActionItem>>;
@@ -52,8 +52,16 @@ pub enum MatchError {
 }
 
 /// Fallible screening entry used by callers that can surface malformed/error outcomes.
-pub fn try_evaluate(rules: &RuleSet, input: &ScreenInput) -> Result<MatchOutcome, MatchError> {
-    evaluate_checked(rules, input)
+///
+/// `max_event_bindings` is the authoritative per-transaction complete-binding budget. Callers with
+/// a [`crate::FilterConfig`] pass its configured value; callers without one pass
+/// [`DEFAULT_MAX_EVENT_BINDINGS_PER_TX`].
+pub fn try_evaluate(
+    rules: &RuleSet,
+    input: &ScreenInput,
+    max_event_bindings: usize,
+) -> Result<MatchOutcome, MatchError> {
+    evaluate_checked(rules, input, max_event_bindings)
 }
 
 fn checked_binding_count(candidate_counts: impl IntoIterator<Item = usize>) -> Option<usize> {
@@ -63,7 +71,7 @@ fn checked_binding_count(candidate_counts: impl IntoIterator<Item = usize>) -> O
 /// Runs the full screening algorithm for one transaction. Resource-budget errors fail closed;
 /// callers with a malformed/error channel should use [`try_evaluate`] to preserve the reason.
 pub fn evaluate(rules: &RuleSet, input: &ScreenInput) -> MatchOutcome {
-    match try_evaluate(rules, input) {
+    match try_evaluate(rules, input, DEFAULT_MAX_EVENT_BINDINGS_PER_TX) {
         Ok(outcome) => outcome,
         Err(error) => {
             tracing::warn!(target: "rcs_filter", %error, "matching budget exceeded; failing closed");
@@ -72,7 +80,11 @@ pub fn evaluate(rules: &RuleSet, input: &ScreenInput) -> MatchOutcome {
     }
 }
 
-fn evaluate_checked(rules: &RuleSet, input: &ScreenInput) -> Result<MatchOutcome, MatchError> {
+fn evaluate_checked(
+    rules: &RuleSet,
+    input: &ScreenInput,
+    max_event_bindings: usize,
+) -> Result<MatchOutcome, MatchError> {
     // Merge audit rules at the physical-log level. Multiple rules can match the same log, but
     // RCS must receive that event only once per audit type or it would account the same action
     // multiple times.
@@ -118,11 +130,11 @@ fn evaluate_checked(rules: &RuleSet, input: &ScreenInput) -> Result<MatchOutcome
         complete_binding_count = complete_binding_count
             .checked_add(rule_binding_count)
             .ok_or_else(|| MatchError::BindingCountOverflow { rule_id: rule.id.clone() })?;
-        if complete_binding_count > MAX_COMPLETE_EVENT_BINDINGS_PER_EVALUATION {
+        if complete_binding_count > max_event_bindings {
             return Err(MatchError::BindingBudgetExceeded {
                 rule_id: rule.id.clone(),
                 attempted: complete_binding_count,
-                limit: MAX_COMPLETE_EVENT_BINDINGS_PER_EVALUATION,
+                limit: max_event_bindings,
             });
         }
         let mut current = Vec::with_capacity(candidates.len());
@@ -763,11 +775,20 @@ mod tests {
             .collect::<Vec<_>>();
         let input = transfer_input(&logs);
 
+        // An explicit budget of 4,096 rejects the 4,225 bindings.
         assert!(matches!(
-            try_evaluate(&rules, &input),
+            try_evaluate(&rules, &input, 4_096),
             Err(MatchError::BindingBudgetExceeded { .. })
         ));
-        assert_eq!(evaluate(&rules, &input), MatchOutcome::Deny);
+        // The fail-closed wrapper uses the DEFAULT budget (10,000); a scenario exceeding it
+        // (101 × 101 = 10,201) still fails closed to Deny.
+        let over_default = (0..101)
+            .map(|_| Log {
+                address: golden::token_x(),
+                data: LogData::new_unchecked(vec![], Bytes::new()),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(evaluate(&rules, &transfer_input(&over_default)), MatchOutcome::Deny);
     }
 
     #[test]
@@ -796,7 +817,64 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(matches!(
-            try_evaluate(&rules, &transfer_input(&logs)),
+            try_evaluate(&rules, &transfer_input(&logs), 4_096),
+            Err(MatchError::BindingBudgetExceeded { .. })
+        ));
+    }
+
+    // Builds a single audit rule with two anonymous zero-topic events, so K matching logs yield
+    // K × K complete bindings — a precise knob for exercising the configurable binding budget.
+    fn two_event_rule() -> RuleSet {
+        let raw: RawRule = serde_json::from_value(json!({
+            "id": "binding-budget",
+            "event_abis": {
+                "a": {"type": "event", "name": "A", "inputs": [], "anonymous": true},
+                "b": {"type": "event", "name": "B", "inputs": [], "anonymous": true}
+            },
+            "audit_types": ["custom"],
+            "condition": false,
+            "action": "audit"
+        }))
+        .unwrap();
+        load_rules(1, 1, vec![raw])
+    }
+
+    fn zero_topic_logs(count: usize) -> Vec<Log> {
+        (0..count)
+            .map(|_| Log {
+                address: golden::token_x(),
+                data: LogData::new_unchecked(vec![], Bytes::new()),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn binding_budget_boundary_100_121() {
+        let rules = two_event_rule();
+        // 10 × 10 = 100 == limit → allowed (budget check is strictly greater-than).
+        assert!(evaluate_checked(&rules, &transfer_input(&zero_topic_logs(10)), 100).is_ok());
+        // 11 × 11 = 121 > 100 → rejected.
+        assert!(matches!(
+            evaluate_checked(&rules, &transfer_input(&zero_topic_logs(11)), 100),
+            Err(MatchError::BindingBudgetExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn low_binding_budget_2_3_boundary() {
+        // A single-event rule yields exactly K bindings for K matching logs.
+        let raw: RawRule = serde_json::from_value(json!({
+            "id": "binding-budget-low",
+            "event_abis": {"a": {"type": "event", "name": "A", "inputs": [], "anonymous": true}},
+            "audit_types": ["custom"],
+            "condition": false,
+            "action": "audit"
+        }))
+        .unwrap();
+        let rules = load_rules(1, 1, vec![raw]);
+        assert!(evaluate_checked(&rules, &transfer_input(&zero_topic_logs(2)), 2).is_ok());
+        assert!(matches!(
+            evaluate_checked(&rules, &transfer_input(&zero_topic_logs(3)), 2),
             Err(MatchError::BindingBudgetExceeded { .. })
         ));
     }
