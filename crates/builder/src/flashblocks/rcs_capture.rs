@@ -862,6 +862,12 @@ mod gating_integration_tests {
     }
 
     fn call_tx(target: Address) -> OpTx {
+        call_tx_from(caller(), target)
+    }
+
+    /// Same as [`call_tx`] but from an explicit sender. Two candidate txs in one test can then share
+    /// a single EVM/inspector without a nonce-ordering dependency: each distinct sender uses nonce 0.
+    fn call_tx_from(from: Address, target: Address) -> OpTx {
         let tx = TxLegacy {
             nonce: 0,
             gas_limit: 2_000_000,
@@ -874,7 +880,7 @@ mod gating_integration_tests {
             Default::default(),
             Default::default(),
         ));
-        OpTx::from_recovered_tx(&tx, caller())
+        OpTx::from_recovered_tx(&tx, from)
     }
 
     /// Executes one candidate tx through a real composite-wrapped `OpEvm` and returns the capture
@@ -956,6 +962,21 @@ mod gating_integration_tests {
                 assert_eq!(stream[0].address, NATIVE_ASSET_ADDRESS);
                 assert_eq!(stream[0].topics()[1], factory.into_word());
                 assert_eq!(stream[0].data.data.as_ref(), &U256::from(7u64).to_be_bytes::<32>());
+                // Recipient (topic2) must be the newly created address — not the creator, the tx
+                // caller, or zero. Guards against a recipient-derivation bug that credits the wrong
+                // account (robust to revm's contract-nonce semantics, which fix the exact address).
+                let created = stream[0].topics()[2];
+                assert_ne!(
+                    created,
+                    factory.into_word(),
+                    "recipient is the created addr, not creator"
+                );
+                assert_ne!(
+                    created,
+                    caller().into_word(),
+                    "recipient is the created addr, not caller"
+                );
+                assert_ne!(created, B256::ZERO, "recipient must be a real derived address");
             }
             other => panic!("expected Complete with one CREATE transfer, got {other:?}"),
         }
@@ -1030,6 +1051,128 @@ mod gating_integration_tests {
                 );
             }
             other => panic!("expected Complete(empty) after child revert, got {other:?}"),
+        }
+    }
+
+    /// Runtime bytecode: `CALL(gas, dst, value=1, 0,0,0,0); POP; LOG0(0, 0); STOP` — one internal
+    /// 1-wei transfer followed by a persisted real `LOG0` in the same (successful) frame.
+    fn call_value_1_then_log0(dst: Address) -> Vec<u8> {
+        // PUSH1 0 (retSize) PUSH1 0 (retOffset) PUSH1 0 (argsSize) PUSH1 0 (argsOffset)
+        // PUSH1 1 (value)   PUSH20 dst          GAS                CALL
+        let mut code = vec![0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x01, 0x73];
+        code.extend_from_slice(dst.as_slice());
+        // GAS CALL POP  PUSH1 0 (size) PUSH1 0 (offset) LOG0  STOP
+        code.extend_from_slice(&[0x5a, 0xf1, 0x50, 0x60, 0x00, 0x60, 0x00, 0xa0, 0x00]);
+        code
+    }
+
+    #[test]
+    fn internal_transfer_then_real_log_interleaved_captured_through_composite() {
+        // A successful contract makes an internal value CALL and then emits a real LOG0. The stream
+        // must contain BOTH the virtual native `Transfer` and the persisted real log, interleaved in
+        // execution order [virtual, real]. This is the non-tautological real-log proof: if the
+        // composite stopped forwarding `log`/`log_full` to the inner inspector, the RealLog
+        // subsequence would be empty while `result.logs()` has one entry, so `finish_capture` would
+        // fail closed with `InvariantViolation` instead of `Complete` — the assert below would fail.
+        let contract = Address::from([0xC5; 20]);
+        let dst = Address::from([0xD5; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(contract, account(1_000, Some(call_value_1_then_log0(dst))));
+
+        let (outcome, success) = run(db, contract, 16);
+        assert!(success, "top-level tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete(stream) => {
+                assert_eq!(
+                    stream.len(),
+                    2,
+                    "one virtual transfer + one real log expected, in order"
+                );
+                // [0] virtual native transfer (contract -> dst, value 1).
+                assert_eq!(stream[0].address, NATIVE_ASSET_ADDRESS);
+                assert_eq!(stream[0].topics()[1], contract.into_word());
+                assert_eq!(stream[0].topics()[2], dst.into_word());
+                assert_eq!(stream[0].data.data.as_ref(), &U256::from(1u64).to_be_bytes::<32>());
+                // [1] the persisted real LOG0 — proves real-log forwarding + the cross-check passed.
+                assert_ne!(
+                    stream[1].address, NATIVE_ASSET_ADDRESS,
+                    "second entry must be the real log, not another virtual transfer"
+                );
+                assert_eq!(
+                    stream[1].address, contract,
+                    "real log carries the emitting contract addr"
+                );
+            }
+            other => panic!("expected Complete([virtual, real]) interleaved, got {other:?}"),
+        }
+    }
+
+    /// Runtime bytecode: two internal 1-wei CALLs (to `a` then `b`), each result popped, then STOP.
+    fn call_value_1_twice(a: Address, b: Address) -> Vec<u8> {
+        let mut code = Vec::new();
+        for dst in [a, b] {
+            // PUSH1 0 x4 (ret/args) PUSH1 1 (value) PUSH20 dst GAS CALL POP
+            code.extend_from_slice(&[
+                0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x01, 0x73,
+            ]);
+            code.extend_from_slice(dst.as_slice());
+            code.extend_from_slice(&[0x5a, 0xf1, 0x50]);
+        }
+        code.push(0x00); // STOP
+        code
+    }
+
+    #[test]
+    fn inspector_state_does_not_cross_transactions_through_real_evm() {
+        // Two candidate txs share ONE inspector (as in the real per-block loop), distinct senders so
+        // neither depends on the other committing. tx1 makes TWO internal transfers against a budget
+        // of 1, so it overflows: `finish_capture` returns `LimitExceeded` WITHOUT draining the queue
+        // (that early-return path skips the `mem::take`), leaving residual queue + `observed_count` +
+        // `overflowed` state on the inspector. `start_capture` at the head of tx2 MUST wipe all of it,
+        // or tx2 would inherit tx1's transfers (queue) and/or be born already overflowed. If any reset
+        // regressed, tx2 would not be a clean `Complete([d2 transfer])` and the asserts below fail.
+        let sender_a = Address::from([0xA5; 20]);
+        let sender_b = Address::from([0xB5; 20]);
+        let c1 = Address::from([0xC1; 20]);
+        let d1a = Address::from([0xD1; 20]);
+        let d1b = Address::from([0xD3; 20]);
+        let c2 = Address::from([0xC2; 20]);
+        let d2 = Address::from([0xD2; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(sender_a, account(1_000_000_000, None));
+        db.insert_account_info(sender_b, account(1_000_000_000, None));
+        db.insert_account_info(c1, account(1_000, Some(call_value_1_twice(d1a, d1b))));
+        db.insert_account_info(c2, account(1_000, Some(call_value_1_to(d2))));
+
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(1),
+        );
+
+        // tx1 -> c1: two transfers over a budget of 1 ⇒ overflow (queue not drained on this path).
+        evm.components_mut().1.start_capture();
+        let r1 = evm.transact_raw(call_tx_from(sender_a, c1)).expect("tx1 executes");
+        let o1 = evm.components_mut().1.finish_capture(r1.result.logs());
+        assert!(
+            matches!(o1, CaptureOutcome::LimitExceeded { .. }),
+            "tx1 must overflow the native-transfer budget, got {o1:?}"
+        );
+
+        // tx2 -> c2 on the SAME (dirty) inspector: start_capture must reset queue/count/overflow.
+        evm.components_mut().1.start_capture();
+        let r2 = evm.transact_raw(call_tx_from(sender_b, c2)).expect("tx2 executes");
+        let o2 = evm.components_mut().1.finish_capture(r2.result.logs());
+        match o2 {
+            CaptureOutcome::Complete(s) => {
+                assert_eq!(s.len(), 1, "tx2 must not inherit tx1's residual queue (reset per tx)");
+                assert_eq!(s[0].topics()[2], d2.into_word(), "tx2's transfer targets d2 only");
+            }
+            other => panic!("tx2 expected clean Complete(1) after a dirty tx1, got {other:?}"),
         }
     }
 }
