@@ -279,41 +279,61 @@ impl RcsCaptureControl for RcsInspector {
     }
 
     fn finish_capture(&mut self, result_logs: &[Log]) -> CaptureOutcome {
+        // Compute the outcome first — copying every count the outcome needs into locals — so the
+        // uniform state clear below can run on EVERY return path (spec §5.2, R9 item 4). The earlier
+        // implementation returned on the `LimitExceeded` / `InvariantViolation` paths *before*
+        // clearing `queue`/`checkpoints`/`observed_count`/`overflowed`, leaking state into the next
+        // capture window; cleanliness is now guaranteed immediately at finish, not only at reset.
+        let outcome = if self.overflowed {
+            CaptureOutcome::LimitExceeded { attempted: self.observed_count, limit: self.limit }
+        } else {
+            // Cross-check: the RealLog subsequence must equal `result.logs()` for count, content,
+            // and order. Any mismatch fails closed. Only indices/counts are surfaced, never content.
+            // `real` borrows `self.queue`, so it is scoped to this block and dropped before the
+            // `mem::take` below can move the queue out.
+            let mismatch = {
+                let real = self.real_log_subsequence();
+                if real.len() != result_logs.len() {
+                    let first_bad_index = real
+                        .iter()
+                        .zip(result_logs)
+                        .position(|(a, b)| *a != b)
+                        .unwrap_or_else(|| real.len().min(result_logs.len()));
+                    Some((first_bad_index, real.len(), result_logs.len()))
+                } else if let Some(first_bad_index) =
+                    real.iter().zip(result_logs).position(|(a, b)| *a != b)
+                {
+                    Some((first_bad_index, real.len(), result_logs.len()))
+                } else {
+                    None
+                }
+            };
+            match mismatch {
+                Some((first_bad_index, observed, expected)) => CaptureOutcome::InvariantViolation {
+                    reason: CaptureInvariantError::RealLogMismatch {
+                        first_bad_index,
+                        observed,
+                        expected,
+                    },
+                },
+                None => {
+                    let stream = std::mem::take(&mut self.queue)
+                        .into_iter()
+                        .map(QueuedLog::into_log)
+                        .collect();
+                    CaptureOutcome::Complete(stream)
+                }
+            }
+        };
+        // Uniform every-exit cleanup (R9 item 4): leave the inspector inactive and fully reset so
+        // nothing — queue, checkpoints, the native counter, or the sticky overflow flag — can leak
+        // into the next `start_capture`, regardless of Complete / LimitExceeded / InvariantViolation.
+        self.queue.clear();
+        self.checkpoints.clear();
+        self.observed_count = 0;
+        self.overflowed = false;
         self.active = false;
-        if self.overflowed {
-            return CaptureOutcome::LimitExceeded {
-                attempted: self.observed_count,
-                limit: self.limit,
-            };
-        }
-        // Cross-check: the RealLog subsequence must equal `result.logs()` for count, content, and
-        // order. Any mismatch fails closed. Only indices/counts are surfaced, never content.
-        let real = self.real_log_subsequence();
-        if real.len() != result_logs.len() {
-            let first_bad_index = real
-                .iter()
-                .zip(result_logs)
-                .position(|(a, b)| *a != b)
-                .unwrap_or_else(|| real.len().min(result_logs.len()));
-            return CaptureOutcome::InvariantViolation {
-                reason: CaptureInvariantError::RealLogMismatch {
-                    first_bad_index,
-                    observed: real.len(),
-                    expected: result_logs.len(),
-                },
-            };
-        }
-        if let Some(first_bad_index) = real.iter().zip(result_logs).position(|(a, b)| *a != b) {
-            return CaptureOutcome::InvariantViolation {
-                reason: CaptureInvariantError::RealLogMismatch {
-                    first_bad_index,
-                    observed: real.len(),
-                    expected: result_logs.len(),
-                },
-            };
-        }
-        let stream = std::mem::take(&mut self.queue).into_iter().map(QueuedLog::into_log).collect();
-        CaptureOutcome::Complete(stream)
+        outcome
     }
 
     fn abort_capture(&mut self) {
@@ -627,6 +647,49 @@ mod tests {
                 reason: CaptureInvariantError::RealLogMismatch { first_bad_index: 0, .. }
             }
         ));
+    }
+
+    /// Asserts the inspector is fully reset the instant a budget-overflow finish returns — not only
+    /// after the next `start_capture`.
+    fn assert_capture_state_is_clean(inspector: &RcsInspector) {
+        assert!(!inspector.active, "inspector must be inactive after finish");
+        assert!(inspector.queue.is_empty(), "queue must be cleared on the failing exit");
+        assert!(inspector.checkpoints.is_empty(), "checkpoints must be cleared on the failing exit");
+        assert_eq!(inspector.observed_count, 0, "observed_count must be reset on the failing exit");
+        assert!(!inspector.overflowed, "overflow flag must be reset on the failing exit");
+    }
+
+    #[test]
+    fn finish_capture_clears_state_on_limit_exceeded_exit() {
+        // A `LimitExceeded` finish must leave the inspector fully reset IMMEDIATELY (spec §5.2, R9
+        // item 4): the earlier implementation returned on this path before draining the queue.
+        let mut inspector = RcsInspector::new(1);
+        inspector.start_capture();
+        inspector.push_checkpoint();
+        observe_n(&mut inspector, NativeTransferKind::Call, 2);
+        assert!(matches!(
+            inspector.finish_capture(&[]),
+            CaptureOutcome::LimitExceeded { attempted: 2, limit: 1 }
+        ));
+        assert_capture_state_is_clean(&inspector);
+    }
+
+    #[test]
+    fn finish_capture_clears_state_on_invariant_exit() {
+        // An `InvariantViolation` (RealLog mismatch) finish must ALSO leave the inspector fully reset
+        // immediately, never leaking the captured queue into the next transaction (R9 item 4).
+        let mut inspector = RcsInspector::new(10);
+        inspector.start_capture();
+        inspector.push_checkpoint();
+        inspector.record_real_log(real_log(1));
+        // `result.logs()` is empty while one real log was captured → RealLogMismatch.
+        assert!(matches!(
+            inspector.finish_capture(&[]),
+            CaptureOutcome::InvariantViolation {
+                reason: CaptureInvariantError::RealLogMismatch { observed: 1, expected: 0, .. }
+            }
+        ));
+        assert_capture_state_is_clean(&inspector);
     }
 
     // ---- Task 11: budget boundaries + unified SELFDESTRUCT budget -------------------------------
