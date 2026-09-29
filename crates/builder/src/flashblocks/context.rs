@@ -6,7 +6,7 @@ use crate::{
 };
 use std::{sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use alloy_consensus::{
     conditional::BlockConditionalAttributes, transaction::Recovered, Eip658Value, Transaction,
@@ -15,7 +15,7 @@ use alloy_eips::eip2718::WithEncoded;
 use alloy_eips::{Encodable2718, Typed2718};
 use alloy_evm::Database;
 use alloy_op_evm::{block::receipt_builder::OpReceiptBuilder, block::OpTxEnv, OpEvm, OpEvmContext};
-use alloy_primitives::{BlockHash, Bytes, U256};
+use alloy_primitives::{BlockHash, Bytes, B256, U256};
 use alloy_rpc_types_eth::Withdrawals;
 use core::fmt::Debug;
 use op_alloy_consensus::{OpDepositReceipt, OpTxType};
@@ -98,19 +98,39 @@ pub(super) struct TransactionLimits {
     pub block_da_footprint: Option<u64>,
 }
 
-/// Maps a non-`Complete` [`CaptureOutcome`] to a fail-closed screening decision, recording the
+/// Maps a non-`Complete` [`CaptureOutcome`] to a fail-closed screening decision, emitting a
+/// structured `error!` at every real budget-overflow / invariant decision point and recording the
 /// matching local-deny reason metric exactly once. Returns `None` only for `Complete` (the caller
 /// screens the captured stream instead). An enabled filter receiving `Passthrough` is a
 /// state-machine bug and fails closed exactly like an observation-invariant violation — it is never
 /// allowed to fall back to raw logs.
-fn fail_closed_screen(filter: &FilterHandle, outcome: &CaptureOutcome) -> Option<Screen> {
+///
+/// Diagnostic fields are bounded to `tx_hash`, `observed_count`/`attempted`, and `limit`; the
+/// transfer list, individual from/to/value tuples, and the observation queue are NEVER logged.
+fn fail_closed_screen(
+    filter: &FilterHandle,
+    tx_hash: B256,
+    outcome: &CaptureOutcome,
+) -> Option<Screen> {
     match outcome {
         CaptureOutcome::Complete(_) => None,
-        CaptureOutcome::LimitExceeded { .. } => {
+        CaptureOutcome::LimitExceeded { attempted, limit } => {
+            error!(
+                target: "rcs_filter::capture",
+                %tx_hash,
+                observed_count = *attempted,
+                limit = *limit,
+                "native-transfer observation budget exceeded; failing closed (Screen::Deny)"
+            );
             filter.record_local_deny(LocalDenyReason::NativeTransferLimit);
             Some(Screen::Deny)
         }
         CaptureOutcome::InvariantViolation { .. } | CaptureOutcome::Passthrough => {
+            error!(
+                target: "rcs_filter::capture",
+                %tx_hash,
+                "capture invariant violated; failing closed (Screen::Deny)"
+            );
             filter.record_local_deny(LocalDenyReason::ObservationInvariant);
             Some(Screen::Deny)
         }
@@ -878,7 +898,7 @@ impl FlashblocksBuilderCtx {
                 } else {
                     // Every non-`Complete` outcome fails closed (budget overflow, observation
                     // invariant, or — a state-machine bug — an enabled filter seeing `Passthrough`).
-                    fail_closed_screen(filter, &capture_outcome).unwrap_or(Screen::Deny)
+                    fail_closed_screen(filter, tx_hash, &capture_outcome).unwrap_or(Screen::Deny)
                 };
                 match decision {
                     Screen::Allow | Screen::AuditApproved => {}
@@ -977,14 +997,21 @@ mod capture_decision_tests {
     #[test]
     fn complete_is_not_fail_closed() {
         let filter = test_filter();
-        assert_eq!(fail_closed_screen(&filter, &CaptureOutcome::Complete(vec![])), None);
+        assert_eq!(
+            fail_closed_screen(&filter, B256::ZERO, &CaptureOutcome::Complete(vec![])),
+            None
+        );
     }
 
     #[test]
     fn limit_exceeded_fails_closed() {
         let filter = test_filter();
         assert_eq!(
-            fail_closed_screen(&filter, &CaptureOutcome::LimitExceeded { attempted: 3, limit: 2 }),
+            fail_closed_screen(
+                &filter,
+                B256::ZERO,
+                &CaptureOutcome::LimitExceeded { attempted: 3, limit: 2 }
+            ),
             Some(Screen::Deny)
         );
     }
@@ -999,14 +1026,67 @@ mod capture_decision_tests {
                 expected: 2,
             },
         };
-        assert_eq!(fail_closed_screen(&filter, &outcome), Some(Screen::Deny));
+        assert_eq!(fail_closed_screen(&filter, B256::ZERO, &outcome), Some(Screen::Deny));
     }
 
     #[test]
     fn enabled_filter_passthrough_fails_closed() {
         // Review-focus: an enabled filter must never reuse raw logs on a `Passthrough`.
         let filter = test_filter();
-        assert_eq!(fail_closed_screen(&filter, &CaptureOutcome::Passthrough), Some(Screen::Deny));
+        assert_eq!(
+            fail_closed_screen(&filter, B256::ZERO, &CaptureOutcome::Passthrough),
+            Some(Screen::Deny)
+        );
+    }
+
+    #[test]
+    fn native_overflow_emits_error_with_bounded_fields_only() {
+        use std::io::Write;
+        use std::sync::Mutex;
+
+        // Minimal in-memory writer to inspect the emitted diagnostics.
+        #[derive(Clone)]
+        struct BufWriter(Arc<Mutex<Vec<u8>>>);
+        impl Write for BufWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl tracing_subscriber::fmt::MakeWriter<'_> for BufWriter {
+            type Writer = BufWriter;
+            fn make_writer(&self) -> BufWriter {
+                self.clone()
+            }
+        }
+
+        let buf = BufWriter(Arc::new(Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_target(true)
+            .with_writer(buf.clone())
+            .finish();
+
+        let filter = test_filter();
+        let decision = tracing::subscriber::with_default(subscriber, || {
+            fail_closed_screen(
+                &filter,
+                B256::repeat_byte(0xCD),
+                &CaptureOutcome::LimitExceeded { attempted: 10_001, limit: 10_000 },
+            )
+        });
+        assert_eq!(decision, Some(Screen::Deny));
+
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(out.contains("ERROR"), "expected error-level diagnostic, got: {out}");
+        assert!(out.contains("rcs_filter::capture"), "expected target, got: {out}");
+        assert!(out.contains("observed_count"), "expected observed_count field, got: {out}");
+        assert!(out.contains("10001"), "expected attempted count value, got: {out}");
+        assert!(out.contains("limit"), "expected limit field, got: {out}");
     }
 }
 

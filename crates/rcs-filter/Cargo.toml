@@ -25,6 +25,7 @@ metrics.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 metrics-util.workspace = true
+tracing-subscriber = "0.3"
 
 [lints]
 workspace = true

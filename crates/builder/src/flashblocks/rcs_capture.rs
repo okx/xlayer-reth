@@ -795,4 +795,241 @@ mod tests {
         i.record_create_observation(1, U256::ZERO, addr(1), addr(2));
         assert_eq!(i.observed_count, 0);
     }
+
+    // ---- R8: per-operation, never netted -------------------------------------------------------
+
+    #[test]
+    fn reverse_transfers_are_two_ordered_events_not_netted() {
+        // A→B: v then B→A: v (account net zero) must yield TWO ordered virtual Transfers, in order,
+        // never offset/netted/deduped.
+        let mut i = armed(10);
+        i.observe_native_transfer(addr(0xA), addr(0xB), U256::from(1u64), NativeTransferKind::Call);
+        i.observe_native_transfer(addr(0xB), addr(0xA), U256::from(1u64), NativeTransferKind::Call);
+        match i.finish_capture(&[]) {
+            CaptureOutcome::Complete(logs) => {
+                assert_eq!(logs.len(), 2, "net-zero pair must not be offset/deduped");
+                // Execution order preserved: first A→B, then B→A.
+                assert_eq!(logs[0].topics()[1], addr(0xA).into_word());
+                assert_eq!(logs[0].topics()[2], addr(0xB).into_word());
+                assert_eq!(logs[1].topics()[1], addr(0xB).into_word());
+                assert_eq!(logs[1].topics()[2], addr(0xA).into_word());
+            }
+            other => panic!("expected Complete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reverse_transfers_parent_revert_removes_both_count_stays() {
+        let mut i = armed(10);
+        i.push_checkpoint(); // parent frame
+        i.observe_native_transfer(addr(0xA), addr(0xB), U256::from(1u64), NativeTransferKind::Call);
+        i.observe_native_transfer(addr(0xB), addr(0xA), U256::from(1u64), NativeTransferKind::Call);
+        assert_eq!(i.observed_count, 2);
+        i.pop_checkpoint(true); // parent reverts → both dropped from the stream
+        assert!(i.queue.is_empty());
+        assert_eq!(i.observed_count, 2, "observed_count must not roll back on revert");
+    }
+}
+
+/// Production-shaped GATING runtime integration test (design §8). Builds a real
+/// `alloy_op_evm::OpEvm<_, RcsInspector, _>` — the `RcsInspector` is the inner inspector of the
+/// baked-in `PostExecCompositeInspector` — via the same factory the flashblocks path uses, executes
+/// real transactions through `evm.transact_raw`, and asserts capture happens THROUGH the composite
+/// wrapper at runtime. This proves the "inner implements the hook, the wrapper must forward it"
+/// property (§4/§5.3) that a helper-level unit test cannot; a green CI pipeline does NOT replace it.
+#[cfg(test)]
+mod gating_integration_tests {
+    use super::*;
+    use alloy_consensus::{SignableTransaction, TxLegacy};
+    use alloy_evm::{Evm, EvmEnv, EvmFactory, FromRecoveredTx};
+    use alloy_op_evm::{OpEvmFactory, OpTx};
+    use alloy_primitives::{Signature, TxKind};
+    use op_revm::OpSpecId;
+    use revm::context::{BlockEnv, CfgEnv};
+    use revm::database::InMemoryDB;
+    use revm::state::{AccountInfo, Bytecode};
+
+    fn caller() -> Address {
+        Address::from([0xAA; 20])
+    }
+
+    fn account(balance: u64, code: Option<Vec<u8>>) -> AccountInfo {
+        AccountInfo {
+            balance: U256::from(balance),
+            code: code.map(|c| Bytecode::new_raw(alloy_primitives::Bytes::from(c))),
+            ..Default::default()
+        }
+    }
+
+    fn call_tx(target: Address) -> OpTx {
+        let tx = TxLegacy {
+            nonce: 0,
+            gas_limit: 2_000_000,
+            to: TxKind::Call(target),
+            value: U256::ZERO,
+            ..Default::default()
+        }
+        .into_signed(Signature::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
+        OpTx::from_recovered_tx(&tx, caller())
+    }
+
+    /// Executes one candidate tx through a real composite-wrapped `OpEvm` and returns the capture
+    /// outcome plus whether the top-level tx succeeded. The capture seam (`start_capture` →
+    /// `transact_raw` → `finish_capture(result.logs())`) mirrors the builder's real path.
+    fn run(db: InMemoryDB, target: Address, budget: usize) -> (CaptureOutcome, bool) {
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(budget),
+        );
+        evm.components_mut().1.start_capture();
+        let result = evm.transact_raw(call_tx(target)).expect("tx executes");
+        let success = result.result.is_success();
+        let outcome = evm.components_mut().1.finish_capture(result.result.logs());
+        (outcome, success)
+    }
+
+    /// Runtime bytecode: `CALL(gas, dst, value=1, 0, 0, 0, 0); STOP` — one internal 1-wei transfer.
+    fn call_value_1_to(dst: Address) -> Vec<u8> {
+        // PUSH1 0 (retSize) PUSH1 0 (retOffset) PUSH1 0 (argsSize) PUSH1 0 (argsOffset)
+        // PUSH1 1 (value)   PUSH20 dst          GAS                CALL                 STOP
+        let mut code = vec![0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x01, 0x73];
+        code.extend_from_slice(dst.as_slice());
+        code.extend_from_slice(&[0x5a, 0xf1, 0x00]);
+        code
+    }
+
+    #[test]
+    fn internal_call_transfer_captured_through_composite() {
+        // caller → contract (value 0); contract makes an internal CALL transferring 1 wei to dst.
+        // Proves the composite forwards `call` to the inner RcsInspector at runtime, that
+        // `transfer_value`/`transfer_from`/`transfer_to` are read correctly, and top-level exclusion
+        // (the outer caller→contract call at journal depth 0 is NOT captured).
+        let contract = Address::from([0xCC; 20]);
+        let dst = Address::from([0xDD; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(contract, account(1_000, Some(call_value_1_to(dst))));
+
+        let (outcome, success) = run(db, contract, 16);
+        assert!(success, "top-level tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete(stream) => {
+                assert_eq!(stream.len(), 1, "exactly one internal native transfer expected");
+                assert_eq!(stream[0].address, NATIVE_ASSET_ADDRESS);
+                assert_eq!(stream[0].topics()[1], contract.into_word());
+                assert_eq!(stream[0].topics()[2], dst.into_word());
+                assert_eq!(stream[0].data.data.as_ref(), &U256::from(1u64).to_be_bytes::<32>());
+            }
+            other => panic!("expected Complete with one native transfer, got {other:?}"),
+        }
+    }
+
+    /// Runtime bytecode: `CREATE(value=7, offset=0, size=0); STOP` — one CREATE with a 7-wei endowment
+    /// and empty init code.
+    fn create_endowment_7() -> Vec<u8> {
+        // PUSH1 0 (size) PUSH1 0 (offset) PUSH1 7 (value) CREATE STOP
+        vec![0x60, 0x00, 0x60, 0x00, 0x60, 0x07, 0xf0, 0x00]
+    }
+
+    #[test]
+    fn internal_create_endowment_captured_through_composite() {
+        // A depth>0 CREATE with a non-zero endowment yields one native Transfer from the creator to
+        // the created address (recipient derivation runs through the composite-forwarded `create`).
+        let factory = Address::from([0xF1; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(factory, account(1_000, Some(create_endowment_7())));
+
+        let (outcome, success) = run(db, factory, 16);
+        assert!(success, "top-level tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete(stream) => {
+                assert_eq!(stream.len(), 1, "one CREATE endowment transfer expected");
+                assert_eq!(stream[0].address, NATIVE_ASSET_ADDRESS);
+                assert_eq!(stream[0].topics()[1], factory.into_word());
+                assert_eq!(stream[0].data.data.as_ref(), &U256::from(7u64).to_be_bytes::<32>());
+            }
+            other => panic!("expected Complete with one CREATE transfer, got {other:?}"),
+        }
+    }
+
+    /// Runtime bytecode: `PUSH20 beneficiary; SELFDESTRUCT`.
+    fn selfdestruct_to(beneficiary: Address) -> Vec<u8> {
+        let mut code = vec![0x73];
+        code.extend_from_slice(beneficiary.as_slice());
+        code.push(0xff);
+        code
+    }
+
+    #[test]
+    fn selfdestruct_transfer_captured_through_composite() {
+        // SELFDESTRUCT (value != 0, contract != beneficiary) is a qualifying native transfer even in
+        // the root frame — proves the composite forwards `selfdestruct` to the inner inspector.
+        let victim = Address::from([0xE1; 20]);
+        let beneficiary = Address::from([0xB1; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(victim, account(500, Some(selfdestruct_to(beneficiary))));
+
+        let (outcome, success) = run(db, victim, 16);
+        assert!(success, "top-level tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete(stream) => {
+                assert_eq!(stream.len(), 1, "one SELFDESTRUCT transfer expected");
+                assert_eq!(stream[0].address, NATIVE_ASSET_ADDRESS);
+                assert_eq!(stream[0].topics()[1], victim.into_word());
+                assert_eq!(stream[0].topics()[2], beneficiary.into_word());
+                assert_eq!(stream[0].data.data.as_ref(), &U256::from(500u64).to_be_bytes::<32>());
+            }
+            other => panic!("expected Complete with one SELFDESTRUCT transfer, got {other:?}"),
+        }
+    }
+
+    /// Runtime bytecode: `CALL(gas, dst, value=0, 0,0,0,0); STOP` — a zero-value child call whose
+    /// failure is ignored.
+    fn call_value_0_to(dst: Address) -> Vec<u8> {
+        let mut code = vec![0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x73];
+        code.extend_from_slice(dst.as_slice());
+        code.extend_from_slice(&[0x5a, 0xf1, 0x00]);
+        code
+    }
+
+    /// Runtime bytecode: `LOG0(offset=0, size=0); REVERT(0, 0)` — emits one real (empty) log, then
+    /// reverts the frame.
+    fn log_then_revert() -> Vec<u8> {
+        vec![0x60, 0x00, 0x60, 0x00, 0xa0, 0x60, 0x00, 0x60, 0x00, 0xfd]
+    }
+
+    #[test]
+    fn reverted_child_frame_rolls_back_real_log_and_cross_check_passes() {
+        // A zero-value child CALL emits a real log then REVERTs. The captured real log must be
+        // truncated on the sub-frame revert, and the finish_capture RealLog cross-check against
+        // `result.logs()` (which excludes reverted logs) must still pass → Complete(empty).
+        let parent = Address::from([0xA1; 20]);
+        let child = Address::from([0xA2; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(parent, account(0, Some(call_value_0_to(child))));
+        db.insert_account_info(child, account(0, Some(log_then_revert())));
+
+        let (outcome, success) = run(db, parent, 16);
+        assert!(success, "parent tx ignores the child revert and succeeds");
+        match outcome {
+            CaptureOutcome::Complete(stream) => {
+                assert!(
+                    stream.is_empty(),
+                    "reverted child frame's real log must be rolled back, got {stream:?}"
+                );
+            }
+            other => panic!("expected Complete(empty) after child revert, got {other:?}"),
+        }
+    }
 }
