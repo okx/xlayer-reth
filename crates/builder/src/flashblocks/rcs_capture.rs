@@ -894,18 +894,22 @@ mod tests {
     }
 }
 
-/// Production-shaped GATING runtime integration test (design §8). Builds a real
+/// Production-shaped GATING runtime integration test (design §8, R9 item 2). Builds a real
 /// `alloy_op_evm::OpEvm<_, RcsInspector, _>` — the `RcsInspector` is the inner inspector of the
-/// baked-in `PostExecCompositeInspector` — via the same factory the flashblocks path uses, executes
-/// real transactions through `evm.transact_raw`, and asserts capture happens THROUGH the composite
-/// wrapper at runtime. This proves the "inner implements the hook, the wrapper must forward it"
-/// property (§4/§5.3) that a helper-level unit test cannot; a green CI pipeline does NOT replace it.
+/// baked-in `PostExecCompositeInspector` — via the same factory the flashblocks path uses, and
+/// executes real transactions through the production entry point **`evm.transact`** (matching
+/// `context.rs`'s candidate simulation; `transact_raw` is used only as a supplementary probe for a
+/// forced-mismatch fixture, never as the gate). It asserts capture happens THROUGH the composite
+/// wrapper at runtime — the "inner implements the hook, the wrapper must forward it" property
+/// (§4/§5.3) that a helper-level unit test cannot prove — plus CREATE2 endowment, parent-frame
+/// revert rollback, a runtime-forced real-log mismatch, and that the composite's own SDM/post-exec
+/// warming is preserved. A green CI pipeline does NOT replace this gate.
 #[cfg(test)]
 mod gating_integration_tests {
     use super::*;
     use alloy_consensus::{SignableTransaction, TxLegacy};
     use alloy_evm::{Evm, EvmEnv, EvmFactory, FromRecoveredTx};
-    use alloy_op_evm::{OpEvmFactory, OpTx};
+    use alloy_op_evm::{post_exec, OpEvmFactory, OpTx};
     use alloy_primitives::{Signature, TxKind};
     use op_revm::OpSpecId;
     use revm::context::{BlockEnv, CfgEnv};
@@ -922,6 +926,17 @@ mod gating_integration_tests {
             code: code.map(|c| Bytecode::new_raw(alloy_primitives::Bytes::from(c))),
             ..Default::default()
         }
+    }
+
+    /// The shared prologue for a `CALL(gas, dst, value, 0, 0, 0, 0)`: pushes the four zero
+    /// ret/args words, the `value`, and `PUSH20 dst`, leaving the stack ready for `GAS; CALL`.
+    /// Extracted so the hand-written CALL fixtures below don't each repeat the opcode prefix.
+    fn call_prefix(value: u8, dst: Address) -> Vec<u8> {
+        // PUSH1 0 (retSize) PUSH1 0 (retOffset) PUSH1 0 (argsSize) PUSH1 0 (argsOffset)
+        // PUSH1 value       PUSH20 dst
+        let mut code = vec![0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, value, 0x73];
+        code.extend_from_slice(dst.as_slice());
+        code
     }
 
     fn call_tx(target: Address) -> OpTx {
@@ -948,8 +963,10 @@ mod gating_integration_tests {
 
     /// Executes one candidate tx through a real composite-wrapped `OpEvm` and returns the capture
     /// outcome plus whether the top-level tx succeeded. The capture seam (`start_capture` →
-    /// `transact_raw` → `finish_capture(result.logs())`) mirrors the builder's real path.
-    fn run(db: InMemoryDB, target: Address, budget: usize) -> (CaptureOutcome, bool) {
+    /// production `evm.transact` → `finish_capture(result.logs())`) mirrors the builder's real path;
+    /// `transact` is the same entry point `context.rs` uses (R9 decision), so the gate exercises the
+    /// production `PostExecCompositeInspector` forwarding and gasless/base-fee handling.
+    fn run_capturing_tx(db: InMemoryDB, target: Address, budget: usize) -> (CaptureOutcome, bool) {
         let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
             db,
             EvmEnv::new(
@@ -959,7 +976,7 @@ mod gating_integration_tests {
             RcsInspector::new(budget),
         );
         evm.components_mut().1.start_capture();
-        let result = evm.transact_raw(call_tx(target)).expect("tx executes");
+        let result = evm.transact(call_tx(target)).expect("tx executes");
         let success = result.result.is_success();
         let outcome = evm.components_mut().1.finish_capture(result.result.logs());
         (outcome, success)
@@ -967,11 +984,8 @@ mod gating_integration_tests {
 
     /// Runtime bytecode: `CALL(gas, dst, value=1, 0, 0, 0, 0); STOP` — one internal 1-wei transfer.
     fn call_value_1_to(dst: Address) -> Vec<u8> {
-        // PUSH1 0 (retSize) PUSH1 0 (retOffset) PUSH1 0 (argsSize) PUSH1 0 (argsOffset)
-        // PUSH1 1 (value)   PUSH20 dst          GAS                CALL                 STOP
-        let mut code = vec![0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x01, 0x73];
-        code.extend_from_slice(dst.as_slice());
-        code.extend_from_slice(&[0x5a, 0xf1, 0x00]);
+        let mut code = call_prefix(0x01, dst);
+        code.extend_from_slice(&[0x5a, 0xf1, 0x00]); // GAS CALL STOP
         code
     }
 
@@ -987,7 +1001,7 @@ mod gating_integration_tests {
         db.insert_account_info(caller(), account(1_000_000_000, None));
         db.insert_account_info(contract, account(1_000, Some(call_value_1_to(dst))));
 
-        let (outcome, success) = run(db, contract, 16);
+        let (outcome, success) = run_capturing_tx(db, contract, 16);
         assert!(success, "top-level tx should succeed");
         match outcome {
             CaptureOutcome::Complete(stream) => {
@@ -1017,7 +1031,7 @@ mod gating_integration_tests {
         db.insert_account_info(caller(), account(1_000_000_000, None));
         db.insert_account_info(factory, account(1_000, Some(create_endowment_7())));
 
-        let (outcome, success) = run(db, factory, 16);
+        let (outcome, success) = run_capturing_tx(db, factory, 16);
         assert!(success, "top-level tx should succeed");
         match outcome {
             CaptureOutcome::Complete(stream) => {
@@ -1063,7 +1077,7 @@ mod gating_integration_tests {
         db.insert_account_info(caller(), account(1_000_000_000, None));
         db.insert_account_info(victim, account(500, Some(selfdestruct_to(beneficiary))));
 
-        let (outcome, success) = run(db, victim, 16);
+        let (outcome, success) = run_capturing_tx(db, victim, 16);
         assert!(success, "top-level tx should succeed");
         match outcome {
             CaptureOutcome::Complete(stream) => {
@@ -1080,9 +1094,8 @@ mod gating_integration_tests {
     /// Runtime bytecode: `CALL(gas, dst, value=0, 0,0,0,0); STOP` — a zero-value child call whose
     /// failure is ignored.
     fn call_value_0_to(dst: Address) -> Vec<u8> {
-        let mut code = vec![0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x73];
-        code.extend_from_slice(dst.as_slice());
-        code.extend_from_slice(&[0x5a, 0xf1, 0x00]);
+        let mut code = call_prefix(0x00, dst);
+        code.extend_from_slice(&[0x5a, 0xf1, 0x00]); // GAS CALL STOP
         code
     }
 
@@ -1104,7 +1117,7 @@ mod gating_integration_tests {
         db.insert_account_info(parent, account(0, Some(call_value_0_to(child))));
         db.insert_account_info(child, account(0, Some(log_then_revert())));
 
-        let (outcome, success) = run(db, parent, 16);
+        let (outcome, success) = run_capturing_tx(db, parent, 16);
         assert!(success, "parent tx ignores the child revert and succeeds");
         match outcome {
             CaptureOutcome::Complete(stream) => {
@@ -1120,10 +1133,7 @@ mod gating_integration_tests {
     /// Runtime bytecode: `CALL(gas, dst, value=1, 0,0,0,0); POP; LOG0(0, 0); STOP` — one internal
     /// 1-wei transfer followed by a persisted real `LOG0` in the same (successful) frame.
     fn call_value_1_then_log0(dst: Address) -> Vec<u8> {
-        // PUSH1 0 (retSize) PUSH1 0 (retOffset) PUSH1 0 (argsSize) PUSH1 0 (argsOffset)
-        // PUSH1 1 (value)   PUSH20 dst          GAS                CALL
-        let mut code = vec![0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x01, 0x73];
-        code.extend_from_slice(dst.as_slice());
+        let mut code = call_prefix(0x01, dst);
         // GAS CALL POP  PUSH1 0 (size) PUSH1 0 (offset) LOG0  STOP
         code.extend_from_slice(&[0x5a, 0xf1, 0x50, 0x60, 0x00, 0x60, 0x00, 0xa0, 0x00]);
         code
@@ -1143,7 +1153,7 @@ mod gating_integration_tests {
         db.insert_account_info(caller(), account(1_000_000_000, None));
         db.insert_account_info(contract, account(1_000, Some(call_value_1_then_log0(dst))));
 
-        let (outcome, success) = run(db, contract, 16);
+        let (outcome, success) = run_capturing_tx(db, contract, 16);
         assert!(success, "top-level tx should succeed");
         match outcome {
             CaptureOutcome::Complete(stream) => {
@@ -1175,12 +1185,8 @@ mod gating_integration_tests {
     fn call_value_1_twice(a: Address, b: Address) -> Vec<u8> {
         let mut code = Vec::new();
         for dst in [a, b] {
-            // PUSH1 0 x4 (ret/args) PUSH1 1 (value) PUSH20 dst GAS CALL POP
-            code.extend_from_slice(&[
-                0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x01, 0x73,
-            ]);
-            code.extend_from_slice(dst.as_slice());
-            code.extend_from_slice(&[0x5a, 0xf1, 0x50]);
+            code.extend_from_slice(&call_prefix(0x01, dst)); // ret/args, value 1, PUSH20 dst
+            code.extend_from_slice(&[0x5a, 0xf1, 0x50]); // GAS CALL POP
         }
         code.push(0x00); // STOP
         code
@@ -1219,7 +1225,7 @@ mod gating_integration_tests {
 
         // tx1 -> c1: two transfers over a budget of 1 ⇒ overflow (queue not drained on this path).
         evm.components_mut().1.start_capture();
-        let r1 = evm.transact_raw(call_tx_from(sender_a, c1)).expect("tx1 executes");
+        let r1 = evm.transact(call_tx_from(sender_a, c1)).expect("tx1 executes");
         let o1 = evm.components_mut().1.finish_capture(r1.result.logs());
         assert!(
             matches!(o1, CaptureOutcome::LimitExceeded { .. }),
@@ -1228,7 +1234,7 @@ mod gating_integration_tests {
 
         // tx2 -> c2 on the SAME (dirty) inspector: start_capture must reset queue/count/overflow.
         evm.components_mut().1.start_capture();
-        let r2 = evm.transact_raw(call_tx_from(sender_b, c2)).expect("tx2 executes");
+        let r2 = evm.transact(call_tx_from(sender_b, c2)).expect("tx2 executes");
         let o2 = evm.components_mut().1.finish_capture(r2.result.logs());
         match o2 {
             CaptureOutcome::Complete(s) => {
@@ -1237,5 +1243,177 @@ mod gating_integration_tests {
             }
             other => panic!("tx2 expected clean Complete(1) after a dirty tx1, got {other:?}"),
         }
+    }
+
+    /// Runtime bytecode: `CREATE2(value=7, offset=0, size=0, salt=0); STOP` — a 7-wei endowment with
+    /// empty init code. CREATE2 pops value(top), offset, size, salt, so the pushes are salt, size,
+    /// offset, value.
+    fn create2_endowment_7() -> Vec<u8> {
+        // PUSH1 0 (salt) PUSH1 0 (size) PUSH1 0 (offset) PUSH1 7 (value) CREATE2 STOP
+        vec![0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x07, 0xf5, 0x00]
+    }
+
+    #[test]
+    fn internal_create2_endowment_captured_through_composite() {
+        // R9 item 2a: a depth>0 CREATE2 with a non-zero endowment yields one native Transfer from the
+        // creator to the CREATE2-derived address, through the composite-forwarded `create` hook on the
+        // production `evm.transact` path (distinct from the plain-CREATE case).
+        let factory = Address::from([0xF2; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(factory, account(1_000, Some(create2_endowment_7())));
+
+        let (outcome, success) = run_capturing_tx(db, factory, 16);
+        assert!(success, "top-level tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete(stream) => {
+                assert_eq!(stream.len(), 1, "one CREATE2 endowment transfer expected");
+                assert_eq!(stream[0].address, NATIVE_ASSET_ADDRESS);
+                assert_eq!(stream[0].topics()[1], factory.into_word());
+                assert_eq!(stream[0].data.data.as_ref(), &U256::from(7u64).to_be_bytes::<32>());
+                // Recipient is the CREATE2-derived address (salt + init-code hash), not the creator,
+                // the tx caller, or zero.
+                let created = stream[0].topics()[2];
+                assert_ne!(created, factory.into_word(), "recipient is the CREATE2 addr, not creator");
+                assert_ne!(created, caller().into_word(), "recipient is the CREATE2 addr, not caller");
+                assert_ne!(created, B256::ZERO, "recipient must be a real derived address");
+            }
+            other => panic!("expected Complete with one CREATE2 transfer, got {other:?}"),
+        }
+    }
+
+    /// Runtime bytecode: `LOG0(0, 0); STOP` — emits one real (empty) log then returns successfully.
+    fn log_then_stop() -> Vec<u8> {
+        vec![0x60, 0x00, 0x60, 0x00, 0xa0, 0x00]
+    }
+
+    /// Runtime bytecode: `CALL(gas, child, value=1, 0,0,0,0); POP; REVERT(0, 0)` — a successful child
+    /// value-call (which emits a real log) followed by the PARENT frame reverting.
+    fn call_child_then_revert(child: Address) -> Vec<u8> {
+        let mut code = call_prefix(0x01, child);
+        // GAS CALL POP  PUSH1 0 (size) PUSH1 0 (offset) REVERT
+        code.extend_from_slice(&[0x5a, 0xf1, 0x50, 0x60, 0x00, 0x60, 0x00, 0xfd]);
+        code
+    }
+
+    #[test]
+    fn parent_frame_revert_rolls_back_child_transfer_and_real_log_through_composite() {
+        // R9 item 2b / spec §8 test 32. A grandchild frame receives a qualifying native transfer and
+        // emits a real log; its PARENT frame then reverts (while the top-level tx survives, ignoring
+        // the failed sub-call). Through `evm.transact`, both the virtual transfer and the real log
+        // must truncate at the parent checkpoint, and `result.logs()` (the reverted subtree's logs are
+        // discarded) must match the now-empty RealLog subsequence → Complete(empty): the tx screens as
+        // if the events never happened.
+        let root = Address::from([0xA0; 20]); // calls parent (value 0), ignores its revert, succeeds
+        let parent = Address::from([0xA1; 20]); // calls child (value 1) then REVERTs
+        let child = Address::from([0xA2; 20]); // receives value + emits a real log, returns ok
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(root, account(0, Some(call_value_0_to(parent))));
+        db.insert_account_info(parent, account(1_000, Some(call_child_then_revert(child))));
+        db.insert_account_info(child, account(0, Some(log_then_stop())));
+
+        let (outcome, success) = run_capturing_tx(db, root, 16);
+        assert!(success, "the top-level tx ignores the parent frame's revert and succeeds");
+        match outcome {
+            CaptureOutcome::Complete(stream) => assert!(
+                stream.is_empty(),
+                "a parent-frame revert must truncate the child transfer AND its real log, got {stream:?}"
+            ),
+            other => panic!("expected Complete(empty) after a parent-frame revert, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_forced_real_log_mismatch_fails_closed_through_composite() {
+        // R9 item 2c / spec §8 test 33. Drive a real tx that emits a real log (captured through the
+        // composite-forwarded `log` hook), then finish the capture against a `result.logs()` forced to
+        // DIVERGE from the captured subsequence. The cross-check must fail closed with
+        // `InvariantViolation { RealLogMismatch }` — the outcome the builder maps to Screen::Deny
+        // (see context.rs `invariant_violation_fails_closed` / `realogmismatch_emits_own_arm_...`),
+        // never entering the pending buffer and never submitting a partial action.
+        let contract = Address::from([0xC7; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(contract, account(0, Some(log_then_stop())));
+
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        evm.components_mut().1.start_capture();
+        let result = evm.transact(call_tx(contract)).expect("tx executes");
+        assert!(result.result.is_success(), "the emitting tx itself succeeds");
+        // The composite forwarded the real log to the inner inspector (one persisted log).
+        assert_eq!(result.result.logs().len(), 1, "one real log persisted");
+
+        // Force divergence at runtime: append a fabricated log so the captured RealLog subsequence
+        // (1) no longer matches the claimed `result.logs()` (2).
+        let mut tampered = result.result.logs().to_vec();
+        tampered.push(native_transfer_log(caller(), NATIVE_ASSET_ADDRESS, U256::from(1u64)));
+        let outcome = evm.components_mut().1.finish_capture(&tampered);
+        assert!(
+            matches!(
+                outcome,
+                CaptureOutcome::InvariantViolation {
+                    reason: CaptureInvariantError::RealLogMismatch { observed: 1, expected: 2, .. }
+                }
+            ),
+            "a runtime real-log divergence must fail closed with RealLogMismatch, got {outcome:?}"
+        );
+    }
+
+    /// Runtime bytecode: `PUSH1 0; SLOAD; POP; STOP` — reads (warms) storage slot 0.
+    const WARMING_CONTRACT_CODE: [u8; 5] = [0x60, 0x00, 0x54, 0x50, 0x00];
+
+    #[test]
+    fn composite_post_exec_warming_preserved_with_rcs_inspector_inner() {
+        // R9 item 2d / spec §8 item 9. Making `RcsInspector` the composite's INNER inspector must NOT
+        // replace the composite's own SDM/post-exec warming. Drive two warming txs through the
+        // production `evm.transact` on an `OpEvm<_, RcsInspector, _>` with post-exec tracking active:
+        // the second tx re-touches a block-warmed slot and MUST still earn a warming refund, exactly
+        // as it does with no capture inspector, while capture runs alongside (a clean empty Complete
+        // each time — an SLOAD moves no native value).
+        let target = Address::from([0x2C; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(target, account(0, Some(WARMING_CONTRACT_CODE.to_vec())));
+
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+
+        // `transact` does not commit here, so nonce 0 is reused across both txs (as in the upstream
+        // OpEvm post-exec test); block-scoped warming is carried on the composite across the two txs.
+        let mut warm_once = |tx_index: u64| {
+            evm.begin_post_exec_tx(post_exec::PostExecTxContext {
+                tx_index,
+                kind: post_exec::PostExecTxKind::Normal,
+            });
+            evm.components_mut().1.start_capture();
+            let result = evm.transact(call_tx(target)).expect("warming tx executes");
+            let outcome = evm.components_mut().1.finish_capture(result.result.logs());
+            assert!(
+                matches!(outcome, CaptureOutcome::Complete(ref s) if s.is_empty()),
+                "capture must run alongside warming (no native transfer from an SLOAD), got {outcome:?}"
+            );
+            evm.take_last_post_exec_tx_result().refund_total
+        };
+
+        assert_eq!(warm_once(0), 0, "the first tx warms the slot but earns no refund");
+        assert!(
+            warm_once(1) > 0,
+            "the composite's SDM warming must still credit a refund on the second tx — making \
+             RcsInspector the inner inspector did not replace the composite's post-exec behavior"
+        );
     }
 }
