@@ -51,9 +51,7 @@ use revm::{
     context::result::ResultAndState, interpreter::as_u64_saturated, DatabaseCommit, Inspector,
 };
 
-use super::rcs_capture::{
-    CaptureInvariantError, CaptureOutcome, RcsCaptureControl, RcsInspector,
-};
+use super::rcs_capture::{CaptureInvariantError, CaptureOutcome, RcsCaptureControl, RcsInspector};
 
 /// Container type that holds all necessities to build a new payload.
 #[derive(Debug)]
@@ -445,11 +443,9 @@ impl FlashblocksBuilderCtx {
         // inactive without relying on manual cleanup, and abort runs exactly once (spec §5.2, R9
         // item 3). So every early exit downstream sees an inactive inspector.
         let mut guard = CaptureGuard::new(evm);
-        let result = match guard.scope_mut().transact(tx_env) {
-            Ok(result) => result,
-            // On the `Err` path the guard is dropped while still armed → a single `abort_capture`.
-            Err(err) => return Err(err),
-        };
+        // On the `Err` path `?` early-returns while the guard is still armed, so its `Drop` runs a
+        // single `abort_capture`; on `Ok`, `guard.finish` disarms it (no double-abort).
+        let result = guard.scope_mut().transact(tx_env)?;
         let capture = guard.finish(result.result.logs());
         Ok((result, is_gasless, capture))
     }

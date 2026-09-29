@@ -293,19 +293,17 @@ impl RcsCaptureControl for RcsInspector {
             // `mem::take` below can move the queue out.
             let mismatch = {
                 let real = self.real_log_subsequence();
+                let first_divergence = real.iter().zip(result_logs).position(|(a, b)| *a != b);
                 if real.len() != result_logs.len() {
-                    let first_bad_index = real
-                        .iter()
-                        .zip(result_logs)
-                        .position(|(a, b)| *a != b)
-                        .unwrap_or_else(|| real.len().min(result_logs.len()));
-                    Some((first_bad_index, real.len(), result_logs.len()))
-                } else if let Some(first_bad_index) =
-                    real.iter().zip(result_logs).position(|(a, b)| *a != b)
-                {
+                    // Count differs: report the first differing index, or the shorter length when
+                    // the shared prefix matches (one is a prefix of the other).
+                    let first_bad_index =
+                        first_divergence.unwrap_or_else(|| real.len().min(result_logs.len()));
                     Some((first_bad_index, real.len(), result_logs.len()))
                 } else {
-                    None
+                    // Equal length: a mismatch exists only if some element differs.
+                    first_divergence
+                        .map(|first_bad_index| (first_bad_index, real.len(), result_logs.len()))
                 }
             };
             match mismatch {
@@ -654,7 +652,10 @@ mod tests {
     fn assert_capture_state_is_clean(inspector: &RcsInspector) {
         assert!(!inspector.active, "inspector must be inactive after finish");
         assert!(inspector.queue.is_empty(), "queue must be cleared on the failing exit");
-        assert!(inspector.checkpoints.is_empty(), "checkpoints must be cleared on the failing exit");
+        assert!(
+            inspector.checkpoints.is_empty(),
+            "checkpoints must be cleared on the failing exit"
+        );
         assert_eq!(inspector.observed_count, 0, "observed_count must be reset on the failing exit");
         assert!(!inspector.overflowed, "overflow flag must be reset on the failing exit");
     }
@@ -897,9 +898,10 @@ mod tests {
 /// Production-shaped GATING runtime integration test (design §8, R9 item 2). Builds a real
 /// `alloy_op_evm::OpEvm<_, RcsInspector, _>` — the `RcsInspector` is the inner inspector of the
 /// baked-in `PostExecCompositeInspector` — via the same factory the flashblocks path uses, and
-/// executes real transactions through the production entry point **`evm.transact`** (matching
-/// `context.rs`'s candidate simulation; `transact_raw` is used only as a supplementary probe for a
-/// forced-mismatch fixture, never as the gate). It asserts capture happens THROUGH the composite
+/// executes every candidate through the production entry point **`evm.transact`** (matching
+/// `context.rs`'s candidate simulation) — no `transact_raw` is used; the runtime-forced-mismatch case
+/// drives a real `evm.transact` and then compares against a deliberately tampered `result.logs()`
+/// slice. It asserts capture happens THROUGH the composite
 /// wrapper at runtime — the "inner implements the hook, the wrapper must forward it" property
 /// (§4/§5.3) that a helper-level unit test cannot prove — plus CREATE2 endowment, parent-frame
 /// revert rollback, a runtime-forced real-log mismatch, and that the composite's own SDM/post-exec
@@ -1274,8 +1276,16 @@ mod gating_integration_tests {
                 // Recipient is the CREATE2-derived address (salt + init-code hash), not the creator,
                 // the tx caller, or zero.
                 let created = stream[0].topics()[2];
-                assert_ne!(created, factory.into_word(), "recipient is the CREATE2 addr, not creator");
-                assert_ne!(created, caller().into_word(), "recipient is the CREATE2 addr, not caller");
+                assert_ne!(
+                    created,
+                    factory.into_word(),
+                    "recipient is the CREATE2 addr, not creator"
+                );
+                assert_ne!(
+                    created,
+                    caller().into_word(),
+                    "recipient is the CREATE2 addr, not caller"
+                );
                 assert_ne!(created, B256::ZERO, "recipient must be a real derived address");
             }
             other => panic!("expected Complete with one CREATE2 transfer, got {other:?}"),
