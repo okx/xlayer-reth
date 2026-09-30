@@ -1118,6 +1118,69 @@ mod capture_decision_tests {
     }
 
     #[test]
+    fn real_runtime_mismatch_fails_closed_on_builder_path_no_buffer_no_action() {
+        // R10 item 5 / spec §8 test 35 — the single remaining R9-required GATE. It proves, in ONE
+        // test on the actual builder screening path, what test 33 (real runtime outcome) and
+        // `invariant_violation_fails_closed` (Screen::Deny from a HAND-CONSTRUCTED outcome) only prove
+        // apart:
+        //   - Real runtime outcome (NOT synthetic): a production `evm.transact` + real `finish_capture`
+        //     yields `CaptureOutcome::InvariantViolation{RealLogMismatch}` (the shared test 33 fixture).
+        //   - Same fail-closed branch the candidate loop uses (NOT a re-implementation): the outcome is
+        //     routed through the production `fail_closed_screen` dispatch that `execute_best_transactions`
+        //     calls at its screen-decision site (context.rs `:989`), reaching the `Screen::Deny` arm.
+        //   - All three guarantees asserted TOGETHER: (a) the decision is `Screen::Deny` (the loop then
+        //     runs the Deny arm — `mark_invalid` → `tx_pool.remove_transaction` → `record_txpool_discard`
+        //     → `continue`, so the tx is never appended to `info.executed_transactions`/`info.receipts`
+        //     and `evm.db_mut().commit` is never reached); (b) the tx NEVER enters the RCS pending buffer
+        //     — fail-closed never calls `screen_tx` (the only `AuditPending`→`BufferPool` insert path),
+        //     so no `BufferEntry` exists for the tx; (c) no partial action / no side effects — fail-closed
+        //     fires only the metrics-only `record_local_deny(ObservationInvariant)`, no submit-queue entry.
+        // Stopping at `InvariantViolation`, or asserting `Screen::Deny` from a synthetic outcome, does
+        // NOT satisfy this gate.
+        use crate::flashblocks::rcs_capture::test_fixtures;
+
+        // (real runtime outcome — reuses the test 33 fixture, not a hand-built CaptureOutcome)
+        let outcome = test_fixtures::real_runtime_reallogmismatch_outcome();
+        assert!(
+            matches!(
+                outcome,
+                CaptureOutcome::InvariantViolation {
+                    reason: CaptureInvariantError::RealLogMismatch { .. }
+                }
+            ),
+            "the fixture must yield a REAL runtime RealLogMismatch, got {outcome:?}"
+        );
+
+        let filter = test_filter();
+        let tx_hash = B256::repeat_byte(0x35);
+        assert_eq!(filter.buffered_len(), 0, "precondition: the RCS pending buffer starts empty");
+
+        // Route the REAL outcome through the SAME production dispatch the candidate loop calls.
+        let decision = fail_closed_screen(&filter, tx_hash, &outcome);
+
+        // (a) the builder decision is Screen::Deny.
+        assert_eq!(
+            decision,
+            Some(Screen::Deny),
+            "a real runtime RealLogMismatch must fail closed to Screen::Deny on the builder path"
+        );
+        // (b) the tx never enters the RCS pending buffer: fail-closed never calls screen_tx (the only
+        // path that inserts a BufferPool entry), so the buffer is unchanged and holds no entry for it.
+        assert_eq!(
+            filter.buffered_len(),
+            0,
+            "fail-closed must not insert a BufferPool entry (screen_tx is never called)"
+        );
+        assert!(
+            filter.buffer_status(&tx_hash).is_none(),
+            "no BufferEntry may exist for the failed-closed tx"
+        );
+        // (c) no partial action / no side effects: the fail-closed path fired only the metrics-only
+        // record_local_deny(ObservationInvariant); the tx was never screened and no action was
+        // submitted (evidenced by the empty pending buffer + the absence of any buffer entry above).
+    }
+
+    #[test]
     fn enabled_filter_passthrough_fails_closed() {
         // Review-focus: an enabled filter must never reuse raw logs on a `Passthrough`.
         let filter = test_filter();

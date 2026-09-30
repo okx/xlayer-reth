@@ -895,17 +895,91 @@ mod tests {
     }
 }
 
+/// Shared runtime test fixtures for the builder capture path. Kept `pub(crate)` so the end-to-end
+/// builder-path fail-closed test (spec §8 test 35, in `context.rs`) can consume the SAME real
+/// `evm.transact`-driven outcome that test 33 asserts — one runtime source, not a re-implementation.
+#[cfg(test)]
+pub(crate) mod test_fixtures {
+    use super::*;
+    use alloy_consensus::{SignableTransaction, TxLegacy};
+    use alloy_evm::{Evm, EvmEnv, EvmFactory, FromRecoveredTx};
+    use alloy_op_evm::{OpEvmFactory, OpTx};
+    use alloy_primitives::{Signature, TxKind};
+    use op_revm::OpSpecId;
+    use revm::context::{BlockEnv, CfgEnv};
+    use revm::database::InMemoryDB;
+    use revm::state::{AccountInfo, Bytecode};
+
+    /// Produces a REAL [`CaptureOutcome::InvariantViolation`] carrying a
+    /// [`CaptureInvariantError::RealLogMismatch`] from a production `evm.transact` on an
+    /// `OpEvm<_, RcsInspector, _>` — NOT a hand-constructed outcome. A contract emits one real `LOG0`
+    /// (captured through the composite-forwarded `log` hook), then `finish_capture` runs against a
+    /// deliberately tampered `result.logs()` slice so the RealLog cross-check diverges (observed 1 vs
+    /// expected 2). This is the shared runtime source consumed by test 33 (asserts the runtime
+    /// outcome) and test 35 (asserts the builder fail-closed path). Reusing it keeps the two tests on
+    /// the exact same real runtime outcome.
+    pub(crate) fn real_runtime_reallogmismatch_outcome() -> CaptureOutcome {
+        let caller = Address::from([0xAA; 20]);
+        let contract = Address::from([0xC7; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            caller,
+            AccountInfo { balance: U256::from(1_000_000_000u64), ..Default::default() },
+        );
+        // Runtime bytecode: `LOG0(0, 0); STOP` — emits one real (empty) log then returns successfully.
+        db.insert_account_info(
+            contract,
+            AccountInfo {
+                code: Some(Bytecode::new_raw(Bytes::from(vec![
+                    0x60, 0x00, 0x60, 0x00, 0xa0, 0x00,
+                ]))),
+                ..Default::default()
+            },
+        );
+        let tx = TxLegacy {
+            nonce: 0,
+            gas_limit: 2_000_000,
+            to: TxKind::Call(contract),
+            value: U256::ZERO,
+            ..Default::default()
+        }
+        .into_signed(Signature::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
+        let op_tx = OpTx::from_recovered_tx(&tx, caller);
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        evm.components_mut().1.start_capture();
+        let result = evm.transact(op_tx).expect("tx executes");
+        assert!(result.result.is_success(), "the emitting tx itself succeeds");
+        assert_eq!(result.result.logs().len(), 1, "one real log persisted");
+        // Force divergence at runtime: append a fabricated log so the captured RealLog subsequence
+        // (1) no longer matches the claimed `result.logs()` (2).
+        let mut tampered = result.result.logs().to_vec();
+        tampered.push(native_transfer_log(caller, NATIVE_ASSET_ADDRESS, U256::from(1u64)));
+        evm.components_mut().1.finish_capture(&tampered)
+    }
+}
+
 /// Production-shaped GATING runtime integration test (design §8, R9 item 2). Builds a real
 /// `alloy_op_evm::OpEvm<_, RcsInspector, _>` — the `RcsInspector` is the inner inspector of the
 /// baked-in `PostExecCompositeInspector` — via the same factory the flashblocks path uses, and
 /// executes every candidate through the production entry point **`evm.transact`** (matching
 /// `context.rs`'s candidate simulation) — no `transact_raw` is used; the runtime-forced-mismatch case
 /// drives a real `evm.transact` and then compares against a deliberately tampered `result.logs()`
-/// slice. It asserts capture happens THROUGH the composite
-/// wrapper at runtime — the "inner implements the hook, the wrapper must forward it" property
-/// (§4/§5.3) that a helper-level unit test cannot prove — plus CREATE2 endowment, parent-frame
-/// revert rollback, a runtime-forced real-log mismatch, and that the composite's own SDM/post-exec
-/// warming is preserved. A green CI pipeline does NOT replace this gate.
+/// slice. It asserts capture happens THROUGH the composite wrapper at runtime — the "inner implements
+/// the hook, the wrapper must forward it" property (§4/§5.3) that a helper-level unit test cannot
+/// prove — plus CREATE2 endowment, parent-frame revert rollback, a runtime-forced real-log mismatch,
+/// and that the composite's own SDM/post-exec warming is preserved. A green CI pipeline does NOT
+/// replace this gate.
 #[cfg(test)]
 mod gating_integration_tests {
     use super::*;
@@ -1198,11 +1272,12 @@ mod gating_integration_tests {
     fn inspector_state_does_not_cross_transactions_through_real_evm() {
         // Two candidate txs share ONE inspector (as in the real per-block loop), distinct senders so
         // neither depends on the other committing. tx1 makes TWO internal transfers against a budget
-        // of 1, so it overflows: `finish_capture` returns `LimitExceeded` WITHOUT draining the queue
-        // (that early-return path skips the `mem::take`), leaving residual queue + `observed_count` +
-        // `overflowed` state on the inspector. `start_capture` at the head of tx2 MUST wipe all of it,
-        // or tx2 would inherit tx1's transfers (queue) and/or be born already overflowed. If any reset
-        // regressed, tx2 would not be a clean `Complete([d2 transfer])` and the asserts below fail.
+        // of 1, so it overflows. R10 item 6 / R9 item 4: `finish_capture` clears ALL capture state on
+        // EVERY exit — including the `LimitExceeded` path — so the inspector is left clean IMMEDIATELY
+        // when tx1 finishes; nothing residual is carried to the next `start_capture` for it to wipe.
+        // tx2 therefore starts from an already-clean inspector regardless (start_capture's reset is
+        // belt-and-suspenders). If the every-exit cleanup regressed, tx2 would inherit tx1's transfers
+        // or be born overflowed and the asserts below would fail.
         let sender_a = Address::from([0xA5; 20]);
         let sender_b = Address::from([0xB5; 20]);
         let c1 = Address::from([0xC1; 20]);
@@ -1225,7 +1300,7 @@ mod gating_integration_tests {
             RcsInspector::new(1),
         );
 
-        // tx1 -> c1: two transfers over a budget of 1 ⇒ overflow (queue not drained on this path).
+        // tx1 -> c1: two transfers over a budget of 1 ⇒ overflow (LimitExceeded).
         evm.components_mut().1.start_capture();
         let r1 = evm.transact(call_tx_from(sender_a, c1)).expect("tx1 executes");
         let o1 = evm.components_mut().1.finish_capture(r1.result.logs());
@@ -1233,14 +1308,29 @@ mod gating_integration_tests {
             matches!(o1, CaptureOutcome::LimitExceeded { .. }),
             "tx1 must overflow the native-transfer budget, got {o1:?}"
         );
+        // R10 item 6: the `LimitExceeded` exit cleared ALL state IMMEDIATELY — assert the inspector is
+        // clean right now, BEFORE tx2's `start_capture`, so cross-tx isolation does not depend on the
+        // next reset. (Fields are visible: this test module is a descendant of `rcs_capture`.)
+        {
+            let insp = evm.components_mut().1;
+            assert!(insp.queue.is_empty(), "queue cleared immediately on the LimitExceeded exit");
+            assert!(insp.checkpoints.is_empty(), "checkpoints cleared immediately");
+            assert_eq!(insp.observed_count, 0, "observed_count reset immediately");
+            assert!(!insp.overflowed, "overflow flag reset immediately");
+            assert!(!insp.active, "inspector inactive immediately after finish");
+        }
 
-        // tx2 -> c2 on the SAME (dirty) inspector: start_capture must reset queue/count/overflow.
+        // tx2 -> c2 on the SAME (already-clean) inspector.
         evm.components_mut().1.start_capture();
         let r2 = evm.transact(call_tx_from(sender_b, c2)).expect("tx2 executes");
         let o2 = evm.components_mut().1.finish_capture(r2.result.logs());
         match o2 {
             CaptureOutcome::Complete(s) => {
-                assert_eq!(s.len(), 1, "tx2 must not inherit tx1's residual queue (reset per tx)");
+                assert_eq!(
+                    s.len(),
+                    1,
+                    "tx2 sees only its own transfer (state cleared on every exit)"
+                );
                 assert_eq!(s[0].topics()[2], d2.into_word(), "tx2's transfer targets d2 only");
             }
             other => panic!("tx2 expected clean Complete(1) after a dirty tx1, got {other:?}"),
@@ -1336,36 +1426,15 @@ mod gating_integration_tests {
 
     #[test]
     fn runtime_forced_real_log_mismatch_fails_closed_through_composite() {
-        // R9 item 2c / spec §8 test 33. Drive a real tx that emits a real log (captured through the
-        // composite-forwarded `log` hook), then finish the capture against a `result.logs()` forced to
-        // DIVERGE from the captured subsequence. The cross-check must fail closed with
-        // `InvariantViolation { RealLogMismatch }` — the outcome the builder maps to Screen::Deny
-        // (see context.rs `invariant_violation_fails_closed` / `realogmismatch_emits_own_arm_...`),
-        // never entering the pending buffer and never submitting a partial action.
-        let contract = Address::from([0xC7; 20]);
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(caller(), account(1_000_000_000, None));
-        db.insert_account_info(contract, account(0, Some(log_then_stop())));
-
-        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
-            db,
-            EvmEnv::new(
-                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
-                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
-            ),
-            RcsInspector::new(16),
-        );
-        evm.components_mut().1.start_capture();
-        let result = evm.transact(call_tx(contract)).expect("tx executes");
-        assert!(result.result.is_success(), "the emitting tx itself succeeds");
-        // The composite forwarded the real log to the inner inspector (one persisted log).
-        assert_eq!(result.result.logs().len(), 1, "one real log persisted");
-
-        // Force divergence at runtime: append a fabricated log so the captured RealLog subsequence
-        // (1) no longer matches the claimed `result.logs()` (2).
-        let mut tampered = result.result.logs().to_vec();
-        tampered.push(native_transfer_log(caller(), NATIVE_ASSET_ADDRESS, U256::from(1u64)));
-        let outcome = evm.components_mut().1.finish_capture(&tampered);
+        // R9 item 2c / spec §8 test 33 (R10: the shared runtime SOURCE for test 35). A real tx emits a
+        // real log (captured through the composite-forwarded `log` hook), then `finish_capture` runs
+        // against a `result.logs()` forced to DIVERGE from the captured subsequence, so the cross-check
+        // fails closed with `InvariantViolation { RealLogMismatch }`. Test 33 asserts the RUNTIME
+        // OUTCOME; the builder `Screen::Deny` + no-pending-buffer + no-partial-action guarantees are
+        // proven together on the real screening path by test 35 (context.rs), which consumes this same
+        // fixture. Stopping at `InvariantViolation` does NOT close the fail-closed loop — that is test
+        // 35's job.
+        let outcome = super::test_fixtures::real_runtime_reallogmismatch_outcome();
         assert!(
             matches!(
                 outcome,
