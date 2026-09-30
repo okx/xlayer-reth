@@ -920,9 +920,11 @@ mod tests {
     }
 }
 
-/// Shared runtime test fixtures for the builder capture path. Kept `pub(crate)` so the end-to-end
-/// builder-path fail-closed test (spec §8 test 35, in `context.rs`) can consume the SAME real
-/// `evm.transact`-driven outcome that test 33 asserts — one runtime source, not a re-implementation.
+/// Runtime test fixture for the builder capture path. Kept `pub(crate)` so test 33 (spec §8, in this
+/// file) asserts a REAL `evm.transact`-driven `RealLogMismatch` outcome — one runtime source, not a
+/// re-implementation. NOTE: the loop-level fail-closed test 35 in `context.rs` does NOT consume this
+/// fixture; it drives the real candidate loop and forces the mismatch inside the loop's own
+/// `RcsInspector::finish_capture` via the `FORCE_REALLOG_MISMATCH` seam.
 #[cfg(test)]
 pub(crate) mod test_fixtures {
     use super::*;
@@ -940,9 +942,9 @@ pub(crate) mod test_fixtures {
     /// `OpEvm<_, RcsInspector, _>` — NOT a hand-constructed outcome. A contract emits one real `LOG0`
     /// (captured through the composite-forwarded `log` hook), then `finish_capture` runs against a
     /// deliberately tampered `result.logs()` slice so the RealLog cross-check diverges (observed 1 vs
-    /// expected 2). This is the shared runtime source consumed by test 33 (asserts the runtime
-    /// outcome) and test 35 (asserts the builder fail-closed path). Reusing it keeps the two tests on
-    /// the exact same real runtime outcome.
+    /// expected 2). This is the runtime source asserted by test 33 (the runtime `InvariantViolation`
+    /// outcome). The loop-level test 35 in `context.rs` does NOT consume this fixture — it forces the
+    /// mismatch through the real candidate loop's own inspector via `FORCE_REALLOG_MISMATCH`.
     pub(crate) fn real_runtime_reallogmismatch_outcome() -> CaptureOutcome {
         let caller = Address::from([0xAA; 20]);
         let contract = Address::from([0xC7; 20]);
