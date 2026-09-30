@@ -118,6 +118,20 @@ impl QueuedLog {
     }
 }
 
+// Test-only "controlled inspector outcome" seam (spec §5.10.2 / §8 test 35). When set, the next
+// `finish_capture` on an active inspector injects one extra real-log entry so the REAL RealLog
+// cross-check diverges from `result.logs()` and returns a genuine
+// `CaptureOutcome::InvariantViolation { RealLogMismatch }`. This lets the loop-level builder-path
+// test drive a real runtime mismatch through the actual `execute_best_transactions` candidate loop
+// (the loop's own inspector honors it) instead of hand-constructing a `CaptureOutcome`. One-shot:
+// the flag is cleared as it is consumed so only the armed candidate is affected. Kept as `//` (not
+// `///`) so the RcsInspector doc comment below is not orphaned onto this macro invocation.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FORCE_REALLOG_MISMATCH: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
 /// The RCS capture inspector: the **inner** inspector of `alloy_op_evm::OpEvm`'s composite
 /// wrapper. It maintains one ordered queue of real + virtual logs with per-frame checkpoints and a
 /// single, non-rolling-back native-transfer counter with a sticky budget overflow.
@@ -279,6 +293,17 @@ impl RcsCaptureControl for RcsInspector {
     }
 
     fn finish_capture(&mut self, result_logs: &[Log]) -> CaptureOutcome {
+        // Test-only controlled-outcome seam (spec §5.10.2): when armed, inject a real-log divergence
+        // so the REAL cross-check below yields a genuine `RealLogMismatch` on the live candidate-loop
+        // path (used by the loop-level test 35 driving `execute_best_transactions`). No effect in
+        // production builds — the whole block is `#[cfg(test)]`.
+        #[cfg(test)]
+        if self.active && FORCE_REALLOG_MISMATCH.with(|f| f.replace(false)) {
+            self.queue.push(QueuedLog::Real(Log {
+                address: NATIVE_ASSET_ADDRESS,
+                data: LogData::new_unchecked(Vec::new(), Bytes::new()),
+            }));
+        }
         // Compute the outcome first — copying every count the outcome needs into locals — so the
         // uniform state clear below can run on EVERY return path (spec §5.2, R9 item 4). The earlier
         // implementation returned on the `LimitExceeded` / `InvariantViolation` paths *before*
@@ -1333,7 +1358,9 @@ mod gating_integration_tests {
                 );
                 assert_eq!(s[0].topics()[2], d2.into_word(), "tx2's transfer targets d2 only");
             }
-            other => panic!("tx2 expected clean Complete(1) after a dirty tx1, got {other:?}"),
+            other => {
+                panic!("tx2 expected clean Complete(1) from an already-clean tx1, got {other:?}")
+            }
         }
     }
 
