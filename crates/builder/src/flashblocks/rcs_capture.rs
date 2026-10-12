@@ -1671,4 +1671,300 @@ mod gating_integration_tests {
             other => panic!("expected Complete with one transfer, got {other:?}"),
         }
     }
+
+    // --- Task 3: D7a address-None guard regression ---
+
+    #[test]
+    fn create_is_ok_early_return_no_endowment_leak() {
+        // D7a: when a factory account's nonce = u64::MAX the internal CREATE returns
+        // `CreateOutcome{address:None, is_ok:true}` (revm nonce-overflow path).  The
+        // pre-pushed endowment event must be revoked even though `is_ok` is true.
+        // The top-level CALL endowment (value=5) is the only Transfer that must survive.
+        let factory = Address::from([0xFA; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(
+            factory,
+            AccountInfo {
+                balance: U256::from(1_000u64),
+                nonce: u64::MAX,
+                code: Some(Bytecode::new_raw(alloy_primitives::Bytes::from(create_endowment_7()))),
+                ..Default::default()
+            },
+        );
+
+        let tx = TxLegacy {
+            nonce: 0,
+            gas_limit: 2_000_000,
+            to: TxKind::Call(factory),
+            value: U256::from(5u64),
+            ..Default::default()
+        }
+        .into_signed(Signature::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
+        let op_tx = OpTx::from_recovered_tx(&tx, caller());
+
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        evm.components_mut().1.start_capture();
+        let result = evm.transact(op_tx).expect("tx executes");
+        let outcome = evm.components_mut().1.finish_capture(result.result.logs());
+
+        match outcome {
+            CaptureOutcome::Complete(stream) => {
+                assert_eq!(
+                    stream.len(),
+                    1,
+                    "only the top-level transfer survives; nonce-overflow endowment must be revoked"
+                );
+                assert_eq!(stream[0].topics()[1], caller().into_word(), "from = caller");
+                assert_eq!(stream[0].topics()[2], factory.into_word(), "to = factory");
+                assert_eq!(stream[0].data.data.as_ref(), &U256::from(5u64).to_be_bytes::<32>());
+            }
+            other => panic!("expected Complete with one transfer, got {other:?}"),
+        }
+    }
+
+    // --- Task 4: Layered rollback / early-failure ---
+
+    fn always_revert_code() -> Vec<u8> {
+        // PUSH1 0 PUSH1 0 REVERT
+        vec![0x60, 0x00, 0x60, 0x00, 0xfd]
+    }
+
+    fn call_with_value_to(value: u8, dst: Address) -> Vec<u8> {
+        let mut code = call_prefix(value, dst);
+        code.extend_from_slice(&[0x5a, 0xf1, 0x00]); // GAS CALL STOP
+        code
+    }
+
+    #[test]
+    fn root_success_child_revert_keeps_root_drops_child() {
+        // Root CALL (value=5) succeeds; the contract makes an internal CALL (value=3) that
+        // reverts. The root Transfer survives; the reverted child Transfer is removed.
+        let contract = Address::from([0xC1; 20]);
+        let revert_target = Address::from([0xEE; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(
+            contract,
+            account(1_000, Some(call_with_value_to(0x03, revert_target))),
+        );
+        db.insert_account_info(revert_target, account(0, Some(always_revert_code())));
+
+        let tx = TxLegacy {
+            nonce: 0,
+            gas_limit: 2_000_000,
+            to: TxKind::Call(contract),
+            value: U256::from(5u64),
+            ..Default::default()
+        }
+        .into_signed(Signature::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
+        let op_tx = OpTx::from_recovered_tx(&tx, caller());
+
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        evm.components_mut().1.start_capture();
+        let result = evm.transact(op_tx).expect("tx executes");
+        assert!(result.result.is_success(), "root tx should succeed");
+        let outcome = evm.components_mut().1.finish_capture(result.result.logs());
+
+        match outcome {
+            CaptureOutcome::Complete(stream) => {
+                assert_eq!(stream.len(), 1, "only root Transfer survives; child drop");
+                assert_eq!(stream[0].topics()[1], caller().into_word(), "from = caller");
+                assert_eq!(stream[0].topics()[2], contract.into_word(), "to = contract");
+                assert_eq!(stream[0].data.data.as_ref(), &U256::from(5u64).to_be_bytes::<32>());
+            }
+            other => panic!("expected Complete with one transfer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn whole_tx_root_failure_drops_all() {
+        // Root tx reverts. No Transfer event should survive.
+        let revert_target = Address::from([0xEE; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(revert_target, account(0, Some(always_revert_code())));
+
+        let tx = TxLegacy {
+            nonce: 0,
+            gas_limit: 2_000_000,
+            to: TxKind::Call(revert_target),
+            value: U256::from(5u64),
+            ..Default::default()
+        }
+        .into_signed(Signature::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
+        let op_tx = OpTx::from_recovered_tx(&tx, caller());
+
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        evm.components_mut().1.start_capture();
+        let result = evm.transact(op_tx).expect("tx executes");
+        assert!(!result.result.is_success(), "root tx should revert");
+        let outcome = evm.components_mut().1.finish_capture(result.result.logs());
+
+        match outcome {
+            CaptureOutcome::Complete(stream) => {
+                assert!(stream.is_empty(), "root revert must drop all transfers");
+            }
+            other => panic!("expected Complete(empty), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_early_failure_no_address_or_event_leak() {
+        // A factory issues CREATE with value=7 but has zero balance; the CREATE fails
+        // (insufficient balance). The pre-pushed endowment event must not survive.
+        let factory = Address::from([0xFA; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(factory, account(0, Some(create_endowment_7())));
+
+        let (outcome, success) = run_capturing_tx(db, factory, 16);
+        assert!(success, "top-level zero-value tx should succeed even if inner CREATE fails");
+        match outcome {
+            CaptureOutcome::Complete(stream) => {
+                assert!(
+                    stream.is_empty(),
+                    "failed CREATE with zero-value top-level must leave an empty stream"
+                );
+            }
+            other => panic!("expected Complete(empty), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn next_capture_starts_clean() {
+        // After a completed capture, `start_capture` on the same inspector starts clean.
+        // Two distinct senders (both nonce=0) share one inspector so neither depends on
+        // the other committing state changes (same pattern as the existing cross-tx test).
+        let sender_a = Address::from([0xA1; 20]);
+        let sender_b = Address::from([0xB1; 20]);
+        let contract = Address::from([0xC1; 20]);
+        let revert_target = Address::from([0xEE; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(sender_a, account(1_000_000_000, None));
+        db.insert_account_info(sender_b, account(1_000_000_000, None));
+        db.insert_account_info(
+            contract,
+            account(1_000, Some(call_with_value_to(0x03, revert_target))),
+        );
+        db.insert_account_info(revert_target, account(0, Some(always_revert_code())));
+
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+
+        // First tx (sender_a): root value=5, internal CALL (value=3) reverts.
+        let tx1 = TxLegacy {
+            nonce: 0,
+            gas_limit: 2_000_000,
+            to: TxKind::Call(contract),
+            value: U256::from(5u64),
+            ..Default::default()
+        }
+        .into_signed(Signature::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
+        evm.components_mut().1.start_capture();
+        let result1 = evm.transact(OpTx::from_recovered_tx(&tx1, sender_a)).expect("tx1");
+        let _outcome1 = evm.components_mut().1.finish_capture(result1.result.logs());
+
+        // Second tx (sender_b): zero value — must produce an independent, empty stream.
+        let tx2 = TxLegacy {
+            nonce: 0,
+            gas_limit: 2_000_000,
+            to: TxKind::Call(contract),
+            value: U256::ZERO,
+            ..Default::default()
+        }
+        .into_signed(Signature::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
+        evm.components_mut().1.start_capture();
+        let result2 = evm.transact(OpTx::from_recovered_tx(&tx2, sender_b)).expect("tx2");
+        let outcome2 = evm.components_mut().1.finish_capture(result2.result.logs());
+
+        match outcome2 {
+            CaptureOutcome::Complete(stream) => {
+                assert!(stream.is_empty(), "second tx (zero value) must produce an empty stream");
+            }
+            other => panic!("expected Complete(empty) for second tx, got {other:?}"),
+        }
+    }
+
+    // --- Task 5: DELEGATECALL identity-independence ---
+
+    /// DELEGATECALL carries apparent value but `CallInputs::transfer_value()` returns `None`
+    /// for DELEGATECALL frames, so they are never emitted as native Transfer events.
+    /// Note: `OpSpecId::JOVIAN` used in these fixtures does not activate EIP-7702 (OP chains'
+    /// Prague/Pectra equivalent), so a full EIP-7702 SET_CODE_TX test (type 0x04) requires a
+    /// higher spec. The DELEGATECALL identity-independence property is verified here directly.
+    #[test]
+    fn delegatecall_carries_no_transfer_event() {
+        // A contract DELEGATECALL-s to a target. DELEGATECALL passes apparent value but
+        // transfer_value() = None → no Transfer emitted. Zero-value outer CALL is also not
+        // observed. Stream must be empty.
+        let outer = Address::from([0xD1; 20]);
+        let inner = Address::from([0xD2; 20]);
+
+        // outer bytecode: PUSH1 0 ×4 (ret/arg), PUSH20 inner, GAS, DELEGATECALL, STOP
+        let mut outer_code = vec![0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x73];
+        outer_code.extend_from_slice(inner.as_slice());
+        outer_code.extend_from_slice(&[0x5a, 0xf4, 0x00]); // GAS DELEGATECALL STOP
+
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(outer, account(1_000, Some(outer_code)));
+        db.insert_account_info(inner, account(0, None));
+
+        let (outcome, success) = run_capturing_tx(db, outer, 16);
+        assert!(success, "DELEGATECALL tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete(stream) => {
+                assert!(stream.is_empty(), "DELEGATECALL must not emit any Transfer event");
+            }
+            other => panic!("expected Complete(empty), got {other:?}"),
+        }
+    }
 }
