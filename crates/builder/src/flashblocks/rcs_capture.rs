@@ -153,6 +153,11 @@ pub struct RcsInspector {
     overflowed: bool,
     /// The configured per-transaction native-transfer budget.
     limit: usize,
+    /// Per-CREATE-frame pre-derived recipient stack. `Some(addr)` when the CREATE carries a
+    /// non-zero endowment; `None` otherwise. Balanced with `checkpoints`: one entry per
+    /// `create` hook, popped on each `create_end`. Used to assert consistency between the
+    /// pre-derived address and the real `CreateOutcome.address` on success.
+    create_recipients: Vec<Option<Address>>,
 }
 
 impl RcsInspector {
@@ -166,6 +171,7 @@ impl RcsInspector {
             observed_count: 0,
             overflowed: false,
             limit: max_native_transfers,
+            create_recipients: Vec::new(),
         }
     }
 
@@ -200,43 +206,30 @@ impl RcsInspector {
     }
 
     /// CALL-frame native-transfer decision, split out from the `call` hook so it is testable
-    /// without a full EVM context. `depth` is the journal depth at the frame (0 = top-level, which
-    /// carries only `tx.value` and is excluded). `transfer_value` is `CallInputs::transfer_value()`
+    /// without a full EVM context. `transfer_value` is `CallInputs::transfer_value()`
     /// — `Some` only for a real `CallValue::Transfer` (so DELEGATECALL/STATICCALL, whose value is
     /// *apparent*, never reach here); zero-value and self-transfers (e.g. CALLCODE, whose caller and
     /// target are the same) are filtered by [`Self::observe_native_transfer`].
     fn record_call_observation(
         &mut self,
-        depth: usize,
         transfer_value: Option<U256>,
         from: Address,
         to: Address,
     ) {
-        if depth > 0
-            && let Some(value) = transfer_value
-        {
+        if let Some(value) = transfer_value {
             self.observe_native_transfer(from, to, value, NativeTransferKind::Call);
         }
     }
 
     /// CREATE/CREATE2-frame native-transfer decision, split out from the `create` hook for
-    /// testability. Top-level creations (`depth == 0`) and zero endowments generate no event; the
-    /// recipient is the created address.
+    /// testability. Zero endowments generate no event; the recipient is the created address.
     fn record_create_observation(
         &mut self,
-        depth: usize,
         value: U256,
         caller: Address,
         created_address: Address,
     ) {
-        if depth > 0 && !value.is_zero() {
-            self.observe_native_transfer(
-                caller,
-                created_address,
-                value,
-                NativeTransferKind::Create,
-            );
-        }
+        self.observe_native_transfer(caller, created_address, value, NativeTransferKind::Create);
     }
 
     /// Records a real EVM log into the unified ordered queue. No-op while inactive.
@@ -287,6 +280,7 @@ impl RcsCaptureControl for RcsInspector {
     fn start_capture(&mut self) {
         self.queue.clear();
         self.checkpoints.clear();
+        self.create_recipients.clear();
         self.observed_count = 0;
         self.overflowed = false;
         self.active = true;
@@ -353,6 +347,7 @@ impl RcsCaptureControl for RcsInspector {
         // into the next `start_capture`, regardless of Complete / LimitExceeded / InvariantViolation.
         self.queue.clear();
         self.checkpoints.clear();
+        self.create_recipients.clear();
         self.observed_count = 0;
         self.overflowed = false;
         self.active = false;
@@ -362,6 +357,7 @@ impl RcsCaptureControl for RcsInspector {
     fn abort_capture(&mut self) {
         self.queue.clear();
         self.checkpoints.clear();
+        self.create_recipients.clear();
         self.observed_count = 0;
         self.overflowed = false;
         self.active = false;
@@ -381,16 +377,15 @@ where
         self.record_real_log(log);
     }
 
-    fn call(&mut self, context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
+    fn call(&mut self, _context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
         // Every CALL-type frame (incl. zero-value / DELEGATECALL / STATICCALL / CALLCODE) gets a
         // checkpoint so real logs it captured roll back if it reverts.
         self.push_checkpoint();
         // `transfer_value()` is `Some` only for a real `CallValue::Transfer`; DELEGATECALL and
         // STATICCALL carry an *apparent* value (`None`) and never generate an event. CALLCODE does
         // report a transfer value, but its caller and target are the same account, so it is filtered
-        // as a self-transfer inside `observe_native_transfer`. Top-level (`depth == 0`) is excluded.
+        // as a self-transfer inside `observe_native_transfer`.
         self.record_call_observation(
-            context.journal().depth(),
             inputs.transfer_value(),
             inputs.transfer_from(),
             inputs.transfer_to(),
@@ -404,12 +399,11 @@ where
 
     fn create(&mut self, context: &mut CTX, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
         self.push_checkpoint();
-        // Non-top-level CREATE/CREATE2 with a non-zero endowment. The recipient is the created
-        // address (nonce-derived for CREATE; salt/init-code-derived for CREATE2). The created-address
+        // CREATE/CREATE2 with a non-zero endowment. The recipient is the created address
+        // (nonce-derived for CREATE; salt/init-code-derived for CREATE2). The created-address
         // derivation needs the context, so it is done here and handed to the (context-free) decision.
-        let depth = context.journal().depth();
         let value = inputs.value();
-        if depth > 0 && !value.is_zero() {
+        if !value.is_zero() {
             let caller = inputs.caller();
             let created_address = match inputs.scheme() {
                 CreateScheme::Create => {
@@ -423,7 +417,10 @@ where
                 }
                 _ => inputs.created_address(0),
             };
-            self.record_create_observation(depth, value, caller, created_address);
+            self.create_recipients.push(Some(created_address));
+            self.record_create_observation(value, caller, created_address);
+        } else {
+            self.create_recipients.push(None);
         }
         None
     }
@@ -434,7 +431,22 @@ where
         _inputs: &CreateInputs,
         outcome: &mut CreateOutcome,
     ) {
-        self.pop_checkpoint(!outcome.result.is_ok());
+        let recorded = self.create_recipients.pop();
+        // Treat `address.is_none()` as a revert even when `is_ok()` is true: when the caller's
+        // nonce is u64::MAX the handler returns early with success status but no contract is
+        // created and no endowment transferred, so the pre-pushed virtual event must be revoked.
+        let reverted = !outcome.result.is_ok() || outcome.address.is_none();
+        if !reverted {
+            // Only check consistency when a virtual event was actually pushed (non-zero endowment).
+            if let Some(Some(pre_derived)) = recorded {
+                debug_assert_eq!(
+                    Some(pre_derived),
+                    outcome.address,
+                    "pre-derived CREATE recipient must match the real CreateOutcome address"
+                );
+            }
+        }
+        self.pop_checkpoint(reverted);
     }
 
     fn selfdestruct(&mut self, contract: Address, target: Address, value: U256) {
@@ -818,17 +830,17 @@ mod tests {
     }
 
     #[test]
-    fn call_top_level_generates_no_event() {
-        // depth 0 = the tx's own top-level call; its value is top-level tx.value, excluded.
+    fn call_any_depth_value_emits_transfer() {
+        // Any frame carrying a real CallValue::Transfer generates an event regardless of depth.
         let mut i = armed(10);
-        i.record_call_observation(0, Some(U256::from(5u64)), addr(1), addr(2));
-        assert_eq!(i.observed_count, 0);
+        i.record_call_observation(Some(U256::from(5u64)), addr(1), addr(2));
+        assert_eq!(i.observed_count, 1);
     }
 
     #[test]
     fn call_internal_nonzero_transfer_is_observed() {
         let mut i = armed(10);
-        i.record_call_observation(1, Some(U256::from(5u64)), addr(1), addr(2));
+        i.record_call_observation(Some(U256::from(5u64)), addr(1), addr(2));
         assert_eq!(i.observed_count, 1);
         match i.finish_capture(&[]) {
             CaptureOutcome::Complete(logs) => {
@@ -845,7 +857,7 @@ mod tests {
     fn call_apparent_value_generates_no_event() {
         // DELEGATECALL / STATICCALL: transfer_value() is None.
         let mut i = armed(10);
-        i.record_call_observation(1, None, addr(1), addr(2));
+        i.record_call_observation(None, addr(1), addr(2));
         assert_eq!(i.observed_count, 0);
     }
 
@@ -853,22 +865,23 @@ mod tests {
     fn call_self_transfer_generates_no_event() {
         // CALLCODE reports a transfer value but caller == target, so it is a self-transfer.
         let mut i = armed(10);
-        i.record_call_observation(1, Some(U256::from(5u64)), addr(1), addr(1));
+        i.record_call_observation(Some(U256::from(5u64)), addr(1), addr(1));
         assert_eq!(i.observed_count, 0);
     }
 
     #[test]
-    fn create_top_level_generates_no_event() {
+    fn create_any_depth_nonzero_endowment_emits_transfer() {
+        // A non-zero endowment emits a transfer event regardless of depth.
         let mut i = armed(10);
-        i.record_create_observation(0, U256::from(5u64), addr(1), addr(2));
-        assert_eq!(i.observed_count, 0);
+        i.record_create_observation(U256::from(5u64), addr(1), addr(2));
+        assert_eq!(i.observed_count, 1);
     }
 
     #[test]
     fn create_internal_endowment_is_observed_to_created_address() {
         let mut i = armed(10);
         let created = addr(9);
-        i.record_create_observation(1, U256::from(7u64), addr(1), created);
+        i.record_create_observation(U256::from(7u64), addr(1), created);
         match i.finish_capture(&[]) {
             CaptureOutcome::Complete(logs) => {
                 assert_eq!(logs.len(), 1);
@@ -881,7 +894,7 @@ mod tests {
     #[test]
     fn create_zero_endowment_generates_no_event() {
         let mut i = armed(10);
-        i.record_create_observation(1, U256::ZERO, addr(1), addr(2));
+        i.record_create_observation(U256::ZERO, addr(1), addr(2));
         assert_eq!(i.observed_count, 0);
     }
 
@@ -1096,8 +1109,9 @@ mod gating_integration_tests {
     fn internal_call_transfer_captured_through_composite() {
         // caller → contract (value 0); contract makes an internal CALL transferring 1 wei to dst.
         // Proves the composite forwards `call` to the inner RcsInspector at runtime, that
-        // `transfer_value`/`transfer_from`/`transfer_to` are read correctly, and top-level exclusion
-        // (the outer caller→contract call at journal depth 0 is NOT captured).
+        // `transfer_value`/`transfer_from`/`transfer_to` are read correctly. The outer
+        // caller→contract call carries zero value and is therefore not captured (zero-value filter,
+        // not depth — every frame's real value is now observed regardless of depth).
         let contract = Address::from([0xCC; 20]);
         let dst = Address::from([0xDD; 20]);
         let mut db = InMemoryDB::default();
@@ -1127,7 +1141,7 @@ mod gating_integration_tests {
 
     #[test]
     fn internal_create_endowment_captured_through_composite() {
-        // A depth>0 CREATE with a non-zero endowment yields one native Transfer from the creator to
+        // A CREATE with a non-zero endowment yields one native Transfer from the creator to
         // the created address (recipient derivation runs through the composite-forwarded `create`).
         let factory = Address::from([0xF1; 20]);
         let mut db = InMemoryDB::default();
@@ -1523,5 +1537,138 @@ mod gating_integration_tests {
             "the composite's SDM warming must still credit a refund on the second tx — making \
              RcsInspector the inner inspector did not replace the composite's post-exec behavior"
         );
+    }
+
+    /// Build an `OpTx` that is a `CREATE` transaction (tx.to=None) from `caller()`, with the given
+    /// `value` and `init_code`.
+    fn create_tx(value: U256, init_code: Vec<u8>) -> OpTx {
+        let tx = TxLegacy {
+            nonce: 0,
+            gas_limit: 2_000_000,
+            to: TxKind::Create,
+            value,
+            input: alloy_primitives::Bytes::from(init_code),
+            ..Default::default()
+        }
+        .into_signed(Signature::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
+        OpTx::from_recovered_tx(&tx, caller())
+    }
+
+    /// Execute one top-level CREATE tx through the production composite and return (outcome, success).
+    fn run_creating_tx(db: InMemoryDB, value: U256, budget: usize) -> (CaptureOutcome, bool) {
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(budget),
+        );
+        evm.components_mut().1.start_capture();
+        // Empty init code: the CREATE returns immediately with an empty contract.
+        let result = evm.transact(create_tx(value, vec![])).expect("tx executes");
+        let success = result.result.is_success();
+        let outcome = evm.components_mut().1.finish_capture(result.result.logs());
+        (outcome, success)
+    }
+
+    #[test]
+    fn top_level_create_with_value_emits_transfer() {
+        // NT2: a top-level CREATE tx (tx.to=None, value>0) fires the `create` hook at journal depth=0.
+        // The old depth>0 gate excluded it. After removing the gate, the non-zero value must produce
+        // exactly one native Transfer event from the caller to the newly created address.
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+
+        let (outcome, success) = run_creating_tx(db, U256::from(5u64), 16);
+        assert!(success, "top-level CREATE tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete(stream) => {
+                assert_eq!(stream.len(), 1, "one CREATE endowment transfer expected at depth=0");
+                assert_eq!(stream[0].address, NATIVE_ASSET_ADDRESS);
+                assert_eq!(stream[0].topics()[1], caller().into_word(), "from = caller");
+                assert_eq!(
+                    stream[0].data.data.as_ref(),
+                    &U256::from(5u64).to_be_bytes::<32>(),
+                    "value = 5"
+                );
+                let created = stream[0].topics()[2];
+                assert_ne!(created, caller().into_word(), "recipient is the created addr");
+                assert_ne!(created, B256::ZERO, "recipient must be a real derived address");
+            }
+            other => panic!("expected Complete with one native transfer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn top_level_create_zero_value_no_transfer() {
+        // A top-level CREATE with no endowment must not emit any Transfer event.
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+
+        let (outcome, success) = run_creating_tx(db, U256::ZERO, 16);
+        assert!(success, "top-level CREATE tx with zero value should succeed");
+        match outcome {
+            CaptureOutcome::Complete(stream) => {
+                assert!(stream.is_empty(), "zero-value CREATE must not emit a transfer");
+            }
+            other => panic!("expected Complete(empty), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn top_level_call_with_value_emits_transfer() {
+        // Task 2: a top-level CALL tx with non-zero tx.value (tx.to=contract, value>0) fires the
+        // `call` hook at journal depth=0. The old depth>0 gate excluded it. After removing the gate,
+        // the value must produce exactly one native Transfer event.
+        let contract = Address::from([0xCC; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(contract, account(0, None));
+
+        let tx = TxLegacy {
+            nonce: 0,
+            gas_limit: 2_000_000,
+            to: TxKind::Call(contract),
+            value: U256::from(3u64),
+            ..Default::default()
+        }
+        .into_signed(Signature::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
+        let op_tx = OpTx::from_recovered_tx(&tx, caller());
+
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        evm.components_mut().1.start_capture();
+        let result = evm.transact(op_tx).expect("tx executes");
+        assert!(result.result.is_success(), "top-level CALL with value should succeed");
+        let outcome = evm.components_mut().1.finish_capture(result.result.logs());
+
+        match outcome {
+            CaptureOutcome::Complete(stream) => {
+                assert_eq!(
+                    stream.len(),
+                    1,
+                    "one native transfer expected from top-level call value"
+                );
+                assert_eq!(stream[0].topics()[1], caller().into_word(), "from = caller");
+                assert_eq!(stream[0].topics()[2], contract.into_word(), "to = contract");
+                assert_eq!(stream[0].data.data.as_ref(), &U256::from(3u64).to_be_bytes::<32>());
+            }
+            other => panic!("expected Complete with one transfer, got {other:?}"),
+        }
     }
 }
