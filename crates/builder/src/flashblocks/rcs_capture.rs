@@ -402,29 +402,25 @@ where
         if !self.active {
             return None;
         }
-        // CREATE/CREATE2 with a non-zero endowment. The recipient is the created address
-        // (nonce-derived for CREATE; salt/init-code-derived for CREATE2). The created-address
-        // derivation needs the context, so it is done here and handed to the (context-free) decision.
+        // Capture the expected recipient for every CREATE/CREATE2 frame. The created-address
+        // derivation needs the context, so it is computed here and stored for `create_end` to
+        // verify against the actual outcome address (release-safe consistency guard).
         let value = inputs.value();
-        if !value.is_zero() {
-            let caller = inputs.caller();
-            let created_address = match inputs.scheme() {
-                CreateScheme::Create => {
-                    let nonce = context
-                        .journal_ref()
-                        .evm_state()
-                        .get(&caller)
-                        .map(|account| account.info.nonce)
-                        .unwrap_or_default();
-                    inputs.created_address(nonce)
-                }
-                _ => inputs.created_address(0),
-            };
-            self.create_recipients.push(Some(created_address));
-            self.record_create_observation(value, caller, created_address);
-        } else {
-            self.create_recipients.push(None);
-        }
+        let caller = inputs.caller();
+        let created_address = match inputs.scheme() {
+            CreateScheme::Create => {
+                let nonce = context
+                    .journal_ref()
+                    .evm_state()
+                    .get(&caller)
+                    .map(|account| account.info.nonce)
+                    .unwrap_or_default();
+                inputs.created_address(nonce)
+            }
+            _ => inputs.created_address(0),
+        };
+        self.create_recipients.push(if !value.is_zero() { Some(created_address) } else { None });
+        self.record_create_observation(value, caller, created_address);
         None
     }
 
@@ -437,20 +433,13 @@ where
         if !self.active {
             return;
         }
-        let recorded = self.create_recipients.pop();
-        // Treat `address.is_none()` as a revert even when `is_ok()` is true: when the caller's
-        // nonce is u64::MAX the handler returns early with success status but no contract is
-        // created and no endowment transferred, so the pre-pushed virtual event must be revoked.
-        let reverted = !outcome.result.is_ok() || outcome.address.is_none();
-        if !reverted {
-            if let Some(Some(pre_derived)) = recorded {
-                debug_assert_eq!(
-                    Some(pre_derived),
-                    outcome.address,
-                    "pre-derived CREATE recipient must match the real CreateOutcome address"
-                );
-            }
-        }
+        let expected = self.create_recipients.pop();
+        // Revoke the endowment observation when: the frame reverted, the EVM returned no address
+        // (e.g. nonce overflow — is_ok() is true but address is None), or the actual deployed
+        // address differs from the pre-derived address stored in create_recipients.
+        let reverted = !outcome.result.is_ok()
+            || outcome.address.is_none()
+            || matches!((expected.flatten(), outcome.address), (Some(e), Some(a)) if e != a);
         self.pop_checkpoint(reverted);
     }
 
@@ -1222,7 +1211,9 @@ mod gating_integration_tests {
     fn internal_create_endowment_captured_through_composite() {
         // A CREATE with a non-zero endowment yields one native Transfer from the creator to
         // the created address (recipient derivation runs through the composite-forwarded `create`).
+        // The factory is pre-inserted with nonce=0; CREATE at nonce=0 produces a deterministic addr.
         let factory = Address::from([0xF1; 20]);
+        let expected_created = factory.create(0);
         let mut db = InMemoryDB::default();
         db.insert_account_info(caller(), account(1_000_000_000, None));
         db.insert_account_info(factory, account(1_000, Some(create_endowment_7())));
@@ -1235,21 +1226,12 @@ mod gating_integration_tests {
                 assert_eq!(stream[0].address, NATIVE_ASSET_ADDRESS);
                 assert_eq!(stream[0].topics()[1], factory.into_word());
                 assert_eq!(stream[0].data.data.as_ref(), &U256::from(7u64).to_be_bytes::<32>());
-                // Recipient (topic2) must be the newly created address — not the creator, the tx
-                // caller, or zero. Guards against a recipient-derivation bug that credits the wrong
-                // account (robust to revm's contract-nonce semantics, which fix the exact address).
-                let created = stream[0].topics()[2];
-                assert_ne!(
-                    created,
-                    factory.into_word(),
-                    "recipient is the created addr, not creator"
+                // Recipient (topic2) must be the exact CREATE-derived address.
+                assert_eq!(
+                    stream[0].topics()[2],
+                    expected_created.into_word(),
+                    "recipient must be the exact nonce-derived CREATE address"
                 );
-                assert_ne!(
-                    created,
-                    caller().into_word(),
-                    "recipient is the created addr, not caller"
-                );
-                assert_ne!(created, B256::ZERO, "recipient must be a real derived address");
             }
             other => panic!("expected Complete with one CREATE transfer, got {other:?}"),
         }
@@ -1473,10 +1455,12 @@ mod gating_integration_tests {
 
     #[test]
     fn internal_create2_endowment_captured_through_composite() {
-        // R9 item 2a: a depth>0 CREATE2 with a non-zero endowment yields one native Transfer from the
-        // creator to the CREATE2-derived address, through the composite-forwarded `create` hook on the
-        // production `evm.transact` path (distinct from the plain-CREATE case).
+        // A CREATE2 with a non-zero endowment yields one native Transfer from the creator to the
+        // CREATE2-derived address, through the composite-forwarded `create` hook on the production
+        // `evm.transact` path (distinct from the plain-CREATE case).
+        // The bytecode uses salt=0 and empty init code; the expected address is deterministic.
         let factory = Address::from([0xF2; 20]);
+        let expected_created = factory.create2(B256::ZERO, keccak256(b""));
         let mut db = InMemoryDB::default();
         db.insert_account_info(caller(), account(1_000_000_000, None));
         db.insert_account_info(factory, account(1_000, Some(create2_endowment_7())));
@@ -1489,20 +1473,12 @@ mod gating_integration_tests {
                 assert_eq!(stream[0].address, NATIVE_ASSET_ADDRESS);
                 assert_eq!(stream[0].topics()[1], factory.into_word());
                 assert_eq!(stream[0].data.data.as_ref(), &U256::from(7u64).to_be_bytes::<32>());
-                // Recipient is the CREATE2-derived address (salt + init-code hash), not the creator,
-                // the tx caller, or zero.
-                let created = stream[0].topics()[2];
-                assert_ne!(
-                    created,
-                    factory.into_word(),
-                    "recipient is the CREATE2 addr, not creator"
+                // Recipient (topic2) must be the exact CREATE2-derived address.
+                assert_eq!(
+                    stream[0].topics()[2],
+                    expected_created.into_word(),
+                    "recipient must be the exact salt+init_code_hash CREATE2 address"
                 );
-                assert_ne!(
-                    created,
-                    caller().into_word(),
-                    "recipient is the CREATE2 addr, not caller"
-                );
-                assert_ne!(created, B256::ZERO, "recipient must be a real derived address");
             }
             other => panic!("expected Complete with one CREATE2 transfer, got {other:?}"),
         }
@@ -1819,6 +1795,71 @@ mod gating_integration_tests {
                 }
             }
             other => panic!("expected Complete with 2 transfers, got {other:?}"),
+        }
+    }
+
+    // ── T4a: CREATE2 EIP-684 collision revokes endowment ─────────────────────
+
+    #[test]
+    fn internal_create2_nonce_overflow_endowment_revoked() {
+        // When a CREATE2 target already has nonce > 0 (EIP-684 collision), the deployment
+        // fails: outcome.result.is_ok() == false. The `create_end` hook must detect this and
+        // call pop_checkpoint(true), rolling back the 7-wei endowment from the queue.
+        let factory = Address::from([0xF3; 20]);
+        let collision_target = factory.create2(B256::ZERO, keccak256(b""));
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(factory, account(1_000, Some(create2_endowment_7())));
+        // Pre-populate the CREATE2 target with nonce=1 to trigger EIP-684 collision.
+        db.insert_account_info(collision_target, AccountInfo { nonce: 1, ..Default::default() });
+
+        let (outcome, success) = run_capturing_tx(db, factory, 16);
+        assert!(success, "top-level CALL to factory must succeed even if inner CREATE2 fails");
+        match outcome {
+            CaptureOutcome::Complete(stream) => assert!(
+                stream.is_empty(),
+                "EIP-684 collision must revoke the CREATE2 endowment; stream must be empty"
+            ),
+            other => panic!("expected Complete(empty) after CREATE2 collision, got {other:?}"),
+        }
+    }
+
+    // ── T4b: revoked CREATE still consumes observed_count budget ─────────────
+
+    #[test]
+    fn revoked_create_still_consumes_native_budget() {
+        // observed_count increments in observe_native_transfer regardless of later revocation.
+        // With budget=1, after a CREATE2 collision (revoked), observed_count == 1 before
+        // finish_capture; after finish_capture it resets to 0 and the stream is empty.
+        let factory = Address::from([0xF4; 20]);
+        let collision_target = factory.create2(B256::ZERO, keccak256(b""));
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(factory, account(1_000, Some(create2_endowment_7())));
+        db.insert_account_info(collision_target, AccountInfo { nonce: 1, ..Default::default() });
+
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(1),
+        );
+        evm.components_mut().1.start_capture();
+        let result = evm.transact(call_tx(factory)).expect("tx executes");
+        // After transact, before finish_capture: observed_count is sticky (== 1).
+        assert_eq!(
+            evm.components_mut().1.observed_count,
+            1,
+            "observed_count must be 1 after revoked CREATE2 (sticky counter, not rolled back)"
+        );
+        let outcome = evm.components_mut().1.finish_capture(result.result.logs());
+        match outcome {
+            CaptureOutcome::Complete(stream) => {
+                assert!(stream.is_empty(), "revoked endowment must not appear in the final stream")
+            }
+            other => panic!("expected Complete(empty), got {other:?}"),
         }
     }
 
