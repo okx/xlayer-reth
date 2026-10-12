@@ -1887,6 +1887,4 @@ mod gating_integration_tests {
             other => panic!("expected Complete with one Transfer, got {other:?}"),
         }
     }
-
-
 }
