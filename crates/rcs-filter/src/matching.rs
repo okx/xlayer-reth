@@ -238,6 +238,7 @@ fn build_bindings(
         input.tx_to.map(addr_lower).map(Value::String).unwrap_or(Value::Null),
     );
     b.insert("origin".to_string(), Value::String(addr_lower(input.origin)));
+    // `value` = tx.value as decimal string; retained for backward compatibility with deployed rules.
     b.insert("value".to_string(), Value::String(input.value.to_string()));
     b.insert("nonce".to_string(), Value::Number(input.nonce.into()));
 
