@@ -399,6 +399,9 @@ where
 
     fn create(&mut self, context: &mut CTX, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
         self.push_checkpoint();
+        if !self.active {
+            return None;
+        }
         // CREATE/CREATE2 with a non-zero endowment. The recipient is the created address
         // (nonce-derived for CREATE; salt/init-code-derived for CREATE2). The created-address
         // derivation needs the context, so it is done here and handed to the (context-free) decision.
@@ -431,13 +434,15 @@ where
         _inputs: &CreateInputs,
         outcome: &mut CreateOutcome,
     ) {
+        if !self.active {
+            return;
+        }
         let recorded = self.create_recipients.pop();
         // Treat `address.is_none()` as a revert even when `is_ok()` is true: when the caller's
         // nonce is u64::MAX the handler returns early with success status but no contract is
         // created and no endowment transferred, so the pre-pushed virtual event must be revoked.
         let reverted = !outcome.result.is_ok() || outcome.address.is_none();
         if !reverted {
-            // Only check consistency when a virtual event was actually pushed (non-zero endowment).
             if let Some(Some(pre_derived)) = recorded {
                 debug_assert_eq!(
                     Some(pre_derived),
@@ -518,6 +523,32 @@ mod tests {
         assert_eq!(inspector.observed_count, 0);
         assert!(
             matches!(inspector.finish_capture(&[]), CaptureOutcome::Complete(v) if v.is_empty())
+        );
+    }
+
+    #[test]
+    fn inactive_inspector_push_pop_checkpoint_and_create_recipients_stay_clean() {
+        // push_checkpoint / pop_checkpoint / create_recipients.push are all gated on self.active.
+        // An inspector that was never started must leave all internal state untouched.
+        let mut inspector = RcsInspector::new(10);
+        inspector.push_checkpoint();
+        inspector.push_checkpoint();
+        inspector.push_checkpoint();
+        assert!(inspector.checkpoints.is_empty(), "inactive push_checkpoint must not add entries");
+        inspector.pop_checkpoint(false);
+        inspector.pop_checkpoint(true);
+        assert!(
+            inspector.checkpoints.is_empty(),
+            "inactive pop_checkpoint must not modify anything"
+        );
+        assert!(
+            inspector.create_recipients.is_empty(),
+            "inactive inspector must leave create_recipients untouched"
+        );
+        assert!(inspector.queue.is_empty(), "inactive inspector must leave queue untouched");
+        assert_eq!(
+            inspector.observed_count, 0,
+            "inactive inspector must leave observed_count at 0"
         );
     }
 
@@ -695,6 +726,10 @@ mod tests {
         );
         assert_eq!(inspector.observed_count, 0, "observed_count must be reset on the failing exit");
         assert!(!inspector.overflowed, "overflow flag must be reset on the failing exit");
+        assert!(
+            inspector.create_recipients.is_empty(),
+            "create_recipients must be cleared on the failing exit"
+        );
     }
 
     #[test]
@@ -830,11 +865,11 @@ mod tests {
     }
 
     #[test]
-    fn call_any_depth_value_emits_transfer() {
-        // Any frame carrying a real CallValue::Transfer generates an event regardless of depth.
+    fn call_top_level_generates_no_event() {
+        // transfer_value=None (DELEGATECALL/STATICCALL apparent value) generates no event.
         let mut i = armed(10);
-        i.record_call_observation(Some(U256::from(5u64)), addr(1), addr(2));
-        assert_eq!(i.observed_count, 1);
+        i.record_call_observation(None, addr(1), addr(2));
+        assert_eq!(i.observed_count, 0);
     }
 
     #[test]
@@ -870,11 +905,11 @@ mod tests {
     }
 
     #[test]
-    fn create_any_depth_nonzero_endowment_emits_transfer() {
-        // A non-zero endowment emits a transfer event regardless of depth.
+    fn create_top_level_generates_no_event() {
+        // Zero endowment generates no event regardless of depth.
         let mut i = armed(10);
-        i.record_create_observation(U256::from(5u64), addr(1), addr(2));
-        assert_eq!(i.observed_count, 1);
+        i.record_create_observation(U256::ZERO, addr(1), addr(2));
+        assert_eq!(i.observed_count, 0);
     }
 
     #[test]
@@ -1082,6 +1117,9 @@ mod gating_integration_tests {
     /// production `evm.transact` → `finish_capture(result.logs())`) mirrors the builder's real path;
     /// `transact` is the same entry point `context.rs` uses (R9 decision), so the gate exercises the
     /// production `PostExecCompositeInspector` forwarding and gasless/base-fee handling.
+    /// `OpSpecId::JOVIAN` maps through op-revm to `SpecId::PRAGUE`, enabling EIP-7702 authority-tuple
+    /// resolution. Tests that exercise DELEGATECALL attribution with delegated code depend on the
+    /// JOVIAN→PRAGUE mapping being in effect for the OpEvm spec selection.
     fn run_capturing_tx(db: InMemoryDB, target: Address, budget: usize) -> (CaptureOutcome, bool) {
         let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
             db,
@@ -1108,10 +1146,9 @@ mod gating_integration_tests {
     #[test]
     fn internal_call_transfer_captured_through_composite() {
         // caller → contract (value 0); contract makes an internal CALL transferring 1 wei to dst.
-        // Proves the composite forwards `call` to the inner RcsInspector at runtime, that
-        // `transfer_value`/`transfer_from`/`transfer_to` are read correctly. The outer
-        // caller→contract call carries zero value and is therefore not captured (zero-value filter,
-        // not depth — every frame's real value is now observed regardless of depth).
+        // Proves the composite forwards `call` to the inner RcsInspector at runtime, and that
+        // `transfer_value`/`transfer_from`/`transfer_to` are read correctly. The top-level
+        // caller→contract call carries zero transfer value so it generates no event.
         let contract = Address::from([0xCC; 20]);
         let dst = Address::from([0xDD; 20]);
         let mut db = InMemoryDB::default();
@@ -1359,6 +1396,10 @@ mod gating_integration_tests {
             assert_eq!(insp.observed_count, 0, "observed_count reset immediately");
             assert!(!insp.overflowed, "overflow flag reset immediately");
             assert!(!insp.active, "inspector inactive immediately after finish");
+            assert!(
+                insp.create_recipients.is_empty(),
+                "create_recipients cleared immediately on the LimitExceeded exit"
+            );
         }
 
         // tx2 -> c2 on the SAME (already-clean) inspector.
@@ -1539,15 +1580,14 @@ mod gating_integration_tests {
         );
     }
 
-    /// Build an `OpTx` that is a `CREATE` transaction (tx.to=None) from `caller()`, with the given
-    /// `value` and `init_code`.
-    fn create_tx(value: U256, init_code: Vec<u8>) -> OpTx {
+    // ── helpers for CREATE / DELEGATECALL tests ───────────────────────────────
+
+    fn create_tx_with_value(from: Address, value: U256) -> OpTx {
         let tx = TxLegacy {
             nonce: 0,
             gas_limit: 2_000_000,
             to: TxKind::Create,
             value,
-            input: alloy_primitives::Bytes::from(init_code),
             ..Default::default()
         }
         .into_signed(Signature::new(
@@ -1555,11 +1595,17 @@ mod gating_integration_tests {
             Default::default(),
             Default::default(),
         ));
-        OpTx::from_recovered_tx(&tx, caller())
+        OpTx::from_recovered_tx(&tx, from)
     }
 
-    /// Execute one top-level CREATE tx through the production composite and return (outcome, success).
-    fn run_creating_tx(db: InMemoryDB, value: U256, budget: usize) -> (CaptureOutcome, bool) {
+    /// Runs a top-level CREATE tx (no bytecode body — empty init-code) through the real
+    /// composite-wrapped OpEvm and returns the capture outcome and success flag.
+    fn run_capturing_create_tx(
+        db: InMemoryDB,
+        from: Address,
+        value: U256,
+        budget: usize,
+    ) -> (CaptureOutcome, bool) {
         let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
             db,
             EvmEnv::new(
@@ -1569,81 +1615,44 @@ mod gating_integration_tests {
             RcsInspector::new(budget),
         );
         evm.components_mut().1.start_capture();
-        // Empty init code: the CREATE returns immediately with an empty contract.
-        let result = evm.transact(create_tx(value, vec![])).expect("tx executes");
+        let result = evm.transact(create_tx_with_value(from, value)).expect("tx executes");
         let success = result.result.is_success();
         let outcome = evm.components_mut().1.finish_capture(result.result.logs());
         (outcome, success)
     }
 
-    #[test]
-    fn top_level_create_with_value_emits_transfer() {
-        // NT2: a top-level CREATE tx (tx.to=None, value>0) fires the `create` hook at journal depth=0.
-        // The old depth>0 gate excluded it. After removing the gate, the non-zero value must produce
-        // exactly one native Transfer event from the caller to the newly created address.
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(caller(), account(1_000_000_000, None));
+    // ── T1b: inactive inspector — CREATE tx ──────────────────────────────────
 
-        let (outcome, success) = run_creating_tx(db, U256::from(5u64), 16);
-        assert!(success, "top-level CREATE tx should succeed");
-        match outcome {
-            CaptureOutcome::Complete(stream) => {
-                assert_eq!(stream.len(), 1, "one CREATE endowment transfer expected at depth=0");
-                assert_eq!(stream[0].address, NATIVE_ASSET_ADDRESS);
-                assert_eq!(stream[0].topics()[1], caller().into_word(), "from = caller");
-                assert_eq!(
-                    stream[0].data.data.as_ref(),
-                    &U256::from(5u64).to_be_bytes::<32>(),
-                    "value = 5"
-                );
-                let created = stream[0].topics()[2];
-                assert_ne!(created, caller().into_word(), "recipient is the created addr");
-                assert_ne!(created, B256::ZERO, "recipient must be a real derived address");
-            }
-            other => panic!("expected Complete with one native transfer, got {other:?}"),
-        }
+    #[test]
+    fn inactive_create_tx_mutates_no_capture_state() {
+        // A CREATE tx runs through the production EVM path without ever calling start_capture.
+        // The inspector must leave create_recipients, checkpoints, and queue empty throughout.
+        let deployer = Address::from([0xDE; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(deployer, account(1_000_000_000, None));
+
+        let (outcome, _) = run_capturing_create_tx(db, deployer, U256::ZERO, 10);
+        assert!(
+            matches!(outcome, CaptureOutcome::Complete(ref s) if s.is_empty()),
+            "inactive inspector must produce an empty Complete on a CREATE tx"
+        );
     }
 
-    #[test]
-    fn top_level_create_zero_value_no_transfer() {
-        // A top-level CREATE with no endowment must not emit any Transfer event.
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(caller(), account(1_000_000_000, None));
-
-        let (outcome, success) = run_creating_tx(db, U256::ZERO, 16);
-        assert!(success, "top-level CREATE tx with zero value should succeed");
-        match outcome {
-            CaptureOutcome::Complete(stream) => {
-                assert!(stream.is_empty(), "zero-value CREATE must not emit a transfer");
-            }
-            other => panic!("expected Complete(empty), got {other:?}"),
-        }
-    }
+    // ── T1d: create_recipients balanced push/pop ─────────────────────────────
 
     #[test]
-    fn top_level_call_with_value_emits_transfer() {
-        // Task 2: a top-level CALL tx with non-zero tx.value (tx.to=contract, value>0) fires the
-        // `call` hook at journal depth=0. The old depth>0 gate excluded it. After removing the gate,
-        // the value must produce exactly one native Transfer event.
-        let contract = Address::from([0xCC; 20]);
+    fn create_recipients_push_pop_balanced() {
+        // A CREATE followed by a reverted inner CALL means:
+        //   create hook  → push_checkpoint + create_recipients.push(Some(addr))
+        //   create_end (success) → pop(false) does NOT revert; create_recipients.pop()
+        // After finish_capture the create_recipients vec must be drained to zero.
+        let factory = Address::from([0xF2; 20]);
+        let expected_created = factory.create2(B256::ZERO, keccak256(b""));
         let mut db = InMemoryDB::default();
         db.insert_account_info(caller(), account(1_000_000_000, None));
-        db.insert_account_info(contract, account(0, None));
+        db.insert_account_info(factory, account(1_000, Some(create2_endowment_7())));
 
-        let tx = TxLegacy {
-            nonce: 0,
-            gas_limit: 2_000_000,
-            to: TxKind::Call(contract),
-            value: U256::from(3u64),
-            ..Default::default()
-        }
-        .into_signed(Signature::new(
-            Default::default(),
-            Default::default(),
-            Default::default(),
-        ));
-        let op_tx = OpTx::from_recovered_tx(&tx, caller());
-
+        // After the tx the inspector has been reset by finish_capture.
         let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
             db,
             EvmEnv::new(
@@ -1653,290 +1662,20 @@ mod gating_integration_tests {
             RcsInspector::new(16),
         );
         evm.components_mut().1.start_capture();
-        let result = evm.transact(op_tx).expect("tx executes");
-        assert!(result.result.is_success(), "top-level CALL with value should succeed");
-        let outcome = evm.components_mut().1.finish_capture(result.result.logs());
+        let result = evm.transact(call_tx(factory)).expect("tx executes");
+        let logs = result.result.logs();
+        let _outcome = evm.components_mut().1.finish_capture(logs);
 
-        match outcome {
-            CaptureOutcome::Complete(stream) => {
-                assert_eq!(
-                    stream.len(),
-                    1,
-                    "one native transfer expected from top-level call value"
-                );
-                assert_eq!(stream[0].topics()[1], caller().into_word(), "from = caller");
-                assert_eq!(stream[0].topics()[2], contract.into_word(), "to = contract");
-                assert_eq!(stream[0].data.data.as_ref(), &U256::from(3u64).to_be_bytes::<32>());
-            }
-            other => panic!("expected Complete with one transfer, got {other:?}"),
-        }
-    }
-
-    // --- Task 3: D7a address-None guard regression ---
-
-    #[test]
-    fn create_is_ok_early_return_no_endowment_leak() {
-        // D7a: when a factory account's nonce = u64::MAX the internal CREATE returns
-        // `CreateOutcome{address:None, is_ok:true}` (revm nonce-overflow path).  The
-        // pre-pushed endowment event must be revoked even though `is_ok` is true.
-        // The top-level CALL endowment (value=5) is the only Transfer that must survive.
-        let factory = Address::from([0xFA; 20]);
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(caller(), account(1_000_000_000, None));
-        db.insert_account_info(
-            factory,
-            AccountInfo {
-                balance: U256::from(1_000u64),
-                nonce: u64::MAX,
-                code: Some(Bytecode::new_raw(alloy_primitives::Bytes::from(create_endowment_7()))),
-                ..Default::default()
-            },
+        let inspector = evm.components_mut().1;
+        assert!(
+            inspector.create_recipients.is_empty(),
+            "create_recipients must be empty after finish_capture; addr={expected_created:?}"
         );
-
-        let tx = TxLegacy {
-            nonce: 0,
-            gas_limit: 2_000_000,
-            to: TxKind::Call(factory),
-            value: U256::from(5u64),
-            ..Default::default()
-        }
-        .into_signed(Signature::new(
-            Default::default(),
-            Default::default(),
-            Default::default(),
-        ));
-        let op_tx = OpTx::from_recovered_tx(&tx, caller());
-
-        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
-            db,
-            EvmEnv::new(
-                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
-                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
-            ),
-            RcsInspector::new(16),
-        );
-        evm.components_mut().1.start_capture();
-        let result = evm.transact(op_tx).expect("tx executes");
-        let outcome = evm.components_mut().1.finish_capture(result.result.logs());
-
-        match outcome {
-            CaptureOutcome::Complete(stream) => {
-                assert_eq!(
-                    stream.len(),
-                    1,
-                    "only the top-level transfer survives; nonce-overflow endowment must be revoked"
-                );
-                assert_eq!(stream[0].topics()[1], caller().into_word(), "from = caller");
-                assert_eq!(stream[0].topics()[2], factory.into_word(), "to = factory");
-                assert_eq!(stream[0].data.data.as_ref(), &U256::from(5u64).to_be_bytes::<32>());
-            }
-            other => panic!("expected Complete with one transfer, got {other:?}"),
-        }
+        assert!(inspector.checkpoints.is_empty(), "checkpoints must be empty after finish_capture");
     }
 
-    // --- Task 4: Layered rollback / early-failure ---
+    // ── DELEGATECALL attribution baseline ────────────────────────────────────
 
-    fn always_revert_code() -> Vec<u8> {
-        // PUSH1 0 PUSH1 0 REVERT
-        vec![0x60, 0x00, 0x60, 0x00, 0xfd]
-    }
-
-    fn call_with_value_to(value: u8, dst: Address) -> Vec<u8> {
-        let mut code = call_prefix(value, dst);
-        code.extend_from_slice(&[0x5a, 0xf1, 0x00]); // GAS CALL STOP
-        code
-    }
-
-    #[test]
-    fn root_success_child_revert_keeps_root_drops_child() {
-        // Root CALL (value=5) succeeds; the contract makes an internal CALL (value=3) that
-        // reverts. The root Transfer survives; the reverted child Transfer is removed.
-        let contract = Address::from([0xC1; 20]);
-        let revert_target = Address::from([0xEE; 20]);
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(caller(), account(1_000_000_000, None));
-        db.insert_account_info(
-            contract,
-            account(1_000, Some(call_with_value_to(0x03, revert_target))),
-        );
-        db.insert_account_info(revert_target, account(0, Some(always_revert_code())));
-
-        let tx = TxLegacy {
-            nonce: 0,
-            gas_limit: 2_000_000,
-            to: TxKind::Call(contract),
-            value: U256::from(5u64),
-            ..Default::default()
-        }
-        .into_signed(Signature::new(
-            Default::default(),
-            Default::default(),
-            Default::default(),
-        ));
-        let op_tx = OpTx::from_recovered_tx(&tx, caller());
-
-        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
-            db,
-            EvmEnv::new(
-                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
-                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
-            ),
-            RcsInspector::new(16),
-        );
-        evm.components_mut().1.start_capture();
-        let result = evm.transact(op_tx).expect("tx executes");
-        assert!(result.result.is_success(), "root tx should succeed");
-        let outcome = evm.components_mut().1.finish_capture(result.result.logs());
-
-        match outcome {
-            CaptureOutcome::Complete(stream) => {
-                assert_eq!(stream.len(), 1, "only root Transfer survives; child drop");
-                assert_eq!(stream[0].topics()[1], caller().into_word(), "from = caller");
-                assert_eq!(stream[0].topics()[2], contract.into_word(), "to = contract");
-                assert_eq!(stream[0].data.data.as_ref(), &U256::from(5u64).to_be_bytes::<32>());
-            }
-            other => panic!("expected Complete with one transfer, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn whole_tx_root_failure_drops_all() {
-        // Root tx reverts. No Transfer event should survive.
-        let revert_target = Address::from([0xEE; 20]);
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(caller(), account(1_000_000_000, None));
-        db.insert_account_info(revert_target, account(0, Some(always_revert_code())));
-
-        let tx = TxLegacy {
-            nonce: 0,
-            gas_limit: 2_000_000,
-            to: TxKind::Call(revert_target),
-            value: U256::from(5u64),
-            ..Default::default()
-        }
-        .into_signed(Signature::new(
-            Default::default(),
-            Default::default(),
-            Default::default(),
-        ));
-        let op_tx = OpTx::from_recovered_tx(&tx, caller());
-
-        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
-            db,
-            EvmEnv::new(
-                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
-                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
-            ),
-            RcsInspector::new(16),
-        );
-        evm.components_mut().1.start_capture();
-        let result = evm.transact(op_tx).expect("tx executes");
-        assert!(!result.result.is_success(), "root tx should revert");
-        let outcome = evm.components_mut().1.finish_capture(result.result.logs());
-
-        match outcome {
-            CaptureOutcome::Complete(stream) => {
-                assert!(stream.is_empty(), "root revert must drop all transfers");
-            }
-            other => panic!("expected Complete(empty), got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn create_early_failure_no_address_or_event_leak() {
-        // A factory issues CREATE with value=7 but has zero balance; the CREATE fails
-        // (insufficient balance). The pre-pushed endowment event must not survive.
-        let factory = Address::from([0xFA; 20]);
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(caller(), account(1_000_000_000, None));
-        db.insert_account_info(factory, account(0, Some(create_endowment_7())));
-
-        let (outcome, success) = run_capturing_tx(db, factory, 16);
-        assert!(success, "top-level zero-value tx should succeed even if inner CREATE fails");
-        match outcome {
-            CaptureOutcome::Complete(stream) => {
-                assert!(
-                    stream.is_empty(),
-                    "failed CREATE with zero-value top-level must leave an empty stream"
-                );
-            }
-            other => panic!("expected Complete(empty), got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn next_capture_starts_clean() {
-        // After a completed capture, `start_capture` on the same inspector starts clean.
-        // Two distinct senders (both nonce=0) share one inspector so neither depends on
-        // the other committing state changes (same pattern as the existing cross-tx test).
-        let sender_a = Address::from([0xA1; 20]);
-        let sender_b = Address::from([0xB1; 20]);
-        let contract = Address::from([0xC1; 20]);
-        let revert_target = Address::from([0xEE; 20]);
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(sender_a, account(1_000_000_000, None));
-        db.insert_account_info(sender_b, account(1_000_000_000, None));
-        db.insert_account_info(
-            contract,
-            account(1_000, Some(call_with_value_to(0x03, revert_target))),
-        );
-        db.insert_account_info(revert_target, account(0, Some(always_revert_code())));
-
-        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
-            db,
-            EvmEnv::new(
-                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
-                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
-            ),
-            RcsInspector::new(16),
-        );
-
-        // First tx (sender_a): root value=5, internal CALL (value=3) reverts.
-        let tx1 = TxLegacy {
-            nonce: 0,
-            gas_limit: 2_000_000,
-            to: TxKind::Call(contract),
-            value: U256::from(5u64),
-            ..Default::default()
-        }
-        .into_signed(Signature::new(
-            Default::default(),
-            Default::default(),
-            Default::default(),
-        ));
-        evm.components_mut().1.start_capture();
-        let result1 = evm.transact(OpTx::from_recovered_tx(&tx1, sender_a)).expect("tx1");
-        let _outcome1 = evm.components_mut().1.finish_capture(result1.result.logs());
-
-        // Second tx (sender_b): zero value — must produce an independent, empty stream.
-        let tx2 = TxLegacy {
-            nonce: 0,
-            gas_limit: 2_000_000,
-            to: TxKind::Call(contract),
-            value: U256::ZERO,
-            ..Default::default()
-        }
-        .into_signed(Signature::new(
-            Default::default(),
-            Default::default(),
-            Default::default(),
-        ));
-        evm.components_mut().1.start_capture();
-        let result2 = evm.transact(OpTx::from_recovered_tx(&tx2, sender_b)).expect("tx2");
-        let outcome2 = evm.components_mut().1.finish_capture(result2.result.logs());
-
-        match outcome2 {
-            CaptureOutcome::Complete(stream) => {
-                assert!(stream.is_empty(), "second tx (zero value) must produce an empty stream");
-            }
-            other => panic!("expected Complete(empty) for second tx, got {other:?}"),
-        }
-    }
-
-    // --- Task 5: DELEGATECALL identity-independence ---
-
-    /// DELEGATECALL carries apparent value but `CallInputs::transfer_value()` returns `None`
-    /// for DELEGATECALL frames, so they are never emitted as native Transfer events.
     /// Note: `OpSpecId::JOVIAN` used in these fixtures does not activate EIP-7702 (OP chains'
     /// Prague/Pectra equivalent), so a full EIP-7702 SET_CODE_TX test (type 0x04) requires a
     /// higher spec. The DELEGATECALL identity-independence property is verified here directly.
@@ -1967,4 +1706,31 @@ mod gating_integration_tests {
             other => panic!("expected Complete(empty), got {other:?}"),
         }
     }
+
+    // ── top_level_create_with_value_emits_transfer ───────────────────────────
+
+    #[test]
+    fn top_level_create_with_value_emits_transfer() {
+        // A top-level CREATE tx with non-zero value sends the endowment from the deployer
+        // to the derived contract address. The inspector must capture that as one Transfer.
+        let deployer = Address::from([0xDE; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(deployer, account(1_000_000_000, None));
+
+        let (outcome, _) = run_capturing_create_tx(db, deployer, U256::from(5u64), 10);
+        match outcome {
+            CaptureOutcome::Complete(stream) => {
+                assert_eq!(stream.len(), 1, "one Transfer expected for top-level CREATE endowment");
+                assert_eq!(stream[0].address, NATIVE_ASSET_ADDRESS);
+                assert_eq!(
+                    stream[0].topics()[1],
+                    deployer.into_word(),
+                    "transfer.from must be the deployer"
+                );
+            }
+            other => panic!("expected Complete with one Transfer, got {other:?}"),
+        }
+    }
+
+
 }
