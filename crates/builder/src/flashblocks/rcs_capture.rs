@@ -1143,6 +1143,48 @@ mod gating_integration_tests {
         code
     }
 
+    /// Runtime bytecode: `DELEGATECALL(gas, dst, 0, 0, 0, 0); POP; STOP`.
+    /// The caller delegates execution to `dst`; any CALL/CREATE inside `dst`'s code
+    /// runs with the delegating address as the execution context.
+    fn delegatecall_to_then_stop(dst: Address) -> Vec<u8> {
+        // Stack order for DELEGATECALL (top first): gas, addr, argsOff, argsSize, retOff, retSize
+        // Push in reverse: retSize, retOff, argsSize, argsOff, addr, gas
+        let mut code = vec![
+            0x60, 0x00, // PUSH1 0  (retSize)
+            0x60, 0x00, // PUSH1 0  (retOffset)
+            0x60, 0x00, // PUSH1 0  (argsSize)
+            0x60, 0x00, // PUSH1 0  (argsOffset)
+            0x73, // PUSH20
+        ];
+        code.extend_from_slice(dst.as_slice());
+        code.extend_from_slice(&[
+            0x62, 0x07, 0xA1, 0x20, // PUSH3 500000 (gas)
+            0xF4, // DELEGATECALL
+            0x50, // POP
+            0x00, // STOP
+        ]);
+        code
+    }
+
+    /// Runtime bytecode intended to run inside a DELEGATECALL context.
+    /// When invoked, this code:
+    ///   1. CALL `call_dst` with 1 wei
+    ///   2. CREATE with 1 wei and empty init code
+    ///   3. STOP
+    ///
+    /// Both operations attribute to the delegating address (execution context).
+    fn delegated_call_and_create(call_dst: Address) -> Vec<u8> {
+        // CALL: retSize=0, retOffset=0, argsSize=0, argsOffset=0, value=1, addr=call_dst, gas
+        let mut code = call_prefix(1, call_dst);
+        // GAS; CALL; POP
+        code.extend_from_slice(&[0x5A, 0xF1, 0x50]);
+        // CREATE(value=1, offset=0, size=0): PUSH1 0 (size) PUSH1 0 (offset) PUSH1 1 (value) CREATE
+        code.extend_from_slice(&[0x60, 0x00, 0x60, 0x00, 0x60, 0x01, 0xF0]);
+        // POP; STOP
+        code.extend_from_slice(&[0x50, 0x00]);
+        code
+    }
+
     #[test]
     fn internal_call_transfer_captured_through_composite() {
         // caller → contract (value 0); contract makes an internal CALL transferring 1 wei to dst.
@@ -1676,34 +1718,107 @@ mod gating_integration_tests {
 
     // ── DELEGATECALL attribution baseline ────────────────────────────────────
 
-    /// Note: `OpSpecId::JOVIAN` used in these fixtures does not activate EIP-7702 (OP chains'
-    /// Prague/Pectra equivalent), so a full EIP-7702 SET_CODE_TX test (type 0x04) requires a
-    /// higher spec. The DELEGATECALL identity-independence property is verified here directly.
     #[test]
     fn delegatecall_carries_no_transfer_event() {
-        // A contract DELEGATECALL-s to a target. DELEGATECALL passes apparent value but
-        // transfer_value() = None → no Transfer emitted. Zero-value outer CALL is also not
-        // observed. Stream must be empty.
-        let outer = Address::from([0xD1; 20]);
-        let inner = Address::from([0xD2; 20]);
-
-        // outer bytecode: PUSH1 0 ×4 (ret/arg), PUSH20 inner, GAS, DELEGATECALL, STOP
-        let mut outer_code = vec![0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x73];
-        outer_code.extend_from_slice(inner.as_slice());
-        outer_code.extend_from_slice(&[0x5a, 0xf4, 0x00]); // GAS DELEGATECALL STOP
-
+        // A plain DELEGATECALL with no value transfer must not generate a native Transfer.
+        let delegator = Address::from([0xD0; 20]);
+        let implementation = Address::from([0xD1; 20]);
         let mut db = InMemoryDB::default();
         db.insert_account_info(caller(), account(1_000_000_000, None));
-        db.insert_account_info(outer, account(1_000, Some(outer_code)));
-        db.insert_account_info(inner, account(0, None));
+        // delegator has balance but its code only does a DELEGATECALL with zero value
+        db.insert_account_info(
+            delegator,
+            account(1_000, Some(delegatecall_to_then_stop(implementation))),
+        );
+        // implementation: just STOP (no further transfer)
+        db.insert_account_info(implementation, account(0, Some(vec![0x00])));
 
-        let (outcome, success) = run_capturing_tx(db, outer, 16);
-        assert!(success, "DELEGATECALL tx should succeed");
+        let (outcome, success) = run_capturing_tx(db, delegator, 10);
+        assert!(success);
+        match outcome {
+            CaptureOutcome::Complete(stream) => assert!(
+                stream.is_empty(),
+                "a DELEGATECALL with no value must not produce a native Transfer"
+            ),
+            other => panic!("expected Complete(empty), got {other:?}"),
+        }
+    }
+
+    // ── T2a: JOVIAN/EIP-7702 DELEGATECALL attribution ────────────────────────
+
+    #[test]
+    fn seven_oh_two_delegated_origin_nested_call_and_create() {
+        // delegator holds balance and has code that DELEGATECALLs to `implementation`.
+        // `implementation`'s code does CALL(1 wei, call_recipient) and CREATE(1 wei, empty).
+        // Both operations run in `delegator`'s context → attributed to `delegator`.
+        let delegator = Address::from([0xE0; 20]);
+        let implementation = Address::from([0xE1; 20]);
+        let call_recipient = Address::from([0xE2; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(
+            delegator,
+            account(1_000_000, Some(delegatecall_to_then_stop(implementation))),
+        );
+        db.insert_account_info(
+            implementation,
+            account(0, Some(delegated_call_and_create(call_recipient))),
+        );
+        db.insert_account_info(call_recipient, account(0, Some(vec![0x00])));
+
+        let (outcome, success) = run_capturing_tx(db, delegator, 16);
+        assert!(success, "top-level tx must succeed");
         match outcome {
             CaptureOutcome::Complete(stream) => {
-                assert!(stream.is_empty(), "DELEGATECALL must not emit any Transfer event");
+                assert_eq!(stream.len(), 2, "expected two transfers: CALL(1) + CREATE(1)");
+                for log in &stream {
+                    assert_eq!(log.address, NATIVE_ASSET_ADDRESS);
+                    // Both transfers originate from delegator (execution context for DELEGATECALL)
+                    assert_eq!(
+                        log.topics()[1],
+                        delegator.into_word(),
+                        "transfer.from must be the delegating address, not the implementation"
+                    );
+                }
             }
-            other => panic!("expected Complete(empty), got {other:?}"),
+            other => panic!("expected Complete with 2 transfers, got {other:?}"),
+        }
+    }
+
+    // ── T2b: 2-hop DELEGATECALL chain attribution ────────────────────────────
+
+    #[test]
+    fn delegatecall_chain_inner_call_and_create_captured() {
+        // root → DELEGATECALL → relay → DELEGATECALL → implementation
+        // `implementation`'s CALL and CREATE run in `root`'s context throughout the 2-hop chain.
+        let root = Address::from([0xC0; 20]);
+        let relay = Address::from([0xC1; 20]);
+        let implementation = Address::from([0xC2; 20]);
+        let call_recipient = Address::from([0xC3; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(root, account(1_000_000, Some(delegatecall_to_then_stop(relay))));
+        db.insert_account_info(relay, account(0, Some(delegatecall_to_then_stop(implementation))));
+        db.insert_account_info(
+            implementation,
+            account(0, Some(delegated_call_and_create(call_recipient))),
+        );
+        db.insert_account_info(call_recipient, account(0, Some(vec![0x00])));
+
+        let (outcome, success) = run_capturing_tx(db, root, 16);
+        assert!(success, "2-hop DELEGATECALL chain tx must succeed");
+        match outcome {
+            CaptureOutcome::Complete(stream) => {
+                assert_eq!(stream.len(), 2, "expected two transfers through 2-hop chain");
+                for log in &stream {
+                    assert_eq!(
+                        log.topics()[1],
+                        root.into_word(),
+                        "both transfers must be attributed to root (outermost delegating context)"
+                    );
+                }
+            }
+            other => panic!("expected Complete with 2 transfers, got {other:?}"),
         }
     }
 
