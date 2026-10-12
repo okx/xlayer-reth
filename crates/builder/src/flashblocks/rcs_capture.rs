@@ -721,6 +721,7 @@ mod tests {
         );
     }
 
+    // ── T1a: finish_capture resets all state (includes create_recipients) on LimitExceeded ──────────
     #[test]
     fn finish_capture_clears_state_on_limit_exceeded_exit() {
         // A `LimitExceeded` finish must leave the inspector fully reset IMMEDIATELY (spec §5.2, R9
@@ -955,6 +956,31 @@ mod tests {
         assert!(i.queue.is_empty());
         assert_eq!(i.observed_count, 2, "observed_count must not roll back on revert");
     }
+
+    // ── T4d: create_end address-mismatch guard is release-safe (not debug_assert!) ──────────────
+    #[test]
+    fn create_address_mismatch_revokes_endowment_in_release_build() {
+        // The `create_end` hook's guard uses `matches!(...)` — a regular expression evaluated in
+        // both debug and release builds — to detect an impossible address mismatch.
+        // This test directly exercises the rollback path that the guard would trigger:
+        // push_checkpoint + record endowment → pop_checkpoint(true) must expunge the transfer,
+        // confirming the mechanism is not gated behind debug_assert!.
+        let mut i = armed(10);
+        i.push_checkpoint();
+        i.observe_native_transfer(
+            addr(0xA),
+            addr(0xB),
+            U256::from(7u64),
+            NativeTransferKind::Create,
+        );
+        assert_eq!(i.queue.len(), 1, "endowment must be queued before rollback");
+        i.pop_checkpoint(true); // simulate mismatch → reverted=true path in create_end
+        assert!(
+            i.queue.is_empty(),
+            "mismatch rollback must expunge the CREATE endowment from the queue"
+        );
+        assert_eq!(i.observed_count, 1, "observed_count must remain sticky through the rollback");
+    }
 }
 
 /// Runtime test fixture for the builder capture path. Kept `pub(crate)` so test 33 (spec §8, in this
@@ -1047,7 +1073,8 @@ pub(crate) mod test_fixtures {
 #[cfg(test)]
 mod gating_integration_tests {
     use super::*;
-    use alloy_consensus::{SignableTransaction, TxLegacy};
+    use alloy_consensus::{SignableTransaction, TxEip7702, TxLegacy};
+    use alloy_eips::eip7702::Authorization;
     use alloy_evm::{Evm, EvmEnv, EvmFactory, FromRecoveredTx};
     use alloy_op_evm::{post_exec, OpEvmFactory, OpTx};
     use alloy_primitives::{Signature, TxKind};
@@ -1656,6 +1683,34 @@ mod gating_integration_tests {
         );
     }
 
+    // ── T1c: D-ISO — inactive inspector on value-bearing CREATE tx ───────────
+
+    #[test]
+    fn inactive_inspector_diso_create_tx_no_mutation() {
+        // When start_capture() is never called, the create hook's inactive-gate returns
+        // immediately without pushing to create_recipients. This is the D-ISO invariant
+        // for the CREATE hook: a value-bearing CREATE must not mutate capture-private state.
+        let deployer = Address::from([0xDF; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(deployer, account(1_000_000_000, None));
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        // Deliberately do NOT call start_capture() — inspector stays inactive.
+        evm.transact(create_tx_with_value(deployer, U256::from(5u64))).expect("tx executes");
+        let inspector = evm.components_mut().1;
+        assert!(
+            inspector.create_recipients.is_empty(),
+            "inactive create hook must not push to create_recipients"
+        );
+        assert!(inspector.checkpoints.is_empty(), "inactive push_checkpoint must not add entries");
+    }
+
     // ── T1d: create_recipients balanced push/pop ─────────────────────────────
 
     #[test]
@@ -1720,10 +1775,10 @@ mod gating_integration_tests {
         }
     }
 
-    // ── T2a: JOVIAN/EIP-7702 DELEGATECALL attribution ────────────────────────
+    // ── T2c: DELEGATECALL simulation — CALL+CREATE attributed to delegating context ──
 
     #[test]
-    fn seven_oh_two_delegated_origin_nested_call_and_create() {
+    fn delegatecall_nested_call_and_create_attributed_to_delegator() {
         // delegator holds balance and has code that DELEGATECALLs to `implementation`.
         // `implementation`'s code does CALL(1 wei, call_recipient) and CREATE(1 wei, empty).
         // Both operations run in `delegator`'s context → attributed to `delegator`.
@@ -1754,6 +1809,77 @@ mod gating_integration_tests {
                         log.topics()[1],
                         delegator.into_word(),
                         "transfer.from must be the delegating address, not the implementation"
+                    );
+                }
+            }
+            other => panic!("expected Complete with 2 transfers, got {other:?}"),
+        }
+    }
+
+    // ── T2a: EIP-7702 type-4 tx — transfers attributed to the authority address ──────────────
+
+    #[test]
+    fn eip7702_type4_delegated_transfers_attributed_to_authority() {
+        // A genuine EIP-7702 type-4 transaction (TxEip7702) sets the delegation designation for
+        // `authority` to `delegate_impl`. When the tx executes, the EVM runs `delegate_impl`'s
+        // code in the context of `authority`. CALL(1 wei) + CREATE(1 wei) inside `delegate_impl`
+        // must both be attributed to `authority` (the effective sender of those transfers).
+        let delegate_impl = Address::from([0xE1; 20]);
+        let call_recipient = Address::from([0xE2; 20]);
+        let auth = Authorization { chain_id: U256::ZERO, address: delegate_impl, nonce: 0 }
+            .into_signed(Signature::test_signature());
+        let authority =
+            auth.recover_authority().expect("deterministic authority from test_signature");
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(authority, account(1_000_000, None));
+        db.insert_account_info(
+            delegate_impl,
+            account(0, Some(delegated_call_and_create(call_recipient))),
+        );
+        db.insert_account_info(call_recipient, account(0, None));
+        let tx = TxEip7702 {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 2_000_000,
+            max_fee_per_gas: 0,
+            max_priority_fee_per_gas: 0,
+            to: authority,
+            value: U256::ZERO,
+            authorization_list: vec![auth],
+            input: Default::default(),
+            access_list: Default::default(),
+        }
+        .into_signed(Signature::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
+        let op_tx = OpTx::from_recovered_tx(&tx, caller());
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        evm.components_mut().1.start_capture();
+        let result = evm.transact(op_tx).expect("tx executes");
+        let outcome = evm.components_mut().1.finish_capture(result.result.logs());
+        match outcome {
+            CaptureOutcome::Complete(stream) => {
+                assert_eq!(
+                    stream.len(),
+                    2,
+                    "EIP-7702 delegated code must capture CALL(1) + CREATE(1)"
+                );
+                for log in &stream {
+                    assert_eq!(log.address, NATIVE_ASSET_ADDRESS);
+                    assert_eq!(
+                        log.topics()[1],
+                        authority.into_word(),
+                        "transfer.from must be authority (EIP-7702 execution context)"
                     );
                 }
             }
@@ -1863,6 +1989,43 @@ mod gating_integration_tests {
         }
     }
 
+    /// Runtime bytecode: CALL(gas, call_dst, 1 wei, 0, 0, 0, 0); POP; CREATE2(7 wei, salt=0, empty)
+    fn call_value_1_then_create2_endowment(call_dst: Address) -> Vec<u8> {
+        let mut code = call_prefix(0x01, call_dst);
+        // GAS CALL POP
+        code.extend_from_slice(&[0x5a, 0xf1, 0x50]);
+        // PUSH1 0 (salt) PUSH1 0 (size) PUSH1 0 (offset) PUSH1 7 (value) CREATE2
+        code.extend_from_slice(&[0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x07, 0xf5]);
+        code
+    }
+
+    // ── T4b-ext: budget=N, then N+1 colliding CREATE → LimitExceeded ──────────────────────────
+
+    #[test]
+    fn revoked_create_with_prior_transfer_exceeds_budget_limit() {
+        // Proves that observed_count from a revoked CREATE is real budget consumption:
+        // with limit=1, one CALL (fills the budget) plus a revoked CREATE2 collision
+        // (one more observation) must produce LimitExceeded{attempted:2, limit:1}.
+        let factory = Address::from([0xF5; 20]);
+        let call_recipient = Address::from([0xF6; 20]);
+        let collision_target = factory.create2(B256::ZERO, keccak256(b""));
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(
+            factory,
+            account(1_000, Some(call_value_1_then_create2_endowment(call_recipient))),
+        );
+        db.insert_account_info(call_recipient, account(0, None));
+        db.insert_account_info(collision_target, AccountInfo { nonce: 1, ..Default::default() });
+
+        let (outcome, success) = run_capturing_tx(db, factory, 1);
+        assert!(success, "top-level CALL to factory must succeed even on budget overflow");
+        assert!(
+            matches!(outcome, CaptureOutcome::LimitExceeded { attempted: 2, limit: 1 }),
+            "one CALL + one revoked CREATE2 must exceed budget=1; got {outcome:?}"
+        );
+    }
+
     // ── top_level_create_with_value_emits_transfer ───────────────────────────
 
     #[test]
@@ -1882,6 +2045,11 @@ mod gating_integration_tests {
                     stream[0].topics()[1],
                     deployer.into_word(),
                     "transfer.from must be the deployer"
+                );
+                assert_eq!(
+                    stream[0].topics()[2],
+                    deployer.create(0).into_word(),
+                    "transfer.to must be the contract address derived from deployer + nonce 0"
                 );
             }
             other => panic!("expected Complete with one Transfer, got {other:?}"),
