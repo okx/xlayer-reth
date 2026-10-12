@@ -2366,3 +2366,175 @@ fn rules_lock_recovers_from_poisoning() {
     *shared.rules_write() = Arc::new(RuleSet::default());
     assert_eq!(shared.current_rules().rules.len(), 0);
 }
+
+// ---- T3: NT2 + unified transfer.* denial end-to-end through screen_tx ---------------------
+
+const NATIVE_ASSET_ADDRESS: &str = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
+
+fn native_asset_address() -> Address {
+    Address::from_str(NATIVE_ASSET_ADDRESS).unwrap()
+}
+
+fn native_transfer_log(from: Address, to: Address, value: U256) -> Log {
+    log_builder::erc20_transfer(native_asset_address(), from, to, value)
+}
+
+fn deny_by_sender_rules() -> RuleSet {
+    load_rules(1, 1, vec![serde_json::from_str(golden::RULE_SCENARIO_B).unwrap()])
+}
+
+#[test]
+fn t3a_native_endowment_transfer_log_denied_through_screen_tx() {
+    // T3a: a transfer.* deny rule blocks a ScreenInput carrying a native-transfer log with a
+    // blacklisted sender — the unmodified matching engine path handles both token types.
+    let handle = FilterHandle::for_test(
+        enabled_config(),
+        deny_by_sender_rules(),
+        Arc::new(TestClock::new(START)),
+    );
+    let logs = vec![native_transfer_log(
+        golden::blacklisted_from(),
+        golden::recipient(),
+        U256::from(7u64),
+    )];
+    assert_eq!(handle.screen_tx(&scenario_a_input(golden::tx_a(), &logs)), Screen::Deny);
+}
+
+#[test]
+fn t3b_single_rule_denies_erc20_and_native_transfer_in_same_tx() {
+    // T3b: one deny rule fires when a ScreenInput carries both a top-level ERC20 log and an
+    // internal native-transfer log, both from the blacklisted address.
+    let handle = FilterHandle::for_test(
+        enabled_config(),
+        deny_by_sender_rules(),
+        Arc::new(TestClock::new(START)),
+    );
+    let logs = vec![
+        log_builder::erc20_transfer(
+            golden::token_x(),
+            golden::blacklisted_from(),
+            golden::recipient(),
+            U256::from(1_000_000_000_000_000_000u64),
+        ),
+        native_transfer_log(golden::blacklisted_from(), golden::recipient(), U256::from(7u64)),
+    ];
+    assert_eq!(handle.screen_tx(&scenario_a_input(golden::tx_a(), &logs)), Screen::Deny);
+}
+
+#[test]
+fn t3c_event_binding_budget_overflow_denies_tx() {
+    // T3c: when matched bindings exceed max_event_bindings_per_tx, screen_tx returns
+    // Deny (fail-closed).
+    let config = FilterConfig {
+        enabled: true,
+        rcs_base_url: "http://mock".into(),
+        max_event_bindings_per_tx: 2,
+        ..Default::default()
+    };
+    let handle =
+        FilterHandle::for_test(config, scenario_a_rules(), Arc::new(TestClock::new(START)));
+    // Three logs each matching the scenario-a condition push the binding count past the budget.
+    let logs: Vec<Log> = (1u8..=3)
+        .map(|i| {
+            log_builder::erc20_transfer(
+                golden::token_x(),
+                golden::bridge_erc20(),
+                golden::recipient(),
+                U256::from(u64::from(i)),
+            )
+        })
+        .collect();
+    assert_eq!(handle.screen_tx(&scenario_a_input(golden::tx_a(), &logs)), Screen::Deny);
+}
+
+#[test]
+fn t3d_two_audit_rules_same_audit_type_produce_single_pool_entry() {
+    // T3d: two audit rules with the same audit_type="quota" merge their actions into one
+    // pool entry — the buffer is not inflated by duplicated per-rule entries.
+    let second_rule_raw = r#"{
+        "id":"risk-check-quota-dup",
+        "contract_address":null,"origin":null,
+        "event_abis":{"transfer":{"type":"event","name":"Transfer","inputs":[
+            {"name":"from","type":"address","indexed":true},
+            {"name":"to","type":"address","indexed":true},
+            {"name":"value","type":"uint256","indexed":false}
+        ],"anonymous":false}},
+        "audit_types":["quota"],
+        "condition":{"and":[
+            {"==":[{"var":"transfer.address"},"0x0202020202020202020202020202020202020202"]},
+            {"==":[{"var":"transfer.from"},"0x0101010101010101010101010101010101010101"]}
+        ]},
+        "action":"audit","audit_timeout_action":"allow"
+    }"#;
+    let rules = load_rules(
+        1,
+        1,
+        vec![
+            serde_json::from_str(golden::RULE_SCENARIO_A).unwrap(),
+            serde_json::from_str(second_rule_raw).unwrap(),
+        ],
+    );
+    let handle = FilterHandle::for_test(enabled_config(), rules, Arc::new(TestClock::new(START)));
+    let logs = vec![transfer_log(golden::ONE_TOKEN)];
+    assert_eq!(handle.screen_tx(&scenario_a_input(golden::tx_a(), &logs)), Screen::AuditPending);
+    assert_eq!(handle.buffered_len(), 1, "merged same-audit_type actions → single pool entry");
+}
+
+#[test]
+fn t3e_post_approval_re_screen_produces_audit_approved_for_native_transfer() {
+    // T3e: first screen_tx → AuditPending; after pool transition to Approved, second
+    // screen_tx → AuditApproved, proving screen_existing consistency for native-transfer txs.
+    let audit_native_raw = r#"{
+        "id":"audit-native-bridge",
+        "contract_address":null,"origin":null,
+        "event_abis":{"transfer":{"type":"event","name":"Transfer","inputs":[
+            {"name":"from","type":"address","indexed":true},
+            {"name":"to","type":"address","indexed":true},
+            {"name":"value","type":"uint256","indexed":false}
+        ],"anonymous":false}},
+        "audit_types":["quota"],
+        "condition":{"==":[{"var":"transfer.from"},"0x0101010101010101010101010101010101010101"]},
+        "action":"audit","audit_timeout_action":"allow"
+    }"#;
+    let rules = load_rules(1, 1, vec![serde_json::from_str(audit_native_raw).unwrap()]);
+    let handle = FilterHandle::for_test(enabled_config(), rules, Arc::new(TestClock::new(START)));
+    let logs =
+        vec![native_transfer_log(golden::bridge_erc20(), golden::recipient(), U256::from(7u64))];
+    let input = scenario_a_input(golden::tx_a(), &logs);
+    assert_eq!(handle.screen_tx(&input), Screen::AuditPending);
+    handle.with_pool(|pool| {
+        pool.apply_submit_response_current(&[golden::TX_A.to_string()], START);
+        pool.apply_query_status_current(&golden::tx_a(), "approved", START);
+    });
+    assert_eq!(handle.screen_tx(&input), Screen::AuditApproved);
+}
+
+#[test]
+fn t3f_native_and_erc20_transfer_produce_identical_decision_no_matching_change_needed() {
+    // T3f: design position — native-transfer logs and ERC20 logs share the transfer.* ABI
+    // decoding path; both produce Screen::Deny under the same rule without any change to
+    // matching.rs or handle.rs.
+    let handle = FilterHandle::for_test(
+        enabled_config(),
+        deny_by_sender_rules(),
+        Arc::new(TestClock::new(START)),
+    );
+    let native_log =
+        native_transfer_log(golden::blacklisted_from(), golden::recipient(), U256::from(1u64));
+    let erc20_log = log_builder::erc20_transfer(
+        golden::token_x(),
+        golden::blacklisted_from(),
+        golden::recipient(),
+        U256::from(1u64),
+    );
+    assert_eq!(
+        handle.screen_tx(&scenario_a_input(golden::tx_a(), &[native_log])),
+        Screen::Deny,
+        "native transfer denied"
+    );
+    assert_eq!(
+        handle.screen_tx(&scenario_a_input(golden::tx_b(), &[erc20_log])),
+        Screen::Deny,
+        "erc20 transfer denied identically"
+    );
+}
