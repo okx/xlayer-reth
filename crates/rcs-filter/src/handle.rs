@@ -582,15 +582,22 @@ impl FilterHandle {
 
     /// Test-only accessor to drive the buffer pool directly (simulating worker transitions)
     /// without spawning the async workers.
-    #[cfg(test)]
-    pub(crate) fn with_pool<R>(&self, f: impl FnOnce(&mut crate::pool::BufferPool) -> R) -> R {
+    ///
+    /// Compiled for this crate's own tests and for dependents whose `[dev-dependencies]` enable
+    /// the non-default `test-utils` feature. It is absent from every production build: a
+    /// dependent's `cfg(test)` is inactive while this crate is compiled as a dependency, so the
+    /// feature — not `test` — is what carries the helper across the crate boundary.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn with_pool<R>(&self, f: impl FnOnce(&mut crate::pool::BufferPool) -> R) -> R {
         let mut pool = self.shared.pool_lock();
         f(&mut pool)
     }
 
     /// Advances a buffered transaction to Approved state for testing, without spawning workers.
     ///
-    /// Uses only the public pool API so it is accessible from dependent crates' test code.
+    /// Compiled for this crate's own tests and for dependents that enable the non-default
+    /// `test-utils` feature from `[dev-dependencies]`; never exposed by a production build.
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn advance_to_approved_for_test(&self, tx_hash: &B256) {
         let hash_str = format!("{tx_hash:#x}");
         let now = self.shared.clock.now_unix();
