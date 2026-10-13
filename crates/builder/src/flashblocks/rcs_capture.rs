@@ -147,6 +147,27 @@ thread_local! {
         const { std::cell::Cell::new(false) };
 }
 
+// Test-only gate-snapshot seam (T1-INACTIVE). The `create` hook writes here at the inactive
+// early-return path — before `create_end` has a chance to fire — so tests can assert that
+// neither `create_recipients` nor `checkpoints` were mutated while inactive. Tuple layout:
+// `(create_recipients_len, checkpoints_len, derivation_ran)`. Never set in production.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static CREATE_GATE_SNAPSHOT: std::cell::Cell<(usize, usize, bool)> =
+        const { std::cell::Cell::new((0, 0, false)) };
+}
+
+// Test-only push/pop balance seam (T1-BALANCE). The `create_end` hook writes here after every
+// `pop` and `pop_checkpoint` call, before `finish_capture` can run. Tuple layout:
+// `(create_recipients_len, checkpoints_len)`. Proves that each `create` push is balanced by
+// a `create_end` pop within the same EVM frame, not deferred to `finish_capture`. Never set
+// in production.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static CREATE_END_BALANCE: std::cell::Cell<(usize, usize)> =
+        const { std::cell::Cell::new((0, 0)) };
+}
+
 /// The RCS capture inspector: the **inner** inspector of `alloy_op_evm::OpEvm`'s composite
 /// wrapper. It maintains one ordered queue of real + virtual logs with per-frame checkpoints and a
 /// single, non-rolling-back native-transfer counter with a sticky budget overflow.
@@ -430,6 +451,10 @@ where
     fn create(&mut self, context: &mut CTX, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
         self.push_checkpoint();
         if !self.active {
+            #[cfg(test)]
+            CREATE_GATE_SNAPSHOT.with(|s| {
+                s.set((self.create_recipients.len(), self.checkpoints.len(), false))
+            });
             return None;
         }
         // Capture the expected recipient for every CREATE/CREATE2 frame. The created-address
@@ -494,6 +519,9 @@ where
             // No endowment was recorded for this frame (expected was None) — commit
             self.pop_checkpoint(false);
         }
+        #[cfg(test)]
+        CREATE_END_BALANCE
+            .with(|s| s.set((self.create_recipients.len(), self.checkpoints.len())));
     }
 
     fn selfdestruct(&mut self, contract: Address, target: Address, value: U256) {
@@ -2942,6 +2970,214 @@ mod gating_integration_tests {
                 );
             }
             other => panic!("expected Complete(empty) for nonce-overflow CREATE2, got {other:?}"),
+        }
+    }
+
+    // ── T1 proof-boundary: inactive gate at create-return ────────────────────────────────────────
+
+    #[test]
+    fn inactive_create_no_mutation_and_no_derivation_at_create_return() {
+        // Inspector is never activated. The `create` hook must push_checkpoint then immediately
+        // gate-return without touching `create_recipients` or running address derivation.
+        // The CREATE_GATE_SNAPSHOT seam records the state at the exact return point so we can
+        // assert cleanliness BEFORE `create_end` fires.
+        let deployer = Address::from([0xDA; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(deployer, account(1_000_000_000, None));
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        // Deliberately do NOT call start_capture().
+        evm.transact(create_tx_with_value(deployer, U256::from(5u64))).expect("tx executes");
+        let inspector = evm.components_mut().1;
+        assert!(!inspector.active);
+        assert!(inspector.create_recipients.is_empty());
+        assert!(inspector.checkpoints.is_empty());
+        let (cr_len, cp_len, derivation_ran) = CREATE_GATE_SNAPSHOT.with(|s| s.get());
+        assert_eq!(cr_len, 0, "create_recipients must be untouched at create hook return");
+        assert_eq!(cp_len, 0, "checkpoints must be untouched at create hook return");
+        assert!(!derivation_ran, "address derivation must not run while inactive");
+    }
+
+    // ── T1 proof-boundary: create_recipients balanced inside create_end ──────────────────────────
+
+    #[test]
+    fn create_recipients_balanced_before_finish_capture() {
+        // Each `create` hook push must be balanced by `create_end`'s pop, not deferred to
+        // `finish_capture`. The CREATE_END_BALANCE seam captures the lengths immediately after
+        // the last pop inside `create_end` — before the test calls `finish_capture` — so the
+        // assertion is on the boundary that matters: within the EVM frame, not at cleanup.
+        let deployer = Address::from([0xDB; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(deployer, account(1_000_000_000, None));
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        evm.components_mut().1.start_capture();
+        let result =
+            evm.transact(create_tx_with_value(deployer, U256::from(7u64))).expect("tx executes");
+        // Read seam BEFORE finish_capture — proves push/pop balanced in create_end itself.
+        let (cr_len, cp_len) = CREATE_END_BALANCE.with(|s| s.get());
+        assert_eq!(cr_len, 0, "create_recipients must be empty after create_end — push/pop balanced");
+        assert_eq!(cp_len, 0, "checkpoints must be empty after create_end — push/pop balanced");
+        let logs = result.result.logs();
+        let _outcome = evm.components_mut().1.finish_capture(logs);
+    }
+
+    // ── T1 proof-boundary: abort_capture clears mid-window state ─────────────────────────────────
+
+    #[test]
+    fn abort_capture_mid_window_leaves_state_clean() {
+        // abort_capture must reset all inspector state even when called with entries mid-flight:
+        // a partially-filled queue, an open checkpoint, and an in-progress create_recipients entry.
+        let mut inspector = RcsInspector::new(10);
+        inspector.start_capture();
+        inspector.push_checkpoint();
+        inspector.observe_native_transfer(
+            Address::from([0x01u8; 20]),
+            Address::from([0x02u8; 20]),
+            U256::from(5u64),
+            NativeTransferKind::Call,
+        );
+        inspector.create_recipients.push(Some(Address::from([0x03u8; 20])));
+        inspector.abort_capture();
+        assert!(!inspector.active, "must be inactive after abort");
+        assert!(inspector.queue.is_empty(), "queue must be cleared by abort");
+        assert!(inspector.checkpoints.is_empty(), "checkpoints must be cleared by abort");
+        assert_eq!(inspector.observed_count, 0, "observed_count must be reset by abort");
+        assert!(!inspector.overflowed, "overflow flag must be reset by abort");
+        assert!(inspector.create_recipients.is_empty(), "create_recipients must be cleared by abort");
+    }
+
+    // ── T1 proof-boundary: two consecutive captures are independent ───────────────────────────────
+
+    #[test]
+    fn two_consecutive_txs_capture_independently() {
+        // State from one capture window must not carry over into the next. tx1 captures one
+        // internal transfer; tx2 hits an empty contract (no code, no value) and must produce an
+        // empty stream — not the leftovers from tx1.
+        let sender1 = Address::from([0xA4; 20]);
+        let sender2 = Address::from([0xA5; 20]);
+        let target = Address::from([0xC4; 20]);
+        let recv = Address::from([0xC5; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(sender1, account(1_000_000_000, None));
+        db.insert_account_info(sender2, account(1_000_000_000, None));
+        db.insert_account_info(target, account(1_000, Some(call_with_value_to(5, recv))));
+        db.insert_account_info(recv, account(0, None));
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        evm.components_mut().1.start_capture();
+        let result1 = evm.transact(call_tx_from(sender1, target)).expect("tx1 executes");
+        let outcome1 = evm.components_mut().1.finish_capture(result1.result.logs());
+        match outcome1 {
+            CaptureOutcome::Complete(stream) => {
+                assert_eq!(stream.len(), 1, "tx1 must produce 1 transfer")
+            }
+            other => panic!("expected Complete with 1 transfer for tx1, got {other:?}"),
+        }
+        evm.components_mut().1.start_capture();
+        let result2 = evm.transact(call_tx_from(sender2, recv)).expect("tx2 executes");
+        let outcome2 = evm.components_mut().1.finish_capture(result2.result.logs());
+        match outcome2 {
+            CaptureOutcome::Complete(stream) => assert!(
+                stream.is_empty(),
+                "tx2 must produce 0 transfers — no carry-over from tx1"
+            ),
+            other => panic!("expected Complete(empty) for tx2, got {other:?}"),
+        }
+    }
+
+    // ── T2 proof-boundary: EIP-7702 origin-is-delegated path ─────────────────────────────────────
+
+    #[test]
+    fn eip7702_origin_itself_delegated_runs_inner_call_and_create() {
+        // EIP-7702 case where the tx origin (signer) IS the delegation authority. The tx target is
+        // also the origin, so the delegated code runs in the origin's context. The delegated code
+        // (delegated_call_and_create) issues CALL(1 wei) + CREATE(1 wei), both attributed to the
+        // origin. Two synthetic logs must be captured with from==origin on both.
+        //
+        // Hardfork basis: OpSpecId::JOVIAN maps through op-revm to SpecId::PRAGUE, enabling
+        // EIP-7702 authority-tuple resolution.
+        let delegate_impl = Address::from([0xE3; 20]);
+        let call_recipient = Address::from([0xE4; 20]);
+        // When origin == authority == tx sender, the EVM increments the sender's nonce from 0
+        // to 1 before processing the authorization list. auth.nonce must therefore be 1 so that
+        // the nonce check inside authorization processing succeeds (auth.nonce == 1 == origin.nonce
+        // after increment). With nonce 0, the check would fail (0 != 1) and no delegation code
+        // would be installed, causing the call to origin to be a no-op.
+        let auth = Authorization { chain_id: U256::ZERO, address: delegate_impl, nonce: 1 }
+            .into_signed(Signature::test_signature());
+        let origin = auth.recover_authority().expect("deterministic authority from test_signature");
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(origin, account(1_000_000, None));
+        db.insert_account_info(
+            delegate_impl,
+            account(0, Some(delegated_call_and_create(call_recipient))),
+        );
+        db.insert_account_info(call_recipient, account(0, None));
+        let tx = TxEip7702 {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 2_000_000,
+            max_fee_per_gas: 0,
+            max_priority_fee_per_gas: 0,
+            to: origin, // origin calls itself — delegation applies
+            value: U256::ZERO,
+            authorization_list: vec![auth],
+            input: Default::default(),
+            access_list: Default::default(),
+        }
+        .into_signed(Signature::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
+        let op_tx = OpTx::from_recovered_tx(&tx, origin);
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        evm.components_mut().1.start_capture();
+        let result = evm.transact(op_tx).expect("tx executes");
+        let outcome = evm.components_mut().1.finish_capture(result.result.logs());
+        match outcome {
+            CaptureOutcome::Complete(stream) => {
+                assert_eq!(
+                    stream.len(),
+                    2,
+                    "origin-delegated code must capture CALL(1) + CREATE(1)"
+                );
+                for log in &stream {
+                    assert_eq!(log.address, NATIVE_ASSET_ADDRESS);
+                    assert_eq!(
+                        log.topics()[1],
+                        origin.into_word(),
+                        "transfer.from must be origin (signer itself carries the delegation)"
+                    );
+                }
+            }
+            other => panic!("expected Complete with 2 transfers, got {other:?}"),
         }
     }
 }
