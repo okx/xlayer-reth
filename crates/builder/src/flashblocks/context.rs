@@ -143,6 +143,21 @@ fn fail_closed_screen(
             filter.record_local_deny(LocalDenyReason::ObservationInvariant);
             Some(Screen::Deny)
         }
+        // D7b: a successful CREATE returned an address that differed from the pre-derived expected
+        // address. Fails closed with only the bounded `create_index` field (no addresses logged).
+        CaptureOutcome::InvariantViolation {
+            reason: CaptureInvariantError::CreateAddressMismatch { create_index },
+        } => {
+            error!(
+                target: "rcs_filter::capture",
+                %tx_hash,
+                create_index = *create_index,
+                "CREATE address mismatch: pre-derived address differs from actual; \
+                 failing closed (Screen::Deny)"
+            );
+            filter.record_local_deny(LocalDenyReason::ObservationInvariant);
+            Some(Screen::Deny)
+        }
         // An enabled filter receiving `Passthrough` is a state-machine bug: it stays a
         // `tx_hash`-only fail-closed log (no extra fields) and never falls back to raw logs. Any
         // future content-free `CaptureInvariantError` kind will force an explicit decision here at

@@ -60,6 +60,10 @@ fn transfer_topic0() -> B256 {
 pub enum CaptureInvariantError {
     /// The captured real-log subsequence did not match `result.logs()` for content/count/order.
     RealLogMismatch { first_bad_index: usize, observed: usize, expected: usize },
+    /// A successful CREATE returned an address that differed from the pre-derived address stored
+    /// in the CREATE frame's `create_recipients` entry. `create_index` is the 0-based depth of
+    /// open CREATE frames at the point the mismatch was detected.
+    CreateAddressMismatch { create_index: usize },
 }
 
 /// The outcome of finishing a capture window. Never an `Option`: an enabled filter can never
@@ -132,6 +136,17 @@ thread_local! {
         const { std::cell::Cell::new(false) };
 }
 
+// Test-only "forced CREATE address mismatch" seam (D7b). When set, the next `create` hook on an
+// active inspector pushes `Address::repeat_byte(0xFE)` as the expected recipient instead of the
+// real derived address, so `create_end` sees `e != a` on a genuinely successful CREATE. One-shot:
+// the flag is consumed (replaced with `false`) by the `create` hook so only the armed frame is
+// affected. Kept as `//` so the struct doc below is not orphaned onto the macro.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FORCE_CREATE_ADDRESS_MISMATCH: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
 /// The RCS capture inspector: the **inner** inspector of `alloy_op_evm::OpEvm`'s composite
 /// wrapper. It maintains one ordered queue of real + virtual logs with per-frame checkpoints and a
 /// single, non-rolling-back native-transfer counter with a sticky budget overflow.
@@ -158,6 +173,11 @@ pub struct RcsInspector {
     /// `create` hook, popped on each `create_end`. Used to assert consistency between the
     /// pre-derived address and the real `CreateOutcome.address` on success.
     create_recipients: Vec<Option<Address>>,
+    /// Sticky flag set in `create_end` when a successful CREATE returns an address that differs
+    /// from the pre-derived expected address. Surfaced by `finish_capture` as
+    /// `InvariantViolation { CreateAddressMismatch }` — never silently truncated. Cleared on
+    /// every `start_capture`, `abort_capture`, and `finish_capture` exit.
+    address_mismatch_create_index: Option<usize>,
 }
 
 impl RcsInspector {
@@ -172,6 +192,7 @@ impl RcsInspector {
             overflowed: false,
             limit: max_native_transfers,
             create_recipients: Vec::new(),
+            address_mismatch_create_index: None,
         }
     }
 
@@ -283,6 +304,7 @@ impl RcsCaptureControl for RcsInspector {
         self.create_recipients.clear();
         self.observed_count = 0;
         self.overflowed = false;
+        self.address_mismatch_create_index = None;
         self.active = true;
     }
 
@@ -303,7 +325,13 @@ impl RcsCaptureControl for RcsInspector {
         // implementation returned on the `LimitExceeded` / `InvariantViolation` paths *before*
         // clearing `queue`/`checkpoints`/`observed_count`/`overflowed`, leaking state into the next
         // capture window; cleanliness is now guaranteed immediately at finish, not only at reset.
-        let outcome = if self.overflowed {
+        let outcome = if let Some(create_index) = self.address_mismatch_create_index {
+            // D7b: a successful CREATE returned an address that differed from the pre-derived
+            // expected address. Fail closed — never silently truncate with Complete.
+            CaptureOutcome::InvariantViolation {
+                reason: CaptureInvariantError::CreateAddressMismatch { create_index },
+            }
+        } else if self.overflowed {
             CaptureOutcome::LimitExceeded { attempted: self.observed_count, limit: self.limit }
         } else {
             // Cross-check: the RealLog subsequence must equal `result.logs()` for count, content,
@@ -343,13 +371,14 @@ impl RcsCaptureControl for RcsInspector {
             }
         };
         // Uniform every-exit cleanup (R9 item 4): leave the inspector inactive and fully reset so
-        // nothing — queue, checkpoints, the native counter, or the sticky overflow flag — can leak
-        // into the next `start_capture`, regardless of Complete / LimitExceeded / InvariantViolation.
+        // nothing — queue, checkpoints, the native counter, the sticky overflow flag, or the sticky
+        // address-mismatch flag — can leak into the next `start_capture`.
         self.queue.clear();
         self.checkpoints.clear();
         self.create_recipients.clear();
         self.observed_count = 0;
         self.overflowed = false;
+        self.address_mismatch_create_index = None;
         self.active = false;
         outcome
     }
@@ -360,6 +389,7 @@ impl RcsCaptureControl for RcsInspector {
         self.create_recipients.clear();
         self.observed_count = 0;
         self.overflowed = false;
+        self.address_mismatch_create_index = None;
         self.active = false;
     }
 }
@@ -419,6 +449,15 @@ where
             }
             _ => inputs.created_address(0),
         };
+        // Test-only: when armed, push a WRONG expected address so `create_end` detects `e != a`
+        // on a real successful CREATE and exercises the D7b fail-closed branch. One-shot: the flag
+        // is consumed here so only the armed frame is affected. No effect in production builds.
+        #[cfg(test)]
+        if !value.is_zero() && FORCE_CREATE_ADDRESS_MISMATCH.with(|f| f.replace(false)) {
+            self.create_recipients.push(Some(Address::repeat_byte(0xFE)));
+            self.record_create_observation(value, caller, created_address);
+            return None;
+        }
         self.create_recipients.push(if !value.is_zero() { Some(created_address) } else { None });
         self.record_create_observation(value, caller, created_address);
         None
@@ -434,13 +473,27 @@ where
             return;
         }
         let expected = self.create_recipients.pop();
-        // Revoke the endowment observation when: the frame reverted, the EVM returned no address
-        // (e.g. nonce overflow — is_ok() is true but address is None), or the actual deployed
-        // address differs from the pre-derived address stored in create_recipients.
-        let reverted = !outcome.result.is_ok()
-            || outcome.address.is_none()
-            || matches!((expected.flatten(), outcome.address), (Some(e), Some(a)) if e != a);
-        self.pop_checkpoint(reverted);
+        if !outcome.result.is_ok() {
+            // (a) CREATE reverted — revoke the checkpoint
+            self.pop_checkpoint(true);
+        } else if outcome.address.is_none() {
+            // (b) nonce overflow: is_ok() but no address — revoke
+            self.pop_checkpoint(true);
+        } else if let (Some(Some(e)), Some(a)) = (expected, outcome.address) {
+            if e != a {
+                // (c) Successful CREATE but pre-derived address differs from actual — fail closed.
+                // Record the depth at which the mismatch was detected so finish_capture can surface
+                // InvariantViolation { CreateAddressMismatch } instead of silently truncating.
+                let create_index = self.create_recipients.len();
+                self.address_mismatch_create_index = Some(create_index);
+                self.pop_checkpoint(true);
+            } else {
+                self.pop_checkpoint(false);
+            }
+        } else {
+            // No endowment was recorded for this frame (expected was None) — commit
+            self.pop_checkpoint(false);
+        }
     }
 
     fn selfdestruct(&mut self, contract: Address, target: Address, value: U256) {
@@ -957,30 +1010,6 @@ mod tests {
         assert_eq!(i.observed_count, 2, "observed_count must not roll back on revert");
     }
 
-    // ── T4d: create_end address-mismatch guard is release-safe (not debug_assert!) ──────────────
-    #[test]
-    fn create_address_mismatch_revokes_endowment_in_release_build() {
-        // The `create_end` hook's guard uses `matches!(...)` — a regular expression evaluated in
-        // both debug and release builds — to detect an impossible address mismatch.
-        // This test directly exercises the rollback path that the guard would trigger:
-        // push_checkpoint + record endowment → pop_checkpoint(true) must expunge the transfer,
-        // confirming the mechanism is not gated behind debug_assert!.
-        let mut i = armed(10);
-        i.push_checkpoint();
-        i.observe_native_transfer(
-            addr(0xA),
-            addr(0xB),
-            U256::from(7u64),
-            NativeTransferKind::Create,
-        );
-        assert_eq!(i.queue.len(), 1, "endowment must be queued before rollback");
-        i.pop_checkpoint(true); // simulate mismatch → reverted=true path in create_end
-        assert!(
-            i.queue.is_empty(),
-            "mismatch rollback must expunge the CREATE endowment from the queue"
-        );
-        assert_eq!(i.observed_count, 1, "observed_count must remain sticky through the rollback");
-    }
 }
 
 /// Runtime test fixture for the builder capture path. Kept `pub(crate)` so test 33 (spec §8, in this
@@ -2054,5 +2083,34 @@ mod gating_integration_tests {
             }
             other => panic!("expected Complete with one Transfer, got {other:?}"),
         }
+    }
+
+    // ── D7b: successful-CREATE address mismatch fails closed (InvariantViolation) ────────────────
+    #[test]
+    fn create_address_mismatch_through_real_create_end_fails_closed() {
+        // D7b: a successful CREATE whose actual deployed address differs from the pre-derived
+        // expected address stored in `create_recipients` must produce
+        // `InvariantViolation { CreateAddressMismatch }`, NEVER `Complete`. The
+        // `FORCE_CREATE_ADDRESS_MISMATCH` seam pushes `Address::repeat_byte(0xFE)` as the expected
+        // recipient in the real `create` hook, so `create_end` sees a genuine `e != a` on an
+        // actually-successful, value-bearing CREATE (is_ok=true, address=Some(real)).
+        // Falsifiable: deleting the D7b branch in `create_end` causes this test to fail
+        // (`Complete(empty)` instead of `InvariantViolation`); deleting the variant causes a
+        // compile error in this `matches!`.
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        FORCE_CREATE_ADDRESS_MISMATCH.with(|f| f.set(true));
+        let (outcome, success) = run_capturing_create_tx(db, caller(), U256::from(1), 16);
+        assert!(success, "the CREATE must succeed (is_ok=true) for D7b to be reachable");
+        assert!(
+            matches!(
+                outcome,
+                CaptureOutcome::InvariantViolation {
+                    reason: CaptureInvariantError::CreateAddressMismatch { .. }
+                }
+            ),
+            "successful CREATE with mismatched pre-derived/actual address must fail closed with \
+             CreateAddressMismatch, got {outcome:?}"
+        );
     }
 }
