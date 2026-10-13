@@ -452,9 +452,8 @@ where
         self.push_checkpoint();
         if !self.active {
             #[cfg(test)]
-            CREATE_GATE_SNAPSHOT.with(|s| {
-                s.set((self.create_recipients.len(), self.checkpoints.len(), false))
-            });
+            CREATE_GATE_SNAPSHOT
+                .with(|s| s.set((self.create_recipients.len(), self.checkpoints.len(), false)));
             return None;
         }
         // Capture the expected recipient for every CREATE/CREATE2 frame. The created-address
@@ -520,8 +519,7 @@ where
             self.pop_checkpoint(false);
         }
         #[cfg(test)]
-        CREATE_END_BALANCE
-            .with(|s| s.set((self.create_recipients.len(), self.checkpoints.len())));
+        CREATE_END_BALANCE.with(|s| s.set((self.create_recipients.len(), self.checkpoints.len())));
     }
 
     fn selfdestruct(&mut self, contract: Address, target: Address, value: U256) {
@@ -3028,7 +3026,10 @@ mod gating_integration_tests {
             evm.transact(create_tx_with_value(deployer, U256::from(7u64))).expect("tx executes");
         // Read seam BEFORE finish_capture — proves push/pop balanced in create_end itself.
         let (cr_len, cp_len) = CREATE_END_BALANCE.with(|s| s.get());
-        assert_eq!(cr_len, 0, "create_recipients must be empty after create_end — push/pop balanced");
+        assert_eq!(
+            cr_len, 0,
+            "create_recipients must be empty after create_end — push/pop balanced"
+        );
         assert_eq!(cp_len, 0, "checkpoints must be empty after create_end — push/pop balanced");
         let logs = result.result.logs();
         let _outcome = evm.components_mut().1.finish_capture(logs);
@@ -3056,7 +3057,10 @@ mod gating_integration_tests {
         assert!(inspector.checkpoints.is_empty(), "checkpoints must be cleared by abort");
         assert_eq!(inspector.observed_count, 0, "observed_count must be reset by abort");
         assert!(!inspector.overflowed, "overflow flag must be reset by abort");
-        assert!(inspector.create_recipients.is_empty(), "create_recipients must be cleared by abort");
+        assert!(
+            inspector.create_recipients.is_empty(),
+            "create_recipients must be cleared by abort"
+        );
     }
 
     // ── T1 proof-boundary: two consecutive captures are independent ───────────────────────────────
@@ -3096,10 +3100,9 @@ mod gating_integration_tests {
         let result2 = evm.transact(call_tx_from(sender2, recv)).expect("tx2 executes");
         let outcome2 = evm.components_mut().1.finish_capture(result2.result.logs());
         match outcome2 {
-            CaptureOutcome::Complete(stream) => assert!(
-                stream.is_empty(),
-                "tx2 must produce 0 transfers — no carry-over from tx1"
-            ),
+            CaptureOutcome::Complete(stream) => {
+                assert!(stream.is_empty(), "tx2 must produce 0 transfers — no carry-over from tx1")
+            }
             other => panic!("expected Complete(empty) for tx2, got {other:?}"),
         }
     }
