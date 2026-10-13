@@ -1376,7 +1376,7 @@ mod capture_decision_tests {
 #[cfg(test)]
 mod loop_level_fail_closed_tests {
     use super::*;
-    use crate::flashblocks::rcs_capture::FORCE_REALLOG_MISMATCH;
+    use crate::flashblocks::rcs_capture::{FORCE_CREATE_ADDRESS_MISMATCH, FORCE_REALLOG_MISMATCH};
     use alloy_consensus::TxEip1559;
     use alloy_genesis::Genesis;
     use alloy_primitives::{keccak256, Address, TxKind};
@@ -1662,6 +1662,187 @@ mod loop_level_fail_closed_tests {
         // (P1.1 / M1). With no guard, the loop's finish_capture returns Complete([Transfer]) and
         // screen_tx matches RULE_SCENARIO_A → AuditPending → a BufferEntry appears. If the fail-closed
         // path had wrongly reached screen_tx (M1), the buffer-absence assertion above would have failed.
+        LAST_SCREEN_DECISION.with(|d| d.set(None));
+        let mut best_txs_ctrl = RecordingTxs { tx: Some(pooled), marked: Vec::new() };
+        let mut info_ctrl = ExecutionInfo::with_capacity(1);
+        let control = ctx.execute_best_transactions(
+            &mut info_ctrl,
+            &mut state,
+            &mut best_txs_ctrl,
+            &pool,
+            limits,
+        );
+        assert!(matches!(control, Ok(None)), "control loop completes: {control:?}");
+        assert_eq!(
+            LAST_SCREEN_DECISION.with(|d| d.get()),
+            Some(Screen::AuditPending),
+            "control: the SAME candidate, run without a forced mismatch, screens to AuditPending"
+        );
+        assert_eq!(
+            filter.buffer_status(&candidate_hash),
+            Some(BufferStatus::NotSubmitted),
+            "control: the candidate's normal run inserts a BufferPool entry"
+        );
+        assert_eq!(
+            filter.buffered_len(),
+            1,
+            "control: the candidate now occupies the pending buffer"
+        );
+    }
+
+    /// Panic-safe RAII guard for the `FORCE_CREATE_ADDRESS_MISMATCH` test seam: arms the flag on
+    /// construction and RESETS it on `Drop` — on success AND on a panic/unwind — so it cannot leak
+    /// into another test running later on this thread.
+    struct ForceCreateAddressMismatchGuard;
+    impl ForceCreateAddressMismatchGuard {
+        fn arm() -> Self {
+            FORCE_CREATE_ADDRESS_MISMATCH.with(|f| f.set(true));
+            Self
+        }
+    }
+    impl Drop for ForceCreateAddressMismatchGuard {
+        fn drop(&mut self) {
+            FORCE_CREATE_ADDRESS_MISMATCH.with(|f| f.set(false));
+        }
+    }
+
+    /// Runtime bytecode that performs one endowment-bearing `CREATE` and then emits a real ERC20
+    /// `Transfer` log matching `RULE_SCENARIO_A`. Installed at `TOKEN_X`, so the emitted log carries
+    /// `log.address == TOKEN_X` and the CONTROL run of the candidate genuinely buffers.
+    fn create_then_erc20_transfer_emitter_code() -> Vec<u8> {
+        // CREATE(value=1, offset=0, size=0): PUSH1 0 (size), PUSH1 0 (offset), PUSH1 1 (value), CREATE, POP
+        let mut code = vec![0x60, 0x00, 0x60, 0x00, 0x60, 0x01, 0xf0, 0x50];
+        code.extend_from_slice(&erc20_transfer_emitter_code());
+        code
+    }
+
+    /// The `CreateAddressMismatch` fail-closed chain, driven through the ACTUAL candidate loop
+    /// rather than a hand-built `CaptureOutcome`: the loop's own `RcsInspector::create_end` sees a
+    /// genuinely successful CREATE whose deployed address differs from the pre-derived recipient,
+    /// `finish_capture` surfaces `InvariantViolation { CreateAddressMismatch }`, and
+    /// `fail_closed_screen` must turn that into a Deny WITHOUT reaching `screen_tx`.
+    ///
+    /// Falsifiable in both directions: removing the `CreateAddressMismatch` arm from
+    /// `fail_closed_screen` fails to compile (the match is exhaustive), and routing the outcome to
+    /// any non-Deny decision makes the `LAST_SCREEN_DECISION` assertion below fail.
+    #[tokio::test]
+    async fn loop_level_create_address_mismatch_denies_no_buffer_no_commit_no_receipt() {
+        let rules = load_rules(1, 1, vec![serde_json::from_str(golden::RULE_SCENARIO_A).unwrap()]);
+        let filter =
+            Arc::new(FilterHandle::for_test(FilterConfig::default(), rules, Arc::new(SystemClock)));
+        let ctx = build_ctx(filter.clone());
+
+        let signer = crate::tests::funded_signer();
+        let candidate = OpTypedTransaction::Eip1559(TxEip1559 {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 200_000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 0,
+            to: TxKind::Call(golden::token_x()),
+            value: U256::ZERO,
+            ..Default::default()
+        });
+        let recovered = signer.sign_tx(candidate).expect("sign candidate");
+        let candidate_hash: B256 = recovered.tx_hash();
+        let encoded_len = recovered.encode_2718_len();
+        let pooled = OpPooledTransaction::new(recovered, encoded_len);
+
+        // Funded sender + a factory at TOKEN_X that endows a CREATE, then emits the scenario log.
+        // The factory must hold at least the 1 wei it endows.
+        let mut cache = CacheDB::new(EmptyDB::default());
+        cache.insert_account_info(
+            signer.address,
+            AccountInfo { balance: U256::from(10u128.pow(18)), nonce: 0, ..Default::default() },
+        );
+        cache.insert_account_info(
+            golden::token_x(),
+            AccountInfo {
+                balance: U256::from(1_000u64),
+                code: Some(Bytecode::new_raw(Bytes::from(
+                    create_then_erc20_transfer_emitter_code(),
+                ))),
+                ..Default::default()
+            },
+        );
+        let mut state = State::builder().with_database(cache).with_bundle_update().build();
+
+        let pool = testing_pool();
+        let mock = MockTransaction::legacy()
+            .with_sender(signer.address)
+            .with_nonce(0)
+            .with_gas_price(100)
+            .with_hash(candidate_hash);
+        pool.add_transaction(TransactionOrigin::External, mock).await.unwrap();
+        assert!(pool.get(&candidate_hash).is_some(), "candidate is in the txpool before the loop");
+
+        let limits =
+            TransactionLimits { block_gas: 30_000_000, block_da: None, block_da_footprint: None };
+
+        let before = state.basic(signer.address).expect("db read").expect("sender funded");
+        let (nonce_before, balance_before) = (before.nonce, before.balance);
+
+        // ===== FAIL-CLOSED RUN =====
+        LAST_SCREEN_DECISION.with(|d| d.set(None));
+        let mut best_txs = RecordingTxs { tx: Some(pooled.clone()), marked: Vec::new() };
+        let mut info = ExecutionInfo::with_capacity(1);
+        let result = {
+            let _guard = ForceCreateAddressMismatchGuard::arm();
+            let r =
+                ctx.execute_best_transactions(&mut info, &mut state, &mut best_txs, &pool, limits);
+            // Checked INSIDE the guarded scope, BEFORE the guard's Drop clears the flag: the loop's
+            // own `create` hook consumed the one-shot seam, so it is already false here. If the
+            // candidate never reached the create hook this would still be set.
+            assert!(
+                !FORCE_CREATE_ADDRESS_MISMATCH.with(|f| f.get()),
+                "the loop's CREATE hook must have consumed the one-shot mismatch seam"
+            );
+            r
+        };
+        assert!(matches!(result, Ok(None)), "loop completes without cancellation: {result:?}");
+
+        // The fail-closed chain ends in a DENY decision, observed directly through the decision
+        // seam (never inferred from mark_invalid / txpool removal, which Screen::Drop shares).
+        assert_eq!(
+            LAST_SCREEN_DECISION.with(|d| d.get()),
+            Some(Screen::Deny),
+            "the real CreateAddressMismatch must fail closed to Screen::Deny on the candidate loop"
+        );
+
+        // Supporting eviction evidence.
+        assert!(
+            best_txs.marked.contains(&(signer.address, 0)),
+            "the fail-closed candidate is mark_invalid'd by the loop"
+        );
+        assert!(
+            pool.get(&candidate_hash).is_none(),
+            "the fail-closed candidate is removed from the txpool"
+        );
+
+        // The `continue` fires before execution accounting: no block entry, no receipt, no gas.
+        assert!(info.executed_transactions.is_empty(), "fail-closed: no tx appended to the block");
+        assert!(info.receipts.is_empty(), "fail-closed: no receipt pushed (commit skipped)");
+        assert_eq!(info.cumulative_gas_used, 0, "fail-closed: no gas accounted (never committed)");
+
+        let after = state.basic(signer.address).expect("db read").expect("sender present");
+        assert_eq!(after.nonce, nonce_before, "fail-closed: sender nonce unchanged (no commit)");
+        assert_eq!(after.balance, balance_before, "fail-closed: sender balance unchanged");
+
+        // `screen_tx` was SKIPPED: the buffer gained nothing and the candidate has no entry.
+        assert_eq!(
+            filter.buffered_len(),
+            0,
+            "fail-closed must not add a BufferPool entry (screen_tx skipped)"
+        );
+        assert!(
+            filter.buffer_status(&candidate_hash).is_none(),
+            "no BufferEntry may exist for the failed-closed candidate"
+        );
+
+        // ===== CONTROL RUN (no forced mismatch) — the SAME candidate DOES reach screen_tx =====
+        // Without the seam the CREATE completes consistently, the captured stream carries the real
+        // ERC20 Transfer, and RULE_SCENARIO_A matches → AuditPending → a BufferEntry appears. This
+        // is what makes the buffer-absence assertion above evidence that screen_tx was skipped.
         LAST_SCREEN_DECISION.with(|d| d.set(None));
         let mut best_txs_ctrl = RecordingTxs { tx: Some(pooled), marked: Vec::new() };
         let mut info_ctrl = ExecutionInfo::with_capacity(1);
