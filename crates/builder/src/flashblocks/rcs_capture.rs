@@ -2113,4 +2113,443 @@ mod gating_integration_tests {
              CreateAddressMismatch, got {outcome:?}"
         );
     }
+
+    // ── screen_tx integration tests ───────────────────────────────────────────
+    // These tests run a real OpEvm transaction, capture the native transfer
+    // stream, then feed it directly into FilterHandle::screen_tx, proving
+    // the full pipeline from EVM execution through the rule engine.
+
+    use rcs_filter::rules::{load_rules, RawRule};
+    use rcs_filter::test_support::TestClock;
+    use rcs_filter::{BufferStatus, FilterConfig, FilterHandle, Screen, ScreenInput};
+    use std::sync::Arc;
+
+    const DENY_NATIVE_RULE: &str = r#"{
+        "id": "deny-native",
+        "event_abis": {
+            "transfer": {
+                "type": "event", "name": "Transfer",
+                "inputs": [
+                    {"name": "from", "type": "address", "indexed": true},
+                    {"name": "to",   "type": "address", "indexed": true},
+                    {"name": "value","type": "uint256",  "indexed": false}
+                ],
+                "anonymous": false
+            }
+        },
+        "condition": {"==":[{"var":"transfer.address"},"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"]},
+        "action": "deny"
+    }"#;
+
+    const AUDIT_NATIVE_RULE: &str = r#"{
+        "id": "audit-1",
+        "event_abis": {
+            "transfer": {
+                "type": "event", "name": "Transfer",
+                "inputs": [
+                    {"name": "from", "type": "address", "indexed": true},
+                    {"name": "to",   "type": "address", "indexed": true},
+                    {"name": "value","type": "uint256",  "indexed": false}
+                ],
+                "anonymous": false
+            }
+        },
+        "condition": {"==":[{"var":"transfer.address"},"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"]},
+        "audit_types": ["type_a"],
+        "action": "audit"
+    }"#;
+
+    const AUDIT_NATIVE_RULE_2: &str = r#"{
+        "id": "audit-2",
+        "event_abis": {
+            "transfer": {
+                "type": "event", "name": "Transfer",
+                "inputs": [
+                    {"name": "from", "type": "address", "indexed": true},
+                    {"name": "to",   "type": "address", "indexed": true},
+                    {"name": "value","type": "uint256",  "indexed": false}
+                ],
+                "anonymous": false
+            }
+        },
+        "condition": {"==":[{"var":"transfer.address"},"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"]},
+        "audit_types": ["type_b"],
+        "action": "audit"
+    }"#;
+
+    const DUAL_ALIAS_DENY_NATIVE_RULE: &str = r#"{
+        "id": "dual-alias-deny",
+        "event_abis": {
+            "t1": {
+                "type": "event", "name": "Transfer",
+                "inputs": [
+                    {"name": "from", "type": "address", "indexed": true},
+                    {"name": "to",   "type": "address", "indexed": true},
+                    {"name": "value","type": "uint256",  "indexed": false}
+                ],
+                "anonymous": false
+            },
+            "t2": {
+                "type": "event", "name": "Transfer",
+                "inputs": [
+                    {"name": "from", "type": "address", "indexed": true},
+                    {"name": "to",   "type": "address", "indexed": true},
+                    {"name": "value","type": "uint256",  "indexed": false}
+                ],
+                "anonymous": false
+            }
+        },
+        "condition": {"==":[{"var":"t1.address"},"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"]},
+        "action": "deny"
+    }"#;
+
+    fn deny_native_handle() -> FilterHandle {
+        let raw: RawRule = serde_json::from_str(DENY_NATIVE_RULE).unwrap();
+        let rules = load_rules(1, 1, vec![raw]);
+        assert_eq!(rules.rules.len(), 1, "deny-native rule must compile cleanly");
+        FilterHandle::for_test(
+            FilterConfig::default(),
+            rules,
+            Arc::new(TestClock::new(1_751_000_000)),
+        )
+    }
+
+    fn audit_native_handle() -> FilterHandle {
+        let raw: RawRule = serde_json::from_str(AUDIT_NATIVE_RULE).unwrap();
+        let rules = load_rules(1, 1, vec![raw]);
+        assert_eq!(rules.rules.len(), 1, "audit-1 rule must compile cleanly");
+        FilterHandle::for_test(
+            FilterConfig::default(),
+            rules,
+            Arc::new(TestClock::new(1_751_000_000)),
+        )
+    }
+
+    fn run_capturing_call_tx_with_value(
+        db: InMemoryDB,
+        from: Address,
+        target: Address,
+        value: U256,
+        budget: usize,
+    ) -> (CaptureOutcome, bool) {
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(budget),
+        );
+        evm.components_mut().1.start_capture();
+        let tx = TxLegacy {
+            nonce: 0,
+            gas_limit: 2_000_000,
+            to: TxKind::Call(target),
+            value,
+            ..Default::default()
+        }
+        .into_signed(Signature::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
+        let op_tx = OpTx::from_recovered_tx(&tx, from);
+        let result = evm.transact(op_tx).expect("tx executes");
+        let success = result.result.is_success();
+        let outcome = evm.components_mut().1.finish_capture(result.result.logs());
+        (outcome, success)
+    }
+
+    /// Internal CREATE with 7-wei endowment produces a native transfer captured in the real
+    /// stream; the deny-native rule fires on that log through the full screen_tx path.
+    #[test]
+    fn original_nt2_internal_create_denied_through_real_screen_tx() {
+        let factory = Address::from([0xF3; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(factory, account(1_000, Some(create_endowment_7())));
+
+        let (outcome, success) = run_capturing_tx(db, factory, 16);
+        assert!(success, "internal-CREATE tx must succeed");
+        let stream = match outcome {
+            CaptureOutcome::Complete(s) => s,
+            other => panic!("expected Complete, got {other:?}"),
+        };
+        assert!(!stream.is_empty(), "CREATE endowment must produce a native transfer");
+
+        let handle = deny_native_handle();
+        let input = ScreenInput {
+            tx_hash: B256::from([0x11; 32]),
+            origin: caller(),
+            tx_to: Some(factory),
+            nonce: 0,
+            value: U256::ZERO,
+            block_height: 0,
+            logs: &stream,
+        };
+        assert_eq!(handle.screen_tx(&input), Screen::Deny);
+    }
+
+    /// A top-level value CALL (tx.value = 1) produces a single native Transfer as the root
+    /// frame hook fires; the deny-native rule fires on that real synthetic log.
+    #[test]
+    fn top_level_native_denied_through_real_screen_tx() {
+        let target = Address::from([0xBB; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+
+        let (outcome, success) =
+            run_capturing_call_tx_with_value(db, caller(), target, U256::from(1u64), 16);
+        assert!(success, "top-level value CALL must succeed");
+        let stream = match outcome {
+            CaptureOutcome::Complete(s) => s,
+            other => panic!("expected Complete, got {other:?}"),
+        };
+        assert_eq!(stream.len(), 1, "exactly one top-level native transfer expected");
+        assert_eq!(stream[0].address, NATIVE_ASSET_ADDRESS);
+
+        let handle = deny_native_handle();
+        let input = ScreenInput {
+            tx_hash: B256::from([0x22; 32]),
+            origin: caller(),
+            tx_to: Some(target),
+            nonce: 0,
+            value: U256::from(1u64),
+            block_height: 0,
+            logs: &stream,
+        };
+        assert_eq!(handle.screen_tx(&input), Screen::Deny);
+    }
+
+    /// A top-level value CALL to a contract that itself does an internal value CALL produces
+    /// two native Transfers (one per frame); a single deny-native rule fires on the first
+    /// match, proving the rule works across a mixed root+nested stream.
+    #[test]
+    fn one_transfer_rule_denies_both_toplevel_and_internal_real_stream() {
+        let inner_dst = Address::from([0xDD; 20]);
+        let contract = Address::from([0xCC; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(contract, account(1_000, Some(call_value_1_to(inner_dst))));
+
+        let (outcome, success) =
+            run_capturing_call_tx_with_value(db, caller(), contract, U256::from(1u64), 16);
+        assert!(success, "tx must succeed");
+        let stream = match outcome {
+            CaptureOutcome::Complete(s) => s,
+            other => panic!("expected Complete, got {other:?}"),
+        };
+        assert_eq!(stream.len(), 2, "root-frame + internal-frame native transfers expected");
+
+        let handle = deny_native_handle();
+        let input = ScreenInput {
+            tx_hash: B256::from([0x33; 32]),
+            origin: caller(),
+            tx_to: Some(contract),
+            nonce: 0,
+            value: U256::from(1u64),
+            block_height: 0,
+            logs: &stream,
+        };
+        assert_eq!(handle.screen_tx(&input), Screen::Deny);
+    }
+
+    /// The capture budget is enforced at the EVM level: budget=2 fits two native transfers
+    /// (Complete), while budget=1 causes LimitExceeded at the second transfer.
+    /// Falsifiable: reducing call count or raising budget would change the outcome.
+    #[test]
+    fn real_stream_native_budget_limit_plus_one_denies() {
+        let a = Address::from([0xE1; 20]);
+        let b = Address::from([0xE2; 20]);
+        let contract = Address::from([0xE3; 20]);
+
+        // budget=2: both transfers captured → Complete(2)
+        let mut db1 = InMemoryDB::default();
+        db1.insert_account_info(caller(), account(1_000_000_000, None));
+        db1.insert_account_info(contract, account(1_000, Some(call_value_1_twice(a, b))));
+        let (outcome1, _) = run_capturing_tx(db1, contract, 2);
+        assert!(
+            matches!(&outcome1, CaptureOutcome::Complete(s) if s.len() == 2),
+            "budget=2 with 2 transfers must produce Complete(2), got {outcome1:?}"
+        );
+
+        // budget=1: second transfer overflows → LimitExceeded{attempted:2, limit:1}
+        let mut db2 = InMemoryDB::default();
+        db2.insert_account_info(caller(), account(1_000_000_000, None));
+        db2.insert_account_info(contract, account(1_000, Some(call_value_1_twice(a, b))));
+        let (outcome2, _) = run_capturing_tx(db2, contract, 1);
+        assert!(
+            matches!(outcome2, CaptureOutcome::LimitExceeded { attempted: 2, limit: 1 }),
+            "budget=1 with 2 transfers must produce LimitExceeded{{2,1}}, got {outcome2:?}"
+        );
+    }
+
+    /// AuditPending → advance to Approved → AuditApproved (same logs); then empty-log
+    /// re-screen → inconsistent → Drop.  Exercises the full audit lifecycle end-to-end.
+    #[test]
+    fn real_stream_screen_tx_and_screen_existing_consistent() {
+        let dst = Address::from([0xF4; 20]);
+        let contract = Address::from([0xF5; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(contract, account(1_000, Some(call_value_1_to(dst))));
+
+        let (outcome, success) = run_capturing_tx(db, contract, 16);
+        assert!(success);
+        let stream = match outcome {
+            CaptureOutcome::Complete(s) => s,
+            other => panic!("expected Complete, got {other:?}"),
+        };
+        assert_eq!(stream.len(), 1, "one native transfer expected");
+
+        let handle = audit_native_handle();
+        let tx_hash = B256::from([0x55; 32]);
+
+        let input = ScreenInput {
+            tx_hash,
+            origin: caller(),
+            tx_to: Some(contract),
+            nonce: 0,
+            value: U256::ZERO,
+            block_height: 0,
+            logs: &stream,
+        };
+        assert_eq!(handle.screen_tx(&input), Screen::AuditPending);
+
+        handle.advance_to_approved_for_test(&tx_hash);
+
+        assert_eq!(handle.screen_tx(&input), Screen::AuditApproved, "same logs → consistent");
+
+        let empty_input = ScreenInput {
+            tx_hash,
+            origin: caller(),
+            tx_to: Some(contract),
+            nonce: 0,
+            value: U256::ZERO,
+            block_height: 0,
+            logs: &[],
+        };
+        assert_eq!(handle.screen_tx(&empty_input), Screen::Drop, "empty logs → inconsistent → Drop");
+    }
+
+    /// A real stream containing one native Transfer + one real LOG0 (superset of the rule's
+    /// expected shape): the deny-native rule fires on the Transfer even when the stream
+    /// also contains unrelated real logs.
+    #[test]
+    fn legacy_value_rule_still_fires_on_real_capture_superset_stream() {
+        let dst = Address::from([0xC6; 20]);
+        let contract = Address::from([0xB6; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(contract, account(1_000, Some(call_value_1_then_log0(dst))));
+
+        let (outcome, success) = run_capturing_tx(db, contract, 16);
+        assert!(success);
+        let stream = match outcome {
+            CaptureOutcome::Complete(s) => s,
+            other => panic!("expected Complete, got {other:?}"),
+        };
+        assert_eq!(stream.len(), 2, "one native transfer + one real log expected");
+        assert_eq!(stream[0].address, NATIVE_ASSET_ADDRESS, "first log must be native transfer");
+        assert_ne!(stream[1].address, NATIVE_ASSET_ADDRESS, "second log must be the real log");
+
+        let handle = deny_native_handle();
+        let input = ScreenInput {
+            tx_hash: B256::from([0x66; 32]),
+            origin: caller(),
+            tx_to: Some(contract),
+            nonce: 0,
+            value: U256::ZERO,
+            block_height: 0,
+            logs: &stream,
+        };
+        assert_eq!(handle.screen_tx(&input), Screen::Deny);
+    }
+
+    /// Dual-alias rule (t1 × t2) with two native transfers: 2×2 = 4 bindings; binding
+    /// budget = 3 → BindingBudgetExceeded → Screen::Deny.
+    /// Falsifiable: raising the budget to 4 would allow the rule to complete and also deny
+    /// (condition true), but via a different code path; with budget=3 it fails at the counter.
+    #[test]
+    fn dual_alias_binding_growth_and_matcher_limit_plus_one_denies_on_real_stream() {
+        let a = Address::from([0xE4; 20]);
+        let b = Address::from([0xE5; 20]);
+        let contract = Address::from([0xE6; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(contract, account(1_000, Some(call_value_1_twice(a, b))));
+
+        let (outcome, success) = run_capturing_tx(db, contract, 16);
+        assert!(success);
+        let stream = match outcome {
+            CaptureOutcome::Complete(s) => s,
+            other => panic!("expected Complete, got {other:?}"),
+        };
+        assert_eq!(stream.len(), 2, "two native transfers expected");
+
+        let raw: RawRule = serde_json::from_str(DUAL_ALIAS_DENY_NATIVE_RULE).unwrap();
+        let rules = load_rules(1, 1, vec![raw]);
+        assert_eq!(rules.rules.len(), 1, "dual-alias-deny rule must compile cleanly");
+        // Two aliases × two matching logs = 4 bindings; budget=3 → exceeded → Deny
+        let handle = FilterHandle::for_test(
+            FilterConfig { max_event_bindings_per_tx: 3, ..Default::default() },
+            rules,
+            Arc::new(TestClock::new(1_751_000_000)),
+        );
+        let input = ScreenInput {
+            tx_hash: B256::from([0x77; 32]),
+            origin: caller(),
+            tx_to: Some(contract),
+            nonce: 0,
+            value: U256::ZERO,
+            block_height: 0,
+            logs: &stream,
+        };
+        assert_eq!(handle.screen_tx(&input), Screen::Deny);
+    }
+
+    /// Two audit rules with different audit_types both match; their actions are merged into a
+    /// single AuditPending. The pool entry is created as NotSubmitted (not yet sent to RCS).
+    #[test]
+    fn audit_type_action_merge_action_content_no_empty_audit_on_real_stream() {
+        let dst = Address::from([0xA8; 20]);
+        let contract = Address::from([0xB8; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(contract, account(1_000, Some(call_value_1_to(dst))));
+
+        let (outcome, success) = run_capturing_tx(db, contract, 16);
+        assert!(success);
+        let stream = match outcome {
+            CaptureOutcome::Complete(s) => s,
+            other => panic!("expected Complete, got {other:?}"),
+        };
+        assert_eq!(stream.len(), 1);
+
+        let raw1: RawRule = serde_json::from_str(AUDIT_NATIVE_RULE).unwrap();
+        let raw2: RawRule = serde_json::from_str(AUDIT_NATIVE_RULE_2).unwrap();
+        let rules = load_rules(1, 1, vec![raw1, raw2]);
+        assert_eq!(rules.rules.len(), 2, "both audit rules must compile cleanly");
+        let handle = FilterHandle::for_test(
+            FilterConfig::default(),
+            rules,
+            Arc::new(TestClock::new(1_751_000_000)),
+        );
+        let tx_hash = B256::from([0x88; 32]);
+        let input = ScreenInput {
+            tx_hash,
+            origin: caller(),
+            tx_to: Some(contract),
+            nonce: 0,
+            value: U256::ZERO,
+            block_height: 0,
+            logs: &stream,
+        };
+        assert_eq!(handle.screen_tx(&input), Screen::AuditPending, "merged audit rules → AuditPending");
+        assert_eq!(
+            handle.buffer_status(&tx_hash),
+            Some(BufferStatus::NotSubmitted),
+            "pool entry must be NotSubmitted after first screen"
+        );
+    }
 }

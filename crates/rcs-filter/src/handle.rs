@@ -588,6 +588,19 @@ impl FilterHandle {
         f(&mut pool)
     }
 
+    /// Advances a buffered transaction to Approved state for testing, without spawning workers.
+    ///
+    /// Uses only the public pool API so it is accessible from dependent crates' test code.
+    pub fn advance_to_approved_for_test(&self, tx_hash: &B256) {
+        let hash_str = format!("{tx_hash:#x}");
+        let now = self.shared.clock.now_unix();
+        let mut pool = self.shared.pool_lock();
+        let Some(generation) = pool.get(tx_hash).map(|e| e.generation) else { return };
+        let expected = std::collections::HashMap::from([(*tx_hash, generation)]);
+        pool.apply_submit_response(&[hash_str], &expected, &FilterConfig::default(), now);
+        pool.apply_query_status(tx_hash, generation, "approved", &FilterConfig::default(), now);
+    }
+
     /// Constructs a handle without spawning workers, pre-loaded with `rules` (test helper —
     /// lets `screen_tx` be exercised without a tokio runtime).
     pub fn for_test(config: FilterConfig, rules: RuleSet, clock: Arc<dyn Clock>) -> Self {
