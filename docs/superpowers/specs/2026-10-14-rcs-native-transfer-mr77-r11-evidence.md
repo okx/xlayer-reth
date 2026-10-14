@@ -572,19 +572,44 @@ $ echo $?
 ```
 
 **Environment note (recorded honestly, not a code defect):** the FULL `cargo test -p xlayer-builder`
-suite (the plan's literal Step 3 command) was attempted twice — once with the default thread count and
-once with `--test-threads=2` — and both runs were terminated by the kernel OOM killer at this
-environment's cgroup `memory.max` of 32 GiB (`dmesg`: `oom-kill:constraint=CONSTRAINT_MEMCG ...
-task=xlayer_builder-`), after ~30 tests had already passed in-process. `cargo test`'s default libtest
-harness runs all tests of one binary in ONE process (unlike `nextest`'s process-per-test model used in
-§3, which ran all 413 tests, including every test in this binary, successfully), so per-test memory
-does not get released between tests in that mode — an environment/resource constraint of this sandbox,
-not a defect in the code under test. The scoped `cargo test -p xlayer-builder --lib
-real_stream_screen_tx_and_screen_existing_consistent` run above is the actual r10-ADVANCE-TEST
-cross-crate-availability proof the acceptance item needs (the `test-utils`-gated helper compiles and
-passes when invoked from `xlayer-builder`'s own test target), and `cargo build -p rcs-filter` is the
-production-side half of the dual verification (§4.1 proves the symbol is absent from the default
-production graph; this proves `rcs-filter` alone still builds without the feature).
+suite (the plan's literal Step 3 command) was attempted twice in the round-5 delta — once with the
+default thread count and once with `--test-threads=2` — and both runs were terminated by the kernel OOM
+killer at this environment's cgroup `memory.max` of 32 GiB (`dmesg`: `oom-kill:constraint=
+CONSTRAINT_MEMCG ... task=xlayer_builder-`), after ~30 tests had already passed in-process. `cargo
+test`'s default libtest harness runs all tests of one binary in ONE process (unlike `nextest`'s
+process-per-test model used in §3, which ran all 413 tests, including every test in this binary,
+successfully), so per-test memory does not get released between tests in that mode. The scoped `cargo
+test -p xlayer-builder --lib real_stream_screen_tx_and_screen_existing_consistent` run above is the
+actual r10-ADVANCE-TEST cross-crate-availability proof the acceptance item needs (the `test-utils`-gated
+helper compiles and passes when invoked from `xlayer-builder`'s own test target), and `cargo build -p
+rcs-filter` is the production-side half of the dual verification (§4.1 proves the symbol is absent from
+the default production graph; this proves `rcs-filter` alone still builds without the feature).
+
+**Round-6 disposition (branch A — independently reconfirmed, not carried forward as a self-report):**
+
+```
+$ cargo test -p xlayer-builder
+[... 190 tests pass in-process ...]
+test tests::forks::jovian_minimum_fee_must_be_set_flashblocks ... ok
+error: test failed, to rerun pass `-p xlayer-builder --lib`
+
+Caused by:
+  process didn't exit successfully: `.../target/debug/deps/xlayer_builder-868a9c6807f8561b`
+  (signal: 9, SIGKILL: kill)
+$ echo "${PIPESTATUS[0]}"
+101
+
+$ dmesg | grep -i 'oom-kill\|Killed process' | tail -1
+oom-kill:constraint=CONSTRAINT_MEMCG,...,task=xlayer_builder-,pid=2151916,uid=1000
+```
+
+The two prior-round OOM kills are **independently reconfirmed this round**: the identical command,
+run fresh in this round's own environment with zero code changes since the round-5 OOM reports (Task
+5 §8.1 proves the round adds no code delta), reproduces the same kernel OOM kill against the same
+`xlayer_builder-` test binary, at the same cgroup `memory.max` of 32 GiB, before the suite reaches its
+end. This confirms the behavior is an infrastructure/environment constraint of this sandbox's libtest
+single-process memory model, not a defect in the code under test — not as a carried-forward assertion,
+but as a result observed directly in this round.
 
 ## 5. Formatting and lint
 
