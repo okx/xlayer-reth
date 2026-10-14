@@ -1,0 +1,420 @@
+   Compiling xlayer-builder v0.0.7 (/Oli_home/Oli/engine/works/REQ-1791791002340-caa308-1012_074322/stages/3.0/current/xlayer-reth/crates/builder)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 18s
+────────────
+ Nextest run ID cace1589-f906-4b72-970a-6ec91e611ff6 with nextest profile: default
+    Starting 413 tests across 2 binaries
+        PASS [   0.013s] (  1/413) rcs-filter client::wire_tests::required_response_fields_fail_decoding_when_missing
+        PASS [   0.063s] (  2/413) rcs-filter client::wire_tests::oversized_response_is_rejected_before_body_allocation
+        PASS [   0.052s] (  3/413) rcs-filter client::wire_tests::status_query_encoding_never_uses_tx_hashes
+        PASS [   0.004s] (  4/413) rcs-filter config::tests::budgets_are_validated_even_when_disabled
+        PASS [   0.003s] (  5/413) rcs-filter config::tests::default_config_budgets_are_10_000
+        PASS [   0.003s] (  6/413) rcs-filter config::tests::defaults_match_expected_values
+        PASS [   0.003s] (  7/413) rcs-filter config::tests::disabled_filter_skips_submit_concurrency_validation
+        PASS [   0.003s] (  8/413) rcs-filter config::tests::enabled_requires_base_url
+        PASS [   0.004s] (  9/413) rcs-filter config::tests::network_timeout_and_backoff_bounds_are_validated
+        PASS [   0.004s] ( 10/413) rcs-filter config::tests::protocol_version_is_exact_match
+        PASS [   0.003s] ( 11/413) rcs-filter config::tests::retention_must_exceed_total_retry_timeout
+        PASS [   0.003s] ( 12/413) rcs-filter config::tests::scheduling_and_state_durations_must_be_non_zero
+        PASS [   0.096s] ( 13/413) rcs-filter client::wire_tests::rules_endpoints_reject_non_200
+        PASS [   0.098s] ( 14/413) rcs-filter client::wire_tests::get_and_query_decode_only_valid_200_json
+        PASS [   0.003s] ( 15/413) rcs-filter config::tests::submit_concurrency_boundaries_are_validated_when_enabled
+        PASS [   0.003s] ( 16/413) rcs-filter config::tests::validate_rejects_zero_event_bindings_budget
+        PASS [   0.003s] ( 17/413) rcs-filter config::tests::validate_rejects_zero_native_budget
+        PASS [   0.039s] ( 18/413) rcs-filter client::wire_tests::tx_hashes_query_encodes_only_tx_hashes
+        PASS [   0.004s] ( 19/413) rcs-filter handle::tests::approved_consistency_pass_is_attempt_scoped
+        PASS [   0.006s] ( 20/413) rcs-filter handle::tests::approved_consistency_mismatch_hard_drops
+        PASS [   0.007s] ( 21/413) rcs-filter handle::tests::approved_can_become_outdated_before_canonical_cleanup
+        PASS [   0.004s] ( 22/413) rcs-filter handle::tests::approved_mismatch_after_total_timeout_still_drops
+        PASS [   0.004s] ( 23/413) rcs-filter handle::tests::audit_tx_enters_pool_as_pending
+        PASS [   0.004s] ( 24/413) rcs-filter handle::tests::deny_tx_returns_deny_without_buffering
+        PASS [   0.005s] ( 25/413) rcs-filter handle::tests::cancelled_attempt_rechecks_changed_actions
+        PASS [   0.004s] ( 26/413) rcs-filter handle::tests::excessive_complete_bindings_deny_without_buffering
+        PASS [   0.004s] ( 27/413) rcs-filter handle::tests::max_native_transfers_accessor_returns_config_value
+        PASS [   0.005s] ( 28/413) rcs-filter handle::tests::first_screen_matcher_overflow_emits_error_bounded_fields
+        PASS [   0.004s] ( 29/413) rcs-filter handle::tests::pre_screen_defers_all_inflight_states
+        PASS [   0.005s] ( 30/413) rcs-filter handle::tests::pending_precheck_marks_descendants_invalid_for_iterator
+        PASS [   0.004s] ( 31/413) rcs-filter handle::tests::pre_screen_executes_approved_and_timeout_allow
+        PASS [   0.004s] ( 32/413) rcs-filter handle::tests::record_local_deny_creates_no_buffer_entry
+        PASS [   0.004s] ( 33/413) rcs-filter handle::tests::rules_state_updates_on_install_and_reload
+        PASS [   0.004s] ( 34/413) rcs-filter handle::tests::scenario_c_denied_drops_and_never_resubmits
+        PASS [   0.004s] ( 35/413) rcs-filter handle::tests::scenario_d_outdated_drops_without_consistency_check
+        PASS [   0.004s] ( 36/413) rcs-filter handle::tests::screen_tx_uses_configured_event_binding_limit
+        PASS [   0.004s] ( 37/413) rcs-filter handle::tests::unmatched_tx_is_allowed
+        PASS [   0.005s] ( 38/413) rcs-filter handle::tests::timed_out_allow_is_terminal_allow
+        PASS [   0.005s] ( 39/413) rcs-filter integration_tests::all_failed_groups_are_attempted_and_lowest_height_error_is_returned
+        PASS [   0.004s] ( 40/413) rcs-filter integration_tests::channel_lag_reconciles_all_dropped_hashes
+        PASS [   0.005s] ( 41/413) rcs-filter integration_tests::approved_outage_past_total_timeout_still_checks_consistency
+        PASS [   0.005s] ( 42/413) rcs-filter integration_tests::concurrent_partial_failure_keeps_independent_groups_isolated
+        PASS [   0.004s] ( 43/413) rcs-filter integration_tests::conflicting_duplicate_query_rows_prefer_terminal_rejection
+        PASS [   0.004s] ( 44/413) rcs-filter integration_tests::denied_emits_one_discard_event
+        PASS [   0.004s] ( 45/413) rcs-filter integration_tests::duplicate_terminal_updates_are_idempotent
+        PASS [   0.004s] ( 46/413) rcs-filter integration_tests::e2e_scenario_a_happy_path
+        PASS [   0.004s] ( 47/413) rcs-filter integration_tests::fail_close_emits_discard_event
+        PASS [   0.004s] ( 48/413) rcs-filter integration_tests::failed_conflict_predecessor_releases_successor
+        PASS [   0.005s] ( 49/413) rcs-filter integration_tests::expired_later_height_is_never_submitted
+        PASS [   0.004s] ( 50/413) rcs-filter integration_tests::it_anonymous_audit_payload_matches_contract
+        PASS [   0.006s] ( 51/413) rcs-filter integration_tests::four_way_concurrency_reduces_eight_group_latency_by_four_times
+        PASS [   0.005s] ( 52/413) rcs-filter integration_tests::it_approved_survives_rcs_outage_past_total_timeout
+        PASS [   0.006s] ( 53/413) rcs-filter integration_tests::hot_reload_applies_to_new_tx_but_not_buffered
+        PASS [   0.004s] ( 54/413) rcs-filter integration_tests::it_canonical_notification_cleans_buffer
+        PASS [   0.005s] ( 55/413) rcs-filter integration_tests::it_concurrent_payloads_do_not_share_permit
+        PASS [   0.004s] ( 56/413) rcs-filter integration_tests::it_discard_parks_nonce_descendant
+        PASS [   0.004s] ( 57/413) rcs-filter integration_tests::it_late_submit_fail_close_emits_exactly_one_event
+        PASS [   0.004s] ( 58/413) rcs-filter integration_tests::it_malformed_reload_keeps_old_rules
+        PASS [   0.005s] ( 59/413) rcs-filter integration_tests::it_missing_rules_never_marks_version_installed
+        PASS [   0.004s] ( 60/413) rcs-filter integration_tests::it_parent_change_rechecks_approval
+        PASS [   0.006s] ( 61/413) rcs-filter integration_tests::it_official_snapshot_all_event_shapes_submit_exact_wire
+        PASS [   0.004s] ( 62/413) rcs-filter integration_tests::it_partially_invalid_reload_rejects_whole_batch_and_keeps_old_rules
+        PASS [   0.004s] ( 63/413) rcs-filter integration_tests::it_payload_cancel_does_not_cache_approval
+        PASS [   0.004s] ( 64/413) rcs-filter integration_tests::it_pending_transactions_do_not_execute_each_flashblock
+        PASS [   0.004s] ( 65/413) rcs-filter integration_tests::it_rcs_denied_removes_txpool_root
+        PASS [   0.005s] ( 66/413) rcs-filter integration_tests::it_query_timeout_race_is_deterministic
+        PASS [   0.005s] ( 67/413) rcs-filter integration_tests::it_rebroadcast_dropped_hash_is_reconciled
+        PASS [   0.004s] ( 68/413) rcs-filter integration_tests::it_reorg_rescreens_reinserted_tx
+        PASS [   0.004s] ( 69/413) rcs-filter integration_tests::it_submit_response_after_deadline_is_ignored
+        PASS [   0.004s] ( 70/413) rcs-filter integration_tests::it_timeout_first_fail_close_emits_once_and_late_query_is_ignored
+        PASS [   0.004s] ( 71/413) rcs-filter integration_tests::later_physical_log_changes_approval_consistency_hash
+        PASS [   0.162s] ( 72/413) rcs-filter client::wire_tests::response_body_stall_hits_total_request_timeout
+        PASS [   0.004s] ( 73/413) rcs-filter integration_tests::it_transfer_batch_payload_preserves_abi_arrays_through_submit
+        PASS [   0.004s] ( 74/413) rcs-filter integration_tests::load_and_install_errors_when_unavailable
+        PASS [   0.004s] ( 75/413) rcs-filter integration_tests::load_and_install_installs_and_marks_ready
+        PASS [   0.004s] ( 76/413) rcs-filter integration_tests::load_and_install_rejects_unsupported_protocol
+        PASS [   0.005s] ( 77/413) rcs-filter integration_tests::not_submitted_loop_recovers_after_rcs_returns
+        PASS [   0.005s] ( 78/413) rcs-filter integration_tests::official_snapshot_compiles_and_matches_all_supported_transfer_shapes
+        PASS [   0.005s] ( 79/413) rcs-filter integration_tests::out_of_order_independent_responses_update_only_their_own_generations
+        PASS [   0.005s] ( 80/413) rcs-filter integration_tests::outdated_emits_discard_event
+        PASS [   0.004s] ( 81/413) rcs-filter integration_tests::partial_query_failure_still_applies_successful_statuses
+        PASS [   0.004s] ( 82/413) rcs-filter integration_tests::query_once_absent_status_leaves_entry_untouched
+        PASS [   0.005s] ( 83/413) rcs-filter integration_tests::query_once_maps_submitted_through_pending_to_approved
+        PASS [   0.008s] ( 84/413) rcs-filter integration_tests::pool_lock_recovers_from_poisoning
+        PASS [   0.004s] ( 85/413) rcs-filter integration_tests::rules_lock_recovers_from_poisoning
+        PASS [   0.005s] ( 86/413) rcs-filter integration_tests::rcs_failover_recovers_within_grace_period
+        PASS [   0.004s] ( 87/413) rcs-filter integration_tests::scenario_b_deny_makes_zero_rcs_calls
+        PASS [   0.004s] ( 88/413) rcs-filter integration_tests::serial_fallback_preserves_height_order_and_lowest_error
+        PASS [   0.004s] ( 89/413) rcs-filter integration_tests::stale_query_response_does_not_approve_reinserted_lifecycle
+        PASS [   0.005s] ( 90/413) rcs-filter integration_tests::stale_submit_response_does_not_advance_reinserted_lifecycle
+        PASS [   0.006s] ( 91/413) rcs-filter integration_tests::startup_retries_until_rcs_available_then_recovers
+        PASS [   0.006s] ( 92/413) rcs-filter integration_tests::submit_batch_metrics_cover_empty_completed_and_error_batches
+        PASS [   0.005s] ( 93/413) rcs-filter integration_tests::submit_group_isolation_continues_after_one_height_fails
+        PASS [   0.004s] ( 94/413) rcs-filter integration_tests::submit_once_builds_contract_scenario_a_payload_verbatim
+        PASS [   0.005s] ( 95/413) rcs-filter integration_tests::submit_once_groups_by_block_height
+        PASS [   0.004s] ( 96/413) rcs-filter integration_tests::submit_once_keeps_rejected_malformed_not_submitted
+        PASS [   0.005s] ( 97/413) rcs-filter integration_tests::submit_once_preserves_same_nonce_order_while_refilling_independent_work
+        PASS [   0.005s] ( 98/413) rcs-filter integration_tests::submit_once_preserves_same_quota_order_while_refilling_independent_work
+        PASS [   0.004s] ( 99/413) rcs-filter integration_tests::t3b_single_rule_denies_erc20_and_native_transfer_in_same_tx
+        PASS [   0.005s] (100/413) rcs-filter integration_tests::t3a_native_endowment_transfer_log_denied_through_screen_tx
+        PASS [   0.006s] (101/413) rcs-filter integration_tests::submit_once_refills_slots_beyond_limit_while_first_group_is_blocked
+        PASS [   0.004s] (102/413) rcs-filter integration_tests::t3c_event_binding_budget_overflow_denies_tx
+        PASS [   0.004s] (103/413) rcs-filter integration_tests::t3d_two_audit_rules_same_audit_type_produce_single_pool_entry
+        PASS [   0.004s] (104/413) rcs-filter integration_tests::t3e_post_approval_re_screen_produces_audit_approved_for_native_transfer
+        PASS [   0.004s] (105/413) rcs-filter integration_tests::t3f_native_and_erc20_transfer_produce_identical_decision_no_matching_change_needed
+        PASS [   0.004s] (106/413) rcs-filter integration_tests::terminal_tombstone_is_pruned_after_retention
+        PASS [   0.005s] (107/413) rcs-filter integration_tests::transaction_inserted_during_slow_batch_is_processed_by_next_batch
+        PASS [   0.005s] (108/413) rcs-filter integration_tests::transfer_batch_approval_consistency_is_array_exact
+        PASS [   0.005s] (109/413) rcs-filter integration_tests::unsupported_protocol_at_runtime_keeps_old_rules
+        PASS [   0.005s] (110/413) rcs-filter integration_tests::unknown_audit_type_is_a_global_submit_barrier
+        PASS [   0.005s] (111/413) rcs-filter integration_tests::unsupported_protocol_skips_pull_and_recovers_without_content_bump
+        PASS [   0.004s] (112/413) rcs-filter matching::tests::all_events_missing_audit_emits_no_action_and_allows
+        PASS [   0.004s] (113/413) rcs-filter matching::tests::anonymous_event_rejects_wrong_topic_count_and_malformed_data
+        PASS [   0.004s] (114/413) rcs-filter matching::tests::anonymous_non_indexed_event_preserves_all_successful_logs
+        PASS [   0.004s] (115/413) rcs-filter matching::tests::anonymous_indexed_event_matches_by_successful_decode
+        PASS [   0.004s] (116/413) rcs-filter matching::tests::binding_budget_boundary_100_121
+        PASS [   0.003s] (117/413) rcs-filter matching::tests::blacklist_target_is_not_denied
+        PASS [   0.003s] (118/413) rcs-filter matching::tests::complete_binding_count_rejects_usize_multiplication_overflow
+        PASS [   0.004s] (119/413) rcs-filter matching::tests::contract_creation_is_denied
+        PASS [   0.004s] (120/413) rcs-filter matching::tests::deny_stops_remaining_candidate_scan
+        PASS [   0.004s] (121/413) rcs-filter matching::tests::deny_beats_audit_under_all_null_bindings
+        PASS [   0.004s] (122/413) rcs-filter matching::tests::distinct_aliases_on_same_log_are_deduplicated_by_audit_type_and_log_index
+        PASS [   0.004s] (123/413) rcs-filter matching::tests::filter_skip_contract_mismatch_decodes_zero_logs
+        PASS [   0.004s] (124/413) rcs-filter matching::tests::distinct_logs_in_the_same_audit_type_are_preserved
+        PASS [   0.004s] (125/413) rcs-filter matching::tests::excessive_complete_bindings_are_rejected_and_fail_closed
+        PASS [   0.003s] (126/413) rcs-filter matching::tests::filter_skip_origin_mismatch_decodes_zero_logs
+        PASS [   0.003s] (127/413) rcs-filter matching::tests::identical_cross_rule_items_are_deduplicated
+        PASS [   0.004s] (128/413) rcs-filter matching::tests::later_matching_log_denies_and_discards_collected_audit_actions
+        PASS [   0.005s] (129/413) rcs-filter matching::tests::identical_physical_logs_at_distinct_indexes_are_all_preserved
+        PASS [   0.004s] (130/413) rcs-filter matching::tests::later_matching_log_is_included_in_audit_actions
+        PASS [   0.003s] (131/413) rcs-filter matching::tests::literal_true_rule_without_any_physical_log_denies_but_never_audits
+        PASS [   0.016s] (132/413) rcs-filter matching::tests::complete_binding_budget_is_accumulated_across_candidate_rules
+        PASS [   0.004s] (133/413) rcs-filter matching::tests::low_binding_budget_2_3_boundary
+        PASS [   0.005s] (134/413) rcs-filter matching::tests::malformed_log_is_missing_event_denies_for_deny_allows_for_audit
+        PASS [   0.004s] (135/413) rcs-filter matching::tests::matching_signature_with_malformed_data_does_not_match
+        PASS [   0.220s] (136/413) rcs-filter client::wire_tests::rules_version_and_required_fields_are_enforced_over_http
+        PASS [   0.004s] (137/413) rcs-filter matching::tests::no_log_tx_hits_contract_address_deny
+        PASS [   0.004s] (138/413) rcs-filter matching::tests::missing_named_event_binds_null
+        PASS [   0.003s] (139/413) rcs-filter matching::tests::no_log_tx_negative_condition_on_missing_event_field_denies
+        PASS [   0.004s] (140/413) rcs-filter matching::tests::no_matching_log_allows
+        PASS [   0.004s] (141/413) rcs-filter matching::tests::same_log_uses_strictest_action_and_audit_union
+        PASS [   0.004s] (142/413) rcs-filter matching::tests::scenario_a_matches_audit_with_quota_item
+        PASS [   0.004s] (143/413) rcs-filter matching::tests::same_physical_log_is_kept_independently_for_distinct_audit_types
+        PASS [   0.004s] (144/413) rcs-filter matching::tests::scenario_b_deny_short_circuits
+        PASS [   0.004s] (145/413) rcs-filter matching::tests::transfer_batch_decodes_uint_arrays_as_json_string_arrays
+        PASS [   0.004s] (146/413) rcs-filter matching::tests::unrelated_log_is_treated_as_missing_event_and_still_denies
+        PASS [   0.004s] (147/413) rcs-filter matching::tests::within_budget_non_first_complete_multi_event_binding_is_evaluated
+        PASS [   0.004s] (148/413) rcs-filter pool::tests::canonical_cleanup_removes_only_committed_hashes
+        PASS [   0.004s] (149/413) rcs-filter pool::tests::approved_ignores_total_retry_timeout
+        PASS [   0.004s] (150/413) rcs-filter pool::tests::canonical_lag_recovery_keeps_only_fail_closed_tombstones
+        PASS [   0.004s] (151/413) rcs-filter pool::tests::concurrent_outdated_beats_consistency_pass
+        PASS [   0.004s] (152/413) rcs-filter pool::tests::concurrent_pending_beats_consistency_pass
+        PASS [   0.004s] (153/413) rcs-filter pool::tests::inconsistent_approved_entry_is_dropped
+        PASS [   0.004s] (154/413) rcs-filter pool::tests::late_denied_cannot_override_expired_fail_open
+        PASS [   0.003s] (155/413) rcs-filter pool::tests::non_terminal_reconciliation_is_generation_fenced
+        PASS [   0.004s] (156/413) rcs-filter pool::tests::late_approved_cannot_override_expired_fail_close
+        PASS [   0.004s] (157/413) rcs-filter pool::tests::non_terminal_reconciliation_keeps_terminal_tombstones
+        PASS [   0.004s] (158/413) rcs-filter pool::tests::outer_timeout_boundary_is_strict_and_tombstones_release
+        PASS [   0.004s] (159/413) rcs-filter pool::tests::outer_timeout_fail_close_tombstones_dropped
+        PASS [   0.004s] (160/413) rcs-filter pool::tests::pending_timeout_boundary_is_strict
+        PASS [   0.004s] (161/413) rcs-filter pool::tests::prune_terminal_evicts_only_expired_tombstones
+        PASS [   0.003s] (162/413) rcs-filter pool::tests::query_denied_and_outdated_tombstone_as_dropped
+        PASS [   0.004s] (163/413) rcs-filter pool::tests::query_before_deadline_applies_normally
+        PASS [   0.238s] (164/413) rcs-filter client::wire_tests::client_recovers_after_stalled_response_without_recreation
+        PASS [   0.004s] (165/413) rcs-filter pool::tests::retry_cycles_preserve_first_not_submitted_at
+        PASS [   0.004s] (166/413) rcs-filter pool::tests::stale_submit_and_query_responses_cannot_advance_reinserted_hash
+        PASS [   0.003s] (167/413) rcs-filter pool::tests::submit_response_advances_only_accepted
+        PASS [   0.004s] (168/413) rcs-filter pool::tests::stale_consistency_result_cannot_mutate_reinserted_hash
+        PASS [   0.004s] (169/413) rcs-filter pool::tests::submitted_stall_reverts_to_not_submitted
+        PASS [   0.004s] (170/413) rcs-filter pool::tests::total_timeout_resolves_submitted_and_pending
+        PASS [   0.004s] (171/413) rcs-filter pool::tests::unrecognized_status_is_not_terminal
+        PASS [   0.004s] (172/413) rcs-filter quota_hash::tests::different_value_hashes_differ
+        PASS [   0.004s] (173/413) rcs-filter quota_hash::tests::param_insertion_order_hashes_equal
+        PASS [   0.004s] (174/413) rcs-filter quota_hash::tests::identical_content_hashes_equal
+        PASS [   0.004s] (175/413) rcs-filter quota_hash::tests::transfer_batch_arrays_are_order_sensitive_and_deterministic
+        PASS [   0.004s] (176/413) rcs-filter rules::jsonlogic::tests::combinators_with_accelerable_child_are_specialized_and_exact
+        PASS [   0.004s] (177/413) rcs-filter rules::jsonlogic::tests::compiled_matches_truthy_for_all_shapes
+        PASS [   0.004s] (178/413) rcs-filter rules::jsonlogic::tests::empty_and_or_and_non_accelerable_combinators_stay_raw_and_false
+        PASS [   0.003s] (179/413) rcs-filter rules::jsonlogic::tests::empty_and_or_are_valid_and_falsy
+        PASS [   0.003s] (180/413) rcs-filter rules::jsonlogic::tests::identical_normalized_lists_share_one_arc
+        PASS [   0.003s] (181/413) rcs-filter rules::jsonlogic::tests::eq_and_and_match_scenario_a
+        PASS [   0.004s] (182/413) rcs-filter rules::jsonlogic::tests::fast_path_hit_miss_case_and_duplicates_match_linear
+        PASS [   0.004s] (183/413) rcs-filter rules::jsonlogic::tests::in_list_blacklist
+        PASS [   0.004s] (184/413) rcs-filter rules::jsonlogic::tests::in_under_non_boolean_operator_stays_raw_and_matches_linear
+        PASS [   0.004s] (185/413) rcs-filter rules::jsonlogic::tests::literal_true_is_truthy
+        PASS [   0.004s] (186/413) rcs-filter rules::jsonlogic::tests::missing_var_is_null_and_comparisons_are_false
+        PASS [   0.003s] (187/413) rcs-filter rules::jsonlogic::tests::negation_and_neq
+        PASS [   0.004s] (188/413) rcs-filter rules::jsonlogic::tests::nested_and_or_return_operands
+        PASS [   0.004s] (189/413) rcs-filter rules::jsonlogic::tests::numeric_gt_18_digit_precision
+        PASS [   0.004s] (190/413) rcs-filter rules::jsonlogic::tests::non_address_needle_falls_back_to_linear
+        PASS [   0.004s] (191/413) rcs-filter rules::jsonlogic::tests::ordinary_strings_are_case_sensitive_but_addresses_are_not
+        PASS [   0.004s] (192/413) rcs-filter rules::jsonlogic::tests::u256_boundaries_compare_exactly
+        PASS [   0.004s] (193/413) rcs-filter rules::jsonlogic::tests::validates_all_supported_operators_and_rejects_bad_shapes
+        PASS [   0.004s] (194/413) rcs-filter rules::validation::tests::audit_rule_with_empty_audit_types_is_rejected
+        PASS [   0.004s] (195/413) rcs-filter rules::jsonlogic::tests::recognizes_only_static_all_address_arrays
+        PASS [   0.004s] (196/413) rcs-filter rules::validation::tests::audit_without_timeout_action_defaults_allow
+        PASS [   0.004s] (197/413) rcs-filter rules::validation::tests::duplicate_input_name_rejected
+        PASS [   0.004s] (198/413) rcs-filter rules::validation::tests::duplicate_rule_ids_are_all_rejected_without_dropping_unique_rules
+        PASS [   0.003s] (199/413) rcs-filter rules::validation::tests::empty_event_abis_rejected
+        PASS [   0.004s] (200/413) rcs-filter rules::validation::tests::event_alias_depth_above_eight_is_rejected
+        PASS [   0.004s] (201/413) rcs-filter rules::validation::tests::invalid_jsonlogic_rejects_only_affected_rules
+        PASS [   0.004s] (202/413) rcs-filter rules::validation::tests::event_topic_limits_are_enforced
+        PASS [   0.004s] (203/413) rcs-filter rules::validation::tests::load_rules_shares_arc_across_rules_and_standalone_compiles
+        PASS [   0.004s] (204/413) rcs-filter rules::validation::tests::invalid_rules_do_not_drop_valid_ones
+        PASS [   0.004s] (205/413) rcs-filter rules::validation::tests::missing_input_name_rejected
+        PASS [   0.004s] (206/413) rcs-filter rules::validation::tests::missing_required_rule_and_event_fields_fail_decoding
+        PASS [   0.004s] (207/413) rcs-filter rules::validation::tests::only_exact_event_abi_type_is_accepted
+        PASS [   0.004s] (208/413) rcs-filter rules::validation::tests::quota_wrong_shape_rejected
+        PASS [   0.004s] (209/413) rcs-filter rules::validation::tests::non_audit_rules_do_not_require_quota_event_shapes
+        PASS [   0.004s] (210/413) rcs-filter rules::validation::tests::scenario_a_rule_compiles_and_indexes
+        PASS [   0.004s] (211/413) rcs-filter rules::validation::tests::rendered_quota_rule_accepts_transfer_batch_shape
+        PASS [   0.003s] (212/413) rcs-filter submit::tests::batch_stats_track_actual_in_flight_and_release_slots
+        PASS [   0.004s] (213/413) rcs-filter submit::tests::address_keys_are_compared_after_typed_normalization
+        PASS [   0.004s] (214/413) rcs-filter submit::tests::dependency_edges_always_point_from_lower_to_higher_height
+        PASS [   0.004s] (215/413) rcs-filter submit::tests::different_erc1155_ids_with_same_recipient_and_token_still_conflict
+        PASS [   0.004s] (216/413) rcs-filter submit::tests::empty_planner_has_no_segments
+        PASS [   0.004s] (217/413) rcs-filter submit::tests::empty_quota_items_and_invalid_token_are_exclusive
+        PASS [   0.004s] (218/413) rcs-filter submit::tests::group_with_two_distinct_conflicts_waits_for_both_predecessors
+        PASS [   0.004s] (219/413) rcs-filter submit::tests::independent_groups_have_no_predecessors
+        PASS [   0.004s] (220/413) rcs-filter submit::tests::malformed_known_quota_shapes_are_exclusive
+        PASS [   0.004s] (221/413) rcs-filter submit::tests::malformed_or_empty_actions_are_exclusive
+        PASS [   0.003s] (222/413) rcs-filter submit::tests::same_quota_groups_form_nearest_predecessor_chain
+        PASS [   0.004s] (223/413) rcs-filter submit::tests::same_nonce_groups_form_nearest_predecessor_chain
+        PASS [   0.004s] (224/413) rcs-filter submit::tests::shared_nonce_and_quota_predecessor_is_counted_once
+        PASS [   0.004s] (225/413) rcs-filter submit::tests::unknown_audit_type_is_an_exclusive_barrier
+        PASS [   0.004s] (226/413) rcs-filter worker::tests::retry_jitter_stays_between_half_base_and_cap
+        PASS [   0.004s] (227/413) rcs-filter test_support::mock::tests::unavailable_errors
+        PASS [   0.004s] (228/413) rcs-filter submit::tests::valid_erc1155_batch_shape_remains_non_exclusive
+        PASS [   0.004s] (229/413) rcs-filter test_support::mock::tests::submit_echoes_and_query_returns_state
+        PASS [   0.005s] (230/413) rcs-filter test_support::mock::tests::get_rules_returns_registered_fixture
+        PASS [   0.004s] (231/413) rcs-filter worker::tests::retry_schedule_is_exponential_capped_and_resets
+        PASS [   0.005s] (232/413) rcs-filter worker::tests::supervisor_restarts_worker_after_panic
+        PASS [   0.016s] (233/413) xlayer-builder flashblocks::best_txs::tests::test_simple_case
+        PASS [   0.016s] (234/413) xlayer-builder signer::test::test_deterministic_address_derivation
+        PASS [   0.014s] (235/413) xlayer-builder signer::test::test_public_key_format
+        PASS [   0.014s] (236/413) xlayer-builder signer::test::test_sign_transaction
+        PASS [   0.019s] (237/413) xlayer-builder args::op::tests::rcs_submit_concurrency_cli_metadata_has_default_and_env
+        PASS [   0.012s] (238/413) xlayer-builder flashblocks::context::bridge_intercept_tests::test_disabled_config_allows_all
+        PASS [   0.034s] (239/413) xlayer-builder args::op::tests::rcs_submit_concurrency_cli_override_is_parsed
+        PASS [   0.012s] (240/413) xlayer-builder flashblocks::context::bridge_intercept_tests::test_non_target_token_allowed
+        PASS [   0.011s] (241/413) xlayer-builder flashblocks::context::bridge_intercept_tests::test_specific_token_blocks_bridge_tx
+        PASS [   0.331s] (242/413) rcs-filter client::wire_tests::endpoint_specific_statuses_are_enforced
+        PASS [   0.011s] (243/413) xlayer-builder flashblocks::context::bridge_intercept_tests::test_wildcard_blocks_bridge_tx
+        PASS [   0.012s] (244/413) xlayer-builder flashblocks::context::capture_decision_tests::capture_guard_disarms_on_success_single_abort_on_err_no_double_abort
+        PASS [   0.012s] (245/413) xlayer-builder flashblocks::context::capture_decision_tests::complete_is_not_fail_closed
+        PASS [   0.014s] (246/413) xlayer-builder flashblocks::context::capture_decision_tests::enabled_filter_passthrough_fails_closed
+        PASS [   0.013s] (247/413) xlayer-builder flashblocks::context::capture_decision_tests::invariant_violation_fails_closed
+        PASS [   0.012s] (248/413) xlayer-builder flashblocks::context::capture_decision_tests::limit_exceeded_fails_closed
+        PASS [   0.013s] (249/413) xlayer-builder flashblocks::context::capture_decision_tests::native_overflow_emits_error_with_bounded_fields_only
+        PASS [   0.012s] (250/413) xlayer-builder flashblocks::context::capture_decision_tests::realogmismatch_emits_own_arm_four_fields_no_content
+        PASS [   0.023s] (251/413) xlayer-builder flashblocks::context::loop_level_fail_closed_tests::loop_level_create_address_mismatch_denies_no_buffer_no_commit_no_receipt
+        PASS [   0.022s] (252/413) xlayer-builder flashblocks::context::loop_level_fail_closed_tests::loop_level_native_limit_deny_does_not_poison_the_next_candidate
+        PASS [   0.222s] (253/413) xlayer-builder p2p::test::two_nodes_can_connect_and_message
+        PASS [   0.027s] (254/413) xlayer-builder flashblocks::context::loop_level_fail_closed_tests::loop_level_native_limit_exceeded_denies_no_buffer_no_commit_no_receipt
+        PASS [   0.023s] (255/413) xlayer-builder flashblocks::context::loop_level_fail_closed_tests::loop_level_real_reallogmismatch_denies_no_buffer_no_commit_no_receipt
+        PASS [   0.012s] (256/413) xlayer-builder flashblocks::generator::tests::test_block_cell_immediate_value
+        PASS [   0.115s] (257/413) xlayer-builder flashblocks::generator::tests::test_block_cell_multiple_waiters
+        PASS [   0.014s] (258/413) xlayer-builder flashblocks::generator::tests::test_block_cell_update_value
+        PASS [   0.114s] (259/413) xlayer-builder flashblocks::generator::tests::test_block_cell_wait_for_value
+        PASS [   0.013s] (260/413) xlayer-builder flashblocks::generator::tests::test_job_deadline
+        PASS [   4.176s] (261/413) xlayer-builder flashblocks::generator::tests::test_payload_generator
+        PASS [   0.014s] (262/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::abort_capture_mid_window_leaves_state_clean
+        PASS [   0.013s] (263/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::address_mismatch_flag_cleared_by_both_finish_and_abort
+        PASS [   0.015s] (264/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::audit_type_action_merge_action_content_no_empty_audit_on_real_stream
+        PASS [   0.014s] (265/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::composite_post_exec_warming_preserved_with_rcs_inspector_inner
+        PASS [   0.013s] (266/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::create2_nonce_overflow_is_ok_true_address_none_revoked
+        PASS [   0.014s] (267/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::create_address_mismatch_through_real_create_end_fails_closed
+        PASS [   0.017s] (268/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::create_early_failure_no_address_or_event_leak
+        PASS [   0.017s] (269/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::create_is_ok_early_return_no_endowment_leak
+        PASS [   0.016s] (270/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::create_nonce_overflow_is_ok_true_address_none_revoked
+        PASS [   0.014s] (271/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::create_recipients_balanced_before_finish_capture
+        PASS [   0.015s] (272/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::create_recipients_push_pop_balanced
+        PASS [   0.016s] (273/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::delegatecall_carries_no_transfer_event
+        PASS [   0.015s] (274/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::delegatecall_chain_inner_call_and_create_captured
+        PASS [   0.015s] (275/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::delegatecall_nested_call_and_create_attributed_to_delegator
+        PASS [   0.016s] (276/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::derivation_ran_false_but_capture_body_ran_for_create2
+        PASS [   0.014s] (277/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::derivation_ran_false_when_create_hook_not_hit
+        PASS [   0.013s] (278/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::derivation_ran_true_when_journal_read_for_address_derivation
+        PASS [   0.015s] (279/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::dual_alias_binding_growth_and_matcher_limit_plus_one_denies_on_real_stream
+        PASS [   0.015s] (280/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::eip7702_origin_itself_delegated_runs_inner_call_and_create
+        PASS [   0.015s] (281/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::eip7702_type4_delegated_transfers_attributed_to_authority
+        PASS [   0.013s] (282/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::inactive_create_hook_hit_is_nonzero_with_derivation_false
+        PASS [   0.013s] (283/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::inactive_create_no_mutation_and_no_derivation_at_create_return
+        PASS [   0.013s] (284/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::inactive_create_tx_mutates_no_capture_state
+        PASS [   0.013s] (285/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::inactive_inspector_diso_create_tx_no_mutation
+        PASS [   0.013s] (286/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::inspector_state_does_not_cross_transactions_through_real_evm
+        PASS [   0.013s] (287/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::internal_call_transfer_captured_through_composite
+        PASS [   0.013s] (288/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::internal_create2_eip684_collision_endowment_revoked
+        PASS [   0.013s] (289/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::internal_create2_endowment_captured_through_composite
+        PASS [   0.017s] (290/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::internal_create_endowment_captured_through_composite
+        PASS [   0.016s] (291/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::internal_transfer_then_real_log_interleaved_captured_through_composite
+        PASS [   0.014s] (292/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::legacy_value_rule_still_fires_on_real_capture_superset_stream
+        PASS [   0.014s] (293/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::next_capture_starts_clean
+        PASS [   0.014s] (294/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::non_create_control_leaves_create_hook_hits_zero
+        PASS [   0.014s] (295/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::one_transfer_rule_denies_both_toplevel_and_internal_real_stream
+        PASS [   0.014s] (296/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::original_nt2_internal_create_denied_through_real_screen_tx
+        PASS [   0.014s] (297/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::parent_frame_revert_rolls_back_child_transfer_and_real_log_through_composite
+        PASS [   0.013s] (298/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::real_stream_native_budget_limit_plus_one_denies
+        PASS [   0.014s] (299/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::real_stream_screen_tx_and_screen_existing_consistent
+        PASS [   0.013s] (300/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::reverted_child_frame_rolls_back_real_log_and_cross_check_passes
+        PASS [   0.013s] (301/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::revoked_create_still_consumes_native_budget
+        PASS [   0.013s] (302/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::revoked_create_with_prior_transfer_exceeds_budget_limit
+        PASS [   0.013s] (303/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::root_success_child_revert_keeps_root_drops_child
+        PASS [   0.013s] (304/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::runtime_forced_real_log_mismatch_fails_closed_through_composite
+        PASS [   0.013s] (305/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::selfdestruct_transfer_captured_through_composite
+        PASS [   0.012s] (306/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::top_level_call_with_value_emits_transfer
+        PASS [   0.012s] (307/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::top_level_create_with_value_emits_transfer
+        PASS [   0.017s] (308/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::top_level_native_denied_through_real_screen_tx
+        PASS [   0.015s] (309/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::two_consecutive_txs_capture_independently
+        PASS [   0.014s] (310/413) xlayer-builder flashblocks::rcs_capture::gating_integration_tests::whole_tx_root_failure_drops_all
+        PASS [   0.012s] (311/413) xlayer-builder flashblocks::rcs_capture::tests::call_apparent_value_generates_no_event
+        PASS [   0.015s] (312/413) xlayer-builder flashblocks::rcs_capture::tests::call_internal_nonzero_transfer_is_observed
+        PASS [   0.013s] (313/413) xlayer-builder flashblocks::rcs_capture::tests::call_self_transfer_generates_no_event
+        PASS [   0.011s] (314/413) xlayer-builder flashblocks::rcs_capture::tests::call_top_level_generates_no_event
+        PASS [   0.012s] (315/413) xlayer-builder flashblocks::rcs_capture::tests::create_internal_endowment_is_observed_to_created_address
+        PASS [   0.011s] (316/413) xlayer-builder flashblocks::rcs_capture::tests::create_top_level_generates_no_event
+        PASS [   0.011s] (317/413) xlayer-builder flashblocks::rcs_capture::tests::create_zero_endowment_generates_no_event
+        PASS [   0.011s] (318/413) xlayer-builder flashblocks::rcs_capture::tests::finish_capture_clears_state_on_invariant_exit
+        PASS [   0.011s] (319/413) xlayer-builder flashblocks::rcs_capture::tests::finish_capture_clears_state_on_limit_exceeded_exit
+        PASS [   0.012s] (320/413) xlayer-builder flashblocks::rcs_capture::tests::identical_from_to_value_not_deduplicated
+        PASS [   0.012s] (321/413) xlayer-builder flashblocks::rcs_capture::tests::inactive_inspector_ignores_all_observations
+        PASS [   0.011s] (322/413) xlayer-builder flashblocks::rcs_capture::tests::inactive_inspector_push_pop_checkpoint_and_create_recipients_stay_clean
+        PASS [   0.011s] (323/413) xlayer-builder flashblocks::rcs_capture::tests::limit_th_allowed_limit_plus_one_overflows_sticky
+        PASS [   0.011s] (324/413) xlayer-builder flashblocks::rcs_capture::tests::matching_real_logs_yield_complete
+        PASS [   0.011s] (325/413) xlayer-builder flashblocks::rcs_capture::tests::native_asset_address_matches_identifier
+        PASS [   0.029s] (326/413) xlayer-builder flashblocks::rcs_capture::tests::native_budget_boundary_10000_allowed_10001_overflows
+        PASS [   0.013s] (327/413) xlayer-builder flashblocks::rcs_capture::tests::native_transfer_log_has_exact_shape
+        PASS [   0.013s] (328/413) xlayer-builder flashblocks::rcs_capture::tests::noop_inspector_finish_is_passthrough
+        PASS [   0.014s] (329/413) xlayer-builder flashblocks::rcs_capture::tests::observed_count_increments_and_does_not_roll_back
+        PASS [   0.014s] (330/413) xlayer-builder flashblocks::rcs_capture::tests::real_log_count_mismatch_fails_closed
+        PASS [   0.012s] (331/413) xlayer-builder flashblocks::rcs_capture::tests::real_log_order_mismatch_fails_closed
+        PASS [   0.013s] (332/413) xlayer-builder flashblocks::rcs_capture::tests::reverse_transfers_are_two_ordered_events_not_netted
+        PASS [   0.012s] (333/413) xlayer-builder flashblocks::rcs_capture::tests::reverse_transfers_parent_revert_removes_both_count_stays
+        PASS [   0.013s] (334/413) xlayer-builder flashblocks::rcs_capture::tests::selfdestruct_shares_unified_budget_with_call
+        PASS [   0.013s] (335/413) xlayer-builder flashblocks::rcs_capture::tests::selfdestruct_then_parent_revert_removes_event_but_count_stays
+        PASS [   0.015s] (336/413) xlayer-builder flashblocks::rcs_capture::tests::selfdestruct_zero_or_self_target_consumes_no_budget
+        PASS [   0.013s] (337/413) xlayer-builder flashblocks::rcs_capture::tests::start_capture_resets_state_between_txs
+        PASS [   0.012s] (338/413) xlayer-builder flashblocks::rcs_capture::tests::zero_and_self_transfers_are_ignored
+        PASS [   0.047s] (339/413) xlayer-builder flashblocks::rcs_filter_config_tests::budgets_default_to_10_000_and_map_into_config
+        PASS [   0.032s] (340/413) xlayer-builder flashblocks::rcs_filter_config_tests::disabled_filter_bypasses_config_and_handle_construction
+        PASS [   0.032s] (341/413) xlayer-builder flashblocks::rcs_filter_config_tests::disabled_filter_with_zero_event_bindings_is_startup_error
+        PASS [   0.031s] (342/413) xlayer-builder flashblocks::rcs_filter_config_tests::disabled_filter_with_zero_native_budget_is_startup_error
+        PASS [   0.047s] (343/413) xlayer-builder flashblocks::rcs_filter_config_tests::invalid_submit_concurrency_fails_before_workers_start
+        PASS [   0.048s] (344/413) xlayer-builder flashblocks::rcs_filter_config_tests::submit_concurrency_is_mapped_into_filter_config
+        PASS [   1.018s] (345/413) xlayer-builder flashblocks::service::rcs_txpool_tests::approved_reconciliation_removes_absent_real_txpool_entry
+        PASS [   0.015s] (346/413) xlayer-builder flashblocks::service::rcs_txpool_tests::non_terminal_reconciliation_tracks_real_txpool_presence
+        PASS [   0.015s] (347/413) xlayer-builder flashblocks::service::rcs_txpool_tests::real_txpool_discard_parks_nonce_descendant
+        PASS [   1.119s] (348/413) xlayer-builder flashblocks::service::rcs_txpool_tests::terminal_consumer_removes_real_pool_tx_and_rebroadcast
+        PASS [   0.014s] (349/413) xlayer-builder flashblocks::timing::tests::test_apply_offset
+        PASS [   0.012s] (350/413) xlayer-builder flashblocks::timing::tests::test_calculate_first_flashblock_timing
+        PASS [   0.011s] (351/413) xlayer-builder flashblocks::timing::tests::test_compute_remaining_time
+        PASS [   0.012s] (352/413) xlayer-builder flashblocks::timing::tests::test_compute_scheduler_intervals
+        PASS [   0.012s] (353/413) xlayer-builder flashblocks::timing::tests::test_new_different_block_times
+        PASS [   0.012s] (354/413) xlayer-builder flashblocks::timing::tests::test_new_fcu_timing_scenarios
+        PASS [   0.015s] (355/413) xlayer-builder flashblocks::timing::tests::test_new_with_offset_and_buffer
+        PASS [   0.014s] (356/413) xlayer-builder flashblocks::timing::tests::test_scheduler_run_block_cancellation
+        PASS [   0.013s] (357/413) xlayer-builder flashblocks::timing::tests::test_scheduler_run_cancellation_token_lifecycle
+        PASS [   0.012s] (358/413) xlayer-builder flashblocks::timing::tests::test_scheduler_run_dropped_receiver
+        PASS [   0.013s] (359/413) xlayer-builder flashblocks::timing::tests::test_scheduler_run_late_fcu_backwards_compat
+        PASS [   0.012s] (360/413) xlayer-builder flashblocks::timing::tests::test_scheduler_run_sends_all_triggers
+        PASS [   0.012s] (361/413) xlayer-builder flashblocks::utils::cache::tests::add_payload_new_id_replaces_sequence
+        PASS [   0.012s] (362/413) xlayer-builder flashblocks::utils::cache::tests::add_payloads_same_id_appends
+        PASS [   0.011s] (363/413) xlayer-builder flashblocks::utils::cache::tests::add_single_payload_creates_sequence
+        PASS [   0.012s] (364/413) xlayer-builder flashblocks::utils::cache::tests::clone_shares_underlying_data
+        PASS [   0.012s] (365/413) xlayer-builder flashblocks::utils::cache::tests::concurrent_add_and_read
+        PASS [   0.011s] (366/413) xlayer-builder flashblocks::utils::cache::tests::default_cache_is_empty
+        PASS [   0.011s] (367/413) xlayer-builder flashblocks::utils::cache::tests::get_txs_empty_cache_returns_none
+        PASS [   0.012s] (368/413) xlayer-builder flashblocks::utils::cache::tests::get_txs_non_sequential_indexes_returns_none
+        PASS [   0.012s] (369/413) xlayer-builder flashblocks::utils::cache::tests::get_txs_only_base_payload_returns_empty_vec
+        PASS [   0.012s] (370/413) xlayer-builder flashblocks::utils::cache::tests::get_txs_with_none_parent_hash_returns_none
+        PASS [   0.013s] (371/413) xlayer-builder flashblocks::utils::cache::tests::get_txs_wrong_parent_hash_returns_none
+        PASS [   0.012s] (372/413) xlayer-builder flashblocks::utils::cache::tests::load_from_invalid_json_returns_none
+        PASS [   0.011s] (373/413) xlayer-builder flashblocks::utils::cache::tests::load_from_nonexistent_file_returns_none
+        PASS [   0.011s] (374/413) xlayer-builder flashblocks::utils::cache::tests::new_without_datadir_has_no_persist_path
+        PASS [   0.012s] (375/413) xlayer-builder flashblocks::utils::cache::tests::parent_hash_extracted_from_first_payload_with_base
+        PASS [   0.011s] (376/413) xlayer-builder flashblocks::utils::cache::tests::parent_hash_not_overwritten_once_set
+        PASS [   0.015s] (377/413) xlayer-builder flashblocks::utils::cache::tests::persist_empty_cache_is_noop
+        PASS [   0.016s] (378/413) xlayer-builder flashblocks::utils::cache::tests::persist_file_contains_valid_json
+        PASS [   0.012s] (379/413) xlayer-builder flashblocks::utils::cache::tests::persist_no_path_is_noop
+        PASS [   0.015s] (380/413) xlayer-builder flashblocks::utils::cache::tests::persist_overwrites_previous_file
+        PASS [   0.014s] (381/413) xlayer-builder flashblocks::utils::cache::tests::persist_writes_file_and_load_restores
+        PASS [   0.013s] (382/413) xlayer-builder flashblocks::utils::cache::tests::sequence_serde_roundtrip
+        PASS [   0.014s] (383/413) xlayer-builder flashblocks::utils::cache::tests::sequence_serde_with_none_parent_hash
+        PASS [   5.765s] (384/413) xlayer-builder tests::data_availability::block_fill_flashblocks
+        PASS [   5.019s] (385/413) xlayer-builder tests::data_availability::block_size_limit_flashblocks
+        PASS [   5.979s] (386/413) xlayer-builder tests::data_availability::da_footprint_fills_to_limit_flashblocks
+        PASS [   5.012s] (387/413) xlayer-builder tests::data_availability::tx_size_limit_flashblocks
+        PASS [   5.994s] (388/413) xlayer-builder tests::flashblocks::late_fcu_reduces_flashblocks_flashblocks
+        PASS [  30.347s] (389/413) xlayer-builder tests::flashblocks::progressive_lag_reduces_flashblocks_flashblocks
+        PASS [  17.999s] (390/413) xlayer-builder tests::flashblocks::smoke_basic_flashblocks
+        PASS [  18.008s] (391/413) xlayer-builder tests::flashblocks::smoke_with_offset_flashblocks
+        PASS [   5.562s] (392/413) xlayer-builder tests::flashblocks::test_flashblocks_no_state_root_calculation_flashblocks
+        PASS [   8.428s] (393/413) xlayer-builder tests::flashblocks::test_flashblocks_number_contract_builder_tx_flashblocks
+        PASS [   5.042s] (394/413) xlayer-builder tests::forks::jovian_block_parameters_set_flashblocks
+        PASS [   6.021s] (395/413) xlayer-builder tests::forks::jovian_minimum_base_fee_flashblocks
+        PASS [   3.236s] (396/413) xlayer-builder tests::forks::jovian_minimum_fee_must_be_set_flashblocks
+        PASS [   6.704s] (397/413) xlayer-builder tests::forks::jovian_no_tx_pool_sync_flashblocks
+        PASS [   5.049s] (398/413) xlayer-builder tests::miner_gas_limit::block_fill_flashblocks
+        PASS [   5.009s] (399/413) xlayer-builder tests::miner_gas_limit::miner_gas_limit_flashblocks
+        PASS [   7.038s] (400/413) xlayer-builder tests::miner_gas_limit::reset_gas_limit_flashblocks
+        PASS [  12.899s] (401/413) xlayer-builder tests::smoke::block_includes_builder_transaction_flashblocks
+        PASS [  21.035s] (402/413) xlayer-builder tests::smoke::produces_blocks_under_load_within_deadline_flashblocks
+        PASS [   6.968s] (403/413) xlayer-builder tests::smoke::test_no_tx_pool_flashblocks
+        PASS [   5.019s] (404/413) xlayer-builder tests::storage_cost::warm_cold_leak_across_dropped_tx_flashblocks
+        PASS [   6.209s] (405/413) xlayer-builder tests::txpool::pending_pool_limit_flashblocks
+        PASS [   6.120s] (406/413) xlayer-builder tests::xlayer_gasless::gasless_block_gas_limit_caps_and_resets_flashblocks
+        PASS [   5.028s] (407/413) xlayer-builder tests::xlayer_gasless::gasless_same_block_revert_isolation_flashblocks
+        PASS [   5.024s] (408/413) xlayer-builder tests::xlayer_gasless::gasless_same_block_success_isolation_flashblocks
+        PASS [   5.012s] (409/413) xlayer-builder tests::xlayer_gasless::gasless_same_block_validation_failure_isolation_flashblocks
+        PASS [   5.020s] (410/413) xlayer-builder tests::xlayer_gasless::gasless_tx_in_attributes_no_tx_pool_included_over_base_fee_flashblocks
+        PASS [   3.241s] (411/413) xlayer-builder tests::xlayer_gasless::gasless_zero_price_tx_no_contract_rejected_flashblocks
+        PASS [   3.240s] (412/413) xlayer-builder tests::xlayer_gasless::gasless_zero_price_tx_not_whitelisted_rejected_flashblocks
+        PASS [   5.008s] (413/413) xlayer-builder tests::xlayer_gasless::gasless_zero_price_tx_whitelisted_included_flashblocks
+────────────
+     Summary [ 244.905s] 413 tests run: 413 passed, 0 skipped
