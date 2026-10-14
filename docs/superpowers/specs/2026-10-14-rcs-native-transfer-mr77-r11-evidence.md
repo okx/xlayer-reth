@@ -80,7 +80,7 @@ A bare pass count is not evidence; the raw log referenced in §3 is the evidence
 | **r11-NATIVE-LIMIT-DENY** | TEST | `loop_level_native_limit_exceeded_denies_no_buffer_no_commit_no_receipt` (incl. inline at-limit budget=2 control), `loop_level_native_limit_deny_does_not_poison_the_next_candidate` | PASS (§3) |
 | **r11-DERIVE-CTRL** | TEST | `CREATE_HOOK_HITS` seam + `reset_create_gate_seams()`; `non_create_control_leaves_create_hook_hits_zero`, `inactive_create_hook_hit_is_nonzero_with_derivation_false`; the four pre-existing sentinel tests gain the reset call | PASS (§3) |
 | **r11-EVIDENCE-CONTRACT** | SPEC | §3, §4.1, §4.2 | satisfied |
-| **r11-NT2** | SPEC | §7 | satisfied — honest non-reproduction, recorded |
+| **r11-NT2** | SPEC | §7 | (b) honest non-reproduction — **partial, mixed-worktree** (two files substituted from `714e1293`); not full old-checkout coverage (§7) |
 | **r11-MR-TABLE** | SPEC | MR description (Task 5) | pending Task 5 |
 
 **Deviation from the plan's literal Task 1 Step 6** (ledgered as a ruling, not a silent drop): the plan
@@ -636,12 +636,26 @@ files were restored from the pre-swap backup and `git diff --quiet` confirmed a 
 **Command:** `cargo nextest run -p xlayer-builder -E 'test(internal_create_endowment_captured_through_composite)'`
 **Result:** exit 0, **PASS** (1 passed, 0 failed).
 
-**Classification: (b) HONEST NON-REPRODUCTION.** This fixture does not reproduce the original NT2 defect
-even on the genuine pre-fix revision: the CREATE in this fixture executes at a point where
-`journal().depth()` still reads greater than zero under the pre-fix hook timing, so the `depth > 0`
-gate correctly captures it regardless. The original bug report's exact triggering shape is not
-reproduced by this (or any other) fixture already present in the repository; recorded here as an
-honest non-reproduction rather than asserting an unverified "RED pre-D1" claim.
+**Classification: (b) HONEST NON-REPRODUCTION — partial, mixed-worktree.** This fixture does not
+reproduce the original NT2 defect even on the genuine pre-fix revision: the CREATE in this fixture
+executes at a point where `journal().depth()` still reads greater than zero under the pre-fix hook
+timing, so the `depth > 0` gate correctly captures it regardless. The original bug report's exact
+triggering shape is not reproduced by this (or any other) fixture already present in the repository;
+recorded here as an honest non-reproduction rather than asserting an unverified "RED pre-D1" claim.
+
+**Scope boundary of this result (stated explicitly, not implied):**
+
+1. Only two files — `crates/builder/src/flashblocks/rcs_capture.rs` and `context.rs` — were substituted
+   from `714e12934aca97eda1ff344d7d1fdc344baff03f`; every other file in the worktree remained at the
+   post-fix revision.
+2. The run therefore executed a **mixed worktree**, not a clean `714e1293` checkout.
+3. The result is accordingly a **partial non-reproduction**: it shows this fixture does not reproduce
+   the defect under that specific two-file substitution, and it is explicitly **not** full old-checkout
+   coverage of the pre-fix revision.
+4. A clean old checkout was not used because current `context.rs` matches on
+   `CaptureInvariantError::CreateAddressMismatch`, a variant absent at `714e1293` — the two revisions do
+   not compile together, so a full old checkout would have been a different experiment, which this
+   round did not run.
 
 ## 8. Preservation
 
