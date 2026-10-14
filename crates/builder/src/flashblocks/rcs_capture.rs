@@ -186,6 +186,26 @@ thread_local! {
         const { std::cell::Cell::new((0, 0)) };
 }
 
+// Test-only create-hook invocation counter. Incremented as the FIRST statement
+// of the `create` hook, before the `!self.active` gate, so `0` means the hook was never invoked at
+// all for this transaction — distinguishable from `CREATE_GATE_SNAPSHOT`'s `derivation_ran == false`,
+// which is ambiguous between "never hit" and "hit while inactive" without this counter. Never set
+// in production (the whole seam is `#[cfg(test)]`).
+#[cfg(test)]
+thread_local! {
+    pub(crate) static CREATE_HOOK_HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Test-only reset for the create-hook gate seams. Clears [`CREATE_HOOK_HITS`]
+/// and [`CREATE_GATE_SNAPSHOT`] so a stale tuple left by an earlier test on the same thread (`cargo
+/// test` reuses threads across tests, unlike `nextest`'s process-per-test) cannot make a later
+/// assertion pass for the wrong reason.
+#[cfg(test)]
+pub(crate) fn reset_create_gate_seams() {
+    CREATE_HOOK_HITS.with(|c| c.set(0));
+    CREATE_GATE_SNAPSHOT.with(|s| s.set((0, 0, false, false)));
+}
+
 /// The RCS capture inspector: the **inner** inspector of `alloy_op_evm::OpEvm`'s composite
 /// wrapper. It maintains one ordered queue of real + virtual logs with per-frame checkpoints and a
 /// single, non-rolling-back native-transfer counter with a sticky budget overflow.
@@ -467,6 +487,11 @@ where
     }
 
     fn create(&mut self, context: &mut CTX, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
+        // Record that the hook was invoked at all, before anything else — including
+        // the active gate — so a reader can tell "never hit" (count stays 0) from "hit while
+        // inactive" (count > 0, capture_body_ran == false).
+        #[cfg(test)]
+        CREATE_HOOK_HITS.with(|c| c.set(c.get() + 1));
         self.push_checkpoint();
         if !self.active {
             // Not armed: no capture body ran, and therefore no address derivation ran either.
@@ -3386,6 +3411,7 @@ mod gating_integration_tests {
         // gate-return without touching `create_recipients` or running address derivation.
         // The CREATE_GATE_SNAPSHOT seam records the state at the exact return point so we can
         // assert cleanliness BEFORE `create_end` fires.
+        reset_create_gate_seams();
         let deployer = Address::from([0xDA; 20]);
         let mut db = InMemoryDB::default();
         db.insert_account_info(deployer, account(1_000_000_000, None));
@@ -3419,6 +3445,7 @@ mod gating_integration_tests {
         // `create` hook must report that the created-address derivation actually ran — i.e. that the
         // journal read supplying the deployer nonce executed. The assertion is on the value the hook
         // COMPUTED, so replacing the computation with a literal `false` fails this test.
+        reset_create_gate_seams();
         let deployer = Address::from([0xDC; 20]);
         let mut db = InMemoryDB::default();
         db.insert_account_info(deployer, account(1_000_000_000, None));
@@ -3448,6 +3475,7 @@ mod gating_integration_tests {
         // The not-hit sentinel: an inspector that was never armed leaves BOTH the capture-body flag
         // and the derivation flag clear, so `derivation_ran == false` here cannot be confused with
         // the "ran, but no journal read was needed" state (which reports capture_body_ran == true).
+        reset_create_gate_seams();
         let deployer = Address::from([0xDD; 20]);
         let mut db = InMemoryDB::default();
         db.insert_account_info(deployer, account(1_000_000_000, None));
@@ -3468,6 +3496,64 @@ mod gating_integration_tests {
         assert!(!derivation_ran, "the not-hit sentinel must report that no derivation ran");
     }
 
+    // ── distinguish "create hook never invoked" from "invoked while inactive" ──────────────────
+
+    #[test]
+    fn non_create_control_leaves_create_hook_hits_zero() {
+        // A real transaction with NO `CREATE` at any depth (pure `CALL` only) must leave the
+        // create-hook hit counter at zero, which is what makes `derivation_ran == false` in
+        // `derivation_ran_false_when_create_hook_not_hit` a statement about a hook that DID run
+        // (because the create hook was never entered) rather than one that never fired.
+        reset_create_gate_seams();
+        let contract = Address::from([0xC3; 20]);
+        let dst = Address::from([0xD4; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(contract, account(1_000, Some(call_value_1_to(dst))));
+
+        let (outcome, success) = run_capturing_tx(db, contract, 16);
+        assert!(success, "pure-CALL tx must succeed");
+        assert_eq!(
+            CREATE_HOOK_HITS.with(|c| c.get()),
+            0,
+            "a transaction with no CREATE at any depth must never invoke the create hook"
+        );
+        assert!(
+            matches!(outcome, CaptureOutcome::Complete(ref s) if s.len() == 1),
+            "the internal CALL transfer really ran: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn inactive_create_hook_hit_is_nonzero_with_derivation_false() {
+        // The other side of the control above: an UNARMED inspector that really does execute a
+        // CREATE records a hook hit while reporting neither a capture body nor a derivation —
+        // proving `derivation_ran_false_when_create_hook_not_hit`'s `false` comes from a hook that
+        // DID run, not one that never fired.
+        reset_create_gate_seams();
+        let deployer = Address::from([0xD6; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(deployer, account(1_000_000_000, None));
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        // Deliberately do NOT call start_capture().
+        evm.transact(create_tx_with_value(deployer, U256::from(5u64))).expect("tx executes");
+
+        assert!(
+            CREATE_HOOK_HITS.with(|c| c.get()) > 0,
+            "the create hook must have been invoked for a real CREATE, even while unarmed"
+        );
+        let (_, _, capture_body_ran, derivation_ran) = CREATE_GATE_SNAPSHOT.with(|s| s.get());
+        assert!(!capture_body_ran, "the capture body must not run while inactive");
+        assert!(!derivation_ran, "no address derivation runs while inactive");
+    }
+
     #[test]
     fn derivation_ran_false_but_capture_body_ran_for_create2() {
         // The third state, and the reason the sentinel is not a bare bool: CREATE2 derives its
@@ -3475,6 +3561,7 @@ mod gating_integration_tests {
         // while the derivation flag stays clear. A reader can therefore always distinguish
         // "hook never ran" (both false) from "ran, no journal read needed" (body true, derive false)
         // from "derived" (both true).
+        reset_create_gate_seams();
         let factory = Address::from([0xDE; 20]);
         let mut db = InMemoryDB::default();
         db.insert_account_info(caller(), account(1_000_000_000, None));
@@ -3492,6 +3579,12 @@ mod gating_integration_tests {
         assert!(
             !derivation_ran,
             "CREATE2 needs no journal read for the created address, so the derivation flag is clear"
+        );
+        // The hook was genuinely hit, so this `false` can never be misread as
+        // "the hook never ran" — only as "ran, no journal read needed".
+        assert!(
+            CREATE_HOOK_HITS.with(|c| c.get()) > 0,
+            "the create hook must have been invoked for a real CREATE2 endowment"
         );
     }
 
