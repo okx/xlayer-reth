@@ -16,7 +16,8 @@ Branch: `xl/xlop-1217/0928-1135`. Round-6 plan baseline: `ae490d7ffebce921a8e957
    §5's test/lint runs were executed against (the round-5 delta's last test/code commit on top of the
    round-5 baseline `a0e5d7b73a669d50ed18f65d1c40c52a7a70a230`: docs carry-forward, the two new test
    commits, one rustfmt fixup).
-2. **Final submission SHA:** `<FINAL_HEAD>` — filled in by this round's Task 6, Step 5.
+2. **Final submission SHA:** `dbba12bb0a842bab9d0afe0beae25f34fe68845e` — this round-6 delta's final
+   commit, pushed to `origin/xl/xlop-1217/0928-1135`.
 3. **The binding rule, verbatim:** Every commit between the test-capture SHA and the final submission
    SHA touches only `docs/**`. The proof is the `git log --oneline` and `git diff --name-only` output
    reproduced below; a reviewer can re-run both commands and must see only `docs/**` paths. If any
@@ -37,8 +38,36 @@ Branch: `xl/xlop-1217/0928-1135`. Round-6 plan baseline: `ae490d7ffebce921a8e957
    ```
 
    This inherited range is history, not a claim about this round; it is carried forward unchanged.
-5. **Chain proof, test-capture SHA → final submission SHA** (this round's full accumulated range): filled
-   in by Task 6, Step 5, once `<FINAL_HEAD>` is known.
+5. **Chain proof, test-capture SHA → final submission SHA** (this round's full accumulated range,
+   `ae04e4b3`..`dbba12bb`):
+
+   ```
+   $ git log --oneline ae04e4b3f4759583425ddd84b4b7732f9bf1fb3e..dbba12bb0a842bab9d0afe0beae25f34fe68845e
+   dbba12bb docs(rcs): per-SHA r11 evidence re-captured at the round-6 submission head
+   6797335e docs(rcs): record the round-6 change surface as docs-only
+   c0b92081 docs(rcs): record the explicit disposition of the cargo test OOM self-report
+   8b968cca docs(rcs): scope the NT2 result as a partial mixed-worktree non-reproduction
+   5f87a4dc docs(rcs): attach the real default-feature dependency graph for xlayer-reth-node
+   655397ee docs(rcs): bind the r11 evidence document to its capture and submission SHAs
+   a48a79ec docs(superpowers): carry the r11 design mirror and the round-6 delta plan onto the MR77 head
+   ae490d7f docs(superpowers): r11 per-SHA evidence — raw nextest, default feature tree, NT2 result
+   $ echo $?
+   0
+
+   $ git diff --name-only ae04e4b3f4759583425ddd84b4b7732f9bf1fb3e..dbba12bb0a842bab9d0afe0beae25f34fe68845e
+   docs/superpowers/history/lark-review-doc-r10-detailed-from-stage5-archive.md
+   docs/superpowers/lark-review-doc.md
+   docs/superpowers/plans/2026-10-14-rcs-native-transfer-mr77-fixes-plan-r11-round6.md
+   docs/superpowers/specs/2026-10-12-rcs-native-transfer-mr77-fixes-design.md
+   docs/superpowers/specs/2026-10-14-rcs-native-transfer-mr77-r11-evidence.md
+   docs/superpowers/specs/2026-10-14-rcs-native-transfer-mr77-r11-feature-tree.txt
+   docs/superpowers/specs/2026-10-14-rcs-native-transfer-mr77-r11-nextest.txt
+   $ echo $?
+   0
+   ```
+
+   Every path is under `docs/superpowers/`; the binding rule holds across the full accumulated range,
+   not just the inherited round-5 sub-range above.
 
 The round-5 provenance sentence (`a0e5d7b7..ae04e4b3`: docs carry-forward, the two new test commits, one
 rustfmt fixup) is carried forward unchanged above — it is history, not a claim about this round.
