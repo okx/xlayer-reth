@@ -687,3 +687,22 @@ recorded here as an honest non-reproduction rather than asserting an unverified 
 `docs/superpowers/`, `.superpowers/`, `superpowers-context.tar.gz` and the Terran review-ledger
 references in the design/plan documents are preserved — none were deleted or truncated by this round's
 work.
+
+### 8.1 Round-6 change surface
+
+```
+$ git diff --name-only ae490d7ffebce921a8e957618b56672d192739f9..HEAD
+docs/superpowers/history/lark-review-doc-r10-detailed-from-stage5-archive.md
+docs/superpowers/lark-review-doc.md
+docs/superpowers/plans/2026-10-14-rcs-native-transfer-mr77-fixes-plan-r11-round6.md
+docs/superpowers/specs/2026-10-12-rcs-native-transfer-mr77-fixes-design.md
+docs/superpowers/specs/2026-10-14-rcs-native-transfer-mr77-r11-evidence.md
+docs/superpowers/specs/2026-10-14-rcs-native-transfer-mr77-r11-feature-tree.txt
+
+$ git diff --stat ae490d7ffebce921a8e957618b56672d192739f9..HEAD -- crates bin Cargo.toml Cargo.lock
+(empty)
+```
+
+No file under `crates/**`, `bin/**`, `Cargo.toml` or `Cargo.lock` was modified in round 6. The native
+`LimitExceeded` group and the CREATE-inactive-hit group are untouched; no trigger scenario was named,
+and none was needed.
