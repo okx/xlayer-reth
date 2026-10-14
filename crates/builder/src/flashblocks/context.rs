@@ -1870,6 +1870,327 @@ mod loop_level_fail_closed_tests {
             "control: the candidate now occupies the pending buffer"
         );
     }
+
+    /// A rule matching ANY native-asset `Transfer` by address alone (not by which contract emitted
+    /// it), so a budget-boundary fixture can live at any factory address instead of needing to
+    /// collide with `golden::token_x()`.
+    const AUDIT_ANY_NATIVE_TRANSFER_RULE: &str = r#"{
+        "id": "audit-any-native-transfer",
+        "event_abis": {
+            "transfer": {
+                "type": "event", "name": "Transfer",
+                "inputs": [
+                    {"name": "from", "type": "address", "indexed": true},
+                    {"name": "to",   "type": "address", "indexed": true},
+                    {"name": "value","type": "uint256",  "indexed": false}
+                ],
+                "anonymous": false
+            }
+        },
+        "condition": {"==":[{"var":"transfer.address"},"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"]},
+        "audit_types": ["native_budget_test"],
+        "action": "audit"
+    }"#;
+
+    /// Runtime bytecode performing `recipients.len()` sequential 1-wei `CALL` transfers, each a
+    /// distinct internal native-transfer observation, then `STOP`.
+    fn native_transfers_code(recipients: &[Address]) -> Vec<u8> {
+        let mut code = Vec::new();
+        for dst in recipients {
+            // PUSH1 0 (retSize) PUSH1 0 (retOffset) PUSH1 0 (argsSize) PUSH1 0 (argsOffset)
+            // PUSH1 1 (value) PUSH20 dst GAS CALL POP
+            code.extend_from_slice(&[0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x01, 0x73]);
+            code.extend_from_slice(dst.as_slice());
+            code.extend_from_slice(&[0x5a, 0xf1, 0x50]); // GAS CALL POP
+        }
+        code.push(0x00); // STOP
+        code
+    }
+
+    /// Builds a funded sender + a factory at `factory` performing `recipients.len()` internal
+    /// native transfers, a signed candidate calling it, and the pool/state needed to drive one
+    /// real `execute_best_transactions` run.
+    fn native_limit_candidate_fixture(
+        filter: Arc<FilterHandle>,
+        signer: &crate::signer::Signer,
+        factory: Address,
+        recipients: &[Address],
+    ) -> (FlashblocksBuilderCtx, State<CacheDB<EmptyDB>>, B256, OpPooledTransaction) {
+        let ctx = build_ctx(filter);
+        let candidate = OpTypedTransaction::Eip1559(TxEip1559 {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 200_000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 0,
+            to: TxKind::Call(factory),
+            value: U256::ZERO,
+            ..Default::default()
+        });
+        let recovered = signer.sign_tx(candidate).expect("sign candidate");
+        let candidate_hash: B256 = recovered.tx_hash();
+        let encoded_len = recovered.encode_2718_len();
+        let pooled = OpPooledTransaction::new(recovered, encoded_len);
+
+        let mut cache = CacheDB::new(EmptyDB::default());
+        cache.insert_account_info(
+            signer.address,
+            AccountInfo { balance: U256::from(10u128.pow(18)), nonce: 0, ..Default::default() },
+        );
+        cache.insert_account_info(
+            factory,
+            AccountInfo {
+                balance: U256::from(recipients.len() as u64), // funds the 1-wei internal transfers
+                code: Some(Bytecode::new_raw(Bytes::from(native_transfers_code(recipients)))),
+                ..Default::default()
+            },
+        );
+        let state = State::builder().with_database(cache).with_bundle_update().build();
+        (ctx, state, candidate_hash, pooled)
+    }
+
+    /// The native-transfer budget fail-closed chain, driven through the ACTUAL candidate loop
+    /// rather than a helper's `CaptureOutcome`: the loop's own `RcsInspector` (constructed by
+    /// `execute_best_transactions` straight from `FilterConfig::max_native_transfers_per_tx`, so no
+    /// new production seam is needed) overflows at `limit + 1`, `finish_capture` returns
+    /// `LimitExceeded`, and `fail_closed_screen` must turn that into a Deny WITHOUT reaching
+    /// `screen_tx`.
+    ///
+    /// Falsifiable: temporarily widening the `LimitExceeded` arm of `fail_closed_screen` to return
+    /// a non-`Deny` decision makes the `LAST_SCREEN_DECISION` assertion below fail.
+    #[tokio::test]
+    async fn loop_level_native_limit_exceeded_denies_no_buffer_no_commit_no_receipt() {
+        let rules =
+            load_rules(1, 1, vec![serde_json::from_str(AUDIT_ANY_NATIVE_TRANSFER_RULE).unwrap()]);
+        let recipients = [Address::repeat_byte(0xA1), Address::repeat_byte(0xA2)];
+        let factory = Address::repeat_byte(0xF9);
+
+        // ===== FAIL-CLOSED RUN — budget 1, two observations overflow at the second =====
+        let filter = Arc::new(FilterHandle::for_test(
+            FilterConfig { max_native_transfers_per_tx: 1, ..Default::default() },
+            rules.clone(),
+            Arc::new(SystemClock),
+        ));
+        let signer = crate::tests::funded_signer();
+        let (ctx, mut state, candidate_hash, pooled) =
+            native_limit_candidate_fixture(filter.clone(), &signer, factory, &recipients);
+        let pool = testing_pool();
+        let mock = MockTransaction::legacy()
+            .with_sender(signer.address)
+            .with_nonce(0)
+            .with_gas_price(100)
+            .with_hash(candidate_hash);
+        pool.add_transaction(TransactionOrigin::External, mock).await.unwrap();
+        assert!(pool.get(&candidate_hash).is_some(), "candidate is in the txpool before the loop");
+
+        let limits =
+            TransactionLimits { block_gas: 30_000_000, block_da: None, block_da_footprint: None };
+        let before = state.basic(signer.address).expect("db read").expect("sender funded");
+        let (nonce_before, balance_before) = (before.nonce, before.balance);
+
+        LAST_SCREEN_DECISION.with(|d| d.set(None));
+        let mut best_txs = RecordingTxs { tx: Some(pooled), marked: Vec::new() };
+        let mut info = ExecutionInfo::with_capacity(1);
+        let result = ctx.execute_best_transactions(&mut info, &mut state, &mut best_txs, &pool, limits);
+        assert!(matches!(result, Ok(None)), "loop completes without cancellation: {result:?}");
+
+        assert_eq!(
+            LAST_SCREEN_DECISION.with(|d| d.get()),
+            Some(Screen::Deny),
+            "the real native LimitExceeded must fail closed to Screen::Deny on the candidate loop"
+        );
+        assert!(
+            best_txs.marked.contains(&(signer.address, 0)),
+            "the fail-closed candidate is mark_invalid'd by the loop"
+        );
+        assert!(
+            pool.get(&candidate_hash).is_none(),
+            "the fail-closed candidate is removed from the txpool"
+        );
+        assert!(info.executed_transactions.is_empty(), "fail-closed: no tx appended to the block");
+        assert!(info.receipts.is_empty(), "fail-closed: no receipt pushed (commit skipped)");
+        assert_eq!(info.cumulative_gas_used, 0, "fail-closed: no gas accounted (never committed)");
+        let after = state.basic(signer.address).expect("db read").expect("sender present");
+        assert_eq!(after.nonce, nonce_before, "fail-closed: sender nonce unchanged (no commit)");
+        assert_eq!(after.balance, balance_before, "fail-closed: sender balance unchanged");
+        assert_eq!(
+            filter.buffered_len(),
+            0,
+            "fail-closed must not add a BufferPool entry (screen_tx skipped)"
+        );
+        assert!(
+            filter.buffer_status(&candidate_hash).is_none(),
+            "no BufferEntry may exist for the fail-closed candidate"
+        );
+
+        // ===== AT-LIMIT CONTROL — budget 2, the SAME two observations do NOT deny. Guards against
+        // an off-by-one: without this control a deny-at-N implementation would also pass above. =====
+        let filter2 = Arc::new(FilterHandle::for_test(
+            FilterConfig { max_native_transfers_per_tx: 2, ..Default::default() },
+            rules,
+            Arc::new(SystemClock),
+        ));
+        let (ctx2, mut state2, candidate_hash2, pooled2) =
+            native_limit_candidate_fixture(filter2.clone(), &signer, factory, &recipients);
+        let pool2 = testing_pool();
+        let mock2 = MockTransaction::legacy()
+            .with_sender(signer.address)
+            .with_nonce(0)
+            .with_gas_price(100)
+            .with_hash(candidate_hash2);
+        pool2.add_transaction(TransactionOrigin::External, mock2).await.unwrap();
+
+        LAST_SCREEN_DECISION.with(|d| d.set(None));
+        let mut best_txs2 = RecordingTxs { tx: Some(pooled2), marked: Vec::new() };
+        let mut info2 = ExecutionInfo::with_capacity(1);
+        let control =
+            ctx2.execute_best_transactions(&mut info2, &mut state2, &mut best_txs2, &pool2, limits);
+        assert!(matches!(control, Ok(None)), "control loop completes: {control:?}");
+        assert_eq!(
+            LAST_SCREEN_DECISION.with(|d| d.get()),
+            Some(Screen::AuditPending),
+            "control: exactly N=2 observations under budget 2 must NOT deny"
+        );
+        assert_eq!(
+            filter2.buffer_status(&candidate_hash2),
+            Some(BufferStatus::NotSubmitted),
+            "control: the at-limit candidate inserts a BufferPool entry"
+        );
+    }
+
+    /// A one-shot-per-slot [`PayloadTransactions`] yielding candidates from a queue in order,
+    /// recording every `mark_invalid`. Used by the "loop survives a deny" test below, which needs
+    /// two DISTINCT candidates from the same `execute_best_transactions` call — `RecordingTxs`
+    /// only ever yields one.
+    struct QueuedTxs {
+        queue: std::collections::VecDeque<OpPooledTransaction>,
+        marked: Vec<(Address, u64)>,
+    }
+    impl PayloadTransactions for QueuedTxs {
+        type Transaction = OpPooledTransaction;
+        fn next(&mut self, _ctx: ()) -> Option<OpPooledTransaction> {
+            self.queue.pop_front()
+        }
+        fn mark_invalid(&mut self, sender: Address, nonce: u64) {
+            self.marked.push((sender, nonce));
+        }
+    }
+
+    /// After a budget-overflow Deny the loop must keep going: the NEXT candidate in the same
+    /// `execute_best_transactions` call is screened normally and buffers, proving capture state was
+    /// reset and the deny is not sticky.
+    #[tokio::test]
+    async fn loop_level_native_limit_deny_does_not_poison_the_next_candidate() {
+        let rules =
+            load_rules(1, 1, vec![serde_json::from_str(AUDIT_ANY_NATIVE_TRANSFER_RULE).unwrap()]);
+        let filter = Arc::new(FilterHandle::for_test(
+            FilterConfig { max_native_transfers_per_tx: 1, ..Default::default() },
+            rules,
+            Arc::new(SystemClock),
+        ));
+
+        // Two DISTINCT senders AND two distinct factories, each at its own nonce 0: candidate #0's
+        // deny path never commits state (the loop `continue`s before any nonce bump), so a
+        // same-sender nonce 1 for #1 would be invalid against the real EVM/pool nonce sequencing.
+        let ctx = build_ctx(filter.clone());
+        let signer0 = crate::tests::funded_signer();
+        let signer1 = crate::tests::builder_signer();
+        let factory0 = Address::repeat_byte(0xF9); // #0: two transfers under budget 1 → overflow
+        let factory1 = Address::repeat_byte(0xFA); // #1: one transfer, exactly at budget 1 → fits
+
+        let candidate0 = OpTypedTransaction::Eip1559(TxEip1559 {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 200_000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 0,
+            to: TxKind::Call(factory0),
+            value: U256::ZERO,
+            ..Default::default()
+        });
+        let recovered0 = signer0.sign_tx(candidate0).expect("sign candidate 0");
+        let hash0: B256 = recovered0.tx_hash();
+        let len0 = recovered0.encode_2718_len();
+        let pooled0 = OpPooledTransaction::new(recovered0, len0);
+
+        let candidate1 = OpTypedTransaction::Eip1559(TxEip1559 {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 200_000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 0,
+            to: TxKind::Call(factory1),
+            value: U256::ZERO,
+            ..Default::default()
+        });
+        let recovered1 = signer1.sign_tx(candidate1).expect("sign candidate 1");
+        let hash1: B256 = recovered1.tx_hash();
+        let len1 = recovered1.encode_2718_len();
+        let pooled1 = OpPooledTransaction::new(recovered1, len1);
+
+        let mut cache = CacheDB::new(EmptyDB::default());
+        cache.insert_account_info(
+            signer0.address,
+            AccountInfo { balance: U256::from(10u128.pow(18)), nonce: 0, ..Default::default() },
+        );
+        cache.insert_account_info(
+            signer1.address,
+            AccountInfo { balance: U256::from(10u128.pow(18)), nonce: 0, ..Default::default() },
+        );
+        cache.insert_account_info(
+            factory0,
+            AccountInfo {
+                balance: U256::from(2u64),
+                code: Some(Bytecode::new_raw(Bytes::from(native_transfers_code(&[
+                    Address::repeat_byte(0xA1),
+                    Address::repeat_byte(0xA2),
+                ])))),
+                ..Default::default()
+            },
+        );
+        cache.insert_account_info(
+            factory1,
+            AccountInfo {
+                balance: U256::from(1u64),
+                code: Some(Bytecode::new_raw(Bytes::from(native_transfers_code(&[
+                    Address::repeat_byte(0xA3),
+                ])))),
+                ..Default::default()
+            },
+        );
+        let mut state = State::builder().with_database(cache).with_bundle_update().build();
+
+        let pool = testing_pool();
+        for (sender, mock_hash) in [(signer0.address, hash0), (signer1.address, hash1)] {
+            let mock = MockTransaction::legacy()
+                .with_sender(sender)
+                .with_nonce(0)
+                .with_gas_price(100)
+                .with_hash(mock_hash);
+            pool.add_transaction(TransactionOrigin::External, mock).await.unwrap();
+        }
+
+        let limits =
+            TransactionLimits { block_gas: 30_000_000, block_da: None, block_da_footprint: None };
+        let mut best_txs =
+            QueuedTxs { queue: std::collections::VecDeque::from([pooled0, pooled1]), marked: Vec::new() };
+        let mut info = ExecutionInfo::with_capacity(2);
+        let result = ctx.execute_best_transactions(&mut info, &mut state, &mut best_txs, &pool, limits);
+        assert!(matches!(result, Ok(None)), "loop completes without cancellation: {result:?}");
+
+        assert!(best_txs.marked.contains(&(signer0.address, 0)), "candidate #0 is mark_invalid'd");
+        assert!(
+            filter.buffer_status(&hash0).is_none(),
+            "candidate #0 (budget-overflow) must not buffer"
+        );
+        assert_eq!(
+            filter.buffer_status(&hash1),
+            Some(BufferStatus::NotSubmitted),
+            "candidate #1, screened AFTER #0's deny, buffers normally — capture state was reset \
+             and the deny did not poison the loop"
+        );
+        assert_eq!(filter.buffered_len(), 1, "exactly #1 occupies the pending buffer");
+    }
 }
 
 #[cfg(test)]
