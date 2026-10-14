@@ -16,8 +16,15 @@ Branch: `xl/xlop-1217/0928-1135`. Round-6 plan baseline: `ae490d7ffebce921a8e957
    §5's test/lint runs were executed against (the round-5 delta's last test/code commit on top of the
    round-5 baseline `a0e5d7b73a669d50ed18f65d1c40c52a7a70a230`: docs carry-forward, the two new test
    commits, one rustfmt fixup).
-2. **Final submission SHA:** `dbba12bb0a842bab9d0afe0beae25f34fe68845e` — this round-6 delta's final
-   commit, pushed to `origin/xl/xlop-1217/0928-1135`.
+2. **Final submission SHA:** `origin/xl/xlop-1217/0928-1135`'s current pushed tip — **not** a value
+   frozen into this text, because the commit that writes a specific SHA here necessarily advances the
+   branch one commit past whatever it names (the structural self-reference the binding rule exists to
+   handle). The last value this document recorded here was `dbba12bb0a842bab9d0afe0beae25f34fe68845e`;
+   the commit that wrote that sentence (`06830250...`) is itself one commit later and is, in turn,
+   covered by the same rule — a reviewer confirms the *current* true tip with
+   `git rev-parse origin/xl/xlop-1217/0928-1135` and re-runs item 5's chain-proof commands with that
+   value substituted as the end point, rather than trusting a SHA literal that this document cannot
+   keep self-consistent by construction.
 3. **The binding rule, verbatim:** Every commit between the test-capture SHA and the final submission
    SHA touches only `docs/**`. The proof is the `git log --oneline` and `git diff --name-only` output
    reproduced below; a reviewer can re-run both commands and must see only `docs/**` paths. If any
@@ -38,8 +45,9 @@ Branch: `xl/xlop-1217/0928-1135`. Round-6 plan baseline: `ae490d7ffebce921a8e957
    ```
 
    This inherited range is history, not a claim about this round; it is carried forward unchanged.
-5. **Chain proof, test-capture SHA → final submission SHA** (this round's full accumulated range,
-   `ae04e4b3`..`dbba12bb`):
+5. **Chain proof, test-capture SHA → the last-recorded submission SHA** (this round's full accumulated
+   range as of the last commit this document itself names, `ae04e4b3`..`dbba12bb`; it does not and
+   cannot include the commit that writes this very sentence or anything pushed after it — see item 2):
 
    ```
    $ git log --oneline ae04e4b3f4759583425ddd84b4b7732f9bf1fb3e..dbba12bb0a842bab9d0afe0beae25f34fe68845e
@@ -102,7 +110,7 @@ A bare pass count is not evidence; the raw log referenced in §3 is the evidence
 | r10-T2-ORIGIN | TEST | `eip7702_origin_itself_delegated_runs_inner_call_and_create` | PASS (§3) |
 | r10-REGRESS-KEEP | KEEP | `top_level_call_with_value_emits_transfer`, `root_success_child_revert_keeps_root_drops_child`, `whole_tx_root_failure_drops_all`, `create_early_failure_no_address_or_event_leak`, `next_capture_starts_clean`, `create_is_ok_early_return_no_endowment_leak` | all six present and PASS (§3) |
 | r10-EV-LOG | SPEC | §3 | satisfied |
-| r10-EV-TABLE | SPEC | MR description (Task 5) | pending Task 5 |
+| r10-EV-TABLE | SPEC | MR description (Task 7, Stage 4.0) | pending Task 7 |
 | r10-EV-CI | SPEC | §5 | satisfied |
 | r10-EV-T35 | SPEC/KEEP | §6 | satisfied — retained |
 | r10-EV-SUPERPOWERS | KEEP | `docs/superpowers/`, `.superpowers/`, `superpowers-context.tar.gz` | preserved, not deleted (plan Task 0 Steps 1/3/6) |
@@ -110,7 +118,7 @@ A bare pass count is not evidence; the raw log referenced in §3 is the evidence
 | **r11-DERIVE-CTRL** | TEST | `CREATE_HOOK_HITS` seam + `reset_create_gate_seams()`; `non_create_control_leaves_create_hook_hits_zero`, `inactive_create_hook_hit_is_nonzero_with_derivation_false`; the four pre-existing sentinel tests gain the reset call | PASS (§3) |
 | **r11-EVIDENCE-CONTRACT** | SPEC | §3, §4.1, §4.2 | satisfied |
 | **r11-NT2** | SPEC | §7 | (b) honest non-reproduction — **partial, mixed-worktree** (two files substituted from `714e1293`); not full old-checkout coverage (§7) |
-| **r11-MR-TABLE** | SPEC | MR description (Task 5) | pending Task 5 |
+| **r11-MR-TABLE** | SPEC | MR description (Task 7, Stage 4.0) | pending Task 7 |
 
 **Deviation from the plan's literal Task 1 Step 6** (ledgered as a ruling, not a silent drop): the plan
 sketches an additional `zero_native_budget_is_a_config_error_even_when_filter_disabled` test. This exact
