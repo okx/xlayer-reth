@@ -1899,7 +1899,9 @@ mod loop_level_fail_closed_tests {
         for dst in recipients {
             // PUSH1 0 (retSize) PUSH1 0 (retOffset) PUSH1 0 (argsSize) PUSH1 0 (argsOffset)
             // PUSH1 1 (value) PUSH20 dst GAS CALL POP
-            code.extend_from_slice(&[0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x01, 0x73]);
+            code.extend_from_slice(&[
+                0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x01, 0x73,
+            ]);
             code.extend_from_slice(dst.as_slice());
             code.extend_from_slice(&[0x5a, 0xf1, 0x50]); // GAS CALL POP
         }
@@ -1991,7 +1993,8 @@ mod loop_level_fail_closed_tests {
         LAST_SCREEN_DECISION.with(|d| d.set(None));
         let mut best_txs = RecordingTxs { tx: Some(pooled), marked: Vec::new() };
         let mut info = ExecutionInfo::with_capacity(1);
-        let result = ctx.execute_best_transactions(&mut info, &mut state, &mut best_txs, &pool, limits);
+        let result =
+            ctx.execute_best_transactions(&mut info, &mut state, &mut best_txs, &pool, limits);
         assert!(matches!(result, Ok(None)), "loop completes without cancellation: {result:?}");
 
         assert_eq!(
@@ -2172,10 +2175,13 @@ mod loop_level_fail_closed_tests {
 
         let limits =
             TransactionLimits { block_gas: 30_000_000, block_da: None, block_da_footprint: None };
-        let mut best_txs =
-            QueuedTxs { queue: std::collections::VecDeque::from([pooled0, pooled1]), marked: Vec::new() };
+        let mut best_txs = QueuedTxs {
+            queue: std::collections::VecDeque::from([pooled0, pooled1]),
+            marked: Vec::new(),
+        };
         let mut info = ExecutionInfo::with_capacity(2);
-        let result = ctx.execute_best_transactions(&mut info, &mut state, &mut best_txs, &pool, limits);
+        let result =
+            ctx.execute_best_transactions(&mut info, &mut state, &mut best_txs, &pool, limits);
         assert!(matches!(result, Ok(None)), "loop completes without cancellation: {result:?}");
 
         assert!(best_txs.marked.contains(&(signer0.address, 0)), "candidate #0 is mark_invalid'd");
