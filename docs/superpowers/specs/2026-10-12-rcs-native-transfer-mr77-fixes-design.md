@@ -21,7 +21,8 @@
 | Design URL | https://okg-block.sg.larksuite.com/docx/UXohdEdeaokIGpxWnJPlaqGugac |
 | Canonical spec content hash (sha256, r11) | `49dce95ee1dd5f4f37fcabd0ae24c084447a10b111cc7acaea20f8b141970836` |
 | Lark last_modified at PASS | 2026-10-13T10:15:56Z |
-| Plan baseline | `a0e5d7b73a669d50ed18f65d1c40c52a7a70a230` (MR77 round-4 head) — **NOT** 21a311e9 |
+| Plan baseline (at PASS, historical) | `a0e5d7b73a669d50ed18f65d1c40c52a7a70a230` (MR77 round-4 head) — **NOT** 21a311e9 |
+| Plan / implementation baseline (current) | `ae490d7ffebce921a8e957618b56672d192739f9` — current MR77 head, verified live 2026-10-14. Supersedes the `a0e5d7b7` row above. Metadata correction recorded by Stage 1.0 attempt 11; **the approved r11 design body, its canonical sha256 and the PASS decision are unchanged.** |
 | MR (reused) | https://gitlab.okg.com/github/xlayer-reth/-/merge_requests/77 |
 | Jira | XLOP-1228 (Task) under Epic XLOP-1217 |
 | Scope of this PASS | **Design only.** Does NOT authorize merge, deploy, release, MR-approve, cleanup/finalization, or scope expansion. |
