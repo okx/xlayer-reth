@@ -6,12 +6,42 @@
 
 Design: Lark revision **r11**, token `UXohdEdeaokIGpxWnJPlaqGugac`, canonical sha256
 `49dce95ee1dd5f4f37fcabd0ae24c084447a10b111cc7acaea20f8b141970836`.
-Plan: `docs/superpowers/plans/2026-10-14-rcs-native-transfer-mr77-fixes-plan-r11.md`.
-Branch: `xl/xlop-1217/0928-1135`. Plan baseline: `a0e5d7b73a669d50ed18f65d1c40c52a7a70a230`.
-This evidence was captured at commit `ae04e4b3f4759583425ddd84b4b7732f9bf1fb3e` — the round-5 delta's
-last test/code commit on top of the baseline (`a0e5d7b7..ae04e4b3`: docs carry-forward, the two new
-test commits, one rustfmt fixup). The exact submission SHA after this document's own commit and the MR
-description update is recorded in the merge-request description and in the stage implementation report.
+Plan: `docs/superpowers/plans/2026-10-14-rcs-native-transfer-mr77-fixes-plan-r11-round6.md` (round-6
+delta of `2026-10-14-...-plan-r11.md`).
+Branch: `xl/xlop-1217/0928-1135`. Round-6 plan baseline: `ae490d7ffebce921a8e957618b56672d192739f9`.
+
+**Evidence SHA binding (rule, not a single SHA — see `EV-SHA` in §1):**
+
+1. **Test-capture SHA:** `ae04e4b3f4759583425ddd84b4b7732f9bf1fb3e` — the commit whose tree §3's and
+   §5's test/lint runs were executed against (the round-5 delta's last test/code commit on top of the
+   round-5 baseline `a0e5d7b73a669d50ed18f65d1c40c52a7a70a230`: docs carry-forward, the two new test
+   commits, one rustfmt fixup).
+2. **Final submission SHA:** `<FINAL_HEAD>` — filled in by this round's Task 6, Step 5.
+3. **The binding rule, verbatim:** Every commit between the test-capture SHA and the final submission
+   SHA touches only `docs/**`. The proof is the `git log --oneline` and `git diff --name-only` output
+   reproduced below; a reviewer can re-run both commands and must see only `docs/**` paths. If any
+   non-`docs/**` path ever appears in that range, this document's test evidence is void and must be
+   re-captured at the new head.
+4. **Chain proof, test-capture SHA → round-5 submission SHA** (inherited, re-verified this round):
+
+   ```
+   $ git log --oneline ae04e4b3f4759583425ddd84b4b7732f9bf1fb3e..ae490d7ffebce921a8e957618b56672d192739f9
+   ae490d7f docs(superpowers): r11 per-SHA evidence — raw nextest, default feature tree, NT2 result
+   $ echo $?
+   0
+
+   $ git diff --name-only ae04e4b3f4759583425ddd84b4b7732f9bf1fb3e..ae490d7ffebce921a8e957618b56672d192739f9
+   docs/superpowers/specs/2026-10-14-rcs-native-transfer-mr77-r11-evidence.md
+   $ echo $?
+   0
+   ```
+
+   This inherited range is history, not a claim about this round; it is carried forward unchanged.
+5. **Chain proof, test-capture SHA → final submission SHA** (this round's full accumulated range): filled
+   in by Task 6, Step 5, once `<FINAL_HEAD>` is known.
+
+The round-5 provenance sentence (`a0e5d7b7..ae04e4b3`: docs carry-forward, the two new test commits, one
+rustfmt fixup) is carried forward unchanged above — it is history, not a claim about this round.
 
 ## 1. Evidence contract
 
@@ -23,6 +53,7 @@ description update is recorded in the merge-request description and in the stage
 | EV-CI | `cargo +nightly fmt --all --check` exit 0 and `cargo clippy --all-targets --workspace -- -D warnings` 0/0, each with command + exit code | §5 |
 | EV-T35 | Test-35 marked retained (covering blob proven byte-identical) vs re-tested | §6 |
 | EV-NT2 | r11-NT2 classification: genuine reproduction or honest non-reproduction, with baseline/fixture/result | §7 |
+| EV-SHA | Test-capture SHA and final submission SHA both named, with a re-runnable docs-only chain between them | header |
 
 A bare pass count is not evidence; the raw log referenced in §3 is the evidence of record.
 
