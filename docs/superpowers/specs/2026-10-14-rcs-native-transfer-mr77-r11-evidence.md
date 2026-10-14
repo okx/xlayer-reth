@@ -519,16 +519,36 @@ $ echo $?
 ### 4.1 Default production feature graph (`xlayer-reth-node`, no `--all-features`, dev edges excluded)
 
 ```
-$ cargo tree -p xlayer-reth-node -e normal,build,features
+$ cargo tree -p xlayer-reth-node -e normal,build,features > docs/superpowers/specs/2026-10-14-rcs-native-transfer-mr77-r11-feature-tree.txt 2>&1
+$ echo $?
+0
+$ wc -l docs/superpowers/specs/2026-10-14-rcs-native-transfer-mr77-r11-feature-tree.txt
+12503 docs/superpowers/specs/2026-10-14-rcs-native-transfer-mr77-r11-feature-tree.txt
+```
+
+Full verbatim output committed at
+`docs/superpowers/specs/2026-10-14-rcs-native-transfer-mr77-r11-feature-tree.txt` (12503 lines) — a
+reviewer re-runs the two commands below against that committed file directly, without the author:
+
+```
+$ grep -n 'rcs-filter' docs/superpowers/specs/2026-10-14-rcs-native-transfer-mr77-r11-feature-tree.txt
+12007:│       ├── rcs-filter feature "default"
+12008:│       │   └── rcs-filter v0.0.7 (.../crates/rcs-filter)
+12495:│       └── rcs-filter feature "default" (*)
+$ echo $?
+0
+
+$ grep -c 'rcs-filter feature "test-utils"' docs/superpowers/specs/2026-10-14-rcs-native-transfer-mr77-r11-feature-tree.txt
+0
 $ echo $?
 0
 ```
 
-`rcs-filter` appears exactly twice in the tree, both times as `rcs-filter feature "default"` only
-(`.../crates/rcs-filter` lines 12007-12008 and 12495 of the raw output) — `test-utils` is never listed
-against `rcs-filter` anywhere in the default production dependency graph. (Other, unrelated crates —
-`reth-node-builder`, `reth-primitives-traits`, `reth-db`, etc. — have their OWN `test-utils` feature in
-this tree; those are not `rcs-filter`'s.)
+`rcs-filter` appears exactly twice in the committed tree file, both times as `rcs-filter feature
+"default"` only — `test-utils` is never listed against `rcs-filter` anywhere in the default production
+dependency graph. (Other, unrelated crates — `reth-node-builder`, `reth-primitives-traits`, `reth-db`,
+etc. — have their OWN `test-utils` feature in this tree; those are not `rcs-filter`'s.) `rcs-filter`'s
+`test-utils` feature is absent from the default production dependency graph of `xlayer-reth-node`.
 
 ### 4.2 Cross-crate test availability (test-utils enabled)
 
