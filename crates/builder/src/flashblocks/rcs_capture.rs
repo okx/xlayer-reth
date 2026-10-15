@@ -1714,6 +1714,164 @@ mod gating_integration_tests {
         }
     }
 
+    /// Runtime bytecode: two sequential `CALL(gas, dst, value=1, 0,0,0,0)` to two DIFFERENT
+    /// destinations, each with its own `GAS; CALL; POP`.
+    fn call_value_1_to_two(a: Address, b: Address) -> Vec<u8> {
+        let mut code = call_prefix(0x01, a);
+        code.extend_from_slice(&[0x5a, 0xf1, 0x50]); // GAS CALL POP
+        code.extend_from_slice(&call_prefix(0x01, b));
+        code.extend_from_slice(&[0x5a, 0xf1, 0x00]); // GAS CALL STOP
+        code
+    }
+
+    /// A `quota` audit rule matching `Transfer(address,address,uint256)` on
+    /// [`NATIVE_ASSET_ADDRESS`], for driving a real capture stream through `rcs-filter` screening.
+    fn quota_native_transfer_rule() -> rcs_filter::rules::RuleSet {
+        let json = format!(
+            r#"{{
+              "id": "quota-native-transfer",
+              "event_abis": {{
+                "transfer": {{
+                  "type": "event", "name": "Transfer",
+                  "inputs": [
+                    {{ "name": "from", "type": "address", "indexed": true }},
+                    {{ "name": "to", "type": "address", "indexed": true }},
+                    {{ "name": "value", "type": "uint256", "indexed": false }}
+                  ],
+                  "anonymous": false
+                }}
+              }},
+              "audit_types": ["quota"],
+              "condition": {{ "==": [{{ "var": "transfer.address" }}, "{native:#x}"] }},
+              "action": "audit",
+              "audit_timeout_action": "allow"
+            }}"#,
+            native = NATIVE_ASSET_ADDRESS
+        );
+        let raw: rcs_filter::rules::RawRule = serde_json::from_str(&json).expect("valid rule json");
+        rcs_filter::rules::load_rules(1, 0, vec![raw])
+    }
+
+    #[test]
+    fn selfdestruct_to_self_quota_actions_report_one_transfer() {
+        // Third control dimension: drive the real capture stream through rcs-filter screening and
+        // assert exactly one quota ActionItem, not two.
+        let entry = Address::from([0x51; 20]);
+        let victim = Address::from([0x52; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(entry, account(10, Some(call_value_1_to(victim))));
+        db.insert_account_info(victim, account(0, Some(address_then_selfdestruct())));
+
+        let (outcome, success) = run_capturing_tx(db, entry, 16);
+        assert!(success, "top-level tx should succeed");
+        let stream = match outcome {
+            CaptureOutcome::Complete(stream) => stream,
+            other => panic!("expected Complete, got {other:?}"),
+        };
+
+        let rules = quota_native_transfer_rule();
+        let input = rcs_filter::handle::ScreenInput {
+            tx_hash: B256::ZERO,
+            origin: entry,
+            tx_to: Some(victim),
+            nonce: 0,
+            value: U256::ZERO,
+            block_height: 0,
+            logs: &stream,
+        };
+        match rcs_filter::matching::evaluate(&rules, &input) {
+            rcs_filter::matching::MatchOutcome::Audit { actions, .. } => {
+                let quota = actions.get("quota").expect("quota audit_type key present");
+                assert_eq!(quota.len(), 1, "expected exactly one quota action, not a replay");
+                assert_eq!(
+                    quota[0].params.get("value").and_then(|v| v.as_str()),
+                    Some("1")
+                );
+            }
+            other => panic!("expected Audit with quota actions, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stop_control_quota_actions_report_one_transfer() {
+        // Control for the test above: identical single ActionItem.
+        let entry = Address::from([0x51; 20]);
+        let victim = Address::from([0x52; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(entry, account(10, Some(call_value_1_to(victim))));
+        db.insert_account_info(victim, account(0, Some(stop_only())));
+
+        let (outcome, success) = run_capturing_tx(db, entry, 16);
+        assert!(success, "top-level tx should succeed");
+        let stream = match outcome {
+            CaptureOutcome::Complete(stream) => stream,
+            other => panic!("expected Complete, got {other:?}"),
+        };
+
+        let rules = quota_native_transfer_rule();
+        let input = rcs_filter::handle::ScreenInput {
+            tx_hash: B256::ZERO,
+            origin: entry,
+            tx_to: Some(victim),
+            nonce: 0,
+            value: U256::ZERO,
+            block_height: 0,
+            logs: &stream,
+        };
+        match rcs_filter::matching::evaluate(&rules, &input) {
+            rcs_filter::matching::MatchOutcome::Audit { actions, .. } => {
+                let quota = actions.get("quota").expect("quota audit_type key present");
+                assert_eq!(quota.len(), 1);
+                assert_eq!(
+                    quota[0].params.get("value").and_then(|v| v.as_str()),
+                    Some("1")
+                );
+            }
+            other => panic!("expected Audit with quota actions, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn genuine_and_self_targeted_selfdestructs_in_one_tx_report_only_the_genuine() {
+        // Review focus: a genuine SELFDESTRUCT and a to-self SELFDESTRUCT in the same transaction,
+        // in both call orders. An over-broad guard that suppressed the genuine one, or a flag that
+        // carried from the first SELFDESTRUCT to the second, would under- or over-report here.
+        let entry = Address::from([0x71; 20]);
+        let victim_a = Address::from([0x72; 20]); // genuine: selfdestructs to `beneficiary`
+        let victim_b = Address::from([0x73; 20]); // to-self: contributes nothing
+        let beneficiary = Address::from([0x74; 20]);
+
+        let run = |first: Address, second: Address| -> Vec<Log> {
+            let mut db = InMemoryDB::default();
+            db.insert_account_info(caller(), account(1_000_000_000, None));
+            db.insert_account_info(entry, account(10, Some(call_value_1_to_two(first, second))));
+            db.insert_account_info(victim_a, account(0, Some(selfdestruct_to(beneficiary))));
+            db.insert_account_info(victim_b, account(0, Some(address_then_selfdestruct())));
+
+            let (outcome, success) = run_capturing_tx(db, entry, 16);
+            assert!(success, "top-level tx should succeed");
+            match outcome {
+                CaptureOutcome::Complete(stream) => stream,
+                other => panic!("expected Complete, got {other:?}"),
+            }
+        };
+
+        for (first, second, label) in
+            [(victim_a, victim_b, "genuine-then-self"), (victim_b, victim_a, "self-then-genuine")]
+        {
+            let stream = run(first, second);
+            assert_eq!(
+                stream.len(),
+                3,
+                "{label}: expected the two CALL transfers plus the one genuine SELFDESTRUCT transfer"
+            );
+            let genuine = stream.iter().filter(|log| log.topics()[2] == beneficiary.into_word()).count();
+            assert_eq!(genuine, 1, "{label}: exactly one transfer must reach the beneficiary");
+        }
+    }
+
     /// Runtime bytecode: `CALL(gas, dst, value=0, 0,0,0,0); STOP` — a zero-value child call whose
     /// failure is ignored.
     fn call_value_0_to(dst: Address) -> Vec<u8> {
