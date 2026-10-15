@@ -16,8 +16,8 @@ use revm::{
     context_interface::{ContextTr, CreateScheme, JournalTr},
     inspector::{JournalExt, NoOpInspector},
     interpreter::{
-        interpreter_types::Jumps, CallInputs, CallOutcome, CreateInputs, CreateOutcome, Interpreter,
-        InterpreterTypes,
+        interpreter_types::Jumps, CallInputs, CallOutcome, CreateInputs, CreateOutcome,
+        Interpreter, InterpreterTypes,
     },
     Inspector,
 };
@@ -1086,10 +1086,19 @@ mod tests {
 
         inspector.start_capture();
         assert!(!inspector.selfdestruct_wrote_journal, "the next window must start clean");
-        inspector.observe_native_transfer(addr(1), addr(2), U256::from(1u64), NativeTransferKind::Call);
+        inspector.observe_native_transfer(
+            addr(1),
+            addr(2),
+            U256::from(1u64),
+            NativeTransferKind::Call,
+        );
         match inspector.finish_capture(&[]) {
             CaptureOutcome::Complete(logs) => {
-                assert_eq!(logs.len(), 1, "the ordinary transfer must not be mis-attributed or doubled")
+                assert_eq!(
+                    logs.len(),
+                    1,
+                    "the ordinary transfer must not be mis-attributed or doubled"
+                )
             }
             other => panic!("expected Complete with one transfer, got {other:?}"),
         }
@@ -1917,10 +1926,7 @@ mod gating_integration_tests {
             rcs_filter::matching::MatchOutcome::Audit { actions, .. } => {
                 let quota = actions.get("quota").expect("quota audit_type key present");
                 assert_eq!(quota.len(), 1, "expected exactly one quota action, not a replay");
-                assert_eq!(
-                    quota[0].params.get("value").and_then(|v| v.as_str()),
-                    Some("1")
-                );
+                assert_eq!(quota[0].params.get("value").and_then(|v| v.as_str()), Some("1"));
             }
             other => panic!("expected Audit with quota actions, got {other:?}"),
         }
@@ -1957,10 +1963,7 @@ mod gating_integration_tests {
             rcs_filter::matching::MatchOutcome::Audit { actions, .. } => {
                 let quota = actions.get("quota").expect("quota audit_type key present");
                 assert_eq!(quota.len(), 1);
-                assert_eq!(
-                    quota[0].params.get("value").and_then(|v| v.as_str()),
-                    Some("1")
-                );
+                assert_eq!(quota[0].params.get("value").and_then(|v| v.as_str()), Some("1"));
             }
             other => panic!("expected Audit with quota actions, got {other:?}"),
         }
@@ -2000,7 +2003,8 @@ mod gating_integration_tests {
                 3,
                 "{label}: expected the two CALL transfers plus the one genuine SELFDESTRUCT transfer"
             );
-            let genuine = stream.iter().filter(|log| log.topics()[2] == beneficiary.into_word()).count();
+            let genuine =
+                stream.iter().filter(|log| log.topics()[2] == beneficiary.into_word()).count();
             assert_eq!(genuine, 1, "{label}: exactly one transfer must reach the beneficiary");
         }
     }
@@ -2093,14 +2097,14 @@ mod gating_integration_tests {
         let init_len = init_code.len() as u8;
         let mut head = vec![
             0x60, init_len, // PUSH1 init_len   (CODECOPY size)
-            0x60, 0x00,     // PUSH1 <codeoffset> -- patched below (CODECOPY offset)
-            0x60, 0x00,     // PUSH1 0          (CODECOPY destOffset)
-            0x39,           // CODECOPY
+            0x60, 0x00, // PUSH1 <codeoffset> -- patched below (CODECOPY offset)
+            0x60, 0x00, // PUSH1 0          (CODECOPY destOffset)
+            0x39, // CODECOPY
             0x60, init_len, // PUSH1 init_len   (CREATE size)
-            0x60, 0x00,     // PUSH1 0          (CREATE offset)
-            0x60, value,    // PUSH1 value      (CREATE value)
-            0xf0,           // CREATE
-            0x50,           // POP (discard the dynamic created address; we call a precomputed one)
+            0x60, 0x00, // PUSH1 0          (CREATE offset)
+            0x60, value, // PUSH1 value      (CREATE value)
+            0xf0,  // CREATE
+            0x50,  // POP (discard the dynamic created address; we call a precomputed one)
         ];
         head.extend_from_slice(&call_prefix(0x00, child_addr)); // CALL(gas, child_addr, 0, 0,0,0,0)
         head.extend_from_slice(&[0x5a, 0xf1, 0x00]); // GAS CALL STOP

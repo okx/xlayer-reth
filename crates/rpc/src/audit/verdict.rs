@@ -398,7 +398,10 @@ mod tests {
             &two_rules(),
         );
         assert_eq!(allowed.verdict, Verdict::Audit);
-        assert!(allowed.actions.is_some(), "9,800 total bindings must be classified, not Malformed");
+        assert!(
+            allowed.actions.is_some(),
+            "9,800 total bindings must be classified, not Malformed"
+        );
 
         let malformed = verdict_for(
             &sample_request(),
