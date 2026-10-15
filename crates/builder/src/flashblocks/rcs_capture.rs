@@ -2046,6 +2046,47 @@ mod gating_integration_tests {
     }
 
     #[test]
+    fn inactive_inspector_selfdestruct_normal_transfer_leaves_new_state_untouched() {
+        // The to-self shape above writes NO journal entry, so on field values alone it would
+        // pass equally against an implementation whose step/step_end gates were removed (an
+        // ungated step/step_end would measure a zero delta either way). This is the
+        // discriminating shape: a normal transfer (existing contract, beneficiary != victim,
+        // balance > 0) DOES write a journal entry, so an ungated step/step_end would leave
+        // `selfdestruct_wrote_journal == true` here -- which is exactly what this test rules
+        // out. This pins the specific regression where step/step_end lose their inactive gate
+        // while the selfdestruct hook's own gate is retained; it is not a claim that any gate
+        // failure in general leaves the flag true.
+        reset_selfdestruct_gate_seams();
+        let victim = Address::from([0x81; 20]);
+        let beneficiary = Address::from([0x82; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(victim, account(500, Some(selfdestruct_to(beneficiary))));
+
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        // Deliberately never call start_capture.
+        let result = evm.transact(call_tx(victim)).expect("tx executes");
+        assert!(result.result.is_success());
+
+        let inspector = evm.components_mut().1;
+        // Read BEFORE any start_capture/finish_capture, so a reset cannot stand in for the gate.
+        assert_eq!(inspector.selfdestruct_journal_mark, None);
+        assert!(!inspector.selfdestruct_wrote_journal);
+
+        let (hits, active_ran, journal_ran) = SELFDESTRUCT_GATE_SNAPSHOT.with(|s| s.get());
+        assert!(hits > 0, "the step hook must still be reached for the SELFDESTRUCT opcode");
+        assert!(!active_ran, "the active branch must not run while inactive");
+        assert!(!journal_ran, "the watermark journal read must never execute while inactive");
+    }
+
+    #[test]
     fn inactive_then_armed_inspector_still_captures() {
         // The SAME inspector instance that just ran inactive must still capture correctly
         // once armed — proves the inactive gate does not poison a later window.
