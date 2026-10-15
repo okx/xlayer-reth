@@ -229,6 +229,18 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn reset_selfdestruct_gate_seams() {
     SELFDESTRUCT_GATE_SNAPSHOT.with(|s| s.set((0, false, false)));
+    SELFDESTRUCT_CALLBACK_HITS.with(|c| c.set(0));
+}
+
+// Test-only direct evidence that the `selfdestruct` hook itself was entered. Needed because the
+// absence of a `SelfDestruct`-kind observation in the final stream is NOT proof the callback never
+// fired: a reverted frame can remove logs on its own. Incremented as the FIRST statement of the
+// hook, before the `active` gate, so `0` means "never entered" -- distinguishable from "entered
+// while inactive". Never set in production (the whole seam is `#[cfg(test)]`).
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SELFDESTRUCT_CALLBACK_HITS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 /// The RCS capture inspector: the **inner** inspector of `alloy_op_evm::OpEvm`'s composite
@@ -676,6 +688,11 @@ where
     }
 
     fn selfdestruct(&mut self, contract: Address, target: Address, value: U256) {
+        // Record that the callback was entered at all, before anything else -- including the
+        // active gate -- so direct evidence distinguishes "never entered" from "entered while
+        // inactive". No effect in production builds (`#[cfg(test)]`).
+        #[cfg(test)]
+        SELFDESTRUCT_CALLBACK_HITS.with(|c| c.set(c.get() + 1));
         // Inactive windows are strict no-ops: do not even consume the flag, or a stale flag could
         // be silently absorbed here and lost to the next armed window.
         if !self.active {
@@ -1483,6 +1500,20 @@ mod gating_integration_tests {
         code
     }
 
+    /// Runtime bytecode: `CALL(stipend, dst, value=1, 0, 0, 0, 0); STOP` — a value-bearing
+    /// internal transfer with a FIXED gas immediate (`PUSH2 stipend`) instead of `GAS`, so the
+    /// callee frame's gas can be shaped to run out mid-execution. The idiom mirrors
+    /// `delegatecall_to_then_stop`'s `PUSH3 500000` in place of `GAS`. The callee's actual gas is
+    /// `stipend + 2300`, because a value-bearing `CALL` adds the 2,300-gas call stipend on top of
+    /// whatever is explicitly requested; a small `stipend` keeps the EIP-150 63/64-forwarding cap
+    /// irrelevant.
+    fn call_fixed_gas_value_1_to(stipend: u16, dst: Address) -> Vec<u8> {
+        let mut code = call_prefix(0x01, dst);
+        code.extend_from_slice(&[0x61, (stipend >> 8) as u8, (stipend & 0xff) as u8]); // PUSH2 stipend
+        code.extend_from_slice(&[0xf1, 0x00]); // CALL STOP
+        code
+    }
+
     /// Runtime bytecode: `DELEGATECALL(gas, dst, 0, 0, 0, 0); POP; STOP`.
     /// The caller delegates execution to `dst`; any CALL/CREATE inside `dst`'s code
     /// runs with the delegating address as the execution context.
@@ -2124,6 +2155,115 @@ mod gating_integration_tests {
                 assert_eq!(stream[0].topics()[2], victim.into_word());
             }
             other => panic!("expected Complete with one transfer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn selfdestruct_oog_after_journal_write_leaks_flag_but_not_across_windows() {
+        // The real abnormal path, not a hand-set simulation: a value-bearing SELFDESTRUCT writes
+        // its journal entry (JournalInner::selfdestruct's BalanceTransfer/AccountTouched branch)
+        // BEFORE the dynamic gas charge for a new-account + cold-access beneficiary runs. If that
+        // charge fails, the opcode halts with OutOfGas; step_end still measures the (already
+        // grown) journal and sets the flag, but the selfdestruct callback is dispatched only for
+        // InstructionResult::SelfDestruct, so it never fires to consume it.
+        //
+        // Measured (not computed from the gas table): the victim's beneficiary is NOT
+        // pre-inserted (cold, non-existent, so the dynamic charge includes the new-account cost)
+        // and the victim is called with a fixed 10_000-gas stipend. The victim frame's actual gas
+        // at CALL entry is 10_000 + 2_300 (the value-bearing CALL's own stipend) = 12_300, which
+        // sits inside the measured window where the opcode's static dispatch succeeds (so the
+        // journal write runs) but the dynamic charge does not (so it halts after writing).
+        const STIPEND: u16 = 10_000;
+
+        let third = Address::from([0x95; 20]);
+        let victim = Address::from([0x96; 20]);
+        let beneficiary = Address::from([0x97; 20]);
+        let entry = Address::from([0x98; 20]);
+        let entry2 = Address::from([0x99; 20]);
+        let dst2 = Address::from([0x9A; 20]);
+        let second_caller = Address::from([0xBC; 20]);
+
+        reset_selfdestruct_gate_seams();
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(second_caller, account(1_000_000_000, None));
+        db.insert_account_info(victim, account(500, Some(selfdestruct_to(beneficiary))));
+        // entry: a separate, successful ordinary transfer to `third` first (full gas), THEN the
+        // fixed-gas call into `victim` whose frame will run out of gas on the dynamic charge. The
+        // out-of-gas victim frame reverts its OWN incoming value transfer along with everything
+        // else in that frame, so the surviving stream is the `third` transfer, not an empty one.
+        let mut entry_code = call_prefix(0x01, third);
+        entry_code.extend_from_slice(&[0x5a, 0xf1, 0x50]); // GAS CALL POP
+        entry_code.extend_from_slice(&call_fixed_gas_value_1_to(STIPEND, victim));
+        db.insert_account_info(entry, account(10, Some(entry_code)));
+        db.insert_account_info(entry2, account(10, Some(call_value_1_to(dst2))));
+
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        evm.components_mut().1.start_capture();
+        let result = evm.transact(call_tx_from(caller(), entry)).expect("tx executes");
+        assert!(result.result.is_success(), "the top-level tx succeeds; only the inner CALL fails");
+
+        // 1. the opcode was reached and measured in an ARMED window.
+        let (hits, active_ran, journal_ran) = SELFDESTRUCT_GATE_SNAPSHOT.with(|s| s.get());
+        assert!(hits > 0, "the step hook must be reached for the SELFDESTRUCT opcode");
+        assert!(active_ran, "the window must be armed");
+        assert!(journal_ran, "the watermark must have read the journal for THIS opcode");
+
+        // 2. the callback never fired -- proven DIRECTLY via a dedicated entry counter, not via
+        // the absence of a SelfDestruct-kind log (a revert can remove logs on its own). The
+        // callback fires if and only if the opcode's result is InstructionResult::SelfDestruct,
+        // so hits == 0 here, together with journal_ran/flag below, is direct evidence the result
+        // was something else (the measured OutOfGas halt).
+        assert_eq!(
+            SELFDESTRUCT_CALLBACK_HITS.with(|c| c.get()),
+            0,
+            "the selfdestruct callback must never have been entered"
+        );
+
+        // 3. the measured leak, read LIVE before the window ends. A read taken after
+        // finish_capture would always see `false` (every window boundary resets it) and would
+        // silently hide the leak -- which is exactly why this must be read here, not later.
+        let inspector = evm.components_mut().1;
+        assert_eq!(inspector.selfdestruct_journal_mark, None, "step_end took the mark");
+        assert!(inspector.selfdestruct_wrote_journal, "THE LEAK: the flag is set with no consumer");
+
+        let outcome = inspector.finish_capture(result.result.logs());
+        match &outcome {
+            CaptureOutcome::Complete(stream) => {
+                assert_eq!(stream.len(), 1, "only the separate successful transfer survives");
+                assert_eq!(stream[0].topics()[1], entry.into_word());
+                assert_eq!(stream[0].topics()[2], third.into_word());
+            }
+            other => panic!("expected Complete with the one surviving transfer, got {other:?}"),
+        }
+        // Immediately after finish: the flag is cleared. This documents WHY assertion 3 above had
+        // to be read live.
+        assert!(!evm.components_mut().1.selfdestruct_wrote_journal);
+
+        // 4. the next window on the SAME inspector is clean and correct.
+        evm.components_mut().1.start_capture();
+        assert!(
+            !evm.components_mut().1.selfdestruct_wrote_journal,
+            "the next window must not inherit the leaked flag"
+        );
+        let result2 = evm.transact(call_tx_from(second_caller, entry2)).expect("tx executes");
+        assert!(result2.result.is_success());
+        match evm.components_mut().1.finish_capture(result2.result.logs()) {
+            CaptureOutcome::Complete(stream) => {
+                assert_eq!(stream.len(), 1, "the next window's ordinary transfer is observed once");
+                assert_eq!(stream[0].topics()[1], entry2.into_word());
+                assert_eq!(stream[0].topics()[2], dst2.into_word());
+            }
+            other => {
+                panic!("expected Complete with one transfer in the next window, got {other:?}")
+            }
         }
     }
 
