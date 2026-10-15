@@ -12,9 +12,13 @@
 
 use alloy_primitives::{address, keccak256, Address, Bytes, Log, LogData, B256, U256};
 use revm::{
+    bytecode::opcode,
     context_interface::{ContextTr, CreateScheme, JournalTr},
     inspector::{JournalExt, NoOpInspector},
-    interpreter::{CallInputs, CallOutcome, CreateInputs, CreateOutcome, InterpreterTypes},
+    interpreter::{
+        interpreter_types::Jumps, CallInputs, CallOutcome, CreateInputs, CreateOutcome, Interpreter,
+        InterpreterTypes,
+    },
     Inspector,
 };
 
@@ -237,6 +241,13 @@ pub struct RcsInspector {
     /// `InvariantViolation { CreateAddressMismatch }` — never silently truncated. Cleared on
     /// every `start_capture`, `abort_capture`, and `finish_capture` exit.
     address_mismatch_create_index: Option<usize>,
+    /// Journal length captured in `step` when the opcode about to execute is `SELFDESTRUCT`.
+    /// `None` outside that one-opcode window. Only ever written while `active`.
+    selfdestruct_journal_mark: Option<usize>,
+    /// `true` when the last measured `SELFDESTRUCT` actually appended a journal entry, i.e. when
+    /// the `selfdestruct` callback's payload describes THIS opcode rather than a previous entry.
+    /// Consumed with `mem::take` by the callback. Only ever written while `active`.
+    selfdestruct_wrote_journal: bool,
 }
 
 impl RcsInspector {
@@ -252,6 +263,8 @@ impl RcsInspector {
             limit: max_native_transfers,
             create_recipients: Vec::new(),
             address_mismatch_create_index: None,
+            selfdestruct_journal_mark: None,
+            selfdestruct_wrote_journal: false,
         }
     }
 
@@ -364,6 +377,8 @@ impl RcsCaptureControl for RcsInspector {
         self.observed_count = 0;
         self.overflowed = false;
         self.address_mismatch_create_index = None;
+        self.selfdestruct_journal_mark = None;
+        self.selfdestruct_wrote_journal = false;
         self.active = true;
     }
 
@@ -438,6 +453,8 @@ impl RcsCaptureControl for RcsInspector {
         self.observed_count = 0;
         self.overflowed = false;
         self.address_mismatch_create_index = None;
+        self.selfdestruct_journal_mark = None;
+        self.selfdestruct_wrote_journal = false;
         self.active = false;
         outcome
     }
@@ -449,6 +466,8 @@ impl RcsCaptureControl for RcsInspector {
         self.observed_count = 0;
         self.overflowed = false;
         self.address_mismatch_create_index = None;
+        self.selfdestruct_journal_mark = None;
+        self.selfdestruct_wrote_journal = false;
         self.active = false;
     }
 }
@@ -596,7 +615,42 @@ where
         });
     }
 
+    fn step(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
+        // Inactive windows are strict no-ops: no journal read, no field write (gasless pre-checks
+        // and other non-capturing simulations must never pay for or observe this).
+        if !self.active {
+            return;
+        }
+        if interp.bytecode.opcode() == opcode::SELFDESTRUCT {
+            self.selfdestruct_journal_mark = Some(context.journal_ref().journal().len());
+        }
+    }
+
+    fn step_end(&mut self, _interp: &mut Interpreter<INTR>, context: &mut CTX) {
+        if !self.active {
+            return;
+        }
+        if let Some(pre) = self.selfdestruct_journal_mark.take() {
+            self.selfdestruct_wrote_journal = context.journal_ref().journal().len() > pre;
+        }
+    }
+
     fn selfdestruct(&mut self, contract: Address, target: Address, value: U256) {
+        // Inactive windows are strict no-ops: do not even consume the flag, or a stale flag could
+        // be silently absorbed here and lost to the next armed window.
+        if !self.active {
+            return;
+        }
+        // Pinned revm populates this callback from `journal().last()`, keyed only on the
+        // interpreter result. A Cancun existing-contract SELFDESTRUCT-to-self writes NO journal
+        // entry, so `last()` is then a previous, unrelated entry — e.g. the enclosing CALL's own
+        // balance transfer — which this callback would replay as a second native transfer. Accept
+        // the payload only when THIS opcode actually appended an entry. Structural, not
+        // content-based: two legitimate identical transfers each push their own entry and are both
+        // still observed.
+        if !core::mem::take(&mut self.selfdestruct_wrote_journal) {
+            return;
+        }
         // SELFDESTRUCT is an opcode-level internal transfer, counted even in the root frame (not
         // journal-depth-excluded). `observe_native_transfer` filters zero-value and self-transfers.
         self.observe_native_transfer(contract, target, value, NativeTransferKind::SelfDestruct);
@@ -1421,6 +1475,242 @@ mod gating_integration_tests {
                 assert_eq!(stream[0].data.data.as_ref(), &U256::from(500u64).to_be_bytes::<32>());
             }
             other => panic!("expected Complete with one SELFDESTRUCT transfer, got {other:?}"),
+        }
+    }
+
+    /// Runtime bytecode: `ADDRESS; SELFDESTRUCT` — a Cancun existing-contract SELFDESTRUCT whose
+    /// beneficiary is itself. On the pinned Cancun-or-later branch this writes NO journal entry.
+    fn address_then_selfdestruct() -> Vec<u8> {
+        vec![0x30, 0xff] // ADDRESS SELFDESTRUCT
+    }
+
+    /// Runtime bytecode: `STOP` — the control body for the SELFDESTRUCT-to-self fixtures.
+    fn stop_only() -> Vec<u8> {
+        vec![0x00] // STOP
+    }
+
+    /// Runtime bytecode: two sequential `CALL(gas, dst, value=1, 0,0,0,0)` to the same `dst`,
+    /// each with its own `GAS; CALL; POP` so the second call's args sit above the first's leftover
+    /// return value. Used to prove the fix is not content-based: two legitimate identical transfers.
+    fn call_value_1_twice_to(dst: Address) -> Vec<u8> {
+        let mut code = call_prefix(0x01, dst);
+        code.extend_from_slice(&[0x5a, 0xf1, 0x50]); // GAS CALL POP
+        code.extend_from_slice(&call_prefix(0x01, dst));
+        code.extend_from_slice(&[0x5a, 0xf1, 0x00]); // GAS CALL STOP
+        code
+    }
+
+    /// Runtime bytecode: `PUSH1 1; PUSH1 0; SSTORE` prologue, then `CALL(gas, dst, value=1, …); STOP`
+    /// — an unrelated journal-writing opcode immediately before a value-bearing internal CALL.
+    fn sstore_then_call_value_1_to(dst: Address) -> Vec<u8> {
+        let mut code = vec![0x60, 0x01, 0x60, 0x00, 0x55]; // PUSH1 1; PUSH1 0; SSTORE
+        code.extend_from_slice(&call_value_1_to(dst));
+        code
+    }
+
+    /// Runtime bytecode: `CALL(value=1, victim)`, then `SSTORE`, then `CALL(value=0, victim2); STOP`.
+    /// Used to prove a journal-writing opcode earlier in the SAME window does not arm a later,
+    /// unrelated, no-write `SELFDESTRUCT`.
+    fn call_1_then_sstore_then_call_0_to(victim: Address, victim2: Address) -> Vec<u8> {
+        let mut code = call_prefix(0x01, victim);
+        code.extend_from_slice(&[0x5a, 0xf1, 0x50]); // GAS CALL POP
+        code.extend_from_slice(&[0x60, 0x01, 0x60, 0x00, 0x55]); // PUSH1 1; PUSH1 0; SSTORE
+        code.extend_from_slice(&call_prefix(0x00, victim2));
+        code.extend_from_slice(&[0x5a, 0xf1, 0x00]); // GAS CALL STOP
+        code
+    }
+
+    #[test]
+    fn existing_contract_selfdestruct_to_self_is_not_captured() {
+        // Cancun existing-contract SELFDESTRUCT-to-self writes NO journal entry. A stale-callback
+        // replay bug would double-count the enclosing CALL's own transfer here.
+        let entry = Address::from([0x51; 20]);
+        let victim = Address::from([0x52; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(entry, account(10, Some(call_value_1_to(victim))));
+        db.insert_account_info(victim, account(0, Some(address_then_selfdestruct())));
+
+        let (outcome, success) = run_capturing_tx(db, entry, 16);
+        assert!(success, "top-level tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete(stream) => {
+                assert_eq!(
+                    stream.len(),
+                    1,
+                    "expected exactly the enclosing CALL's transfer, no replay from SELFDESTRUCT"
+                );
+                assert_eq!(stream[0].topics()[1], entry.into_word());
+                assert_eq!(stream[0].topics()[2], victim.into_word());
+                assert_eq!(stream[0].data.data.as_ref(), &U256::from(1u64).to_be_bytes::<32>());
+            }
+            other => panic!("expected Complete with exactly one transfer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stop_control_matches_selfdestruct_to_self_capture_count() {
+        // Control for the test above: the victim just STOPs instead of self-destructing. The
+        // identical single-transfer count isolates SELFDESTRUCT-to-self as the only variable.
+        let entry = Address::from([0x51; 20]);
+        let victim = Address::from([0x52; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(entry, account(10, Some(call_value_1_to(victim))));
+        db.insert_account_info(victim, account(0, Some(stop_only())));
+
+        let (outcome, success) = run_capturing_tx(db, entry, 16);
+        assert!(success, "top-level tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete(stream) => {
+                assert_eq!(stream.len(), 1);
+                assert_eq!(stream[0].topics()[1], entry.into_word());
+                assert_eq!(stream[0].topics()[2], victim.into_word());
+                assert_eq!(stream[0].data.data.as_ref(), &U256::from(1u64).to_be_bytes::<32>());
+            }
+            other => panic!("expected Complete with exactly one transfer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn selfdestruct_to_self_consumes_no_native_budget() {
+        // Sharpest discriminator: at budget 1, a stale replay would double-count and overflow to
+        // LimitExceeded instead of completing.
+        let entry = Address::from([0x51; 20]);
+        let victim = Address::from([0x52; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(entry, account(10, Some(call_value_1_to(victim))));
+        db.insert_account_info(victim, account(0, Some(address_then_selfdestruct())));
+
+        let (outcome, success) = run_capturing_tx(db, entry, 1);
+        assert!(success, "top-level tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete(stream) => assert_eq!(stream.len(), 1),
+            other => panic!("expected Complete (budget 1 is not exceeded), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stop_control_at_budget_1_completes() {
+        // Control for the test above: proves budget 1 is genuinely at the limit, so the previous
+        // test's pass is not slack from an oversized budget.
+        let entry = Address::from([0x51; 20]);
+        let victim = Address::from([0x52; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(entry, account(10, Some(call_value_1_to(victim))));
+        db.insert_account_info(victim, account(0, Some(stop_only())));
+
+        let (outcome, success) = run_capturing_tx(db, entry, 1);
+        assert!(success, "top-level tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete(stream) => assert_eq!(stream.len(), 1),
+            other => panic!("expected Complete at budget 1, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn existing_contract_selfdestruct_to_beneficiary_still_captured() {
+        // G2 regression: an existing contract that SELFDESTRUCTs to a DIFFERENT, non-zero-balance
+        // beneficiary must still be observed exactly once — guards against over-suppression.
+        let victim = Address::from([0x55; 20]);
+        let beneficiary = Address::from([0x56; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(victim, account(500, Some(selfdestruct_to(beneficiary))));
+
+        let (outcome, success) = run_capturing_tx(db, victim, 16);
+        assert!(success, "top-level tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete(stream) => {
+                assert_eq!(stream.len(), 1, "genuine SELFDESTRUCT transfer must still be captured");
+                assert_eq!(stream[0].topics()[1], victim.into_word());
+                assert_eq!(stream[0].topics()[2], beneficiary.into_word());
+                assert_eq!(stream[0].data.data.as_ref(), &U256::from(500u64).to_be_bytes::<32>());
+            }
+            other => panic!("expected Complete with one SELFDESTRUCT transfer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn two_identical_native_transfers_are_both_observed() {
+        // G3: the fix must be structural, not content-based. Two legitimate identical transfers in
+        // one transaction must both still be observed.
+        let entry = Address::from([0x57; 20]);
+        let dst = Address::from([0x58; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(entry, account(10, Some(call_value_1_twice_to(dst))));
+
+        let (outcome, success) = run_capturing_tx(db, entry, 16);
+        assert!(success, "top-level tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete(stream) => {
+                assert_eq!(stream.len(), 2, "two identical transfers must both be observed");
+                assert_eq!(stream[0].topics(), stream[1].topics());
+                assert_eq!(stream[0].data.data, stream[1].data.data);
+            }
+            other => panic!("expected Complete with two transfers, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_selfdestruct_to_self_after_unrelated_journal_entry_is_not_captured() {
+        // Review focus: the stale entry can come from anywhere earlier in the (flat,
+        // transaction-wide) journal, not just depth 1. Depth-2 shape with an intervening SSTORE
+        // between the value-bearing CALL and the SELFDESTRUCT.
+        let entry = Address::from([0x61; 20]);
+        let mid = Address::from([0x62; 20]);
+        let victim = Address::from([0x63; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(entry, account(10, Some(call_value_1_to(mid))));
+        db.insert_account_info(mid, account(10, Some(sstore_then_call_value_1_to(victim))));
+        db.insert_account_info(victim, account(0, Some(address_then_selfdestruct())));
+
+        let (outcome, success) = run_capturing_tx(db, entry, 16);
+        assert!(success, "top-level tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete(stream) => {
+                assert_eq!(
+                    stream.len(),
+                    2,
+                    "expected only the two real value-bearing CALLs, no SELFDESTRUCT replay"
+                );
+            }
+            other => panic!("expected Complete with exactly two transfers, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn journal_writing_opcode_does_not_arm_a_later_selfdestruct() {
+        // Review focus: an earlier journal-writing opcode (SSTORE) in the SAME window must not
+        // leak into a later, unrelated, no-write SELFDESTRUCT. The watermark is taken per-opcode,
+        // not merely "did the journal grow at some point in this window".
+        let entry = Address::from([0x64; 20]);
+        let victim = Address::from([0x65; 20]);
+        let victim2 = Address::from([0x66; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(
+            entry,
+            account(10, Some(call_1_then_sstore_then_call_0_to(victim, victim2))),
+        );
+        db.insert_account_info(victim2, account(0, Some(address_then_selfdestruct())));
+
+        let (outcome, success) = run_capturing_tx(db, entry, 16);
+        assert!(success, "top-level tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete(stream) => {
+                assert_eq!(
+                    stream.len(),
+                    1,
+                    "only the real value-bearing CALL should be observed; the SSTORE must not \
+                     arm the later no-write SELFDESTRUCT"
+                );
+            }
+            other => panic!("expected Complete with exactly one transfer, got {other:?}"),
         }
     }
 
