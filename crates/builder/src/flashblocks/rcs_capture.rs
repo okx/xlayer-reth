@@ -1020,7 +1020,7 @@ mod tests {
 
     #[test]
     fn new_selfdestruct_state_cleared_on_every_finish_exit_and_abort() {
-        // AC15: both new fields are driven to a NON-initial state first (so the clearing
+        // Both new fields are driven to a NON-initial state first (so the clearing
         // assertion is not vacuous), then cleared on every exit: Complete, LimitExceeded,
         // InvariantViolation, and abort_capture.
 
@@ -1074,7 +1074,7 @@ mod tests {
 
     #[test]
     fn unconsumed_selfdestruct_flag_does_not_cross_windows() {
-        // AC16: a SELFDESTRUCT that exits abnormally so the `selfdestruct` callback never fires
+        // A SELFDESTRUCT that exits abnormally so the `selfdestruct` callback never fires
         // leaves `selfdestruct_wrote_journal` set; the NEXT window must not inherit it, and a
         // following ordinary (non-SELFDESTRUCT) transfer in that window must not be mis-attributed
         // or doubled.
@@ -1754,7 +1754,7 @@ mod gating_integration_tests {
 
     #[test]
     fn existing_contract_selfdestruct_to_beneficiary_still_captured() {
-        // G2 regression: an existing contract that SELFDESTRUCTs to a DIFFERENT, non-zero-balance
+        // Regression guard: an existing contract that SELFDESTRUCTs to a DIFFERENT, non-zero-balance
         // beneficiary must still be observed exactly once — guards against over-suppression.
         let victim = Address::from([0x55; 20]);
         let beneficiary = Address::from([0x56; 20]);
@@ -1777,7 +1777,7 @@ mod gating_integration_tests {
 
     #[test]
     fn two_identical_native_transfers_are_both_observed() {
-        // G3: the fix must be structural, not content-based. Two legitimate identical transfers in
+        // The fix must be structural, not content-based. Two legitimate identical transfers in
         // one transaction must both still be observed.
         let entry = Address::from([0x57; 20]);
         let dst = Address::from([0x58; 20]);
@@ -1799,9 +1799,9 @@ mod gating_integration_tests {
 
     #[test]
     fn nested_selfdestruct_to_self_after_unrelated_journal_entry_is_not_captured() {
-        // Review focus: the stale entry can come from anywhere earlier in the (flat,
-        // transaction-wide) journal, not just depth 1. Depth-2 shape with an intervening SSTORE
-        // between the value-bearing CALL and the SELFDESTRUCT.
+        // The stale entry can come from anywhere earlier in the (flat, transaction-wide) journal,
+        // not just the immediately enclosing frame. A shape two frames deep with an intervening
+        // SSTORE between the value-bearing CALL and the SELFDESTRUCT.
         let entry = Address::from([0x61; 20]);
         let mid = Address::from([0x62; 20]);
         let victim = Address::from([0x63; 20]);
@@ -1827,9 +1827,9 @@ mod gating_integration_tests {
 
     #[test]
     fn journal_writing_opcode_does_not_arm_a_later_selfdestruct() {
-        // Review focus: an earlier journal-writing opcode (SSTORE) in the SAME window must not
-        // leak into a later, unrelated, no-write SELFDESTRUCT. The watermark is taken per-opcode,
-        // not merely "did the journal grow at some point in this window".
+        // An earlier journal-writing opcode (SSTORE) in the SAME window must not leak into a
+        // later, unrelated, no-write SELFDESTRUCT. The watermark is taken per-opcode, not merely
+        // "did the journal grow at some point in this window".
         let entry = Address::from([0x64; 20]);
         let victim = Address::from([0x65; 20]);
         let victim2 = Address::from([0x66; 20]);
@@ -1971,9 +1971,9 @@ mod gating_integration_tests {
 
     #[test]
     fn genuine_and_self_targeted_selfdestructs_in_one_tx_report_only_the_genuine() {
-        // Review focus: a genuine SELFDESTRUCT and a to-self SELFDESTRUCT in the same transaction,
-        // in both call orders. An over-broad guard that suppressed the genuine one, or a flag that
-        // carried from the first SELFDESTRUCT to the second, would under- or over-report here.
+        // A genuine SELFDESTRUCT and a to-self SELFDESTRUCT in the same transaction, in both call
+        // orders. An over-broad guard that suppressed the genuine one, or a flag that carried from
+        // the first SELFDESTRUCT to the second, would under- or over-report here.
         let entry = Address::from([0x71; 20]);
         let victim_a = Address::from([0x72; 20]); // genuine: selfdestructs to `beneficiary`
         let victim_b = Address::from([0x73; 20]); // to-self: contributes nothing
@@ -2011,7 +2011,7 @@ mod gating_integration_tests {
 
     #[test]
     fn inactive_inspector_selfdestruct_leaves_new_state_untouched() {
-        // AC13: a real, NON-capturing OpEvm run (never armed) executing a SELFDESTRUCT-to-self
+        // A real, NON-capturing OpEvm run (never armed) executing a SELFDESTRUCT-to-self
         // must leave the new watermark fields at their initial values and must never read the
         // journal for the watermark — the seam proves the hook was reached but the active branch
         // never ran, distinguishing "never hit" from "hit while inactive".
@@ -2047,7 +2047,7 @@ mod gating_integration_tests {
 
     #[test]
     fn inactive_then_armed_inspector_still_captures() {
-        // AC13: the SAME inspector instance that just ran inactive must still capture correctly
+        // The SAME inspector instance that just ran inactive must still capture correctly
         // once armed — proves the inactive gate does not poison a later window.
         let entry = Address::from([0x51; 20]);
         let victim = Address::from([0x52; 20]);
@@ -2116,9 +2116,9 @@ mod gating_integration_tests {
 
     #[test]
     fn created_in_tx_selfdestruct_to_self_is_still_filtered_not_double_suppressed() {
-        // Design case-table row 2: a SELFDESTRUCT-to-self by a contract CREATED in this same
-        // transaction writes a REAL AccountDestroyed journal entry (the flag is true), and the
-        // observation is dropped by the pre-existing from==to filter -- not by the new guard.
+        // A SELFDESTRUCT-to-self by a contract CREATED in this same transaction writes a REAL
+        // AccountDestroyed journal entry (the flag is true), and the observation is dropped by
+        // the pre-existing from==to filter -- not by the new guard.
         // Pins that the new guard did not become a second, over-broad suppression mechanism.
         let factory = Address::from([0x75; 20]);
         let value = 7u8;
