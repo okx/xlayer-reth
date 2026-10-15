@@ -210,6 +210,27 @@ pub(crate) fn reset_create_gate_seams() {
     CREATE_GATE_SNAPSHOT.with(|s| s.set((0, 0, false, false)));
 }
 
+// Test-only SELFDESTRUCT-watermark gate snapshot, in the same style as `CREATE_GATE_SNAPSHOT` /
+// `CREATE_HOOK_HITS`. Tuple layout: `(hook_hits, active_branch_ran, journal_read_ran)`.
+// - `hook_hits` — incremented in `step`, as the FIRST thing done once the about-to-execute opcode
+//   is recognized as `SELFDESTRUCT`, before the `!self.active` gate. `0` means "a SELFDESTRUCT
+//   opcode's `step` was never reached"; distinguishable from "reached while inactive".
+// - `active_branch_ran` — set once the `!self.active` gate has been passed for that opcode.
+// - `journal_read_ran` — set immediately before the watermark journal read itself.
+// Never set in production (the whole seam is `#[cfg(test)]`).
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SELFDESTRUCT_GATE_SNAPSHOT: std::cell::Cell<(usize, bool, bool)> =
+        const { std::cell::Cell::new((0, false, false)) };
+}
+
+/// Test-only reset for [`SELFDESTRUCT_GATE_SNAPSHOT`], for the same reason
+/// [`reset_create_gate_seams`] exists: `cargo test` reuses threads across tests.
+#[cfg(test)]
+pub(crate) fn reset_selfdestruct_gate_seams() {
+    SELFDESTRUCT_GATE_SNAPSHOT.with(|s| s.set((0, false, false)));
+}
+
 /// The RCS capture inspector: the **inner** inspector of `alloy_op_evm::OpEvm`'s composite
 /// wrapper. It maintains one ordered queue of real + virtual logs with per-frame checkpoints and a
 /// single, non-rolling-back native-transfer counter with a sticky budget overflow.
@@ -616,14 +637,33 @@ where
     }
 
     fn step(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
+        if interp.bytecode.opcode() != opcode::SELFDESTRUCT {
+            return;
+        }
+        // Record that this opcode's `step` was reached at all, before the active gate, so a
+        // reader can tell "never hit" (count stays 0) from "hit while inactive" (count > 0,
+        // active_branch_ran == false). No effect in production builds (`#[cfg(test)]`).
+        #[cfg(test)]
+        SELFDESTRUCT_GATE_SNAPSHOT.with(|s| {
+            let (hits, active_ran, journal_ran) = s.get();
+            s.set((hits + 1, active_ran, journal_ran));
+        });
         // Inactive windows are strict no-ops: no journal read, no field write (gasless pre-checks
         // and other non-capturing simulations must never pay for or observe this).
         if !self.active {
             return;
         }
-        if interp.bytecode.opcode() == opcode::SELFDESTRUCT {
-            self.selfdestruct_journal_mark = Some(context.journal_ref().journal().len());
-        }
+        #[cfg(test)]
+        SELFDESTRUCT_GATE_SNAPSHOT.with(|s| {
+            let (hits, _, journal_ran) = s.get();
+            s.set((hits, true, journal_ran));
+        });
+        #[cfg(test)]
+        SELFDESTRUCT_GATE_SNAPSHOT.with(|s| {
+            let (hits, active_ran, _) = s.get();
+            s.set((hits, active_ran, true));
+        });
+        self.selfdestruct_journal_mark = Some(context.journal_ref().journal().len());
     }
 
     fn step_end(&mut self, _interp: &mut Interpreter<INTR>, context: &mut CTX) {
@@ -926,6 +966,14 @@ mod tests {
             inspector.create_recipients.is_empty(),
             "create_recipients must be cleared on the failing exit"
         );
+        assert_eq!(
+            inspector.selfdestruct_journal_mark, None,
+            "selfdestruct_journal_mark must be cleared on the failing exit"
+        );
+        assert!(
+            !inspector.selfdestruct_wrote_journal,
+            "selfdestruct_wrote_journal must be cleared on the failing exit"
+        );
     }
 
     // ── T1a: finish_capture resets all state (includes create_recipients) on LimitExceeded ──────────
@@ -937,6 +985,10 @@ mod tests {
         inspector.start_capture();
         inspector.push_checkpoint();
         observe_n(&mut inspector, NativeTransferKind::Call, 2);
+        // Drive the SELFDESTRUCT-watermark fields to a non-initial state first, so the clearing
+        // assertion below is not vacuous.
+        inspector.selfdestruct_journal_mark = Some(7);
+        inspector.selfdestruct_wrote_journal = true;
         assert!(matches!(
             inspector.finish_capture(&[]),
             CaptureOutcome::LimitExceeded { attempted: 2, limit: 1 }
@@ -952,6 +1004,10 @@ mod tests {
         inspector.start_capture();
         inspector.push_checkpoint();
         inspector.record_real_log(real_log(1));
+        // Drive the SELFDESTRUCT-watermark fields to a non-initial state first, so the clearing
+        // assertion below is not vacuous.
+        inspector.selfdestruct_journal_mark = Some(7);
+        inspector.selfdestruct_wrote_journal = true;
         // `result.logs()` is empty while one real log was captured → RealLogMismatch.
         assert!(matches!(
             inspector.finish_capture(&[]),
@@ -960,6 +1016,83 @@ mod tests {
             }
         ));
         assert_capture_state_is_clean(&inspector);
+    }
+
+    #[test]
+    fn new_selfdestruct_state_cleared_on_every_finish_exit_and_abort() {
+        // AC15: both new fields are driven to a NON-initial state first (so the clearing
+        // assertion is not vacuous), then cleared on every exit: Complete, LimitExceeded,
+        // InvariantViolation, and abort_capture.
+
+        // Complete.
+        let mut inspector = RcsInspector::new(10);
+        inspector.start_capture();
+        inspector.selfdestruct_journal_mark = Some(7);
+        inspector.selfdestruct_wrote_journal = true;
+        assert_eq!(inspector.selfdestruct_journal_mark, Some(7));
+        assert!(inspector.selfdestruct_wrote_journal);
+        assert!(matches!(inspector.finish_capture(&[]), CaptureOutcome::Complete(_)));
+        assert_capture_state_is_clean(&inspector);
+
+        // LimitExceeded.
+        let mut inspector = RcsInspector::new(1);
+        inspector.start_capture();
+        inspector.push_checkpoint();
+        observe_n(&mut inspector, NativeTransferKind::Call, 2);
+        inspector.selfdestruct_journal_mark = Some(7);
+        inspector.selfdestruct_wrote_journal = true;
+        assert_eq!(inspector.selfdestruct_journal_mark, Some(7));
+        assert!(inspector.selfdestruct_wrote_journal);
+        assert!(matches!(
+            inspector.finish_capture(&[]),
+            CaptureOutcome::LimitExceeded { attempted: 2, limit: 1 }
+        ));
+        assert_capture_state_is_clean(&inspector);
+
+        // InvariantViolation.
+        let mut inspector = RcsInspector::new(10);
+        inspector.start_capture();
+        inspector.push_checkpoint();
+        inspector.record_real_log(real_log(1));
+        inspector.selfdestruct_journal_mark = Some(7);
+        inspector.selfdestruct_wrote_journal = true;
+        assert_eq!(inspector.selfdestruct_journal_mark, Some(7));
+        assert!(inspector.selfdestruct_wrote_journal);
+        assert!(matches!(inspector.finish_capture(&[]), CaptureOutcome::InvariantViolation { .. }));
+        assert_capture_state_is_clean(&inspector);
+
+        // abort_capture.
+        let mut inspector = RcsInspector::new(10);
+        inspector.start_capture();
+        inspector.selfdestruct_journal_mark = Some(7);
+        inspector.selfdestruct_wrote_journal = true;
+        assert_eq!(inspector.selfdestruct_journal_mark, Some(7));
+        assert!(inspector.selfdestruct_wrote_journal);
+        inspector.abort_capture();
+        assert_capture_state_is_clean(&inspector);
+    }
+
+    #[test]
+    fn unconsumed_selfdestruct_flag_does_not_cross_windows() {
+        // AC16: a SELFDESTRUCT that exits abnormally so the `selfdestruct` callback never fires
+        // leaves `selfdestruct_wrote_journal` set; the NEXT window must not inherit it, and a
+        // following ordinary (non-SELFDESTRUCT) transfer in that window must not be mis-attributed
+        // or doubled.
+        let mut inspector = RcsInspector::new(10);
+        inspector.start_capture();
+        inspector.selfdestruct_wrote_journal = true; // simulates the abnormal-exit leak
+        let _ = inspector.finish_capture(&[]);
+        assert_capture_state_is_clean(&inspector);
+
+        inspector.start_capture();
+        assert!(!inspector.selfdestruct_wrote_journal, "the next window must start clean");
+        inspector.observe_native_transfer(addr(1), addr(2), U256::from(1u64), NativeTransferKind::Call);
+        match inspector.finish_capture(&[]) {
+            CaptureOutcome::Complete(logs) => {
+                assert_eq!(logs.len(), 1, "the ordinary transfer must not be mis-attributed or doubled")
+            }
+            other => panic!("expected Complete with one transfer, got {other:?}"),
+        }
     }
 
     // ---- Task 11: budget boundaries + unified SELFDESTRUCT budget -------------------------------
@@ -1869,6 +2002,149 @@ mod gating_integration_tests {
             );
             let genuine = stream.iter().filter(|log| log.topics()[2] == beneficiary.into_word()).count();
             assert_eq!(genuine, 1, "{label}: exactly one transfer must reach the beneficiary");
+        }
+    }
+
+    #[test]
+    fn inactive_inspector_selfdestruct_leaves_new_state_untouched() {
+        // AC13: a real, NON-capturing OpEvm run (never armed) executing a SELFDESTRUCT-to-self
+        // must leave the new watermark fields at their initial values and must never read the
+        // journal for the watermark — the seam proves the hook was reached but the active branch
+        // never ran, distinguishing "never hit" from "hit while inactive".
+        reset_selfdestruct_gate_seams();
+        let entry = Address::from([0x51; 20]);
+        let victim = Address::from([0x52; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(entry, account(10, Some(call_value_1_to(victim))));
+        db.insert_account_info(victim, account(0, Some(address_then_selfdestruct())));
+
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        // Deliberately never call start_capture.
+        let result = evm.transact(call_tx(entry)).expect("tx executes");
+        assert!(result.result.is_success());
+
+        let inspector = evm.components_mut().1;
+        assert_eq!(inspector.selfdestruct_journal_mark, None);
+        assert!(!inspector.selfdestruct_wrote_journal);
+
+        let (hits, active_ran, journal_ran) = SELFDESTRUCT_GATE_SNAPSHOT.with(|s| s.get());
+        assert!(hits > 0, "the step hook must still be reached for the SELFDESTRUCT opcode");
+        assert!(!active_ran, "the active branch must not run while inactive");
+        assert!(!journal_ran, "the watermark journal read must never execute while inactive");
+    }
+
+    #[test]
+    fn inactive_then_armed_inspector_still_captures() {
+        // AC13: the SAME inspector instance that just ran inactive must still capture correctly
+        // once armed — proves the inactive gate does not poison a later window.
+        let entry = Address::from([0x51; 20]);
+        let victim = Address::from([0x52; 20]);
+        let second_caller = Address::from([0xBB; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(second_caller, account(1_000_000_000, None));
+        db.insert_account_info(entry, account(10, Some(call_value_1_to(victim))));
+        db.insert_account_info(victim, account(0, Some(address_then_selfdestruct())));
+
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        // First: run inactive (never start_capture).
+        let result = evm.transact(call_tx_from(caller(), entry)).expect("tx executes");
+        assert!(result.result.is_success());
+
+        // Now arm the SAME inspector instance and run a second, independent tx from a different
+        // sender (so nonce 0 is valid for both, per `call_tx_from`'s doc comment).
+        evm.components_mut().1.start_capture();
+        let result2 = evm.transact(call_tx_from(second_caller, entry)).expect("tx executes");
+        assert!(result2.result.is_success());
+        let outcome = evm.components_mut().1.finish_capture(result2.result.logs());
+        match outcome {
+            CaptureOutcome::Complete(stream) => {
+                assert_eq!(stream.len(), 1, "exactly one virtual log for the value-bearing CALL");
+                assert_eq!(stream[0].topics()[1], entry.into_word());
+                assert_eq!(stream[0].topics()[2], victim.into_word());
+            }
+            other => panic!("expected Complete with one transfer, got {other:?}"),
+        }
+    }
+
+    /// Runtime bytecode: `CREATE(value, 0, len)` where the appended init code (copied into memory
+    /// via `CODECOPY`) deploys a contract whose runtime body is [`address_then_selfdestruct`]
+    /// (`PUSH2 0x30FF; PUSH1 0; MSTORE; PUSH1 2; PUSH1 30; RETURN`), then `CALL`s the precomputed
+    /// deployment address with zero value to run that child's SELFDESTRUCT within the SAME
+    /// transaction that created it.
+    fn create_endowment_then_call_child(value: u8, child_addr: Address) -> Vec<u8> {
+        let init_code: Vec<u8> =
+            vec![0x61, 0x30, 0xff, 0x60, 0x00, 0x52, 0x60, 0x02, 0x60, 0x1e, 0xf3];
+        let init_len = init_code.len() as u8;
+        let mut head = vec![
+            0x60, init_len, // PUSH1 init_len   (CODECOPY size)
+            0x60, 0x00,     // PUSH1 <codeoffset> -- patched below (CODECOPY offset)
+            0x60, 0x00,     // PUSH1 0          (CODECOPY destOffset)
+            0x39,           // CODECOPY
+            0x60, init_len, // PUSH1 init_len   (CREATE size)
+            0x60, 0x00,     // PUSH1 0          (CREATE offset)
+            0x60, value,    // PUSH1 value      (CREATE value)
+            0xf0,           // CREATE
+            0x50,           // POP (discard the dynamic created address; we call a precomputed one)
+        ];
+        head.extend_from_slice(&call_prefix(0x00, child_addr)); // CALL(gas, child_addr, 0, 0,0,0,0)
+        head.extend_from_slice(&[0x5a, 0xf1, 0x00]); // GAS CALL STOP
+        let codeoffset = head.len() as u8;
+        head[3] = codeoffset; // patch the PUSH1 <codeoffset> immediate
+        head.extend_from_slice(&init_code);
+        head
+    }
+
+    #[test]
+    fn created_in_tx_selfdestruct_to_self_is_still_filtered_not_double_suppressed() {
+        // Design case-table row 2: a SELFDESTRUCT-to-self by a contract CREATED in this same
+        // transaction writes a REAL AccountDestroyed journal entry (the flag is true), and the
+        // observation is dropped by the pre-existing from==to filter -- not by the new guard.
+        // Pins that the new guard did not become a second, over-broad suppression mechanism.
+        let factory = Address::from([0x75; 20]);
+        let value = 7u8;
+        let child = factory.create(0);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(
+            factory,
+            account(10, Some(create_endowment_then_call_child(value, child))),
+        );
+
+        let (outcome, success) = run_capturing_tx(db, factory, 16);
+        assert!(success, "top-level tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete(stream) => {
+                assert_eq!(
+                    stream.len(),
+                    1,
+                    "only the CREATE endowment transfer; the created-in-tx self-destruct \
+                     contributes nothing"
+                );
+                assert_eq!(stream[0].topics()[1], factory.into_word());
+                assert_eq!(
+                    stream[0].data.data.as_ref(),
+                    &U256::from(value as u64).to_be_bytes::<32>()
+                );
+            }
+            other => panic!(
+                "expected Complete with exactly the CREATE endowment transfer, got {other:?}"
+            ),
         }
     }
 
