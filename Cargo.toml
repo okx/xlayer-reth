@@ -81,7 +81,7 @@ xlayer-rpc = { path = "crates/rpc" }
 xlayer-version = { path = "crates/version" }
 
 # For X Layer
-xlayer-trace-monitor = { git = "https://github.com/okx/xlayer-toolkit", rev = "d6af8edac7cf179241af1688f7741e260ba48b79" }
+xlayer-trace-monitor = { git = "https://github.com/okx/xlayer-toolkit", rev = "fca257d4275f0fd72969e4b166a891d1ef3308f0" }
 
 # okx/reth rev aligned with deps/optimism (reth v2.3.0) rust workspace.
 # ==============================================================================

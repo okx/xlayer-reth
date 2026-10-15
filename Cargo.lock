@@ -3033,7 +3033,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccc2776f0c61eca1ca32528f85548abd1a4be8fb53d1b21c013e4f18da1e7090"
 dependencies = [
  "data-encoding",
- "syn 2.0.118",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -14578,7 +14578,6 @@ dependencies = [
  "alloy-primitives",
  "clap",
  "futures",
- "jsonrpsee",
  "reth-engine-primitives",
  "reth-payload-builder",
  "reth-payload-builder-primitives",
@@ -14587,9 +14586,8 @@ dependencies = [
  "reth-provider",
  "reth-tasks",
  "reth-tokio-util",
- "serde_json",
+ "reth-transaction-pool",
  "tokio",
- "tower",
  "tracing",
  "xlayer-trace-monitor",
 ]
@@ -14722,7 +14720,7 @@ dependencies = [
 [[package]]
 name = "xlayer-trace-monitor"
 version = "0.1.0"
-source = "git+https://github.com/okx/xlayer-toolkit?rev=d6af8edac7cf179241af1688f7741e260ba48b79#d6af8edac7cf179241af1688f7741e260ba48b79"
+source = "git+https://github.com/okx/xlayer-toolkit?rev=fca257d4275f0fd72969e4b166a891d1ef3308f0#fca257d4275f0fd72969e4b166a891d1ef3308f0"
 dependencies = [
  "crossbeam-channel",
  "hex",

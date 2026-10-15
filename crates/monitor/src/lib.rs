@@ -5,9 +5,7 @@
 mod args;
 mod handle;
 mod monitor;
-mod rpc;
 
 pub use args::FullLinkMonitorArgs;
-pub use handle::start_monitor_handle;
+pub use handle::{start_monitor_handle, start_pool_admission_trace_handle};
 pub use monitor::XLayerMonitor;
-pub use rpc::RpcMonitorLayer;

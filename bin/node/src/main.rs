@@ -26,7 +26,7 @@ use xlayer_chainspec::XLayerChainSpecParser;
 use xlayer_flashblocks::handler::FlashblocksService;
 use xlayer_flashblocks::subscription::FlashblocksPubSub;
 use xlayer_legacy_rpc::{layer::LegacyRpcRouterLayer, LegacyRpcRouterConfig};
-use xlayer_monitor::{start_monitor_handle, RpcMonitorLayer, XLayerMonitor};
+use xlayer_monitor::{start_monitor_handle, start_pool_admission_trace_handle, XLayerMonitor};
 use xlayer_rpc::xlayer_ext::{XlayerRpcExt, XlayerRpcExtApiServer};
 use xlayer_rpc::{
     FlashblocksEthApiExt, FlashblocksEthApiOverrideServer, XlayerAuditApiServer, XlayerAuditRpc,
@@ -115,10 +115,7 @@ fn main() {
                 xlayer_args.sequencer_mode,
             );
 
-            let add_ons = op_node.add_ons().with_rpc_middleware((
-                RpcMonitorLayer::new(monitor.clone()),    // Execute first
-                LegacyRpcRouterLayer::new(legacy_config), // Execute second
-            ));
+            let add_ons = op_node.add_ons().with_rpc_middleware(LegacyRpcRouterLayer::new(legacy_config));
 
             // Parse and validate bridge intercept configuration
             let bridge_config = args
@@ -244,11 +241,14 @@ fn main() {
             // Start X Layer full link monitor handle
             start_monitor_handle(
                 node.tasks(),
-                monitor,
+                monitor.clone(),
                 node.provider().clone(),
                 node.payload_builder_handle.clone(),
                 node.add_ons_handle.engine_events.new_listener(),
             );
+
+            // Start X Layer transaction-pool admission trace handle
+            start_pool_admission_trace_handle(node.tasks(), monitor, node.pool().clone());
 
             node_exit_future.await
         })

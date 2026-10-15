@@ -20,6 +20,7 @@ reth-primitives-traits.workspace = true
 reth-provider.workspace = true
 reth-tasks.workspace = true
 reth-tokio-util.workspace = true
+reth-transaction-pool.workspace = true
 
 xlayer-trace-monitor.workspace = true
 
@@ -31,11 +32,8 @@ alloy-primitives.workspace = true
 # Misc dependencies
 clap.workspace = true
 futures.workspace = true
-jsonrpsee = { workspace = true, features = ["server", "client-core"] }
-serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-tower.workspace = true
 
 [lints]
 workspace = true

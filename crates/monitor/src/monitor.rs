@@ -7,7 +7,7 @@ use alloy_primitives::B256;
 use xlayer_trace_monitor::{from_b256, get_global_tracer, TransactionProcessId};
 
 /// XLayerMonitor holds monitoring hook logic for full link monitoring requirements.
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub struct XLayerMonitor {
     /// XLayer arguments (reserved for future use)
     #[allow(dead_code)]
@@ -30,27 +30,6 @@ impl XLayerMonitor {
     /// Check if this node is running in sequencer mode
     pub fn is_sequencer(&self) -> bool {
         self.is_sequencer_mode
-    }
-
-    /// Handle transaction received via RPC (eth_sendRawTransaction).
-    pub fn on_recv_transaction(&self, _method: &str, tx_hash: B256) {
-        if let Some(tracer) = get_global_tracer() {
-            if self.is_sequencer() {
-                // SeqReceiveTxEnd: eth_sendRawTransaction (seq handler)
-                tracer.log_transaction(
-                    from_b256(tx_hash),
-                    TransactionProcessId::SeqReceiveTxEnd,
-                    None,
-                );
-            } else {
-                // RpcReceiveTxEnd: eth_sendRawTransaction (RPC handler)
-                tracer.log_transaction(
-                    from_b256(tx_hash),
-                    TransactionProcessId::RpcReceiveTxEnd,
-                    None,
-                );
-            }
-        }
     }
 
     /// Handle block build start event (when payload attributes are received from CL).
@@ -132,5 +111,49 @@ impl XLayerMonitor {
                 );
             }
         }
+    }
+
+    /// The trace ID to use for a pool-admission event, which depends on node mode: the
+    /// per-mode IDs are what let downstream trace tooling tell sequencer and RPC nodes
+    /// apart (there is no separate node-identity field in the trace record itself).
+    ///
+    /// Split out from [`Self::on_pool_admitted`] so the decision can be unit tested
+    /// without depending on the process-global tracer singleton.
+    fn pool_admission_process_id(&self) -> TransactionProcessId {
+        if self.is_sequencer() {
+            TransactionProcessId::SeqReceiveTxEnd
+        } else {
+            TransactionProcessId::P2pReceivedTx
+        }
+    }
+
+    /// Handle a transaction pool admission, regardless of how the transaction reached
+    /// the pool (RPC submission or network propagation).
+    pub fn on_pool_admitted(&self, tx_hash: B256) {
+        if let Some(tracer) = get_global_tracer() {
+            tracer.log_transaction(from_b256(tx_hash), self.pool_admission_process_id(), None);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn monitor(is_sequencer_mode: bool) -> Arc<XLayerMonitor> {
+        XLayerMonitor::new(FullLinkMonitorArgs::default(), false, is_sequencer_mode)
+    }
+
+    #[test]
+    fn pool_admission_uses_p2p_received_tx_on_rpc_node() {
+        assert_eq!(monitor(false).pool_admission_process_id(), TransactionProcessId::P2pReceivedTx);
+    }
+
+    #[test]
+    fn pool_admission_uses_seq_receive_tx_end_on_sequencer_node() {
+        assert_eq!(
+            monitor(true).pool_admission_process_id(),
+            TransactionProcessId::SeqReceiveTxEnd
+        );
     }
 }
