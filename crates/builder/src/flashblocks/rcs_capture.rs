@@ -2387,9 +2387,10 @@ mod gating_integration_tests {
 
         // The GREEN control: same fixture, same initial state and coldness, differing ONLY in the
         // stipend. It brackets the charge that failed in the RED half and proves RED is not vacuous.
-        // Full reset between halves (design D7) keeps each half independently falsifiable. The
-        // fixture's accounts were pre-inserted into `db` above, alongside the RED fixture, because
-        // `db` was moved into `evm` before this half runs.
+        // A full reset between halves keeps each half independently falsifiable: a regression in
+        // one half can't be masked by state left over from the other. The fixture's accounts were
+        // pre-inserted into `db` above, alongside the RED fixture, because `db` was moved into
+        // `evm` before this half runs.
         reset_selfdestruct_gate_seams();
         evm.components_mut().1.start_capture();
         let result3 = evm.transact(call_tx_from(third_caller, entry_green)).expect("tx executes");
@@ -2416,11 +2417,12 @@ mod gating_integration_tests {
         );
 
         // The record belongs to the victim frame: identical call shape => identical victim depth.
-        // Asserted against the measured control, never against a hard-coded literal (design D8).
+        // Asserted against the measured control, never against a hard-coded literal that was
+        // never actually measured on this stack.
         assert_eq!(red_end.depth, green_end.depth, "both records are at the victim frame's depth");
 
-        // Design D10 / reviewer confirmation: the records must be VISIBLE in the raw output. A
-        // passing assertion prints nothing, so print them.
+        // A passing assertion prints nothing, so the records are printed explicitly here to make
+        // them visible when the suite is run with --nocapture / --show-output.
         println!("T14b RED  observation: {red:?}");
         println!("T14b GREEN observation: {green:?}");
 
