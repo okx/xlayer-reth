@@ -2261,6 +2261,16 @@ mod gating_integration_tests {
         let dst2 = Address::from([0x9A; 20]);
         let second_caller = Address::from([0xBC; 20]);
 
+        // The GREEN control's fixture (same shape as `entry`/`victim`, differing only in the
+        // stipend) is pre-inserted here, alongside the RED fixture, because `db` is moved into
+        // `evm` below and the GREEN half runs on the same inspector after the next-window check.
+        const STIPEND_OK: u16 = 40_000;
+        let third_green = Address::from([0x9B; 20]);
+        let victim_green = Address::from([0x9C; 20]);
+        let beneficiary_green = Address::from([0x9D; 20]);
+        let entry_green = Address::from([0x9E; 20]);
+        let third_caller = Address::from([0xBD; 20]);
+
         reset_selfdestruct_gate_seams();
         assert!(
             SELFDESTRUCT_STEP_OBSERVATIONS.with(|o| o.borrow().is_empty()),
@@ -2269,6 +2279,7 @@ mod gating_integration_tests {
         let mut db = InMemoryDB::default();
         db.insert_account_info(caller(), account(1_000_000_000, None));
         db.insert_account_info(second_caller, account(1_000_000_000, None));
+        db.insert_account_info(third_caller, account(1_000_000_000, None));
         db.insert_account_info(victim, account(500, Some(selfdestruct_to(beneficiary))));
         // entry: a separate, successful ordinary transfer to `third` first (full gas), THEN the
         // fixed-gas call into `victim` whose frame will run out of gas on the dynamic charge. The
@@ -2279,6 +2290,14 @@ mod gating_integration_tests {
         entry_code.extend_from_slice(&call_fixed_gas_value_1_to(STIPEND, victim));
         db.insert_account_info(entry, account(10, Some(entry_code)));
         db.insert_account_info(entry2, account(10, Some(call_value_1_to(dst2))));
+        db.insert_account_info(
+            victim_green,
+            account(500, Some(selfdestruct_to(beneficiary_green))),
+        );
+        let mut entry_green_code = call_prefix(0x01, third_green);
+        entry_green_code.extend_from_slice(&[0x5a, 0xf1, 0x50]); // GAS CALL POP
+        entry_green_code.extend_from_slice(&call_fixed_gas_value_1_to(STIPEND_OK, victim_green));
+        db.insert_account_info(entry_green, account(10, Some(entry_green_code)));
 
         let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
             db,
@@ -2360,6 +2379,62 @@ mod gating_integration_tests {
             other => {
                 panic!("expected Complete with one transfer in the next window, got {other:?}")
             }
+        }
+
+        // The GREEN control: same fixture, same initial state and coldness, differing ONLY in the
+        // stipend. It brackets the charge that failed in the RED half and proves RED is not vacuous.
+        // Full reset between halves (design D7) keeps each half independently falsifiable. The
+        // fixture's accounts were pre-inserted into `db` above, alongside the RED fixture, because
+        // `db` was moved into `evm` before this half runs.
+        reset_selfdestruct_gate_seams();
+        evm.components_mut().1.start_capture();
+        let result3 = evm.transact(call_tx_from(third_caller, entry_green)).expect("tx executes");
+        assert!(result3.result.is_success());
+
+        let green = SELFDESTRUCT_STEP_OBSERVATIONS.with(|o| o.borrow().clone());
+        assert_eq!(green.len(), 1, "exactly one observation in this measured run");
+        let green = green[0];
+        assert_eq!(green.opcode, opcode::SELFDESTRUCT);
+        let green_end = green.end.expect("step_end completed the record for this opcode");
+        assert_eq!(
+            green_end.instruction_result,
+            Some(InstructionResult::SelfDestruct),
+            "the GREEN control reaches the only path that returns SelfDestruct"
+        );
+        assert_eq!(
+            SELFDESTRUCT_CALLBACK_HITS.with(|c| c.get()),
+            1,
+            "the callback fires exactly once when the result IS SelfDestruct"
+        );
+        assert!(
+            !evm.components_mut().1.selfdestruct_wrote_journal,
+            "the callback consumed the flag via mem::take"
+        );
+
+        // The record belongs to the victim frame: identical call shape => identical victim depth.
+        // Asserted against the measured control, never against a hard-coded literal (design D8).
+        assert_eq!(red_end.depth, green_end.depth, "both records are at the victim frame's depth");
+
+        // Design D10 / reviewer confirmation: the records must be VISIBLE in the raw output. A
+        // passing assertion prints nothing, so print them.
+        println!("T14b RED  observation: {red:?}");
+        println!("T14b GREEN observation: {green:?}");
+
+        match evm.components_mut().1.finish_capture(result3.result.logs()) {
+            CaptureOutcome::Complete(stream) => {
+                // Unlike RED (where the victim frame's OutOfGas reverts its own incoming
+                // transfer), GREEN's victim CALL now succeeds, so its value-1 transfer survives
+                // alongside the entry's separate transfer to `third_green` and the SELFDESTRUCT
+                // transfer itself -- three distinct native transfers, measured, not assumed.
+                assert_eq!(stream.len(), 3, "all three native transfers in the GREEN run survive");
+                assert_eq!(stream[0].topics()[1], entry_green.into_word());
+                assert_eq!(stream[0].topics()[2], third_green.into_word());
+                assert_eq!(stream[1].topics()[1], entry_green.into_word());
+                assert_eq!(stream[1].topics()[2], victim_green.into_word());
+                assert_eq!(stream[2].topics()[1], victim_green.into_word());
+                assert_eq!(stream[2].topics()[2], beneficiary_green.into_word());
+            }
+            other => panic!("expected Complete with the three surviving transfers, got {other:?}"),
         }
     }
 
