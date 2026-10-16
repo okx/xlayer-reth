@@ -2333,7 +2333,11 @@ mod gating_integration_tests {
         let red = SELFDESTRUCT_STEP_OBSERVATIONS.with(|o| o.borrow().clone());
         assert_eq!(red.len(), 1, "exactly one observation in this measured run");
         let red = red[0];
-        assert_eq!(red.opcode, opcode::SELFDESTRUCT, "the record is bound to the SELFDESTRUCT opcode");
+        assert_eq!(
+            red.opcode,
+            opcode::SELFDESTRUCT,
+            "the record is bound to the SELFDESTRUCT opcode"
+        );
         let red_end = red.end.expect("step_end completed the record for this opcode");
         assert_eq!(
             red_end.instruction_result,
