@@ -230,6 +230,7 @@ thread_local! {
 pub(crate) fn reset_selfdestruct_gate_seams() {
     SELFDESTRUCT_GATE_SNAPSHOT.with(|s| s.set((0, false, false)));
     SELFDESTRUCT_CALLBACK_HITS.with(|c| c.set(0));
+    SELFDESTRUCT_STEP_OBSERVATIONS.with(|o| o.borrow_mut().clear());
 }
 
 // Test-only direct evidence that the `selfdestruct` hook itself was entered. Needed because the
@@ -241,6 +242,74 @@ pub(crate) fn reset_selfdestruct_gate_seams() {
 thread_local! {
     pub(crate) static SELFDESTRUCT_CALLBACK_HITS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+}
+
+// Test-only direct observation of the victim SELFDESTRUCT's actual `InstructionResult`, recorded
+// from inside the production `step` / `step_end` hooks rather than inferred from
+// `SELFDESTRUCT_CALLBACK_HITS`: that counter is 0 for every result other than `SelfDestruct`,
+// including the aborted paths this observation exists to distinguish from the measured OutOfGas
+// halt. `RefCell`, not `Cell` like the two seams above, because a `Vec` is not `Copy`.
+#[cfg(test)]
+use revm::interpreter::{interpreter_types::LoopControl, InstructionResult};
+
+/// One `step`-side record, completed by `step_end` once the halting instruction's result is known.
+/// `end: None` until `step_end` completes it; distinguishable from "completed with no result" by
+/// construction, so a loop that breaks before `step_end` runs leaves a record that is detectably
+/// incomplete rather than silently matching a bare length check.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SelfdestructStepObservation {
+    pub(crate) opcode: u8,
+    pub(crate) gas_remaining_before: u64,
+    pub(crate) end: Option<SelfdestructStepEnd>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SelfdestructStepEnd {
+    pub(crate) depth: usize,
+    pub(crate) instruction_result: Option<InstructionResult>,
+    pub(crate) gas_remaining_after: u64,
+    pub(crate) journal_delta: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SELFDESTRUCT_STEP_OBSERVATIONS: std::cell::RefCell<Vec<SelfdestructStepObservation>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Pushes a new partial record from `step`'s existing gated region. Test-only.
+#[cfg(test)]
+fn record_selfdestruct_step(opcode: u8, gas_remaining_before: u64) {
+    SELFDESTRUCT_STEP_OBSERVATIONS.with(|o| {
+        o.borrow_mut().push(SelfdestructStepObservation {
+            opcode,
+            gas_remaining_before,
+            end: None,
+        });
+    });
+}
+
+/// Completes the most recently pushed record from inside `step_end`'s existing
+/// `if let Some(pre) = self.selfdestruct_journal_mark.take()` branch. Test-only.
+#[cfg(test)]
+fn record_selfdestruct_step_end(
+    depth: usize,
+    instruction_result: Option<InstructionResult>,
+    gas_remaining_after: u64,
+    journal_delta: usize,
+) {
+    SELFDESTRUCT_STEP_OBSERVATIONS.with(|o| {
+        if let Some(last) = o.borrow_mut().last_mut() {
+            last.end = Some(SelfdestructStepEnd {
+                depth,
+                instruction_result,
+                gas_remaining_after,
+                journal_delta,
+            });
+        }
+    });
 }
 
 /// The RCS capture inspector: the **inner** inspector of `alloy_op_evm::OpEvm`'s composite
@@ -675,6 +744,8 @@ where
             let (hits, active_ran, _) = s.get();
             s.set((hits, active_ran, true));
         });
+        #[cfg(test)]
+        record_selfdestruct_step(interp.bytecode.opcode(), interp.gas.remaining());
         self.selfdestruct_journal_mark = Some(context.journal_ref().journal().len());
     }
 
@@ -684,6 +755,13 @@ where
         }
         if let Some(pre) = self.selfdestruct_journal_mark.take() {
             self.selfdestruct_wrote_journal = context.journal_ref().journal().len() > pre;
+            #[cfg(test)]
+            record_selfdestruct_step_end(
+                context.journal_ref().depth(),
+                _interp.bytecode.instruction_result(),
+                _interp.gas.remaining(),
+                context.journal_ref().journal().len().saturating_sub(pre),
+            );
         }
     }
 
@@ -2184,6 +2262,10 @@ mod gating_integration_tests {
         let second_caller = Address::from([0xBC; 20]);
 
         reset_selfdestruct_gate_seams();
+        assert!(
+            SELFDESTRUCT_STEP_OBSERVATIONS.with(|o| o.borrow().is_empty()),
+            "the observation seam must start empty; cargo test reuses threads across tests"
+        );
         let mut db = InMemoryDB::default();
         db.insert_account_info(caller(), account(1_000_000_000, None));
         db.insert_account_info(second_caller, account(1_000_000_000, None));
@@ -2226,6 +2308,20 @@ mod gating_integration_tests {
             0,
             "the selfdestruct callback must never have been entered"
         );
+
+        // 2a. THE ITEM: the victim SELFDESTRUCT's ACTUAL result, observed at that opcode's own
+        // step_end and bound to that opcode and frame -- not inferred from callback_hits.
+        let red = SELFDESTRUCT_STEP_OBSERVATIONS.with(|o| o.borrow().clone());
+        assert_eq!(red.len(), 1, "exactly one observation in this measured run");
+        let red = red[0];
+        assert_eq!(red.opcode, opcode::SELFDESTRUCT, "the record is bound to the SELFDESTRUCT opcode");
+        let red_end = red.end.expect("step_end completed the record for this opcode");
+        assert_eq!(
+            red_end.instruction_result,
+            Some(InstructionResult::OutOfGas),
+            "THE OBSERVATION: the victim SELFDESTRUCT halted with OutOfGas"
+        );
+        assert!(red_end.journal_delta >= 1, "the journal write preceded the failed charge");
 
         // 3. the measured leak, read LIVE before the window ends. A read taken after
         // finish_capture would always see `false` (every window boundary resets it) and would
