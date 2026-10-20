@@ -17,6 +17,7 @@ mod context;
 mod generator;
 mod handler;
 mod handler_ctx;
+mod rcs_capture;
 mod service;
 mod timing;
 pub(crate) mod utils;
@@ -261,6 +262,16 @@ fn build_rcs_filter_handle(
 fn build_rcs_filter_config(
     args: &crate::args::RcsFilterArgs,
 ) -> eyre::Result<Option<FilterConfig>> {
+    // Validate the resource budgets unconditionally (before the disabled early-return): a zero
+    // budget is a startup misconfiguration even when the filter is switched off.
+    if args.max_native_transfers_per_tx == 0 {
+        return Err(eyre::eyre!(
+            "rcs-filter --rcs-filter.max-native-transfers-per-tx must be >= 1"
+        ));
+    }
+    if args.max_event_bindings_per_tx == 0 {
+        return Err(eyre::eyre!("rcs-filter --rcs-filter.max-event-bindings-per-tx must be >= 1"));
+    }
     if !args.enabled {
         return Ok(None);
     }
@@ -285,6 +296,8 @@ fn build_rcs_filter_config(
         total_retry_timeout: Duration::from_secs(args.total_retry_timeout_seconds),
         rules_version_poll_interval: Duration::from_millis(args.rules_version_poll_interval_ms),
         terminal_entry_retention: Duration::from_secs(args.terminal_entry_retention_seconds),
+        max_native_transfers_per_tx: args.max_native_transfers_per_tx,
+        max_event_bindings_per_tx: args.max_event_bindings_per_tx,
     };
     config.validate().map_err(|error| eyre::eyre!(error.to_string()))?;
     Ok(Some(config))
@@ -338,5 +351,37 @@ mod rcs_filter_config_tests {
         args.submit_max_concurrency = 0;
         assert!(build_rcs_filter_config(&args).unwrap().is_none());
         assert!(build_rcs_filter_handle(&args).unwrap().is_none());
+    }
+
+    #[test]
+    fn disabled_filter_with_zero_native_budget_is_startup_error() {
+        let mut args = crate::args::BuilderArgs::default().rcs_filter;
+        args.enabled = false;
+        args.max_native_transfers_per_tx = 0;
+        assert!(build_rcs_filter_config(&args).is_err());
+        assert!(build_rcs_filter_handle(&args).is_err());
+    }
+
+    #[test]
+    fn disabled_filter_with_zero_event_bindings_is_startup_error() {
+        let mut args = crate::args::BuilderArgs::default().rcs_filter;
+        args.enabled = false;
+        args.max_event_bindings_per_tx = 0;
+        assert!(build_rcs_filter_config(&args).is_err());
+        assert!(build_rcs_filter_handle(&args).is_err());
+    }
+
+    #[test]
+    fn budgets_default_to_10_000_and_map_into_config() {
+        let config = build_rcs_filter_config(&enabled_args()).unwrap().unwrap();
+        assert_eq!(config.max_native_transfers_per_tx, 10_000);
+        assert_eq!(config.max_event_bindings_per_tx, 10_000);
+
+        let mut overridden = enabled_args();
+        overridden.max_native_transfers_per_tx = 25;
+        overridden.max_event_bindings_per_tx = 50;
+        let config = build_rcs_filter_config(&overridden).unwrap().unwrap();
+        assert_eq!(config.max_native_transfers_per_tx, 25);
+        assert_eq!(config.max_event_bindings_per_tx, 50);
     }
 }

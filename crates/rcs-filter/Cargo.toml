@@ -25,6 +25,17 @@ metrics.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 metrics-util.workspace = true
+tracing-subscriber = "0.3"
+
+[features]
+default = []
+
+# Non-default. Exposes the crate's in-process test helpers to a *dependent* crate's test code
+# without compiling them into a production build: a dependency's `cfg(test)` is inactive when
+# this crate is compiled as a dependency, so `#[cfg(test)]` alone cannot reach consumers' tests.
+# Downstream crates enable it from `[dev-dependencies]`, so the helpers are available to their
+# test/bench targets only — never to a release artifact of this crate or of its consumers.
+test-utils = []
 
 [lints]
 workspace = true

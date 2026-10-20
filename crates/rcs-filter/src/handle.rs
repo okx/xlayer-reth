@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use alloy_primitives::{Address, Log, B256, U256};
-use tracing::warn;
+use tracing::error;
 
 use crate::client::RcsClient;
 use crate::clock::Clock;
@@ -64,6 +64,18 @@ pub enum PreScreen {
     Defer,
     /// Permanently rejected: remove it from txpool without executing it.
     Drop,
+}
+
+/// Why the builder locally denied a transaction before rule evaluation, driven by its native
+/// observation pipeline. A fixed, low-cardinality enum used as a metric label — never a dynamic
+/// error string. This crate stays revm-free; the builder maps its capture outcomes onto this enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalDenyReason {
+    /// The per-transaction internal native-transfer observation budget was exceeded.
+    NativeTransferLimit,
+    /// An observation invariant failed: the captured real-log subsequence did not match the
+    /// execution result, or an enabled filter received a passthrough capture outcome.
+    ObservationInvariant,
 }
 
 /// Input to [`FilterHandle::screen_tx`], borrowed from the builder loop.
@@ -182,6 +194,22 @@ impl std::fmt::Debug for FilterHandle {
     }
 }
 
+/// Extracts the bounded diagnostic counts `(observed_count, limit)` from a matcher [`MatchError`]
+/// for structured overflow logging. It NEVER returns rule ids or binding/transfer content — only
+/// the numeric budget counts. A count-overflow (usize multiplication overflow) reports
+/// `observed_count = usize::MAX` against the configured limit.
+fn binding_overflow_counts(
+    error: &matching::MatchError,
+    configured_limit: usize,
+) -> (usize, usize) {
+    match error {
+        matching::MatchError::BindingBudgetExceeded { attempted, limit, .. } => {
+            (*attempted, *limit)
+        }
+        matching::MatchError::BindingCountOverflow { .. } => (usize::MAX, configured_limit),
+    }
+}
+
 impl FilterHandle {
     /// Builds a handle and spawns the background workers (rule load/hot-reload, batch
     /// submit, adjudication poll, timeout tick). Must be called from within a tokio runtime.
@@ -218,6 +246,29 @@ impl FilterHandle {
         self.shared.pool_lock().len()
     }
 
+    /// The configured maximum internal native-transfer observation candidates per transaction.
+    /// This is the single source of truth for the builder's inspector budget; the builder reads it
+    /// here rather than duplicating it into its own context, so the two can never drift.
+    pub fn max_native_transfers_per_tx(&self) -> usize {
+        self.shared.config.max_native_transfers_per_tx
+    }
+
+    /// Records a builder-side local deny that bypassed rule evaluation (native-transfer budget
+    /// overflow or an observation invariant failure). Increments the total-deny metric once and the
+    /// matching reason metric once. Creates no buffer-pool entry and performs no txpool removal —
+    /// the shared builder `Screen::Deny` branch owns eviction.
+    pub fn record_local_deny(&self, reason: LocalDenyReason) {
+        self.shared.metrics.deny_total.increment(1);
+        match reason {
+            LocalDenyReason::NativeTransferLimit => {
+                self.shared.metrics.local_deny_native_transfer_limit_total.increment(1)
+            }
+            LocalDenyReason::ObservationInvariant => {
+                self.shared.metrics.local_deny_observation_invariant_total.increment(1)
+            }
+        }
+    }
+
     /// Screens one transaction (synchronous, no network IO). See [`Screen`].
     pub fn screen_tx(&self, input: &ScreenInput) -> Screen {
         // Stage zero: dedup short-circuit — a non-terminal buffered entry is reused without
@@ -234,14 +285,24 @@ impl FilterHandle {
 
         // Fresh evaluation.
         let rules = self.shared.current_rules();
-        let outcome = match matching::try_evaluate(&rules, input) {
+        let outcome = match matching::try_evaluate(
+            &rules,
+            input,
+            self.shared.config.max_event_bindings_per_tx,
+        ) {
             Ok(outcome) => outcome,
             Err(error) => {
-                warn!(
+                // Structured error-level diagnostics at a real budget-overflow decision point.
+                // Fields are bounded to tx_hash / observed_count / limit — the matched binding or
+                // transfer content is NEVER logged.
+                let (attempted, limit) =
+                    binding_overflow_counts(&error, self.shared.config.max_event_bindings_per_tx);
+                error!(
                     target: "rcs_filter",
                     tx_hash = %input.tx_hash,
-                    %error,
-                    "matching budget exceeded; denying transaction"
+                    observed_count = attempted,
+                    limit = limit,
+                    "matcher binding budget exceeded; denying transaction (Screen::Deny)"
                 );
                 self.shared.metrics.deny_total.increment(1);
                 return Screen::Deny;
@@ -439,16 +500,37 @@ impl FilterHandle {
             // current logs and compare to the submit-time hash. Transition to a terminal
             // tombstone either way (no RCS cancel call on mismatch).
             BufferStatus::Approved => {
-                let consistent = match matching::try_evaluate(&rule_snapshot, input) {
+                // Uses the SAME configured budget as the first `screen_tx` so a transaction that
+                // passes first screening can never be dropped at consistency recompute for a
+                // divergent limit.
+                let consistent = match matching::try_evaluate(
+                    &rule_snapshot,
+                    input,
+                    self.shared.config.max_event_bindings_per_tx,
+                ) {
                     Ok(MatchOutcome::Audit { actions, .. }) => {
                         quota_hash::encode_and_hash(&actions) == stored_hash
                     }
                     Err(error) => {
-                        warn!(
+                        // Determinism invariant: post-approval re-simulation runs against the SAME
+                        // rule snapshot, the SAME `max_event_bindings_per_tx`, and deterministic
+                        // execution logs as the first screen. A matcher-binding overflow is a pure
+                        // function of (rules, config, logs); since all three are identical to a
+                        // first screen that already passed, an overflow CANNOT newly fire here. This
+                        // `Err` arm — and the `Screen::Drop` it produces below — is therefore a
+                        // documented defensive dead branch, retained unchanged (see design §5.7).
+                        // Diagnostics use the same bounded error! fields (never the rule/transfer
+                        // content).
+                        let (attempted, limit) = binding_overflow_counts(
+                            &error,
+                            self.shared.config.max_event_bindings_per_tx,
+                        );
+                        error!(
                             target: "rcs_filter",
                             tx_hash = %input.tx_hash,
-                            %error,
-                            "matching budget exceeded during consistency check"
+                            observed_count = attempted,
+                            limit = limit,
+                            "matcher binding budget exceeded during consistency recompute"
                         );
                         false
                     }
@@ -468,6 +550,10 @@ impl FilterHandle {
                         Screen::AuditApproved
                     }
                     Some(BufferStatus::Dropped) => {
+                        // Reached on a genuine quota-consistency mismatch. A matcher-binding
+                        // overflow could also route here via `consistent = false`, but per the
+                        // determinism invariant above that cannot newly fire at recompute, so the
+                        // terminal state stays `Screen::Drop` (design §5.7 — not unified to Deny).
                         self.shared.metrics.consistency_mismatch_total.increment(1);
                         self.shared.metrics.drop_total.increment(1);
                         Screen::Drop
@@ -496,10 +582,30 @@ impl FilterHandle {
 
     /// Test-only accessor to drive the buffer pool directly (simulating worker transitions)
     /// without spawning the async workers.
-    #[cfg(test)]
-    pub(crate) fn with_pool<R>(&self, f: impl FnOnce(&mut crate::pool::BufferPool) -> R) -> R {
+    ///
+    /// Compiled for this crate's own tests and for dependents whose `[dev-dependencies]` enable
+    /// the non-default `test-utils` feature. It is absent from every production build: a
+    /// dependent's `cfg(test)` is inactive while this crate is compiled as a dependency, so the
+    /// feature — not `test` — is what carries the helper across the crate boundary.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn with_pool<R>(&self, f: impl FnOnce(&mut crate::pool::BufferPool) -> R) -> R {
         let mut pool = self.shared.pool_lock();
         f(&mut pool)
+    }
+
+    /// Advances a buffered transaction to Approved state for testing, without spawning workers.
+    ///
+    /// Compiled for this crate's own tests and for dependents that enable the non-default
+    /// `test-utils` feature from `[dev-dependencies]`; never exposed by a production build.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn advance_to_approved_for_test(&self, tx_hash: &B256) {
+        let hash_str = format!("{tx_hash:#x}");
+        let now = self.shared.clock.now_unix();
+        let mut pool = self.shared.pool_lock();
+        let Some(generation) = pool.get(tx_hash).map(|e| e.generation) else { return };
+        let expected = std::collections::HashMap::from([(*tx_hash, generation)]);
+        pool.apply_submit_response(&[hash_str], &expected, &FilterConfig::default(), now);
+        pool.apply_query_status(tx_hash, generation, "approved", &FilterConfig::default(), now);
     }
 
     /// Constructs a handle without spawning workers, pre-loaded with `rules` (test helper —
@@ -567,6 +673,146 @@ mod tests {
         assert_eq!(h.buffered_len(), 1);
     }
 
+    // A single audit rule with two anonymous zero-topic events: K matching logs yield K × K
+    // complete bindings, a precise knob for the configurable binding budget.
+    fn two_event_rules() -> RuleSet {
+        let raw: RawRule = serde_json::from_value(serde_json::json!({
+            "id": "binding-budget",
+            "event_abis": {
+                "a": {"type": "event", "name": "A", "inputs": [], "anonymous": true},
+                "b": {"type": "event", "name": "B", "inputs": [], "anonymous": true}
+            },
+            "audit_types": ["custom"],
+            "condition": false,
+            "action": "audit"
+        }))
+        .unwrap();
+        load_rules(1, 1, vec![raw])
+    }
+
+    #[test]
+    fn screen_tx_uses_configured_event_binding_limit() {
+        let logs: Vec<Log> = (0..3)
+            .map(|_| Log {
+                address: golden::token_x(),
+                data: LogData::new_unchecked(vec![], Bytes::new()),
+            })
+            .collect();
+        let input = ScreenInput {
+            tx_hash: B256::repeat_byte(0x11),
+            origin: Address::repeat_byte(0x22),
+            tx_to: None,
+            nonce: 0,
+            value: U256::ZERO,
+            block_height: 0,
+            logs: &logs,
+        };
+        // Tight budget of 2: 3 × 3 = 9 bindings > 2 → fail-closed Deny (proves screen_tx reads
+        // the configured limit, not a fixed constant).
+        let tight = FilterHandle::for_test(
+            FilterConfig { max_event_bindings_per_tx: 2, ..FilterConfig::default() },
+            two_event_rules(),
+            Arc::new(TestClock::new(1)),
+        );
+        assert_eq!(tight.screen_tx(&input), Screen::Deny);
+        // Default budget (10,000): the same rule set does not overflow (condition false → Allow).
+        let generous = FilterHandle::for_test(
+            FilterConfig::default(),
+            two_event_rules(),
+            Arc::new(TestClock::new(1)),
+        );
+        assert_eq!(generous.screen_tx(&input), Screen::Allow);
+    }
+
+    #[test]
+    fn first_screen_matcher_overflow_emits_error_bounded_fields() {
+        use std::io::Write;
+        use std::sync::Mutex;
+
+        // Minimal in-memory writer so the test can inspect the emitted diagnostics.
+        #[derive(Clone)]
+        struct BufWriter(Arc<Mutex<Vec<u8>>>);
+        impl Write for BufWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl tracing_subscriber::fmt::MakeWriter<'_> for BufWriter {
+            type Writer = BufWriter;
+            fn make_writer(&self) -> BufWriter {
+                self.clone()
+            }
+        }
+
+        let buf = BufWriter(Arc::new(Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_target(true)
+            .with_writer(buf.clone())
+            .finish();
+
+        // 3 zero-topic logs × two anonymous events = 9 complete bindings, over the tight budget of 2.
+        let logs: Vec<Log> = (0..3)
+            .map(|_| Log {
+                address: golden::token_x(),
+                data: LogData::new_unchecked(vec![], Bytes::new()),
+            })
+            .collect();
+        let input = ScreenInput {
+            tx_hash: B256::repeat_byte(0xAB),
+            origin: Address::repeat_byte(0x22),
+            tx_to: None,
+            nonce: 0,
+            value: U256::ZERO,
+            block_height: 0,
+            logs: &logs,
+        };
+        let handle = FilterHandle::for_test(
+            FilterConfig { max_event_bindings_per_tx: 2, ..FilterConfig::default() },
+            two_event_rules(),
+            Arc::new(TestClock::new(1)),
+        );
+
+        let decision = tracing::subscriber::with_default(subscriber, || handle.screen_tx(&input));
+        assert_eq!(decision, Screen::Deny);
+
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(out.contains("ERROR"), "expected error-level diagnostic, got: {out}");
+        assert!(out.contains("rcs_filter"), "expected target, got: {out}");
+        assert!(out.contains("observed_count"), "expected observed_count field, got: {out}");
+        assert!(out.contains("limit"), "expected limit field, got: {out}");
+        // Bounded fields only: the rule id / binding content must never leak into the log.
+        assert!(!out.contains("binding-budget"), "rule id must not be logged: {out}");
+    }
+
+    #[test]
+    fn max_native_transfers_accessor_returns_config_value() {
+        let handle = FilterHandle::for_test(
+            FilterConfig { max_native_transfers_per_tx: 7, ..FilterConfig::default() },
+            RuleSet::default(),
+            Arc::new(TestClock::new(1)),
+        );
+        assert_eq!(handle.max_native_transfers_per_tx(), 7);
+    }
+
+    #[test]
+    fn record_local_deny_creates_no_buffer_entry() {
+        let handle = FilterHandle::for_test(
+            FilterConfig::default(),
+            RuleSet::default(),
+            Arc::new(TestClock::new(1)),
+        );
+        handle.record_local_deny(LocalDenyReason::NativeTransferLimit);
+        handle.record_local_deny(LocalDenyReason::ObservationInvariant);
+        // A local deny records metrics only; it must never enter the pending buffer.
+        assert_eq!(handle.buffered_len(), 0);
+    }
+
     #[test]
     fn deny_tx_returns_deny_without_buffering() {
         let rules = load_rules(1, 1, vec![serde_json::from_str(golden::RULE_SCENARIO_B).unwrap()]);
@@ -597,7 +843,13 @@ mod tests {
         )
         .unwrap();
         let rules = load_rules(1, 1, vec![raw]);
-        let h = FilterHandle::for_test(FilterConfig::default(), rules, Arc::new(TestClock::new(1)));
+        // Pin the binding budget to 4,096 so the 65 × 65 = 4,225 bindings below overflow it
+        // (the scenario predates the configurable budget, whose default is now 10,000).
+        let h = FilterHandle::for_test(
+            FilterConfig { max_event_bindings_per_tx: 4_096, ..FilterConfig::default() },
+            rules,
+            Arc::new(TestClock::new(1)),
+        );
         let logs = (0..65)
             .map(|_| Log {
                 address: golden::token_x(),

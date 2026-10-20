@@ -55,6 +55,14 @@ pub struct FilterConfig {
     /// retry window. Non-terminal entries are bounded separately by builder-side reconciliation
     /// with txpool; `Approved` is intentionally not resolved by this retention setting.
     pub terminal_entry_retention: Duration,
+    /// Maximum internal native-transfer observation candidates collected for one transaction
+    /// during simulation. The Nth candidate is allowed; the (N+1)th overflows and fails the
+    /// transaction closed. Must be `>= 1` (default 10_000).
+    pub max_native_transfers_per_tx: usize,
+    /// Maximum complete event bindings evaluated across all rules for one transaction. Replaces
+    /// the historical fixed matcher ceiling; used identically in first screening and the
+    /// post-approval consistency recompute. Must be `>= 1` (default 10_000).
+    pub max_event_bindings_per_tx: usize,
 }
 
 impl Default for FilterConfig {
@@ -73,6 +81,8 @@ impl Default for FilterConfig {
             total_retry_timeout: Duration::from_secs(90),
             rules_version_poll_interval: Duration::from_millis(2000),
             terminal_entry_retention: Duration::from_secs(300),
+            max_native_transfers_per_tx: 10_000,
+            max_event_bindings_per_tx: 10_000,
         }
     }
 }
@@ -129,6 +139,18 @@ impl FilterConfig {
             return Err(crate::FilterError::Config(format!(
                 "rcs-filter submit_max_concurrency must be between 1 and {MAX_SUBMIT_CONCURRENCY}"
             )));
+        }
+        // Resource budgets are validated unconditionally (even when the filter is disabled): a
+        // zero budget is always a startup misconfiguration, and startup must fail fast on it.
+        if self.max_native_transfers_per_tx == 0 {
+            return Err(crate::FilterError::Config(
+                "rcs-filter max_native_transfers_per_tx must be >= 1".to_string(),
+            ));
+        }
+        if self.max_event_bindings_per_tx == 0 {
+            return Err(crate::FilterError::Config(
+                "rcs-filter max_event_bindings_per_tx must be >= 1".to_string(),
+            ));
         }
         Ok(())
     }
@@ -252,5 +274,35 @@ mod tests {
     fn disabled_filter_skips_submit_concurrency_validation() {
         let config = FilterConfig { submit_max_concurrency: 0, ..Default::default() };
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn default_config_budgets_are_10_000() {
+        let c = FilterConfig::default();
+        assert_eq!(c.max_native_transfers_per_tx, 10_000);
+        assert_eq!(c.max_event_bindings_per_tx, 10_000);
+    }
+
+    #[test]
+    fn validate_rejects_zero_native_budget() {
+        let c = FilterConfig { max_native_transfers_per_tx: 0, ..Default::default() };
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_event_bindings_budget() {
+        let c = FilterConfig { max_event_bindings_per_tx: 0, ..Default::default() };
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn budgets_are_validated_even_when_disabled() {
+        // Disabled filter still rejects a zero budget (validate-always semantics).
+        let native =
+            FilterConfig { enabled: false, max_native_transfers_per_tx: 0, ..Default::default() };
+        assert!(native.validate().is_err());
+        let bindings =
+            FilterConfig { enabled: false, max_event_bindings_per_tx: 0, ..Default::default() };
+        assert!(bindings.validate().is_err());
     }
 }

@@ -11,7 +11,7 @@ use alloy_primitives::{Address, Log, B256, U256};
 use rcs_filter::client::ActionItem;
 use rcs_filter::handle::ScreenInput;
 use rcs_filter::matching::{try_evaluate, MatchOutcome};
-use rcs_filter::rules::RuleSet;
+use rcs_filter::rules::{RuleSet, DEFAULT_MAX_EVENT_BINDINGS_PER_TX};
 use serde::Serialize;
 
 use super::deposit::DepositTxRequest;
@@ -68,7 +68,9 @@ pub fn verdict_for(
 ) -> AuditResult {
     let input =
         ScreenInput { tx_hash, origin: from, tx_to: to, nonce: 0, value, block_height: 0, logs };
-    match try_evaluate(rules, &input) {
+    // The audit RPC path holds no FilterConfig, so it uses the default binding budget. This keeps
+    // its existing matcher-overflow `Malformed` semantics unchanged.
+    match try_evaluate(rules, &input, DEFAULT_MAX_EVENT_BINDINGS_PER_TX) {
         Err(error) => {
             tracing::warn!(
                 target: "xlayer_audit_rpc",
@@ -302,12 +304,16 @@ mod tests {
 
     #[test]
     fn excessive_complete_bindings_are_reported_as_malformed() {
+        // 2 anonymous zero-input events x 101 zero-topic logs = 101 x 101 = 10,201 complete
+        // bindings, which genuinely exceeds the 10,000 default event-binding budget that
+        // `verdict_for` uses. The budget check is strictly-greater, so a 65-log input (4,225
+        // bindings) never trips it. Raise the input, never the asserted verdict.
         let raw: RawRule = serde_json::from_str(
             r#"{"id":"excessive","event_abis":{"a":{"type":"event","name":"A","inputs":[],"anonymous":true},"b":{"type":"event","name":"B","inputs":[],"anonymous":true}},"audit_types":["custom"],"condition":true,"action":"audit"}"#,
         )
         .unwrap();
         let rules = load_rules(1, 0, vec![raw]);
-        let logs = (0..65)
+        let logs = (0..101)
             .map(|_| Log { address: token(), data: LogData::new_unchecked(vec![], Bytes::new()) })
             .collect::<Vec<_>>();
 
@@ -323,6 +329,95 @@ mod tests {
 
         assert_eq!(result.verdict, Verdict::Malformed);
         assert!(result.actions.is_none());
+    }
+
+    #[test]
+    fn exactly_budget_complete_bindings_are_classified_normally() {
+        // 100 x 100 = 10,000 == the default budget. The comparison is strictly-greater, so
+        // this is ALLOWED. Pins the inclusive edge: an off-by-one changing `>` to `>=` fails
+        // here rather than passing silently.
+        let raw: RawRule = serde_json::from_str(
+            r#"{"id":"excessive","event_abis":{"a":{"type":"event","name":"A","inputs":[],"anonymous":true},"b":{"type":"event","name":"B","inputs":[],"anonymous":true}},"audit_types":["custom"],"condition":true,"action":"audit"}"#,
+        )
+        .unwrap();
+        let rules = load_rules(1, 0, vec![raw]);
+        let logs = (0..100)
+            .map(|_| Log { address: token(), data: LogData::new_unchecked(vec![], Bytes::new()) })
+            .collect::<Vec<_>>();
+
+        let result = verdict_for(
+            &sample_request(),
+            origin(),
+            Some(recipient()),
+            B256::ZERO,
+            U256::ZERO,
+            &logs,
+            &rules,
+        );
+
+        assert_eq!(result.verdict, Verdict::Audit);
+        assert!(result.actions.is_some(), "exactly-at-budget must be classified, not Malformed");
+        assert_ne!(result.verdict, Verdict::Malformed);
+    }
+
+    #[test]
+    fn budget_crossed_only_by_accumulation_across_rules_is_reported_as_malformed() {
+        // The complete-binding count accumulates ACROSS candidate rules and is compared once
+        // against the budget. A per-rule comparison would pass every other test here, because
+        // they all use a single rule. Two rules, each with two anonymous zero-input events over
+        // n zero-topic logs, each contribute n^2; the total is 2 * n^2 while neither rule alone
+        // is close to the budget.
+        //   n = 70  ->  2 * 4,900  =  9,800 <= 10,000 -> allowed    (per-rule: 4,900 each)
+        //   n = 71  ->  2 * 5,041  = 10,082  > 10,000 -> Malformed  (per-rule: 5,041 each)
+        // The n = 71 half can only fail by accumulating across both rules.
+        let two_rules = || -> RuleSet {
+            let rule_json = r#"{"id":"ID","event_abis":{"a":{"type":"event","name":"A","inputs":[],"anonymous":true},"b":{"type":"event","name":"B","inputs":[],"anonymous":true}},"audit_types":["custom"],"condition":true,"action":"audit"}"#;
+            let raw_one: RawRule =
+                serde_json::from_str(&rule_json.replace("ID", "excessive-one")).unwrap();
+            let raw_two: RawRule =
+                serde_json::from_str(&rule_json.replace("ID", "excessive-two")).unwrap();
+            load_rules(1, 0, vec![raw_one, raw_two])
+        };
+
+        let logs_of = |n: usize| -> Vec<Log> {
+            (0..n)
+                .map(|_| Log {
+                    address: token(),
+                    data: LogData::new_unchecked(vec![], Bytes::new()),
+                })
+                .collect()
+        };
+
+        let allowed = verdict_for(
+            &sample_request(),
+            origin(),
+            Some(recipient()),
+            B256::ZERO,
+            U256::ZERO,
+            &logs_of(70),
+            &two_rules(),
+        );
+        assert_eq!(allowed.verdict, Verdict::Audit);
+        assert!(
+            allowed.actions.is_some(),
+            "9,800 total bindings must be classified, not Malformed"
+        );
+
+        let malformed = verdict_for(
+            &sample_request(),
+            origin(),
+            Some(recipient()),
+            B256::ZERO,
+            U256::ZERO,
+            &logs_of(71),
+            &two_rules(),
+        );
+        assert_eq!(malformed.verdict, Verdict::Malformed);
+        assert!(
+            malformed.actions.is_none(),
+            "10,082 total bindings (5,041 per rule) must only exceed the budget by accumulating \
+             across both candidate rules"
+        );
     }
 
     #[test]

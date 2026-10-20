@@ -270,6 +270,24 @@ pub struct RcsFilterArgs {
     /// Retention of a terminal buffer-pool tombstone before eviction, in seconds.
     #[arg(long = "rcs-filter.terminal-entry-retention-seconds", default_value = "300")]
     pub terminal_entry_retention_seconds: u64,
+
+    /// Maximum internal native-transfer observation candidates collected per transaction during
+    /// simulation. Must be `>= 1`; `0` is a startup error even when the filter is disabled.
+    #[arg(
+        long = "rcs-filter.max-native-transfers-per-tx",
+        env = "RCS_MAX_NATIVE_TRANSFERS_PER_TX",
+        default_value = "10000"
+    )]
+    pub max_native_transfers_per_tx: usize,
+
+    /// Maximum complete event bindings evaluated across all rules per transaction. Must be `>= 1`;
+    /// `0` is a startup error even when the filter is disabled.
+    #[arg(
+        long = "rcs-filter.max-event-bindings-per-tx",
+        env = "RCS_MAX_EVENT_BINDINGS_PER_TX",
+        default_value = "10000"
+    )]
+    pub max_event_bindings_per_tx: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]

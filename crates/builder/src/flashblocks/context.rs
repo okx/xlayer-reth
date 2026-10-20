@@ -6,7 +6,7 @@ use crate::{
 };
 use std::{sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use alloy_consensus::{
     conditional::BlockConditionalAttributes, transaction::Recovered, Eip658Value, Transaction,
@@ -14,14 +14,14 @@ use alloy_consensus::{
 use alloy_eips::eip2718::WithEncoded;
 use alloy_eips::{Encodable2718, Typed2718};
 use alloy_evm::Database;
-use alloy_op_evm::{block::receipt_builder::OpReceiptBuilder, block::OpTxEnv, OpEvm};
-use alloy_primitives::{BlockHash, Bytes, U256};
+use alloy_op_evm::{block::receipt_builder::OpReceiptBuilder, block::OpTxEnv, OpEvm, OpEvmContext};
+use alloy_primitives::{BlockHash, Bytes, Log, B256, U256};
 use alloy_rpc_types_eth::Withdrawals;
 use core::fmt::Debug;
 use op_alloy_consensus::{OpDepositReceipt, OpTxType};
 use op_revm::{L1BlockInfo, OpSpecId};
 
-use rcs_filter::{FilterHandle, PreScreen, Screen, ScreenInput};
+use rcs_filter::{FilterHandle, LocalDenyReason, PreScreen, Screen, ScreenInput};
 use reth_basic_payload_builder::PayloadConfig;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_evm::{
@@ -48,9 +48,10 @@ use reth_primitives_traits::{InMemorySize, SealedHeader, SignedTransaction};
 use reth_revm::{context::Block, State};
 use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction, TransactionPool};
 use revm::{
-    context::result::ResultAndState, inspector::NoOpInspector, interpreter::as_u64_saturated,
-    DatabaseCommit,
+    context::result::ResultAndState, interpreter::as_u64_saturated, DatabaseCommit, Inspector,
 };
+
+use super::rcs_capture::{CaptureInvariantError, CaptureOutcome, RcsCaptureControl, RcsInspector};
 
 /// Container type that holds all necessities to build a new payload.
 #[derive(Debug)]
@@ -95,6 +96,161 @@ pub(super) struct TransactionLimits {
     pub block_gas: u64,
     pub block_da: Option<u64>,
     pub block_da_footprint: Option<u64>,
+}
+
+/// Maps a non-`Complete` [`CaptureOutcome`] to a fail-closed screening decision, emitting a
+/// structured `error!` at every real budget-overflow / invariant decision point and recording the
+/// matching local-deny reason metric exactly once. Returns `None` only for `Complete` (the caller
+/// screens the captured stream instead). An enabled filter receiving `Passthrough` is a
+/// state-machine bug and fails closed exactly like an observation-invariant violation — it is never
+/// allowed to fall back to raw logs.
+///
+/// Diagnostic fields are bounded to `tx_hash`, `observed_count`/`attempted`, and `limit`; the
+/// transfer list, individual from/to/value tuples, and the observation queue are NEVER logged.
+fn fail_closed_screen(
+    filter: &FilterHandle,
+    tx_hash: B256,
+    outcome: &CaptureOutcome,
+) -> Option<Screen> {
+    match outcome {
+        CaptureOutcome::Complete(_) => None,
+        CaptureOutcome::LimitExceeded { attempted, limit } => {
+            error!(
+                target: "rcs_filter::capture",
+                %tx_hash,
+                observed_count = *attempted,
+                limit = *limit,
+                "native-transfer observation budget exceeded; failing closed (Screen::Deny)"
+            );
+            filter.record_local_deny(LocalDenyReason::NativeTransferLimit);
+            Some(Screen::Deny)
+        }
+        // R9 item 1: `RealLogMismatch` is its OWN arm, emitting EXACTLY the four bounded fields —
+        // `tx_hash`, `first_bad_index`, `observed`, `expected` — and NEVER the real-log list, the
+        // observation queue, or any from/to/value content. It must not be merged with `Passthrough`
+        // (the earlier merged arm dropped these fields and logged only `tx_hash`).
+        CaptureOutcome::InvariantViolation {
+            reason: CaptureInvariantError::RealLogMismatch { first_bad_index, observed, expected },
+        } => {
+            error!(
+                target: "rcs_filter::capture",
+                %tx_hash,
+                first_bad_index = *first_bad_index,
+                observed = *observed,
+                expected = *expected,
+                "real-log subsequence mismatch; failing closed (Screen::Deny)"
+            );
+            filter.record_local_deny(LocalDenyReason::ObservationInvariant);
+            Some(Screen::Deny)
+        }
+        // D7b: a successful CREATE returned an address that differed from the pre-derived expected
+        // address. Fails closed with only the bounded `create_index` field (no addresses logged).
+        CaptureOutcome::InvariantViolation {
+            reason: CaptureInvariantError::CreateAddressMismatch { create_index },
+        } => {
+            error!(
+                target: "rcs_filter::capture",
+                %tx_hash,
+                create_index = *create_index,
+                "CREATE address mismatch: pre-derived address differs from actual; \
+                 failing closed (Screen::Deny)"
+            );
+            filter.record_local_deny(LocalDenyReason::ObservationInvariant);
+            Some(Screen::Deny)
+        }
+        // An enabled filter receiving `Passthrough` is a state-machine bug: it stays a
+        // `tx_hash`-only fail-closed log (no extra fields) and never falls back to raw logs. Any
+        // future content-free `CaptureInvariantError` kind will force an explicit decision here at
+        // compile time, so a new invariant can never silently inherit the mismatch fields.
+        CaptureOutcome::Passthrough => {
+            error!(
+                target: "rcs_filter::capture",
+                %tx_hash,
+                "capture invariant violated; failing closed (Screen::Deny)"
+            );
+            filter.record_local_deny(LocalDenyReason::ObservationInvariant);
+            Some(Screen::Deny)
+        }
+    }
+}
+
+// Test-only capture of the ACTUAL screen decision the candidate loop took (spec §5.10.3 P1.2). It
+// lets a loop-level test assert `Screen::Deny` DIRECTLY — a Deny-only signal that distinguishes the
+// fail-closed path from `Screen::Drop`, which shares the `mark_invalid`/txpool-removal side effects.
+// Kept as `//` (not `///`) so no doc comment is orphaned onto the `thread_local!` macro;
+// `#[cfg(test)]` compiles it out of production builds entirely.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static LAST_SCREEN_DECISION: std::cell::Cell<Option<Screen>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Builder-internal seam letting the panic-safe [`CaptureGuard`] drive the capture lifecycle on the
+/// EVM without knowing the concrete inner inspector type. Implemented for the flashblocks `OpEvm`
+/// (delegating to the composite's inner inspector via `components_mut`) and, in tests, for a
+/// lifecycle-counting double.
+trait RcsCaptureScope {
+    fn scope_start_capture(&mut self);
+    fn scope_finish_capture(&mut self, result_logs: &[Log]) -> CaptureOutcome;
+    fn scope_abort_capture(&mut self);
+}
+
+impl<DB, I> RcsCaptureScope for OpEvm<DB, I, PrecompilesMap>
+where
+    DB: Database,
+    I: Inspector<OpEvmContext<DB>> + RcsCaptureControl,
+{
+    fn scope_start_capture(&mut self) {
+        self.components_mut().1.start_capture();
+    }
+
+    fn scope_finish_capture(&mut self, result_logs: &[Log]) -> CaptureOutcome {
+        self.components_mut().1.finish_capture(result_logs)
+    }
+
+    fn scope_abort_capture(&mut self) {
+        self.components_mut().1.abort_capture();
+    }
+}
+
+/// Panic-safe RAII capture guard (spec §5.2, R9 item 3). Constructing it calls `start_capture` on
+/// the inner inspector; on `Drop` it calls `abort_capture` UNLESS it was explicitly disarmed by a
+/// successful [`CaptureGuard::finish`]. This makes cleanup impossible to forget on any early return
+/// or unwind — a panic caught upstream still aborts exactly once — so correctness does not rest on
+/// caller discipline, and the guard never aborts twice (`finish` disarms before returning; the
+/// `Err`/panic path aborts once via `Drop`).
+struct CaptureGuard<'a, E: RcsCaptureScope> {
+    scope: &'a mut E,
+    armed: bool,
+}
+
+impl<'a, E: RcsCaptureScope> CaptureGuard<'a, E> {
+    /// Arms capture: calls `start_capture` on construction.
+    fn new(scope: &'a mut E) -> Self {
+        scope.scope_start_capture();
+        Self { scope, armed: true }
+    }
+
+    /// The armed scope, for driving the real candidate `evm.transact`.
+    fn scope_mut(&mut self) -> &mut E {
+        self.scope
+    }
+
+    /// Closes the capture window normally and disarms the guard so its `Drop` is a no-op — exactly
+    /// one lifecycle-ending call (this `finish`), never a `finish` followed by a `Drop` abort.
+    fn finish(mut self, result_logs: &[Log]) -> CaptureOutcome {
+        let outcome = self.scope.scope_finish_capture(result_logs);
+        self.armed = false;
+        outcome
+    }
+}
+
+impl<E: RcsCaptureScope> Drop for CaptureGuard<'_, E> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.scope.scope_abort_capture();
+        }
+    }
 }
 
 impl FlashblocksBuilderCtx {
@@ -282,17 +438,21 @@ impl FlashblocksBuilderCtx {
     /// (whitelisted) transactions would be rejected by base-fee validation even when gasless is
     /// enabled.
     #[allow(clippy::type_complexity)]
-    fn transact_maybe_gasless<DB>(
+    fn transact_maybe_gasless<DB, I>(
         &self,
-        evm: &mut OpEvm<DB, NoOpInspector, PrecompilesMap>,
+        evm: &mut OpEvm<DB, I, PrecompilesMap>,
         tx: &Recovered<OpTransactionSigned>,
     ) -> Result<
-        (ResultAndState<<OpEvm<DB, NoOpInspector, PrecompilesMap> as Evm>::HaltReason>, bool),
-        <OpEvm<DB, NoOpInspector, PrecompilesMap> as Evm>::Error,
+        (ResultAndState<<OpEvm<DB, I, PrecompilesMap> as Evm>::HaltReason>, bool, CaptureOutcome),
+        <OpEvm<DB, I, PrecompilesMap> as Evm>::Error,
     >
     where
         DB: Database,
+        I: Inspector<OpEvmContext<DB>> + RcsCaptureControl,
     {
+        // The gasless pre-check runs `getGaslessAllowance` as a system call on the same EVM. It
+        // MUST run with the inspector inactive so the native-transfer observation seam never
+        // captures anything from a non-real-user simulation.
         let is_gasless = self.is_gasless(evm, tx)?;
         let mut tx_env = self.evm_config.tx_env(tx);
         tx_env.set_gasless(is_gasless);
@@ -302,17 +462,28 @@ impl FlashblocksBuilderCtx {
         // on error), so the toggle never leaks into the next tx in the block. `block.basefee` is
         // never mutated (`BASEFEE` still reports the real header base fee) and `OpHandler` skips fee
         // charge/reimbursement/reward, so a plain `transact` applies the full gasless policy.
-        let result = evm.transact(tx_env)?;
-        Ok((result, is_gasless))
+        //
+        // Capture is armed only around the real candidate `evm.transact` through a panic-safe RAII
+        // guard: `start_capture` on construction, `abort_capture` on `Drop` unless disarmed by a
+        // successful `finish`. Every early return / unwind below therefore leaves the inspector
+        // inactive without relying on manual cleanup, and abort runs exactly once (spec §5.2, R9
+        // item 3). So every early exit downstream sees an inactive inspector.
+        let mut guard = CaptureGuard::new(evm);
+        // On the `Err` path `?` early-returns while the guard is still armed, so its `Drop` runs a
+        // single `abort_capture`; on `Ok`, `guard.finish` disarms it (no double-abort).
+        let result = guard.scope_mut().transact(tx_env)?;
+        let capture = guard.finish(result.result.logs());
+        Ok((result, is_gasless, capture))
     }
 
-    fn is_gasless<DB>(
+    fn is_gasless<DB, I>(
         &self,
-        evm: &mut OpEvm<DB, NoOpInspector, PrecompilesMap>,
+        evm: &mut OpEvm<DB, I, PrecompilesMap>,
         tx: &Recovered<OpTransactionSigned>,
-    ) -> Result<bool, <OpEvm<DB, NoOpInspector, PrecompilesMap> as Evm>::Error>
+    ) -> Result<bool, <OpEvm<DB, I, PrecompilesMap> as Evm>::Error>
     where
         DB: Database,
+        I: Inspector<OpEvmContext<DB>>,
     {
         if tx.is_deposit() || tx.max_fee_per_gas() != 0 {
             return Ok(false);
@@ -373,7 +544,7 @@ impl FlashblocksBuilderCtx {
                     ))
                 })?;
 
-            let (ResultAndState { result, state }, _is_gasless) =
+            let (ResultAndState { result, state }, _is_gasless, _capture) =
                 match self.transact_maybe_gasless(&mut evm, &sequencer_tx) {
                     Ok(res) => res,
                     Err(err) => {
@@ -498,7 +669,7 @@ impl FlashblocksBuilderCtx {
             }
 
             // Ensure transaction execution is valid.
-            let (ResultAndState { result, state }, _is_gasless) =
+            let (ResultAndState { result, state }, _is_gasless, _capture) =
                 match self.transact_maybe_gasless(&mut evm, &recovered_tx) {
                     Ok(res) => res,
                     Err(err) => {
@@ -556,6 +727,39 @@ impl FlashblocksBuilderCtx {
         tx_pool: &impl TransactionPool,
         limits: TransactionLimits,
     ) -> Result<Option<()>, PayloadBuilderError> {
+        // Two typed EVM-construction branches feed one generic loop. When the RCS Filter is enabled
+        // the RCS capture inspector becomes the composite's inner inspector so internal native-token
+        // transfers can be observed during the real-user candidate simulation; when it is disabled
+        // the zero-overhead no-op inspector is kept and behavior is unchanged.
+        if let Some(filter) = self.filter.clone() {
+            let inspector = RcsInspector::new(filter.max_native_transfers_per_tx());
+            let mut evm = self.evm_config.evm_with_env_and_inspector(
+                &mut *db,
+                self.evm_env.clone(),
+                inspector,
+            );
+            self.run_tx_loop(&mut evm, info, best_txs, tx_pool, limits)
+        } else {
+            let mut evm = self.evm_config.evm_with_env(&mut *db, self.evm_env.clone());
+            self.run_tx_loop(&mut evm, info, best_txs, tx_pool, limits)
+        }
+    }
+
+    /// The per-flashblock transaction simulation loop, generic over the inner inspector so the
+    /// Filter-disabled (`NoOpInspector`) and Filter-enabled (`RcsInspector`) EVMs share one body.
+    /// Native-transfer capture is driven through the [`RcsCaptureControl`] seam bound on `I`.
+    fn run_tx_loop<DB, I>(
+        &self,
+        evm: &mut OpEvm<DB, I, PrecompilesMap>,
+        info: &mut ExecutionInfo,
+        best_txs: &mut impl PayloadTxsBounds,
+        tx_pool: &impl TransactionPool,
+        limits: TransactionLimits,
+    ) -> Result<Option<()>, PayloadBuilderError>
+    where
+        DB: Database + DatabaseCommit,
+        I: Inspector<OpEvmContext<DB>> + RcsCaptureControl,
+    {
         let execute_txs_start_time = Instant::now();
         let mut num_txs_considered = 0;
         let mut num_txs_simulated = 0;
@@ -565,7 +769,6 @@ impl FlashblocksBuilderCtx {
         let base_fee = self.base_fee();
 
         let tx_da_limit = self.da_config.max_da_tx_size();
-        let mut evm = self.evm_config.evm_with_env(&mut *db, self.evm_env.clone());
 
         debug!(
             target: "payload_builder",
@@ -688,8 +891,8 @@ impl FlashblocksBuilderCtx {
             // Optimism layer, never a `block.basefee` mutation), gated on the chain's gasless
             // contract approving the tx. Non-gasless txs are unaffected — see
             // [`Self::transact_maybe_gasless`].
-            let (ResultAndState { result, state }, is_gasless) =
-                match self.transact_maybe_gasless(&mut evm, &tx) {
+            let (ResultAndState { result, state }, is_gasless, capture_outcome) =
+                match self.transact_maybe_gasless(&mut *evm, &tx) {
                     Ok(res) => res,
                     Err(err) => {
                         if let Some(err) = err.as_invalid_tx_err() {
@@ -791,17 +994,31 @@ impl FlashblocksBuilderCtx {
                 continue;
             }
 
-            // Run rule-driven RCS screening after simulation and before committing any state.
+            // Run rule-driven RCS screening after simulation and before committing any state. The
+            // observation stream (real logs interleaved with virtual native `Transfer`s) replaces
+            // the raw logs; a budget overflow or observation-invariant failure fails closed to
+            // `Screen::Deny` via the same downstream handling, never entering the pending buffer.
             if let Some(filter) = self.filter.as_ref() {
-                let decision = filter.screen_tx(&ScreenInput {
-                    tx_hash,
-                    origin: tx.signer(),
-                    tx_to: tx.to(),
-                    nonce: tx.nonce(),
-                    value: tx.value(),
-                    block_height: self.block_number(),
-                    logs: result.logs(),
-                });
+                let decision = if let CaptureOutcome::Complete(logs) = &capture_outcome {
+                    filter.screen_tx(&ScreenInput {
+                        tx_hash,
+                        origin: tx.signer(),
+                        tx_to: tx.to(),
+                        nonce: tx.nonce(),
+                        value: tx.value(),
+                        block_height: self.block_number(),
+                        logs,
+                    })
+                } else {
+                    // Every non-`Complete` outcome fails closed (budget overflow, observation
+                    // invariant, or — a state-machine bug — an enabled filter seeing `Passthrough`).
+                    fail_closed_screen(filter, tx_hash, &capture_outcome).unwrap_or(Screen::Deny)
+                };
+                // Test-only decision seam (spec §5.10.3 P1.2): record the ACTUAL screen decision so a
+                // loop-level test asserts `Screen::Deny` DIRECTLY — a Deny-only signal, never inferred
+                // from `mark_invalid`/txpool removal that `Screen::Drop` shares. No effect in production.
+                #[cfg(test)]
+                LAST_SCREEN_DECISION.with(|d| d.set(Some(decision)));
                 match decision {
                     Screen::Allow | Screen::AuditApproved => {}
                     Screen::Deny => {
@@ -840,7 +1057,7 @@ impl FlashblocksBuilderCtx {
             // Push transaction changeset and calculate header bloom filter for receipt.
             let ctx = ReceiptBuilderCtx {
                 tx_type: tx.tx_type(),
-                evm: &evm,
+                evm: &*evm,
                 result,
                 state: &state,
                 cumulative_gas_used: info.cumulative_gas_used,
@@ -880,6 +1097,1105 @@ impl FlashblocksBuilderCtx {
             "Completed executing best transactions",
         );
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod capture_decision_tests {
+    use super::*;
+    use crate::flashblocks::rcs_capture::CaptureInvariantError;
+
+    fn test_filter() -> FilterHandle {
+        rcs_filter::FilterHandle::for_test(
+            rcs_filter::FilterConfig::default(),
+            rcs_filter::rules::RuleSet::default(),
+            Arc::new(rcs_filter::SystemClock),
+        )
+    }
+
+    #[test]
+    fn complete_is_not_fail_closed() {
+        let filter = test_filter();
+        assert_eq!(
+            fail_closed_screen(&filter, B256::ZERO, &CaptureOutcome::Complete(vec![])),
+            None
+        );
+    }
+
+    #[test]
+    fn limit_exceeded_fails_closed() {
+        let filter = test_filter();
+        assert_eq!(
+            fail_closed_screen(
+                &filter,
+                B256::ZERO,
+                &CaptureOutcome::LimitExceeded { attempted: 3, limit: 2 }
+            ),
+            Some(Screen::Deny)
+        );
+    }
+
+    #[test]
+    fn invariant_violation_fails_closed() {
+        let filter = test_filter();
+        let outcome = CaptureOutcome::InvariantViolation {
+            reason: CaptureInvariantError::RealLogMismatch {
+                first_bad_index: 0,
+                observed: 1,
+                expected: 2,
+            },
+        };
+        assert_eq!(fail_closed_screen(&filter, B256::ZERO, &outcome), Some(Screen::Deny));
+    }
+
+    // The R10 direct-dispatch test 35 has been REWRITTEN (spec §8 test 35, R11; it supersedes the
+    // R10 version) into the LOOP-LEVEL builder-path gating test in the `loop_level_fail_closed_tests`
+    // module below: that test drives the REAL `execute_best_transactions` / `run_tx_loop` candidate
+    // loop with a non-empty `RuleSet` and a real runtime `RealLogMismatch`, instead of calling
+    // `fail_closed_screen` directly. The direct `fail_closed_screen` dispatch stays covered here by
+    // `invariant_violation_fails_closed` / `enabled_filter_passthrough_fails_closed`, and the real
+    // runtime outcome by `test_fixtures::real_runtime_reallogmismatch_outcome` (test 33).
+
+    #[test]
+    fn enabled_filter_passthrough_fails_closed() {
+        // Review-focus: an enabled filter must never reuse raw logs on a `Passthrough`.
+        let filter = test_filter();
+        assert_eq!(
+            fail_closed_screen(&filter, B256::ZERO, &CaptureOutcome::Passthrough),
+            Some(Screen::Deny)
+        );
+    }
+
+    /// Runs `f` under a capturing `tracing` subscriber and returns its result plus everything it
+    /// logged, so a test can assert the level, target, and exact bounded fields of a diagnostic and
+    /// prove no content leaks. One helper shared by the capture-diagnostic tests (R9 non-blocking
+    /// cleanup: previously each test hand-rolled its own writer).
+    fn capture_tracing<R>(f: impl FnOnce() -> R) -> (R, String) {
+        use std::io::Write;
+        use std::sync::Mutex;
+
+        #[derive(Clone)]
+        struct BufWriter(Arc<Mutex<Vec<u8>>>);
+        impl Write for BufWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl tracing_subscriber::fmt::MakeWriter<'_> for BufWriter {
+            type Writer = BufWriter;
+            fn make_writer(&self) -> BufWriter {
+                self.clone()
+            }
+        }
+
+        let buf = BufWriter(Arc::new(Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_target(true)
+            .with_writer(buf.clone())
+            .finish();
+        let out = tracing::subscriber::with_default(subscriber, f);
+        let logged = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        (out, logged)
+    }
+
+    #[test]
+    fn native_overflow_emits_error_with_bounded_fields_only() {
+        let filter = test_filter();
+        let (decision, out) = capture_tracing(|| {
+            fail_closed_screen(
+                &filter,
+                B256::repeat_byte(0xCD),
+                &CaptureOutcome::LimitExceeded { attempted: 10_001, limit: 10_000 },
+            )
+        });
+        assert_eq!(decision, Some(Screen::Deny));
+        assert!(out.contains("ERROR"), "expected error-level diagnostic, got: {out}");
+        assert!(out.contains("rcs_filter::capture"), "expected target, got: {out}");
+        assert!(out.contains("observed_count"), "expected observed_count field, got: {out}");
+        assert!(out.contains("10001"), "expected attempted count value, got: {out}");
+        assert!(out.contains("limit"), "expected limit field, got: {out}");
+    }
+
+    #[test]
+    fn realogmismatch_emits_own_arm_four_fields_no_content() {
+        // R9 item 1 / spec §8 test 31. The `RealLogMismatch` arm must be DISTINCT from `Passthrough`:
+        // it emits EXACTLY tx_hash + first_bad_index + observed + expected at error level, while
+        // `Passthrough` (an enabled filter seeing a no-op outcome) stays a tx_hash-only fail-closed
+        // log. Neither may leak real-log or transfer content (there is none to leak — the decision
+        // fn takes only the tx hash and bounded counts).
+        let filter = test_filter();
+
+        let (mismatch_decision, mismatch_out) = capture_tracing(|| {
+            fail_closed_screen(
+                &filter,
+                B256::repeat_byte(0xAB),
+                &CaptureOutcome::InvariantViolation {
+                    reason: CaptureInvariantError::RealLogMismatch {
+                        first_bad_index: 7,
+                        observed: 9,
+                        expected: 11,
+                    },
+                },
+            )
+        });
+        assert_eq!(mismatch_decision, Some(Screen::Deny));
+        assert!(mismatch_out.contains("ERROR"), "expected error level, got: {mismatch_out}");
+        assert!(
+            mismatch_out.contains("rcs_filter::capture"),
+            "expected target, got: {mismatch_out}"
+        );
+        assert!(mismatch_out.contains("tx_hash"), "expected tx_hash field, got: {mismatch_out}");
+        // The four bounded fields, by exact `field=value`, so a timestamp digit cannot spoof them.
+        assert!(
+            mismatch_out.contains("first_bad_index=7"),
+            "expected first_bad_index=7, got: {mismatch_out}"
+        );
+        assert!(mismatch_out.contains("observed=9"), "expected observed=9, got: {mismatch_out}");
+        assert!(mismatch_out.contains("expected=11"), "expected expected=11, got: {mismatch_out}");
+        // It is NOT the LimitExceeded arm (which emits `observed_count`, not `first_bad_index`).
+        assert!(
+            !mismatch_out.contains("observed_count"),
+            "RealLogMismatch must not emit the LimitExceeded `observed_count` field: {mismatch_out}"
+        );
+
+        let (passthrough_decision, passthrough_out) = capture_tracing(|| {
+            fail_closed_screen(&filter, B256::repeat_byte(0xCD), &CaptureOutcome::Passthrough)
+        });
+        assert_eq!(passthrough_decision, Some(Screen::Deny));
+        assert!(passthrough_out.contains("ERROR"), "expected error level, got: {passthrough_out}");
+        assert!(
+            passthrough_out.contains("tx_hash"),
+            "Passthrough log must carry tx_hash, got: {passthrough_out}"
+        );
+        // Passthrough is tx_hash-only: it must NOT be merged with the RealLogMismatch arm and must
+        // never carry the mismatch fields.
+        assert!(
+            !passthrough_out.contains("first_bad_index"),
+            "Passthrough must not carry RealLogMismatch fields (distinct arms): {passthrough_out}"
+        );
+        assert!(
+            !passthrough_out.contains("expected="),
+            "Passthrough must stay tx_hash-only: {passthrough_out}"
+        );
+    }
+
+    #[test]
+    fn capture_guard_disarms_on_success_single_abort_on_err_no_double_abort() {
+        // R9 item 3 / spec §8 test 34. Drive the guard against a lifecycle-counting scope (no EVM
+        // needed) and assert: (a) a successful `finish` disarms so `Drop` does NOT abort; (b) the
+        // `Err` path aborts exactly once via `Drop` (no double-abort); (c) a caught panic still
+        // aborts exactly once and leaves the scope inactive.
+        #[derive(Default)]
+        struct CountingScope {
+            starts: u32,
+            finishes: u32,
+            aborts: u32,
+            active: bool,
+        }
+        impl RcsCaptureScope for CountingScope {
+            fn scope_start_capture(&mut self) {
+                self.starts += 1;
+                self.active = true;
+            }
+            fn scope_finish_capture(&mut self, _result_logs: &[Log]) -> CaptureOutcome {
+                self.finishes += 1;
+                self.active = false;
+                CaptureOutcome::Complete(Vec::new())
+            }
+            fn scope_abort_capture(&mut self) {
+                self.aborts += 1;
+                self.active = false;
+            }
+        }
+
+        // (a) success → finish disarms → Drop is a no-op.
+        let mut scope = CountingScope::default();
+        {
+            let guard = CaptureGuard::new(&mut scope);
+            let outcome = guard.finish(&[]);
+            assert!(matches!(outcome, CaptureOutcome::Complete(_)));
+        }
+        assert_eq!(scope.starts, 1, "start_capture runs once on construction");
+        assert_eq!(scope.finishes, 1);
+        assert_eq!(scope.aborts, 0, "a disarmed guard must not abort on Drop");
+        assert!(!scope.active);
+
+        // (b) Err path → guard dropped armed → exactly one abort, no double-abort.
+        let mut scope = CountingScope::default();
+        {
+            let _guard = CaptureGuard::new(&mut scope);
+            // Mirror the `evm.transact` Err path: return without `finish`; guard drops armed.
+        }
+        assert_eq!(scope.starts, 1);
+        assert_eq!(scope.finishes, 0);
+        assert_eq!(scope.aborts, 1, "the Err path aborts exactly once via Drop");
+        assert!(!scope.active);
+
+        // (c) caught panic → the guard's Drop still aborts once, leaving the scope inactive.
+        let mut scope = CountingScope::default();
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {})); // silence the expected panic in test output
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = CaptureGuard::new(&mut scope);
+            panic!("simulated transact panic");
+        }));
+        std::panic::set_hook(prev_hook);
+        assert!(result.is_err(), "the panic must propagate out of catch_unwind");
+        assert_eq!(scope.starts, 1);
+        assert_eq!(scope.aborts, 1, "a caught panic still aborts exactly once via Drop");
+        assert!(!scope.active, "the inspector must be left inactive after an unwind");
+    }
+}
+
+/// Spec §8 **test 35** (R12, GATING) — a LOOP-LEVEL builder-path fail-closed test driven through the
+/// ACTUAL `execute_best_transactions` / `run_tx_loop` candidate loop (§5.1), not a direct
+/// `fail_closed_screen` call and not a re-implementation. R12 rewrites each proof obligation as a
+/// FALSIFIABLE, mutation-resistant assertion (§5.10.3): each MUST fail under a specific incorrect
+/// implementation.
+/// - **P1.1** — the candidate can reach `AuditPending` (option (a): it emits a REAL ERC20 `Transfer`
+///   log matching `RULE_SCENARIO_A`), so 「buffer not increased + candidate has no entry」 on the
+///   fail-closed path proves `screen_tx` was SKIPPED. Fails under **M1** (candidate wrongly reaches
+///   `screen_tx` → a `BufferEntry` appears). A no-mismatch CONTROL run of the SAME candidate asserts
+///   `AuditPending`, making the negative meaningful.
+/// - **P1.2** — `Screen::Deny` is observed DIRECTLY via a Deny-only decision seam
+///   ([`LAST_SCREEN_DECISION`]); it is NEVER inferred from `mark_invalid`/txpool removal, which
+///   `Screen::Drop` shares. Fails under **M2** (loop returns `Screen::Drop`).
+/// - **P1.3** — no state commit is observed DIRECTLY by reading sender nonce/balance before+after the
+///   loop. Fails under **M3** (a `commit` moved before the `continue`).
+///
+/// Retained from R10/R11: no `info.executed_transactions`, no receipt, zero gas, and no virtual native
+/// event on any receipt/RPC/bloom output. The real `RealLogMismatch` comes from the loop's own
+/// `RcsInspector::finish_capture` via the `FORCE_REALLOG_MISMATCH` seam (P2: set through a panic-safe
+/// RAII guard), never a hand-built `CaptureOutcome`.
+#[cfg(test)]
+mod loop_level_fail_closed_tests {
+    use super::*;
+    use crate::flashblocks::rcs_capture::{FORCE_CREATE_ADDRESS_MISMATCH, FORCE_REALLOG_MISMATCH};
+    use alloy_consensus::TxEip1559;
+    use alloy_genesis::Genesis;
+    use alloy_primitives::{keccak256, Address, TxKind};
+    use alloy_rpc_types_engine::PayloadAttributes;
+    use op_alloy_consensus::OpTypedTransaction;
+    use op_alloy_rpc_types_engine::OpPayloadAttributes;
+    use rcs_filter::rules::load_rules;
+    use rcs_filter::test_support::golden;
+    use rcs_filter::{BufferStatus, FilterConfig, SystemClock};
+    use reth_optimism_txpool::OpPooledTransaction;
+    use reth_payload_util::PayloadTransactions;
+    use reth_transaction_pool::test_utils::{testing_pool, MockTransaction};
+    use reth_transaction_pool::TransactionOrigin;
+    use revm::context::{BlockEnv, CfgEnv};
+    use revm::database::{CacheDB, EmptyDB};
+    use revm::state::{AccountInfo, Bytecode};
+    // Bring revm's `Database` trait into scope (anonymously, to avoid shadowing the `alloy_evm::Database`
+    // already in scope) so `state.basic(..)` resolves for the P1.3 sender nonce/balance reads.
+    use revm::Database as _;
+
+    /// Panic-safe RAII guard for the `FORCE_REALLOG_MISMATCH` test seam (spec §5.10.3 P2): arms the
+    /// flag on construction and RESETS it on `Drop` — on success AND on a panic/unwind — so it can
+    /// never leak into another test running later on the same thread.
+    struct ForceMismatchGuard;
+    impl ForceMismatchGuard {
+        fn arm() -> Self {
+            FORCE_REALLOG_MISMATCH.with(|f| f.set(true));
+            Self
+        }
+    }
+    impl Drop for ForceMismatchGuard {
+        fn drop(&mut self) {
+            FORCE_REALLOG_MISMATCH.with(|f| f.set(false));
+        }
+    }
+
+    /// A one-shot [`PayloadTransactions`] that yields a single candidate and RECORDS every
+    /// `mark_invalid(sender, nonce)` call. `PayloadTransactionsFixed::mark_invalid` is a silent
+    /// no-op; this wrapper makes the loop's post-decision `best_txs.mark_invalid` step observable as
+    /// SUPPORTING evidence (the Deny-vs-Drop decision itself is asserted via [`LAST_SCREEN_DECISION`]).
+    struct RecordingTxs {
+        tx: Option<OpPooledTransaction>,
+        marked: Vec<(Address, u64)>,
+    }
+    impl PayloadTransactions for RecordingTxs {
+        type Transaction = OpPooledTransaction;
+        fn next(&mut self, _ctx: ()) -> Option<OpPooledTransaction> {
+            self.tx.take()
+        }
+        fn mark_invalid(&mut self, sender: Address, nonce: u64) {
+            self.marked.push((sender, nonce));
+        }
+    }
+
+    /// Runtime bytecode that emits ONE real ERC20
+    /// `Transfer(from = BRIDGE_ERC20, to = RECIPIENT, value = ONE_TOKEN)` log then `STOP`s. Deployed at
+    /// `TOKEN_X`, so `log.address == TOKEN_X` and the log matches `RULE_SCENARIO_A`
+    /// (`transfer.address == TOKEN_X && transfer.from == BRIDGE_ERC20`). `LOG3` pops
+    /// `offset, size, topic0, topic1, topic2` (offset on top), so the topics are pushed in reverse.
+    fn erc20_transfer_emitter_code() -> Vec<u8> {
+        let transfer_sig = keccak256("Transfer(address,address,uint256)"); // topic0
+        let from_word = golden::bridge_erc20().into_word(); // topic1 (from)
+        let to_word = golden::recipient().into_word(); // topic2 (to)
+        let value_bytes = golden::one_token().to_be_bytes::<32>();
+        let mut code = Vec::new();
+        code.push(0x7f); // PUSH32 value
+        code.extend_from_slice(&value_bytes);
+        code.extend_from_slice(&[0x60, 0x00, 0x52]); // PUSH1 0x00; MSTORE  → mem[0..32] = value
+        code.push(0x7f); // PUSH32 topic2 (to)
+        code.extend_from_slice(to_word.as_slice());
+        code.push(0x7f); // PUSH32 topic1 (from)
+        code.extend_from_slice(from_word.as_slice());
+        code.push(0x7f); // PUSH32 topic0 (Transfer signature)
+        code.extend_from_slice(transfer_sig.as_slice());
+        code.extend_from_slice(&[0x60, 0x20, 0x60, 0x00, 0xa3, 0x00]); // PUSH1 32; PUSH1 0; LOG3; STOP
+        code
+    }
+
+    /// Builds a real [`FlashblocksBuilderCtx`] with the RCS Filter enabled by `filter`: a JOVIAN EVM
+    /// env at base fee 0 (hand-built, so no parent-header/fork coordination is needed) over a chain
+    /// spec from the shared test genesis template pinned to chain id 1.
+    fn build_ctx(filter: Arc<FilterHandle>) -> FlashblocksBuilderCtx {
+        let mut genesis: Genesis =
+            serde_json::from_str(include_str!("../tests/framework/artifacts/genesis.json.tmpl"))
+                .expect("valid genesis template JSON");
+        genesis.config.chain_id = 1;
+        genesis.base_fee_per_gas = Some(0u64.into());
+        let chain_spec = Arc::new(OpChainSpec::from_genesis(genesis));
+        let evm_config = OpEvmConfig::optimism(chain_spec.clone());
+        let mut cfg = CfgEnv::new_with_spec(OpSpecId::JOVIAN);
+        cfg.chain_id = 1;
+        let evm_env = EvmEnv::new(cfg, BlockEnv { gas_limit: 30_000_000, ..Default::default() });
+        let payload_id = PayloadId::new([0x35; 8]);
+        let rpc_attrs = OpPayloadAttributes {
+            payload_attributes: PayloadAttributes {
+                timestamp: 1_751_000_002,
+                ..Default::default()
+            },
+            gas_limit: Some(30_000_000),
+            ..Default::default()
+        };
+        let attributes =
+            OpPayloadBuilderAttributes::from_rpc_attrs(B256::ZERO, payload_id, rpc_attrs)
+                .expect("attrs decode");
+        let config = PayloadConfig {
+            parent_header: Arc::new(SealedHeader::seal_slow(alloy_consensus::Header::default())),
+            parent_block_info: None,
+            payload_id,
+            attributes,
+        };
+        let block_env_attributes = OpNextBlockEnvAttributes {
+            timestamp: 1_751_000_002,
+            suggested_fee_recipient: Address::ZERO,
+            prev_randao: B256::ZERO,
+            gas_limit: 30_000_000,
+            parent_beacon_block_root: None,
+            extra_data: Bytes::new(),
+        };
+        FlashblocksBuilderCtx {
+            evm_config,
+            da_config: OpDAConfig::default(),
+            gas_limit_config: OpGasLimitConfig::default(),
+            chain_spec,
+            config,
+            evm_env,
+            block_env_attributes,
+            cancel: CancellationToken::new(),
+            builder_signer: None,
+            metrics: Arc::new(BuilderMetrics::default()),
+            max_gas_per_txn: None,
+            bridge_intercept_config: Default::default(),
+            gasless_contract: None,
+            gasless_block_gas_limit: None,
+            filter: Some(filter),
+        }
+    }
+
+    #[tokio::test]
+    async fn loop_level_real_reallogmismatch_denies_no_buffer_no_commit_no_receipt() {
+        // Non-empty RuleSet: RULE_SCENARIO_A audits any tx whose captured stream contains an ERC20
+        // Transfer with `log.address == TOKEN_X` and `from == BRIDGE_ERC20` (origin/tx_to are null in
+        // the rule → not constrained).
+        let rules = load_rules(1, 1, vec![serde_json::from_str(golden::RULE_SCENARIO_A).unwrap()]);
+        let filter =
+            Arc::new(FilterHandle::for_test(FilterConfig::default(), rules, Arc::new(SystemClock)));
+        let ctx = build_ctx(filter.clone());
+
+        // (P1.1, option a) The candidate CALLS TOKEN_X, whose installed code emits a REAL ERC20
+        // Transfer log matching RULE_SCENARIO_A — so a normal (no-mismatch) run screens to
+        // AuditPending and buffers (proven by the CONTROL run at the end). This is what makes the
+        // fail-closed buffer-absence meaningful: it shows `screen_tx` was SKIPPED, not that the
+        // candidate could never buffer.
+        let signer = crate::tests::funded_signer();
+        let candidate = OpTypedTransaction::Eip1559(TxEip1559 {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 200_000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 0,
+            to: TxKind::Call(golden::token_x()),
+            value: U256::ZERO,
+            ..Default::default()
+        });
+        let recovered = signer.sign_tx(candidate).expect("sign candidate");
+        let candidate_hash: B256 = recovered.tx_hash();
+        let encoded_len = recovered.encode_2718_len();
+        let pooled = OpPooledTransaction::new(recovered, encoded_len);
+
+        // Funded sender + the ERC20 Transfer-emitting contract installed at TOKEN_X.
+        let mut cache = CacheDB::new(EmptyDB::default());
+        cache.insert_account_info(
+            signer.address,
+            AccountInfo { balance: U256::from(10u128.pow(18)), nonce: 0, ..Default::default() },
+        );
+        cache.insert_account_info(
+            golden::token_x(),
+            AccountInfo {
+                code: Some(Bytecode::new_raw(Bytes::from(erc20_transfer_emitter_code()))),
+                ..Default::default()
+            },
+        );
+        let mut state = State::builder().with_database(cache).with_bundle_update().build();
+
+        // The txpool holds the candidate so the Deny arm's `tx_pool.remove_transaction` is a real,
+        // observable pool-state change (SUPPORTING evidence — not the Deny signal; see P1.2).
+        let pool = testing_pool();
+        let mock = MockTransaction::legacy()
+            .with_sender(signer.address)
+            .with_nonce(0)
+            .with_gas_price(100)
+            .with_hash(candidate_hash);
+        pool.add_transaction(TransactionOrigin::External, mock).await.unwrap();
+        assert!(pool.get(&candidate_hash).is_some(), "candidate is in the txpool before the loop");
+
+        let limits =
+            TransactionLimits { block_gas: 30_000_000, block_da: None, block_da_footprint: None };
+
+        // (P1.3) sender nonce/balance BEFORE the fail-closed loop.
+        let before = state.basic(signer.address).expect("db read").expect("sender funded");
+        let (nonce_before, balance_before) = (before.nonce, before.balance);
+
+        // ===== FAIL-CLOSED RUN =====
+        // (P2) arm the seam through a panic-safe RAII guard so a panic mid-run cannot leak the flag
+        // into another test on this thread; the guard's `Drop` resets it at end of scope.
+        LAST_SCREEN_DECISION.with(|d| d.set(None));
+        let mut best_txs = RecordingTxs { tx: Some(pooled.clone()), marked: Vec::new() };
+        let mut info = ExecutionInfo::with_capacity(1);
+        let result = {
+            let _guard = ForceMismatchGuard::arm();
+            let r =
+                ctx.execute_best_transactions(&mut info, &mut state, &mut best_txs, &pool, limits);
+            // Checked INSIDE the guarded scope, BEFORE the guard's Drop also clears the flag: the loop's
+            // own `finish_capture` consumed the one-shot seam (`replace(false)`), so it is already false
+            // here. This is falsifiable — if the candidate never reached `finish_capture` (e.g. skipped
+            // before the screen decision) the flag would still be set. (The guard additionally guarantees
+            // the flag is reset on any panic/unwind, so it cannot leak to another test on this thread.)
+            assert!(
+                !FORCE_REALLOG_MISMATCH.with(|f| f.get()),
+                "the loop's finish_capture must have consumed the one-shot mismatch seam"
+            );
+            r
+        };
+
+        assert!(
+            matches!(result, Ok(None)),
+            "loop completes without cancellation/error: {result:?}"
+        );
+
+        // (P1.2) Screen::Deny observed DIRECTLY via the decision seam — a Deny-only signal. FAILS
+        // under M2: a loop returning Screen::Drop would be captured here as Drop. Deny is NEVER
+        // inferred from mark_invalid/txpool removal, which Screen::Drop shares.
+        assert_eq!(
+            LAST_SCREEN_DECISION.with(|d| d.get()),
+            Some(Screen::Deny),
+            "the real RealLogMismatch must fail closed to Screen::Deny (not Drop) on the candidate loop"
+        );
+
+        // Supporting eviction evidence (NOT the Deny signal — Screen::Drop shares these).
+        assert!(
+            best_txs.marked.contains(&(signer.address, 0)),
+            "the fail-closed candidate is mark_invalid'd by the loop"
+        );
+        assert!(
+            pool.get(&candidate_hash).is_none(),
+            "the fail-closed candidate is removed from the txpool"
+        );
+
+        // (retained) no execution / no receipt / zero gas / no virtual native event on this path: the
+        // `continue` fires before `info.executed_transactions`/`info.receipts`/`evm.db_mut().commit`.
+        assert!(info.executed_transactions.is_empty(), "fail-closed: no tx appended to the block");
+        assert!(
+            info.receipts.is_empty(),
+            "fail-closed: no receipt pushed (commit skipped) — no virtual native event on any output"
+        );
+        assert_eq!(info.cumulative_gas_used, 0, "fail-closed: no gas accounted (never committed)");
+
+        // (P1.3) no state commit observed DIRECTLY: sender nonce/balance unchanged across the loop.
+        // FAILS under M3: a `commit` moved before the `continue` would bump the nonce and spend gas.
+        let after = state.basic(signer.address).expect("db read").expect("sender present");
+        assert_eq!(
+            after.nonce, nonce_before,
+            "fail-closed: sender nonce must be unchanged (no commit)"
+        );
+        assert_eq!(
+            after.balance, balance_before,
+            "fail-closed: sender balance must be unchanged (no commit)"
+        );
+
+        // (P1.1) the tx never enters the RCS pending buffer: fail-closed SKIPS `screen_tx` (the only
+        // AuditPending -> BufferPool insert path), so the buffer is not increased and the candidate
+        // has no entry. Meaningful because the CONTROL below proves this very candidate DOES buffer.
+        assert_eq!(
+            filter.buffered_len(),
+            0,
+            "fail-closed must not add a BufferPool entry (screen_tx skipped)"
+        );
+        assert!(
+            filter.buffer_status(&candidate_hash).is_none(),
+            "no BufferEntry may exist for the failed-closed candidate"
+        );
+
+        // ===== CONTROL RUN (no forced mismatch) — proves the SAME candidate reaches AuditPending
+        // (P1.1 / M1). With no guard, the loop's finish_capture returns Complete([Transfer]) and
+        // screen_tx matches RULE_SCENARIO_A → AuditPending → a BufferEntry appears. If the fail-closed
+        // path had wrongly reached screen_tx (M1), the buffer-absence assertion above would have failed.
+        LAST_SCREEN_DECISION.with(|d| d.set(None));
+        let mut best_txs_ctrl = RecordingTxs { tx: Some(pooled), marked: Vec::new() };
+        let mut info_ctrl = ExecutionInfo::with_capacity(1);
+        let control = ctx.execute_best_transactions(
+            &mut info_ctrl,
+            &mut state,
+            &mut best_txs_ctrl,
+            &pool,
+            limits,
+        );
+        assert!(matches!(control, Ok(None)), "control loop completes: {control:?}");
+        assert_eq!(
+            LAST_SCREEN_DECISION.with(|d| d.get()),
+            Some(Screen::AuditPending),
+            "control: the SAME candidate, run without a forced mismatch, screens to AuditPending"
+        );
+        assert_eq!(
+            filter.buffer_status(&candidate_hash),
+            Some(BufferStatus::NotSubmitted),
+            "control: the candidate's normal run inserts a BufferPool entry"
+        );
+        assert_eq!(
+            filter.buffered_len(),
+            1,
+            "control: the candidate now occupies the pending buffer"
+        );
+    }
+
+    /// Panic-safe RAII guard for the `FORCE_CREATE_ADDRESS_MISMATCH` test seam: arms the flag on
+    /// construction and RESETS it on `Drop` — on success AND on a panic/unwind — so it cannot leak
+    /// into another test running later on this thread.
+    struct ForceCreateAddressMismatchGuard;
+    impl ForceCreateAddressMismatchGuard {
+        fn arm() -> Self {
+            FORCE_CREATE_ADDRESS_MISMATCH.with(|f| f.set(true));
+            Self
+        }
+    }
+    impl Drop for ForceCreateAddressMismatchGuard {
+        fn drop(&mut self) {
+            FORCE_CREATE_ADDRESS_MISMATCH.with(|f| f.set(false));
+        }
+    }
+
+    /// Runtime bytecode that performs one endowment-bearing `CREATE` and then emits a real ERC20
+    /// `Transfer` log matching `RULE_SCENARIO_A`. Installed at `TOKEN_X`, so the emitted log carries
+    /// `log.address == TOKEN_X` and the CONTROL run of the candidate genuinely buffers.
+    fn create_then_erc20_transfer_emitter_code() -> Vec<u8> {
+        // CREATE(value=1, offset=0, size=0): PUSH1 0 (size), PUSH1 0 (offset), PUSH1 1 (value), CREATE, POP
+        let mut code = vec![0x60, 0x00, 0x60, 0x00, 0x60, 0x01, 0xf0, 0x50];
+        code.extend_from_slice(&erc20_transfer_emitter_code());
+        code
+    }
+
+    /// The `CreateAddressMismatch` fail-closed chain, driven through the ACTUAL candidate loop
+    /// rather than a hand-built `CaptureOutcome`: the loop's own `RcsInspector::create_end` sees a
+    /// genuinely successful CREATE whose deployed address differs from the pre-derived recipient,
+    /// `finish_capture` surfaces `InvariantViolation { CreateAddressMismatch }`, and
+    /// `fail_closed_screen` must turn that into a Deny WITHOUT reaching `screen_tx`.
+    ///
+    /// Falsifiable in both directions: removing the `CreateAddressMismatch` arm from
+    /// `fail_closed_screen` fails to compile (the match is exhaustive), and routing the outcome to
+    /// any non-Deny decision makes the `LAST_SCREEN_DECISION` assertion below fail.
+    #[tokio::test]
+    async fn loop_level_create_address_mismatch_denies_no_buffer_no_commit_no_receipt() {
+        let rules = load_rules(1, 1, vec![serde_json::from_str(golden::RULE_SCENARIO_A).unwrap()]);
+        let filter =
+            Arc::new(FilterHandle::for_test(FilterConfig::default(), rules, Arc::new(SystemClock)));
+        let ctx = build_ctx(filter.clone());
+
+        let signer = crate::tests::funded_signer();
+        let candidate = OpTypedTransaction::Eip1559(TxEip1559 {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 200_000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 0,
+            to: TxKind::Call(golden::token_x()),
+            value: U256::ZERO,
+            ..Default::default()
+        });
+        let recovered = signer.sign_tx(candidate).expect("sign candidate");
+        let candidate_hash: B256 = recovered.tx_hash();
+        let encoded_len = recovered.encode_2718_len();
+        let pooled = OpPooledTransaction::new(recovered, encoded_len);
+
+        // Funded sender + a factory at TOKEN_X that endows a CREATE, then emits the scenario log.
+        // The factory must hold at least the 1 wei it endows.
+        let mut cache = CacheDB::new(EmptyDB::default());
+        cache.insert_account_info(
+            signer.address,
+            AccountInfo { balance: U256::from(10u128.pow(18)), nonce: 0, ..Default::default() },
+        );
+        cache.insert_account_info(
+            golden::token_x(),
+            AccountInfo {
+                balance: U256::from(1_000u64),
+                code: Some(Bytecode::new_raw(Bytes::from(
+                    create_then_erc20_transfer_emitter_code(),
+                ))),
+                ..Default::default()
+            },
+        );
+        let mut state = State::builder().with_database(cache).with_bundle_update().build();
+
+        let pool = testing_pool();
+        let mock = MockTransaction::legacy()
+            .with_sender(signer.address)
+            .with_nonce(0)
+            .with_gas_price(100)
+            .with_hash(candidate_hash);
+        pool.add_transaction(TransactionOrigin::External, mock).await.unwrap();
+        assert!(pool.get(&candidate_hash).is_some(), "candidate is in the txpool before the loop");
+
+        let limits =
+            TransactionLimits { block_gas: 30_000_000, block_da: None, block_da_footprint: None };
+
+        let before = state.basic(signer.address).expect("db read").expect("sender funded");
+        let (nonce_before, balance_before) = (before.nonce, before.balance);
+
+        // ===== FAIL-CLOSED RUN =====
+        LAST_SCREEN_DECISION.with(|d| d.set(None));
+        let mut best_txs = RecordingTxs { tx: Some(pooled.clone()), marked: Vec::new() };
+        let mut info = ExecutionInfo::with_capacity(1);
+        let result = {
+            let _guard = ForceCreateAddressMismatchGuard::arm();
+            let r =
+                ctx.execute_best_transactions(&mut info, &mut state, &mut best_txs, &pool, limits);
+            // Checked INSIDE the guarded scope, BEFORE the guard's Drop clears the flag: the loop's
+            // own `create` hook consumed the one-shot seam, so it is already false here. If the
+            // candidate never reached the create hook this would still be set.
+            assert!(
+                !FORCE_CREATE_ADDRESS_MISMATCH.with(|f| f.get()),
+                "the loop's CREATE hook must have consumed the one-shot mismatch seam"
+            );
+            r
+        };
+        assert!(matches!(result, Ok(None)), "loop completes without cancellation: {result:?}");
+
+        // The fail-closed chain ends in a DENY decision, observed directly through the decision
+        // seam (never inferred from mark_invalid / txpool removal, which Screen::Drop shares).
+        assert_eq!(
+            LAST_SCREEN_DECISION.with(|d| d.get()),
+            Some(Screen::Deny),
+            "the real CreateAddressMismatch must fail closed to Screen::Deny on the candidate loop"
+        );
+
+        // Supporting eviction evidence.
+        assert!(
+            best_txs.marked.contains(&(signer.address, 0)),
+            "the fail-closed candidate is mark_invalid'd by the loop"
+        );
+        assert!(
+            pool.get(&candidate_hash).is_none(),
+            "the fail-closed candidate is removed from the txpool"
+        );
+
+        // The `continue` fires before execution accounting: no block entry, no receipt, no gas.
+        assert!(info.executed_transactions.is_empty(), "fail-closed: no tx appended to the block");
+        assert!(info.receipts.is_empty(), "fail-closed: no receipt pushed (commit skipped)");
+        assert_eq!(info.cumulative_gas_used, 0, "fail-closed: no gas accounted (never committed)");
+
+        let after = state.basic(signer.address).expect("db read").expect("sender present");
+        assert_eq!(after.nonce, nonce_before, "fail-closed: sender nonce unchanged (no commit)");
+        assert_eq!(after.balance, balance_before, "fail-closed: sender balance unchanged");
+
+        // `screen_tx` was SKIPPED: the buffer gained nothing and the candidate has no entry.
+        assert_eq!(
+            filter.buffered_len(),
+            0,
+            "fail-closed must not add a BufferPool entry (screen_tx skipped)"
+        );
+        assert!(
+            filter.buffer_status(&candidate_hash).is_none(),
+            "no BufferEntry may exist for the failed-closed candidate"
+        );
+
+        // ===== CONTROL RUN (no forced mismatch) — the SAME candidate DOES reach screen_tx =====
+        // Without the seam the CREATE completes consistently, the captured stream carries the real
+        // ERC20 Transfer, and RULE_SCENARIO_A matches → AuditPending → a BufferEntry appears. This
+        // is what makes the buffer-absence assertion above evidence that screen_tx was skipped.
+        LAST_SCREEN_DECISION.with(|d| d.set(None));
+        let mut best_txs_ctrl = RecordingTxs { tx: Some(pooled), marked: Vec::new() };
+        let mut info_ctrl = ExecutionInfo::with_capacity(1);
+        let control = ctx.execute_best_transactions(
+            &mut info_ctrl,
+            &mut state,
+            &mut best_txs_ctrl,
+            &pool,
+            limits,
+        );
+        assert!(matches!(control, Ok(None)), "control loop completes: {control:?}");
+        assert_eq!(
+            LAST_SCREEN_DECISION.with(|d| d.get()),
+            Some(Screen::AuditPending),
+            "control: the SAME candidate, run without a forced mismatch, screens to AuditPending"
+        );
+        assert_eq!(
+            filter.buffer_status(&candidate_hash),
+            Some(BufferStatus::NotSubmitted),
+            "control: the candidate's normal run inserts a BufferPool entry"
+        );
+        assert_eq!(
+            filter.buffered_len(),
+            1,
+            "control: the candidate now occupies the pending buffer"
+        );
+    }
+
+    /// A rule matching ANY native-asset `Transfer` by address alone (not by which contract emitted
+    /// it), so a budget-boundary fixture can live at any factory address instead of needing to
+    /// collide with `golden::token_x()`.
+    const AUDIT_ANY_NATIVE_TRANSFER_RULE: &str = r#"{
+        "id": "audit-any-native-transfer",
+        "event_abis": {
+            "transfer": {
+                "type": "event", "name": "Transfer",
+                "inputs": [
+                    {"name": "from", "type": "address", "indexed": true},
+                    {"name": "to",   "type": "address", "indexed": true},
+                    {"name": "value","type": "uint256",  "indexed": false}
+                ],
+                "anonymous": false
+            }
+        },
+        "condition": {"==":[{"var":"transfer.address"},"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"]},
+        "audit_types": ["native_budget_test"],
+        "action": "audit"
+    }"#;
+
+    /// Runtime bytecode performing `recipients.len()` sequential 1-wei `CALL` transfers, each a
+    /// distinct internal native-transfer observation, then `STOP`.
+    fn native_transfers_code(recipients: &[Address]) -> Vec<u8> {
+        let mut code = Vec::new();
+        for dst in recipients {
+            // PUSH1 0 (retSize) PUSH1 0 (retOffset) PUSH1 0 (argsSize) PUSH1 0 (argsOffset)
+            // PUSH1 1 (value) PUSH20 dst GAS CALL POP
+            code.extend_from_slice(&[
+                0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x01, 0x73,
+            ]);
+            code.extend_from_slice(dst.as_slice());
+            code.extend_from_slice(&[0x5a, 0xf1, 0x50]); // GAS CALL POP
+        }
+        code.push(0x00); // STOP
+        code
+    }
+
+    /// Builds a funded sender + a factory at `factory` performing `recipients.len()` internal
+    /// native transfers, a signed candidate calling it, and the pool/state needed to drive one
+    /// real `execute_best_transactions` run.
+    fn native_limit_candidate_fixture(
+        filter: Arc<FilterHandle>,
+        signer: &crate::signer::Signer,
+        factory: Address,
+        recipients: &[Address],
+    ) -> (FlashblocksBuilderCtx, State<CacheDB<EmptyDB>>, B256, OpPooledTransaction) {
+        let ctx = build_ctx(filter);
+        let candidate = OpTypedTransaction::Eip1559(TxEip1559 {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 200_000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 0,
+            to: TxKind::Call(factory),
+            value: U256::ZERO,
+            ..Default::default()
+        });
+        let recovered = signer.sign_tx(candidate).expect("sign candidate");
+        let candidate_hash: B256 = recovered.tx_hash();
+        let encoded_len = recovered.encode_2718_len();
+        let pooled = OpPooledTransaction::new(recovered, encoded_len);
+
+        let mut cache = CacheDB::new(EmptyDB::default());
+        cache.insert_account_info(
+            signer.address,
+            AccountInfo { balance: U256::from(10u128.pow(18)), nonce: 0, ..Default::default() },
+        );
+        cache.insert_account_info(
+            factory,
+            AccountInfo {
+                balance: U256::from(recipients.len() as u64), // funds the 1-wei internal transfers
+                code: Some(Bytecode::new_raw(Bytes::from(native_transfers_code(recipients)))),
+                ..Default::default()
+            },
+        );
+        let state = State::builder().with_database(cache).with_bundle_update().build();
+        (ctx, state, candidate_hash, pooled)
+    }
+
+    /// The native-transfer budget fail-closed chain, driven through the ACTUAL candidate loop
+    /// rather than a helper's `CaptureOutcome`: the loop's own `RcsInspector` (constructed by
+    /// `execute_best_transactions` straight from `FilterConfig::max_native_transfers_per_tx`, so no
+    /// new production seam is needed) overflows at `limit + 1`, `finish_capture` returns
+    /// `LimitExceeded`, and `fail_closed_screen` must turn that into a Deny WITHOUT reaching
+    /// `screen_tx`.
+    ///
+    /// Falsifiable: temporarily widening the `LimitExceeded` arm of `fail_closed_screen` to return
+    /// a non-`Deny` decision makes the `LAST_SCREEN_DECISION` assertion below fail.
+    #[tokio::test]
+    async fn loop_level_native_limit_exceeded_denies_no_buffer_no_commit_no_receipt() {
+        let rules =
+            load_rules(1, 1, vec![serde_json::from_str(AUDIT_ANY_NATIVE_TRANSFER_RULE).unwrap()]);
+        let recipients = [Address::repeat_byte(0xA1), Address::repeat_byte(0xA2)];
+        let factory = Address::repeat_byte(0xF9);
+
+        // ===== FAIL-CLOSED RUN — budget 1, two observations overflow at the second =====
+        let filter = Arc::new(FilterHandle::for_test(
+            FilterConfig { max_native_transfers_per_tx: 1, ..Default::default() },
+            rules.clone(),
+            Arc::new(SystemClock),
+        ));
+        let signer = crate::tests::funded_signer();
+        let (ctx, mut state, candidate_hash, pooled) =
+            native_limit_candidate_fixture(filter.clone(), &signer, factory, &recipients);
+        let pool = testing_pool();
+        let mock = MockTransaction::legacy()
+            .with_sender(signer.address)
+            .with_nonce(0)
+            .with_gas_price(100)
+            .with_hash(candidate_hash);
+        pool.add_transaction(TransactionOrigin::External, mock).await.unwrap();
+        assert!(pool.get(&candidate_hash).is_some(), "candidate is in the txpool before the loop");
+
+        let limits =
+            TransactionLimits { block_gas: 30_000_000, block_da: None, block_da_footprint: None };
+        let before = state.basic(signer.address).expect("db read").expect("sender funded");
+        let (nonce_before, balance_before) = (before.nonce, before.balance);
+
+        LAST_SCREEN_DECISION.with(|d| d.set(None));
+        let mut best_txs = RecordingTxs { tx: Some(pooled), marked: Vec::new() };
+        let mut info = ExecutionInfo::with_capacity(1);
+        let result =
+            ctx.execute_best_transactions(&mut info, &mut state, &mut best_txs, &pool, limits);
+        assert!(matches!(result, Ok(None)), "loop completes without cancellation: {result:?}");
+
+        assert_eq!(
+            LAST_SCREEN_DECISION.with(|d| d.get()),
+            Some(Screen::Deny),
+            "the real native LimitExceeded must fail closed to Screen::Deny on the candidate loop"
+        );
+        assert!(
+            best_txs.marked.contains(&(signer.address, 0)),
+            "the fail-closed candidate is mark_invalid'd by the loop"
+        );
+        assert!(
+            pool.get(&candidate_hash).is_none(),
+            "the fail-closed candidate is removed from the txpool"
+        );
+        assert!(info.executed_transactions.is_empty(), "fail-closed: no tx appended to the block");
+        assert!(info.receipts.is_empty(), "fail-closed: no receipt pushed (commit skipped)");
+        assert_eq!(info.cumulative_gas_used, 0, "fail-closed: no gas accounted (never committed)");
+        let after = state.basic(signer.address).expect("db read").expect("sender present");
+        assert_eq!(after.nonce, nonce_before, "fail-closed: sender nonce unchanged (no commit)");
+        assert_eq!(after.balance, balance_before, "fail-closed: sender balance unchanged");
+        assert_eq!(
+            filter.buffered_len(),
+            0,
+            "fail-closed must not add a BufferPool entry (screen_tx skipped)"
+        );
+        assert!(
+            filter.buffer_status(&candidate_hash).is_none(),
+            "no BufferEntry may exist for the fail-closed candidate"
+        );
+
+        // ===== AT-LIMIT CONTROL — budget 2, the SAME two observations do NOT deny. Guards against
+        // an off-by-one: without this control a deny-at-N implementation would also pass above. =====
+        let filter2 = Arc::new(FilterHandle::for_test(
+            FilterConfig { max_native_transfers_per_tx: 2, ..Default::default() },
+            rules,
+            Arc::new(SystemClock),
+        ));
+        let (ctx2, mut state2, candidate_hash2, pooled2) =
+            native_limit_candidate_fixture(filter2.clone(), &signer, factory, &recipients);
+        let pool2 = testing_pool();
+        let mock2 = MockTransaction::legacy()
+            .with_sender(signer.address)
+            .with_nonce(0)
+            .with_gas_price(100)
+            .with_hash(candidate_hash2);
+        pool2.add_transaction(TransactionOrigin::External, mock2).await.unwrap();
+
+        LAST_SCREEN_DECISION.with(|d| d.set(None));
+        let mut best_txs2 = RecordingTxs { tx: Some(pooled2), marked: Vec::new() };
+        let mut info2 = ExecutionInfo::with_capacity(1);
+        let control =
+            ctx2.execute_best_transactions(&mut info2, &mut state2, &mut best_txs2, &pool2, limits);
+        assert!(matches!(control, Ok(None)), "control loop completes: {control:?}");
+        assert_eq!(
+            LAST_SCREEN_DECISION.with(|d| d.get()),
+            Some(Screen::AuditPending),
+            "control: exactly N=2 observations under budget 2 must NOT deny"
+        );
+        assert_eq!(
+            filter2.buffer_status(&candidate_hash2),
+            Some(BufferStatus::NotSubmitted),
+            "control: the at-limit candidate inserts a BufferPool entry"
+        );
+    }
+
+    /// A one-shot-per-slot [`PayloadTransactions`] yielding candidates from a queue in order,
+    /// recording every `mark_invalid`. Used by the "loop survives a deny" test below, which needs
+    /// two DISTINCT candidates from the same `execute_best_transactions` call — `RecordingTxs`
+    /// only ever yields one.
+    struct QueuedTxs {
+        queue: std::collections::VecDeque<OpPooledTransaction>,
+        marked: Vec<(Address, u64)>,
+    }
+    impl PayloadTransactions for QueuedTxs {
+        type Transaction = OpPooledTransaction;
+        fn next(&mut self, _ctx: ()) -> Option<OpPooledTransaction> {
+            self.queue.pop_front()
+        }
+        fn mark_invalid(&mut self, sender: Address, nonce: u64) {
+            self.marked.push((sender, nonce));
+        }
+    }
+
+    /// After a budget-overflow Deny the loop must keep going: the NEXT candidate in the same
+    /// `execute_best_transactions` call is screened normally and buffers, proving capture state was
+    /// reset and the deny is not sticky.
+    #[tokio::test]
+    async fn loop_level_native_limit_deny_does_not_poison_the_next_candidate() {
+        let rules =
+            load_rules(1, 1, vec![serde_json::from_str(AUDIT_ANY_NATIVE_TRANSFER_RULE).unwrap()]);
+        let filter = Arc::new(FilterHandle::for_test(
+            FilterConfig { max_native_transfers_per_tx: 1, ..Default::default() },
+            rules,
+            Arc::new(SystemClock),
+        ));
+
+        // Two DISTINCT senders AND two distinct factories, each at its own nonce 0: candidate #0's
+        // deny path never commits state (the loop `continue`s before any nonce bump), so a
+        // same-sender nonce 1 for #1 would be invalid against the real EVM/pool nonce sequencing.
+        let ctx = build_ctx(filter.clone());
+        let signer0 = crate::tests::funded_signer();
+        let signer1 = crate::tests::builder_signer();
+        let factory0 = Address::repeat_byte(0xF9); // #0: two transfers under budget 1 → overflow
+        let factory1 = Address::repeat_byte(0xFA); // #1: one transfer, exactly at budget 1 → fits
+
+        let candidate0 = OpTypedTransaction::Eip1559(TxEip1559 {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 200_000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 0,
+            to: TxKind::Call(factory0),
+            value: U256::ZERO,
+            ..Default::default()
+        });
+        let recovered0 = signer0.sign_tx(candidate0).expect("sign candidate 0");
+        let hash0: B256 = recovered0.tx_hash();
+        let len0 = recovered0.encode_2718_len();
+        let pooled0 = OpPooledTransaction::new(recovered0, len0);
+
+        let candidate1 = OpTypedTransaction::Eip1559(TxEip1559 {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 200_000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 0,
+            to: TxKind::Call(factory1),
+            value: U256::ZERO,
+            ..Default::default()
+        });
+        let recovered1 = signer1.sign_tx(candidate1).expect("sign candidate 1");
+        let hash1: B256 = recovered1.tx_hash();
+        let len1 = recovered1.encode_2718_len();
+        let pooled1 = OpPooledTransaction::new(recovered1, len1);
+
+        let mut cache = CacheDB::new(EmptyDB::default());
+        cache.insert_account_info(
+            signer0.address,
+            AccountInfo { balance: U256::from(10u128.pow(18)), nonce: 0, ..Default::default() },
+        );
+        cache.insert_account_info(
+            signer1.address,
+            AccountInfo { balance: U256::from(10u128.pow(18)), nonce: 0, ..Default::default() },
+        );
+        cache.insert_account_info(
+            factory0,
+            AccountInfo {
+                balance: U256::from(2u64),
+                code: Some(Bytecode::new_raw(Bytes::from(native_transfers_code(&[
+                    Address::repeat_byte(0xA1),
+                    Address::repeat_byte(0xA2),
+                ])))),
+                ..Default::default()
+            },
+        );
+        cache.insert_account_info(
+            factory1,
+            AccountInfo {
+                balance: U256::from(1u64),
+                code: Some(Bytecode::new_raw(Bytes::from(native_transfers_code(&[
+                    Address::repeat_byte(0xA3),
+                ])))),
+                ..Default::default()
+            },
+        );
+        let mut state = State::builder().with_database(cache).with_bundle_update().build();
+
+        let pool = testing_pool();
+        for (sender, mock_hash) in [(signer0.address, hash0), (signer1.address, hash1)] {
+            let mock = MockTransaction::legacy()
+                .with_sender(sender)
+                .with_nonce(0)
+                .with_gas_price(100)
+                .with_hash(mock_hash);
+            pool.add_transaction(TransactionOrigin::External, mock).await.unwrap();
+        }
+
+        let limits =
+            TransactionLimits { block_gas: 30_000_000, block_da: None, block_da_footprint: None };
+        let mut best_txs = QueuedTxs {
+            queue: std::collections::VecDeque::from([pooled0, pooled1]),
+            marked: Vec::new(),
+        };
+        let mut info = ExecutionInfo::with_capacity(2);
+        let result =
+            ctx.execute_best_transactions(&mut info, &mut state, &mut best_txs, &pool, limits);
+        assert!(matches!(result, Ok(None)), "loop completes without cancellation: {result:?}");
+
+        assert!(best_txs.marked.contains(&(signer0.address, 0)), "candidate #0 is mark_invalid'd");
+        assert!(
+            filter.buffer_status(&hash0).is_none(),
+            "candidate #0 (budget-overflow) must not buffer"
+        );
+        assert_eq!(
+            filter.buffer_status(&hash1),
+            Some(BufferStatus::NotSubmitted),
+            "candidate #1, screened AFTER #0's deny, buffers normally — capture state was reset \
+             and the deny did not poison the loop"
+        );
+        assert_eq!(filter.buffered_len(), 1, "exactly #1 occupies the pending buffer");
     }
 }
 

@@ -23,6 +23,11 @@ pub(crate) struct RcsFilterMetrics {
     pub allow_total: Counter,
     /// Transactions denied by rule evaluation.
     pub deny_total: Counter,
+    /// Builder-side local denies caused by an exceeded internal native-transfer observation budget.
+    pub local_deny_native_transfer_limit_total: Counter,
+    /// Builder-side local denies caused by an observation invariant failure (RealLog cross-check
+    /// mismatch, or an enabled filter receiving a passthrough capture outcome).
+    pub local_deny_observation_invariant_total: Counter,
     /// Audit transactions deferred pending adjudication.
     pub audit_pending_total: Counter,
     /// Audit transactions released after approval.
