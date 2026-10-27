@@ -21,7 +21,7 @@ use core::fmt::Debug;
 use op_alloy_consensus::{OpDepositReceipt, OpTxType};
 use op_revm::{L1BlockInfo, OpSpecId};
 
-use rcs_filter::callstack::Observations;
+use rcs_filter::callstack::{Observations, SnapshotStamp};
 use rcs_filter::rules::RuleSet;
 use rcs_filter::{FilterHandle, LocalDenyReason, PreScreen, Screen, ScreenInput};
 use reth_basic_payload_builder::PayloadConfig;
@@ -241,6 +241,7 @@ thread_local! {
 /// (delegating to the composite's inner inspector via `components_mut`) and, in tests, for a
 /// lifecycle-counting double.
 trait RcsCaptureScope {
+    fn scope_configure_callstack_capture(&mut self, config: CallstackCaptureConfig);
     fn scope_start_capture(&mut self);
     fn scope_finish_capture(&mut self, result_logs: &[Log]) -> CaptureOutcome;
     fn scope_abort_capture(&mut self);
@@ -251,6 +252,10 @@ where
     DB: Database,
     I: Inspector<OpEvmContext<DB>> + RcsCaptureControl,
 {
+    fn scope_configure_callstack_capture(&mut self, config: CallstackCaptureConfig) {
+        self.components_mut().1.configure_callstack_capture(config);
+    }
+
     fn scope_start_capture(&mut self) {
         self.components_mut().1.start_capture();
     }
@@ -261,6 +266,35 @@ where
 
     fn scope_abort_capture(&mut self) {
         self.components_mut().1.abort_capture();
+    }
+}
+
+/// Per-flashblock memo of capture configurations, keyed by rule-snapshot stamp.
+///
+/// Every candidate is configured from its own snapshot (design §6.5.1 rules 2 and 3), and
+/// consecutive candidates almost always share one, so the memo keeps the selector set from being
+/// rebuilt per transaction. The number of distinct snapshots inside one flashblock is bounded by
+/// the one pinned snapshot plus the snapshots the buffered candidates carry, which makes a linear
+/// scan the cheapest possible lookup.
+#[derive(Default)]
+struct CaptureConfigMemo {
+    entries: Vec<(SnapshotStamp, CallstackCaptureConfig)>,
+}
+
+impl CaptureConfigMemo {
+    /// The configuration for `rules`, built once per distinct stamp. `None` — screening disabled
+    /// or no snapshot pinned — yields an inert configuration, never a stale one.
+    fn config_for(&mut self, rules: Option<&RuleSet>) -> CallstackCaptureConfig {
+        let Some(rules) = rules else {
+            return CallstackCaptureConfig::default();
+        };
+        let stamp = rules.stamp();
+        if let Some((_, config)) = self.entries.iter().find(|(known, _)| *known == stamp) {
+            return config.clone();
+        }
+        let config = CallstackCaptureConfig::new(stamp, rules.callstack_selectors().to_vec());
+        self.entries.push((stamp, config.clone()));
+        config
     }
 }
 
@@ -773,6 +807,10 @@ impl FlashblocksBuilderCtx {
     /// snapshot, so the selector set cannot change part-way through a block. A snapshot with no
     /// selectors yields an inert configuration, which keeps the observation hooks free for every
     /// deployment that has not enabled callstack rules.
+    ///
+    /// This is the configuration a FRESH candidate uses. A candidate that already has a buffer
+    /// entry is captured under the snapshot saved on that entry instead — see
+    /// [`Self::candidate_rule_snapshot`].
     fn callstack_capture_config(&self) -> CallstackCaptureConfig {
         match self.rcs_rule_snapshot.as_ref() {
             Some(rules) => {
@@ -780,6 +818,30 @@ impl FlashblocksBuilderCtx {
             }
             None => CallstackCaptureConfig::default(),
         }
+    }
+
+    /// The rule snapshot one specific candidate is both captured and screened under.
+    ///
+    /// Design §6.5.1 gives two different sources, and which one applies is a property of the
+    /// candidate, not of the block:
+    /// - rule 2 — a fresh candidate uses the snapshot pinned once for this L2 block, which every
+    ///   flashblock of the block shares;
+    /// - rule 3 — a buffered candidate (`Approved` in particular) keeps the snapshot saved on its
+    ///   pool entry, because `screen_tx_with_snapshot` re-evaluates it against exactly that
+    ///   snapshot. Capturing under the block-pinned one instead would stamp the observations with
+    ///   a different rule identity, and a reload that changed nothing but `content_version` would
+    ///   then fail the stamp check and drop a legitimately approved transaction.
+    ///
+    /// The lookup happens immediately before the candidate is simulated, so the window in which an
+    /// entry could appear afterwards is the narrow one where another payload job of a different
+    /// block buffers the same hash concurrently. That case still fails closed on the stamp check,
+    /// per rule 4 — it is never resolved by relaxing the comparison or by reusing observations.
+    fn candidate_rule_snapshot(
+        &self,
+        filter: &FilterHandle,
+        tx_hash: &B256,
+    ) -> Option<Arc<RuleSet>> {
+        filter.saved_rule_snapshot(tx_hash).or_else(|| self.rcs_rule_snapshot.clone())
     }
 
     /// Executes the given best transactions and updates the execution info.
@@ -853,6 +915,10 @@ impl FlashblocksBuilderCtx {
             number: self.block_number(),
             timestamp: self.attributes().timestamp(),
         };
+
+        // Capture configurations are built on demand per candidate and reused across candidates
+        // that share a snapshot; see [`CaptureConfigMemo`].
+        let mut capture_configs = CaptureConfigMemo::default();
 
         while let Some(tx) = best_txs.next(()) {
             let interop = tx.interop_deadline();
@@ -953,6 +1019,18 @@ impl FlashblocksBuilderCtx {
                 ));
                 best_txs.mark_invalid(tx.signer(), tx.nonce());
                 continue;
+            }
+
+            // Choose the rule snapshot THIS candidate is captured and screened under, and install
+            // the matching capture configuration before the window opens. Doing it per candidate
+            // is what keeps a fresh candidate and an `Approved` re-simulation in the same round
+            // from sharing one configuration, which is the only way capture and screening can be
+            // guaranteed to agree without relaxing the stamp check (design §6.5.1 rules 2–4).
+            let mut candidate_snapshot: Option<Arc<RuleSet>> = None;
+            if let Some(filter) = self.filter.as_ref() {
+                candidate_snapshot = self.candidate_rule_snapshot(filter, &tx_hash);
+                let config = capture_configs.config_for(candidate_snapshot.as_deref());
+                evm.scope_configure_callstack_capture(config);
             }
 
             let tx_simulation_start_time = Instant::now();
@@ -1088,12 +1166,14 @@ impl FlashblocksBuilderCtx {
                             &observations.items,
                         ),
                     };
-                    match self.rcs_rule_snapshot.as_ref() {
-                        // Screen against the very snapshot that configured capture.
-                        Some(pinned) => filter.screen_tx_with_snapshot(&input, pinned),
-                        // No snapshot was pinned for this block although screening is enabled:
-                        // the two could not be proven to agree, so fail closed rather than
-                        // evaluate against a possibly newer rule set.
+                    match candidate_snapshot.as_ref() {
+                        // Screen against the very snapshot that configured this candidate's
+                        // capture — the saved one for a buffered candidate, the block-pinned one
+                        // for a fresh candidate.
+                        Some(snapshot) => filter.screen_tx_with_snapshot(&input, snapshot),
+                        // No snapshot could be selected for this candidate although screening is
+                        // enabled: the two could not be proven to agree, so fail closed rather
+                        // than evaluate against a possibly newer rule set.
                         None => {
                             error!(
                                 target: "rcs_filter::capture",
@@ -1417,9 +1497,13 @@ mod capture_decision_tests {
             starts: u32,
             finishes: u32,
             aborts: u32,
+            configures: u32,
             active: bool,
         }
         impl RcsCaptureScope for CountingScope {
+            fn scope_configure_callstack_capture(&mut self, _config: CallstackCaptureConfig) {
+                self.configures += 1;
+            }
             fn scope_start_capture(&mut self) {
                 self.starts += 1;
                 self.active = true;
@@ -1504,7 +1588,7 @@ mod loop_level_fail_closed_tests {
     use alloy_rpc_types_engine::PayloadAttributes;
     use op_alloy_consensus::OpTypedTransaction;
     use op_alloy_rpc_types_engine::OpPayloadAttributes;
-    use rcs_filter::rules::load_rules;
+    use rcs_filter::rules::{load_rules, RawRule};
     use rcs_filter::test_support::golden;
     use rcs_filter::{BufferStatus, FilterConfig, SystemClock};
     use reth_optimism_txpool::OpPooledTransaction;
@@ -2319,6 +2403,273 @@ mod loop_level_fail_closed_tests {
              and the deny did not poison the loop"
         );
         assert_eq!(filter.buffered_len(), 1, "exactly #1 occupies the pending buffer");
+    }
+
+    /// A callstack-gated audit rule: the decoded event supplies the action payload while the
+    /// observed call frame acts as a condition, which is the only shape §6.8 permits for `audit`.
+    /// Only the `content_version` differs between the two snapshots the test installs, so the
+    /// selector set, the rule text and the executed code are all identical across the reload.
+    fn callstack_gated_audit_rule() -> RawRule {
+        serde_json::from_value(serde_json::json!({
+            "id": "gated-quota-audit",
+            "event_abis": { "transfer": {
+                "type": "event", "name": "Transfer",
+                "inputs": [
+                    { "name": "from", "type": "address", "indexed": true },
+                    { "name": "to", "type": "address", "indexed": true },
+                    { "name": "value", "type": "uint256", "indexed": false }
+                ],
+                "anonymous": false
+            }},
+            "audit_types": ["quota"],
+            "callstack": { "entry": { "address": format!("{:#x}", golden::token_x()) } },
+            "condition": { "and": [
+                { "==": [ { "var": "entry.matched" }, true ] },
+                { "==": [ { "var": "transfer.address" }, format!("{:#x}", golden::token_x()) ] }
+            ]},
+            "action": "audit",
+            "audit_timeout_action": "allow"
+        }))
+        .expect("valid callstack-gated audit rule")
+    }
+
+    fn callstack_rules_at(content_version: u64) -> rcs_filter::rules::RuleSet {
+        let rules = load_rules(
+            rcs_filter::CALLSTACK_MIN_PROTOCOL_VERSION,
+            content_version,
+            vec![callstack_gated_audit_rule()],
+        );
+        assert!(rules.rejected.is_empty(), "rule must load: {:?}", rules.rejected);
+        rules
+    }
+
+    /// Installs the sender and the ERC20 `Transfer`-emitting contract the candidate calls.
+    fn callstack_state(sender: Address) -> State<CacheDB<EmptyDB>> {
+        let mut cache = CacheDB::new(EmptyDB::default());
+        cache.insert_account_info(
+            sender,
+            AccountInfo { balance: U256::from(10u128.pow(18)), nonce: 0, ..Default::default() },
+        );
+        cache.insert_account_info(
+            golden::token_x(),
+            AccountInfo {
+                code: Some(Bytecode::new_raw(Bytes::from(erc20_transfer_emitter_code()))),
+                ..Default::default()
+            },
+        );
+        State::builder().with_database(cache).with_bundle_update().build()
+    }
+
+    /// Signs one candidate that calls `TOKEN_X`, so the real capture observes a call frame at the
+    /// selected address AND the emitted log matches the rule's event.
+    fn callstack_candidate() -> (Signer, OpPooledTransaction, B256) {
+        let signer = crate::tests::funded_signer();
+        let candidate = OpTypedTransaction::Eip1559(TxEip1559 {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 200_000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 0,
+            to: TxKind::Call(golden::token_x()),
+            value: U256::ZERO,
+            ..Default::default()
+        });
+        let recovered = signer.sign_tx(candidate).expect("sign candidate");
+        let hash: B256 = recovered.tx_hash();
+        let encoded_len = recovered.encode_2718_len();
+        (signer, OpPooledTransaction::new(recovered, encoded_len), hash)
+    }
+
+    /// Snapshot-binding regression (design §6.5.1 rule 3): an `Approved` candidate re-simulated in
+    /// a LATER L2 block, after a hot reload that changed nothing but `content_version`, must still
+    /// reach `Screen::AuditApproved`.
+    ///
+    /// Driven entirely through `execute_best_transactions`, so the observation stamp is produced by
+    /// the real capture chain rather than hand-built: the first block buffers the candidate under
+    /// version 41, version 42 is then installed, the candidate is approved, and the second block
+    /// pins version 42. If capture were configured from the block-pinned snapshot while the
+    /// consistency recompute evaluated the SAVED one, the stamps would differ and the candidate
+    /// would be dropped — which is exactly the defect this test pins.
+    #[tokio::test]
+    async fn approved_resimulation_after_a_cross_block_reload_uses_the_saved_snapshot() {
+        let filter = Arc::new(FilterHandle::for_test(
+            FilterConfig::default(),
+            callstack_rules_at(41),
+            Arc::new(SystemClock),
+        ));
+        let (signer, pooled, candidate_hash) = callstack_candidate();
+        let mut state = callstack_state(signer.address);
+        let pool = testing_pool();
+        let mock = MockTransaction::legacy()
+            .with_sender(signer.address)
+            .with_nonce(0)
+            .with_gas_price(100)
+            .with_hash(candidate_hash);
+        pool.add_transaction(TransactionOrigin::External, mock).await.unwrap();
+        let limits =
+            TransactionLimits { block_gas: 30_000_000, block_da: None, block_da_footprint: None };
+
+        // ===== BLOCK N: the candidate is screened under version 41 and buffers. =====
+        let ctx_v41 = build_ctx(filter.clone());
+        assert_eq!(
+            ctx_v41.rcs_rule_snapshot.as_ref().expect("snapshot pinned").content_version,
+            41
+        );
+        LAST_SCREEN_DECISION.with(|d| d.set(None));
+        let mut best_txs = RecordingTxs { tx: Some(pooled.clone()), marked: Vec::new() };
+        let mut info = ExecutionInfo::with_capacity(1);
+        let first =
+            ctx_v41.execute_best_transactions(&mut info, &mut state, &mut best_txs, &pool, limits);
+        assert!(matches!(first, Ok(None)), "block N loop completes: {first:?}");
+        assert_eq!(
+            LAST_SCREEN_DECISION.with(|d| d.get()),
+            Some(Screen::AuditPending),
+            "the candidate's first screening buffers it for adjudication"
+        );
+        assert_eq!(filter.buffer_status(&candidate_hash), Some(BufferStatus::NotSubmitted));
+
+        // A hot reload lands while the candidate is buffered. Nothing changes but the version.
+        filter.install_rules(callstack_rules_at(42));
+        filter.advance_to_approved_for_test(&candidate_hash);
+        assert_eq!(filter.buffer_status(&candidate_hash), Some(BufferStatus::Approved));
+
+        // ===== BLOCK N+1: a new payload job pins version 42 and re-simulates the candidate. =====
+        let ctx_v42 = build_ctx(filter.clone());
+        assert_eq!(
+            ctx_v42.rcs_rule_snapshot.as_ref().expect("snapshot pinned").content_version,
+            42,
+            "the next block pins the reloaded snapshot"
+        );
+        LAST_SCREEN_DECISION.with(|d| d.set(None));
+        let mut best_txs = RecordingTxs { tx: Some(pooled), marked: Vec::new() };
+        let mut info = ExecutionInfo::with_capacity(1);
+        let second =
+            ctx_v42.execute_best_transactions(&mut info, &mut state, &mut best_txs, &pool, limits);
+        assert!(matches!(second, Ok(None)), "block N+1 loop completes: {second:?}");
+        assert_eq!(
+            LAST_SCREEN_DECISION.with(|d| d.get()),
+            Some(Screen::AuditApproved),
+            "the Approved re-simulation must configure capture from the SAVED snapshot, so a \
+             version-only reload cannot turn it into a stamp mismatch and a Drop"
+        );
+        assert_eq!(
+            info.executed_transactions.len(),
+            1,
+            "the approved candidate is packaged into the block"
+        );
+    }
+
+    /// A callstack-only deny rule on `address`: any transaction with an observed call frame at it
+    /// is rejected. `audit` would need decoded events; `deny` is the shape a pure callstack rule
+    /// takes, so it isolates the snapshot question from the event pipeline.
+    fn callstack_deny_rule(address: Address) -> RawRule {
+        serde_json::from_value(serde_json::json!({
+            "id": "deny-observed-frame",
+            "callstack": { "entry": { "address": format!("{address:#x}") } },
+            "condition": { "==": [ { "var": "entry.matched" }, true ] },
+            "action": "deny"
+        }))
+        .expect("valid callstack deny rule")
+    }
+
+    fn deny_rules_at(address: Address, content_version: u64) -> rcs_filter::rules::RuleSet {
+        let rules = load_rules(
+            rcs_filter::CALLSTACK_MIN_PROTOCOL_VERSION,
+            content_version,
+            vec![callstack_deny_rule(address)],
+        );
+        assert!(rules.rejected.is_empty(), "rule must load: {:?}", rules.rejected);
+        rules
+    }
+
+    /// Snapshot-pinning regression (design §6.5.1.1): every flashblock of ONE L2 block keeps the
+    /// same pinned snapshot, for the capture selector set as well as for screening.
+    ///
+    /// `execute_best_transactions` runs once per flashblock, so the test calls it twice on the SAME
+    /// context with a hot reload in between. Because the reload replaces the selected address, a
+    /// per-flashblock (or per-candidate-fresh) re-read of the live rules would stop denying the
+    /// candidate in the second flashblock; the block-pinned snapshot must keep denying it. The
+    /// third run, on a NEW context, is where the reload is allowed to take effect.
+    #[tokio::test]
+    async fn every_flashblock_of_one_block_keeps_the_pinned_snapshot() {
+        let elsewhere = Address::repeat_byte(0x7e);
+        let filter = Arc::new(FilterHandle::for_test(
+            FilterConfig::default(),
+            deny_rules_at(golden::token_x(), 1),
+            Arc::new(SystemClock),
+        ));
+        let (signer, pooled, candidate_hash) = callstack_candidate();
+        let mut state = callstack_state(signer.address);
+        let pool = testing_pool();
+        let mock = MockTransaction::legacy()
+            .with_sender(signer.address)
+            .with_nonce(0)
+            .with_gas_price(100)
+            .with_hash(candidate_hash);
+        pool.add_transaction(TransactionOrigin::External, mock).await.unwrap();
+        let limits =
+            TransactionLimits { block_gas: 30_000_000, block_da: None, block_da_footprint: None };
+
+        // One context = one L2 block payload job, pinned once.
+        let ctx = build_ctx(filter.clone());
+        let pinned_version =
+            ctx.rcs_rule_snapshot.as_ref().expect("snapshot pinned").content_version;
+        assert_eq!(pinned_version, 1);
+
+        // ===== FLASHBLOCK 1 =====
+        LAST_SCREEN_DECISION.with(|d| d.set(None));
+        let mut best_txs = RecordingTxs { tx: Some(pooled.clone()), marked: Vec::new() };
+        let mut info = ExecutionInfo::with_capacity(1);
+        let first =
+            ctx.execute_best_transactions(&mut info, &mut state, &mut best_txs, &pool, limits);
+        assert!(matches!(first, Ok(None)), "flashblock 1 loop completes: {first:?}");
+        assert_eq!(
+            LAST_SCREEN_DECISION.with(|d| d.get()),
+            Some(Screen::Deny),
+            "flashblock 1: the observed frame at the selected address denies the candidate"
+        );
+
+        // A hot reload lands mid-block, moving the selector to an address the candidate never
+        // touches. Rule installation is an immediate swap, so this is the moment that could leak
+        // new rules into the block already being built.
+        filter.install_rules(deny_rules_at(elsewhere, 2));
+
+        // ===== FLASHBLOCK 2 of the SAME block =====
+        LAST_SCREEN_DECISION.with(|d| d.set(None));
+        let mut best_txs = RecordingTxs { tx: Some(pooled.clone()), marked: Vec::new() };
+        let mut info = ExecutionInfo::with_capacity(1);
+        let second =
+            ctx.execute_best_transactions(&mut info, &mut state, &mut best_txs, &pool, limits);
+        assert!(matches!(second, Ok(None)), "flashblock 2 loop completes: {second:?}");
+        assert_eq!(
+            LAST_SCREEN_DECISION.with(|d| d.get()),
+            Some(Screen::Deny),
+            "flashblock 2 of the same block must still capture and screen under the pinned \
+             snapshot, so the mid-block reload cannot change the verdict"
+        );
+        assert_eq!(
+            ctx.rcs_rule_snapshot.as_ref().expect("snapshot pinned").content_version,
+            pinned_version,
+            "the context's pinned snapshot never moves during its block"
+        );
+
+        // ===== NEXT L2 BLOCK — a new payload job, where the reload finally takes effect. =====
+        let next_ctx = build_ctx(filter.clone());
+        assert_eq!(
+            next_ctx.rcs_rule_snapshot.as_ref().expect("snapshot pinned").content_version,
+            2
+        );
+        LAST_SCREEN_DECISION.with(|d| d.set(None));
+        let mut best_txs = RecordingTxs { tx: Some(pooled), marked: Vec::new() };
+        let mut info = ExecutionInfo::with_capacity(1);
+        let third =
+            next_ctx.execute_best_transactions(&mut info, &mut state, &mut best_txs, &pool, limits);
+        assert!(matches!(third, Ok(None)), "next block loop completes: {third:?}");
+        assert_eq!(
+            LAST_SCREEN_DECISION.with(|d| d.get()),
+            Some(Screen::Allow),
+            "the next block pins the reloaded snapshot, whose selector the candidate never touches"
+        );
     }
 }
 

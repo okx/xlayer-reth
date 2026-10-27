@@ -194,6 +194,14 @@ impl CallstackCaptureConfig {
 /// trait, so a generic execution loop bounds its inspector on `Inspector + RcsCaptureControl` to
 /// drive capture without a runtime downcast. The `rcs-filter` crate gains no revm dependency.
 pub trait RcsCaptureControl {
+    /// Installs the capture configuration the NEXT capture window will use.
+    ///
+    /// Called once per candidate, before the window opens, because the snapshot a candidate is
+    /// screened against is a property of the candidate and not of the block: a fresh candidate
+    /// uses the snapshot pinned for the block, while a buffered one keeps the snapshot saved on
+    /// its pool entry. Configuring per candidate is what keeps capture and screening on the same
+    /// snapshot without ever relaxing the stamp check.
+    fn configure_callstack_capture(&mut self, config: CallstackCaptureConfig);
     /// Resets all capture state and arms the inspector for one real-user candidate simulation.
     fn start_capture(&mut self);
     /// Ends the capture window, cross-checks the real-log subsequence against `result_logs`
@@ -206,6 +214,8 @@ pub trait RcsCaptureControl {
 /// The filter-disabled inspector performs no capture: `start`/`abort` are no-ops and `finish`
 /// always returns [`CaptureOutcome::Passthrough`], so the loop falls back to raw `result.logs()`.
 impl RcsCaptureControl for NoOpInspector {
+    fn configure_callstack_capture(&mut self, _config: CallstackCaptureConfig) {}
+
     fn start_capture(&mut self) {}
 
     fn finish_capture(&mut self, _result_logs: &[Log]) -> CaptureOutcome {
@@ -314,6 +324,31 @@ thread_local! {
 pub(crate) fn reset_create_gate_seams() {
     CREATE_HOOK_HITS.with(|c| c.set(0));
     CREATE_GATE_SNAPSHOT.with(|s| s.set((0, 0, false, false)));
+}
+
+// Test-only counter of call-frame bytecode hash computations. Incremented in `initialize_interp`
+// immediately before the `keccak256` over the frame's bytecode, i.e. only once the gate has decided
+// the hash is actually wanted. `0` therefore means no hashing work was done at all — which is what
+// the "inert selector set / inactive inspector does no callstack work" regressions assert, instead
+// of trying to measure elapsed time. Never set in production (the whole seam is `#[cfg(test)]`).
+#[cfg(test)]
+thread_local! {
+    pub(crate) static CALLSTACK_HASH_COMPUTATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Test-only reset for [`CALLSTACK_HASH_COMPUTATIONS`], for the same reason
+/// [`reset_create_gate_seams`] exists: `cargo test` reuses threads across tests, so a stale count
+/// from an earlier test could make a later `== 0` assertion pass for the wrong reason.
+#[cfg(test)]
+pub(crate) fn reset_callstack_hash_counter() {
+    CALLSTACK_HASH_COMPUTATIONS.with(|c| c.set(0));
+}
+
+/// Test-only count of call-frame hash computations since the last reset.
+#[cfg(test)]
+pub(crate) fn callstack_hash_computations() -> usize {
+    CALLSTACK_HASH_COMPUTATIONS.with(|c| c.get())
 }
 
 // Test-only SELFDESTRUCT-watermark gate snapshot, in the same style as `CREATE_GATE_SNAPSHOT` /
@@ -555,18 +590,44 @@ impl RcsInspector {
         }
     }
 
+    /// Whether call-frame observation is doing any work at all for the current window.
+    ///
+    /// `false` for an inactive inspector and for an inert selector set, and it is the single gate
+    /// every frame-state operation checks first, so "no selector" and "not armed" are structurally
+    /// equivalent to the callstack path being absent.
+    fn callstack_capture_armed(&self) -> bool {
+        self.active && !self.callstack.is_inert()
+    }
+
+    /// Whether the innermost open frame's executed bytecode hash is needed at all.
+    ///
+    /// Only a frame carrying a staged candidate needs one. A staged `Call` is the selected address
+    /// running its own code — which is also the only frame that can be the parent of a direct
+    /// delegatecall, so recording its hash is exactly what keeps that attribution available — and a
+    /// staged `DirectDelegatecall` needs the implementation's executed hash. No other frame's hash
+    /// is ever read, so it is never computed: hashing whole bytecode is the one genuinely costly
+    /// step in the hot `initialize_interp` hook.
+    fn needs_executed_code_hash(&self) -> bool {
+        self.callstack_capture_armed()
+            && self.frames.last().is_some_and(|frame| frame.pending.is_some())
+    }
+
     /// Enters a frame: records its execution identity and stages an observation candidate if the
     /// selector predicate matches. Staging allocates no observation and consumes no budget.
     ///
-    /// `scheme` is `None` for a `CREATE`/`CREATE2` frame. No-op while inactive or when no address
-    /// is observed, so the non-callstack path pays nothing beyond one branch.
+    /// `scheme` is `None` for a `CREATE`/`CREATE2` frame.
+    ///
+    /// Both gates come BEFORE any frame-state work: while the inspector is inactive (a gasless
+    /// pre-check or any non-candidate simulation) and while the selector set is inert (no active
+    /// rule asks about call frames) not even a [`FrameRecord`] is pushed, so a deployment with no
+    /// callstack rule pays one branch per frame and nothing else. [`Self::exit_frame`] applies the
+    /// same gate, and the configuration cannot change inside a window, so the stack stays balanced.
     fn enter_frame(&mut self, target: Address, bytecode: Address, scheme: Option<CallScheme>) {
-        if !self.active {
+        if !self.callstack_capture_armed() {
             return;
         }
         let is_create = scheme.is_none();
-        let pending =
-            if self.callstack.is_inert() { None } else { self.stage(target, bytecode, scheme) };
+        let pending = self.stage(target, bytecode, scheme);
         if self.frames.len() >= MAX_OPEN_FRAMES {
             // Parentage can no longer be tracked: fail closed instead of dropping the frame,
             // which would make an unobserved call indistinguishable from an absent one.
@@ -622,7 +683,7 @@ impl RcsInspector {
     /// available. The hash is taken from that bytecode — not from an account-state lookup, which
     /// under EIP-7702 names the delegation designator rather than the delegate code that runs.
     fn confirm_frame_execution(&mut self, executed_code_hash: B256) {
-        if !self.active {
+        if !self.callstack_capture_armed() {
             return;
         }
         let Some(frame) = self.frames.last_mut() else {
@@ -670,7 +731,7 @@ impl RcsInspector {
     /// untouched: this is deliberately NOT the log checkpoint/truncate path, because a log
     /// describes an effect while an observation describes execution identity.
     fn exit_frame(&mut self) {
-        if !self.active {
+        if !self.callstack_capture_armed() {
             return;
         }
         if self.frames.pop().is_none() {
@@ -780,6 +841,16 @@ impl RcsInspector {
     }
 }
 
+#[cfg(test)]
+impl RcsInspector {
+    /// Number of open frames the inspector is currently tracking. Test-only: an inert selector set
+    /// must leave this at `0` for every frame of the transaction, which is direct evidence that no
+    /// frame-state work happened rather than an inference from the observation list being empty.
+    pub(crate) fn open_frame_count(&self) -> usize {
+        self.frames.len()
+    }
+}
+
 impl RcsInspector {
     /// Clears every piece of per-transaction capture state. Used by all three lifecycle
     /// transitions so no state can leak from one capture window into the next.
@@ -801,6 +872,18 @@ impl RcsInspector {
 }
 
 impl RcsCaptureControl for RcsInspector {
+    fn configure_callstack_capture(&mut self, config: CallstackCaptureConfig) {
+        // Only ever called between windows. Swapping the selector set mid-window would let one
+        // transaction's frames be entered under one configuration and exited under another, which
+        // would unbalance the frame stack; the assertion states that contract where it is relied
+        // on rather than leaving it to the caller.
+        debug_assert!(
+            !self.active,
+            "the capture configuration must be installed while the inspector is inactive"
+        );
+        self.callstack = config;
+    }
+
     fn start_capture(&mut self) {
         self.reset_state();
         self.active = true;
@@ -933,10 +1016,19 @@ where
     }
 
     fn initialize_interp(&mut self, interp: &mut Interpreter<INTR>, _context: &mut CTX) {
+        // The gate comes first and the hash second. Every frame of every simulation reaches this
+        // hook, so hashing before deciding whether the hash is wanted would charge the whole node
+        // — including deployments with no callstack rule and the inactive gasless pre-check — for
+        // a value nothing reads.
+        if !self.needs_executed_code_hash() {
+            return;
+        }
         // The first point at which this frame is known to execute: an interpreter exists for it.
         // The hash is of the bytecode the EVM actually loaded for the frame, so an EIP-7702
         // delegated call reports the delegate code that really ran rather than the designator
         // stored on the account.
+        #[cfg(test)]
+        CALLSTACK_HASH_COMPUTATIONS.with(|c| c.set(c.get() + 1));
         let executed_code_hash = keccak256(interp.bytecode.bytecode_slice());
         self.confirm_frame_execution(executed_code_hash);
     }
@@ -5521,6 +5613,167 @@ mod callstack_observation_tests {
         }
         code.push(0x00);
         code
+    }
+
+    // ── no selector / not armed: the callstack path must be fully inert ───────────────────────
+
+    /// Executes one candidate like [`run_observing_tx`], but WITHOUT arming capture — the exact
+    /// state the inspector is in during the gasless pre-check and any other non-candidate
+    /// simulation. Returns the open-frame count observed after execution, read before any
+    /// lifecycle call could have cleared it.
+    fn run_unarmed_tx(db: InMemoryDB, target: Address, selectors: &[Address]) -> usize {
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::with_callstack(
+                1_000,
+                16,
+                CallstackCaptureConfig::new(stamp(), selectors.to_vec()),
+            ),
+        );
+        let result = evm.transact(call_tx(target)).expect("tx executes");
+        assert!(result.result.is_success(), "the unarmed control transaction still executes");
+        evm.components_mut().1.open_frame_count()
+    }
+
+    /// Proxy → DELEGATECALL → implementation, with the proxy selected: the positive control for the
+    /// two tests below. Exactly the two frames whose hash is actually reported get hashed.
+    #[test]
+    fn a_selected_proxy_hashes_exactly_the_two_frames_it_reports() {
+        reset_callstack_hash_counter();
+        let proxy = Address::from([0xD1; 20]);
+        let implementation = Address::from([0xD2; 20]);
+        let proxy_code = delegatecall_to(implementation);
+        let impl_code = stop_only();
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(proxy, account(0, Some(proxy_code.clone())));
+        db.insert_account_info(implementation, account(0, Some(impl_code.clone())));
+
+        let (outcome, success) = run_observing_tx(db, proxy, &[proxy], 16);
+        assert!(success);
+        assert_eq!(
+            observations(outcome),
+            vec![
+                CallObservation::call(proxy, code_hash(&proxy_code)),
+                CallObservation::direct_delegatecall(
+                    proxy,
+                    code_hash(&proxy_code),
+                    implementation,
+                    code_hash(&impl_code),
+                ),
+            ]
+        );
+        assert_eq!(
+            callstack_hash_computations(),
+            2,
+            "exactly the proxy frame and its direct delegatecall are hashed"
+        );
+    }
+
+    /// An unselected frame is never hashed, even when it executes and even when a selected frame
+    /// runs inside it.
+    ///
+    /// helper → CALL → selected: two frames execute, one of them is an execution identity some
+    /// selector asked about, so exactly one hash is computed. A hook that hashed every frame it
+    /// initialized would report 2 here.
+    #[test]
+    fn only_the_frames_whose_identity_is_reported_are_hashed() {
+        reset_callstack_hash_counter();
+        let helper = Address::from([0xD3; 20]);
+        let selected = Address::from([0xD4; 20]);
+        let selected_code = stop_only();
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(helper, account(0, Some(call_to(selected))));
+        db.insert_account_info(selected, account(0, Some(selected_code.clone())));
+
+        let (outcome, success) = run_observing_tx(db, helper, &[selected], 16);
+        assert!(success);
+        assert_eq!(
+            observations(outcome),
+            vec![CallObservation::call(selected, code_hash(&selected_code))],
+            "the selected address is still observed through the helper"
+        );
+        assert_eq!(
+            callstack_hash_computations(),
+            1,
+            "the unselected helper frame executed but was never hashed"
+        );
+    }
+
+    /// An empty selector set must cost nothing: no bytecode hash and no frame-state work, for a
+    /// transaction whose frames would otherwise all qualify.
+    ///
+    /// This is the shape every deployment without a callstack rule runs in, so "inert" has to mean
+    /// genuinely no work rather than merely no observation.
+    #[test]
+    fn an_empty_selector_set_computes_no_hash_and_tracks_no_frame() {
+        reset_callstack_hash_counter();
+        let proxy = Address::from([0xD5; 20]);
+        let implementation = Address::from([0xD6; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(proxy, account(0, Some(delegatecall_to(implementation))));
+        db.insert_account_info(implementation, account(0, Some(stop_only())));
+
+        let (outcome, success) = run_observing_tx(db, proxy, &[], 16);
+        assert!(success);
+        assert!(observations(outcome).is_empty());
+        assert_eq!(
+            callstack_hash_computations(),
+            0,
+            "an empty selector set must not hash any frame's bytecode"
+        );
+    }
+
+    /// The same inertness, asserted on frame state rather than on hashing: with an empty selector
+    /// set no [`FrameRecord`] is pushed at all, and the window still closes as `Complete` — an
+    /// `enter_frame` that pushed while `exit_frame` did not pop (or the reverse) would surface
+    /// `FrameStackUnbalanced` instead.
+    #[test]
+    fn an_empty_selector_set_pushes_no_frame_record() {
+        let any = Address::from([0xD7; 20]);
+        let mut inspector =
+            RcsInspector::with_callstack(1_000, 16, CallstackCaptureConfig::default());
+        inspector.start_capture();
+        inspector.enter_frame(any, any, Some(CallScheme::Call));
+        assert_eq!(
+            inspector.open_frame_count(),
+            0,
+            "no frame is tracked for an inert selector set"
+        );
+        inspector.exit_frame();
+        assert_eq!(inspector.open_frame_count(), 0);
+        match inspector.finish_capture(&[]) {
+            CaptureOutcome::Complete { observations, .. } => assert!(observations.items.is_empty()),
+            other => panic!("an inert window must close cleanly, got {other:?}"),
+        }
+    }
+
+    /// An inspector that was never armed does no callstack work either — the state the gasless
+    /// pre-check and every other non-candidate simulation run in. The selector set is deliberately
+    /// NON-empty here, so only the `active` gate can be what suppresses the work.
+    #[test]
+    fn an_unarmed_inspector_computes_no_hash_and_tracks_no_frame() {
+        reset_callstack_hash_counter();
+        let proxy = Address::from([0xD8; 20]);
+        let implementation = Address::from([0xD9; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(proxy, account(0, Some(delegatecall_to(implementation))));
+        db.insert_account_info(implementation, account(0, Some(stop_only())));
+
+        let open_frames = run_unarmed_tx(db, proxy, &[proxy]);
+        assert_eq!(open_frames, 0, "an unarmed inspector tracks no frame");
+        assert_eq!(
+            callstack_hash_computations(),
+            0,
+            "an unarmed inspector must not hash any frame's bytecode"
+        );
     }
 
     // ── direct call vs. direct delegatecall ──────────────────────────────────────────────────
