@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 
 use alloy_primitives::{Address, Log, B256, U256};
+use rcs_filter::callstack::Observations;
 use rcs_filter::client::ActionItem;
 use rcs_filter::handle::ScreenInput;
 use rcs_filter::matching::{try_evaluate, MatchOutcome};
@@ -53,6 +54,17 @@ impl AuditResult {
     }
 }
 
+/// The observation state of the audit RPC path.
+///
+/// The EVM built for `xlayer_auditTransactions` runs without the call-frame observation
+/// inspector, so observations are genuinely unavailable here rather than empty. Rules that
+/// declare no callstack selectors are unaffected and keep their exact previous behavior; a rule
+/// that does declare them cannot be adjudicated on this path and is surfaced as a non-verdict
+/// `Malformed` result rather than an authoritative `Allow`.
+fn observations_for_audit_path() -> Observations<'static> {
+    Observations::NOT_CAPTURED
+}
+
 /// Classifies one already-executed deposit transaction against `rules`. `tx_hash` and `logs`
 /// come from the caller's EVM execution; this function does no execution itself —
 /// zero network IO, zero side effects (unlike `FilterHandle::screen_tx`, this never touches a
@@ -66,17 +78,34 @@ pub fn verdict_for(
     logs: &[Log],
     rules: &RuleSet,
 ) -> AuditResult {
-    let input =
-        ScreenInput { tx_hash, origin: from, tx_to: to, nonce: 0, value, block_height: 0, logs };
+    let input = ScreenInput {
+        tx_hash,
+        origin: from,
+        tx_to: to,
+        nonce: 0,
+        value,
+        block_height: 0,
+        logs,
+        // This path executes the EVM without the observation inspector attached, so nothing is
+        // known about its call frames. Reporting an empty list instead would make every selector
+        // bind `matched = false`, and a rule written to reject the transaction would return
+        // `Allow` — "not captured" disguised as "captured, nothing matched".
+        observations: observations_for_audit_path(),
+    };
     // The audit RPC path holds no FilterConfig, so it uses the default binding budget. This keeps
     // its existing matcher-overflow `Malformed` semantics unchanged.
     match try_evaluate(rules, &input, DEFAULT_MAX_EVENT_BINDINGS_PER_TX) {
         Err(error) => {
+            // Every screening failure returns the existing non-verdict channel rather than an
+            // authoritative verdict. A matcher budget overflow and an unadjudicable observation
+            // set are different incidents, so the reason is reported, but neither may become
+            // `Allow`: that would release a transaction a rule was written to reject.
             tracing::warn!(
                 target: "xlayer_audit_rpc",
                 source_hash = %req.source_hash,
+                kind = ?error.kind(),
                 %error,
-                "matching budget exceeded; returning malformed result"
+                "screening failed closed; returning malformed result"
             );
             AuditResult::malformed(req.source_hash.clone())
         }

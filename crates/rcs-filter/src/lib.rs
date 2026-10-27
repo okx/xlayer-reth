@@ -17,6 +17,7 @@
 //! 2. All RCS network IO happens on background tokio workers ([`worker`]).
 //! 3. Rules are hot-swapped atomically ([`Arc<RwLock<Arc<RuleSet>>>`]).
 
+pub mod callstack;
 pub mod client;
 pub mod clock;
 pub mod config;
@@ -32,14 +33,19 @@ pub mod test_support;
 pub mod worker;
 
 #[cfg(test)]
+mod callstack_tests;
+#[cfg(test)]
 mod integration_tests;
 
+pub use callstack::{
+    CallObservation, CallObservationKind, ObservationUnavailable, Observations, SnapshotStamp,
+};
 pub use client::{
     ActionItem, QueryParams, QueryResponse, QueryTx, RcsClient, ReqwestRcsClient, RulesResponse,
     SubmitRequest, SubmitResponse, SubmitTx, VersionResponse,
 };
 pub use clock::{Clock, SystemClock};
-pub use config::{FilterConfig, SUPPORTED_PROTOCOL_VERSIONS};
+pub use config::{FilterConfig, CALLSTACK_MIN_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS};
 pub use error::{FilterError, Result};
 pub use handle::{
     FilterHandle, LocalDenyReason, PreScreen, Screen, ScreenInput, TerminalEvent, TerminalReason,

@@ -99,6 +99,7 @@ impl FlashblockHandlerContext {
             // External full-payload processing is disabled while RCS filtering is enabled, so
             // follower/replay execution never performs local screening.
             filter: None,
+            rcs_rule_snapshot: None,
         }
     }
 }

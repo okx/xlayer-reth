@@ -21,6 +21,8 @@ use core::fmt::Debug;
 use op_alloy_consensus::{OpDepositReceipt, OpTxType};
 use op_revm::{L1BlockInfo, OpSpecId};
 
+use rcs_filter::callstack::Observations;
+use rcs_filter::rules::RuleSet;
 use rcs_filter::{FilterHandle, LocalDenyReason, PreScreen, Screen, ScreenInput};
 use reth_basic_payload_builder::PayloadConfig;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
@@ -51,7 +53,10 @@ use revm::{
     context::result::ResultAndState, interpreter::as_u64_saturated, DatabaseCommit, Inspector,
 };
 
-use super::rcs_capture::{CaptureInvariantError, CaptureOutcome, RcsCaptureControl, RcsInspector};
+use super::rcs_capture::{
+    CallstackCaptureConfig, CaptureInvariantError, CaptureOutcome, ObservationBudget,
+    RcsCaptureControl, RcsInspector,
+};
 
 /// Container type that holds all necessities to build a new payload.
 #[derive(Debug)]
@@ -88,6 +93,19 @@ pub struct FlashblocksBuilderCtx {
     pub gasless_block_gas_limit: Option<u64>,
     /// RCS Filter handle. `None` when the risk-control master switch is disabled.
     pub filter: Option<Arc<FilterHandle>>,
+    /// The rule snapshot pinned for this **L2 block** payload job.
+    ///
+    /// Rule installation is an immediate atomic swap, so acquiring the snapshot per transaction
+    /// would let a hot reload that lands between two transactions take effect inside the block
+    /// already being built. This context is constructed once per L2 block payload job and
+    /// outlives the per-flashblock execution routines, so pinning the snapshot here is what makes
+    /// a newly installed rule set visible only from the next L2 block — never between two
+    /// transactions, and never between two flashblocks, of the current one.
+    ///
+    /// The same `Arc` configures observation capture and evaluates the result, which is what
+    /// prevents capture and screening from disagreeing about which rules are in force. `None`
+    /// when screening is disabled.
+    pub rcs_rule_snapshot: Option<Arc<RuleSet>>,
 }
 
 /// Per-flashblock execution capacity passed to the transaction executor.
@@ -113,16 +131,49 @@ fn fail_closed_screen(
     outcome: &CaptureOutcome,
 ) -> Option<Screen> {
     match outcome {
-        CaptureOutcome::Complete(_) => None,
-        CaptureOutcome::LimitExceeded { attempted, limit } => {
+        CaptureOutcome::Complete { .. } => None,
+        // The two capture budgets are reported separately: one bounds internal native-transfer
+        // volume, the other bounds call-frame observation volume, and conflating them would hide
+        // which limit an operator needs to raise.
+        CaptureOutcome::LimitExceeded { attempted, limit, budget } => {
             error!(
                 target: "rcs_filter::capture",
                 %tx_hash,
+                budget = budget.as_str(),
                 observed_count = *attempted,
                 limit = *limit,
-                "native-transfer observation budget exceeded; failing closed (Screen::Deny)"
+                "observation budget exceeded; failing closed (Screen::Deny)"
             );
-            filter.record_local_deny(LocalDenyReason::NativeTransferLimit);
+            filter.record_local_deny(match budget {
+                ObservationBudget::NativeTransfer => LocalDenyReason::NativeTransferLimit,
+                ObservationBudget::Callstack => LocalDenyReason::CallstackObservationLimit,
+            });
+            Some(Screen::Deny)
+        }
+        // A frame-stack invariant failure means parentage is untrustworthy, so the observation set
+        // cannot be adjudicated. Bounded to the depth/remaining count — never any frame address.
+        CaptureOutcome::InvariantViolation {
+            reason: CaptureInvariantError::FrameStackOverflow { depth },
+        } => {
+            error!(
+                target: "rcs_filter::capture",
+                %tx_hash,
+                depth = *depth,
+                "observed frame stack exceeded its bound; failing closed (Screen::Deny)"
+            );
+            filter.record_local_deny(LocalDenyReason::ObservationInvariant);
+            Some(Screen::Deny)
+        }
+        CaptureOutcome::InvariantViolation {
+            reason: CaptureInvariantError::FrameStackUnbalanced { remaining },
+        } => {
+            error!(
+                target: "rcs_filter::capture",
+                %tx_hash,
+                remaining = *remaining,
+                "observed frame stack was unbalanced at capture end; failing closed (Screen::Deny)"
+            );
+            filter.record_local_deny(LocalDenyReason::ObservationInvariant);
             Some(Screen::Deny)
         }
         // R9 item 1: `RealLogMismatch` is its OWN arm, emitting EXACTLY the four bounded fields —
@@ -716,6 +767,21 @@ impl FlashblocksBuilderCtx {
         Ok(())
     }
 
+    /// Derives the capture configuration from the snapshot pinned for this L2 block.
+    ///
+    /// Every flashblock of the block builds a fresh inspector but derives it from this same
+    /// snapshot, so the selector set cannot change part-way through a block. A snapshot with no
+    /// selectors yields an inert configuration, which keeps the observation hooks free for every
+    /// deployment that has not enabled callstack rules.
+    fn callstack_capture_config(&self) -> CallstackCaptureConfig {
+        match self.rcs_rule_snapshot.as_ref() {
+            Some(rules) => {
+                CallstackCaptureConfig::new(rules.stamp(), rules.callstack_selectors().to_vec())
+            }
+            None => CallstackCaptureConfig::default(),
+        }
+    }
+
     /// Executes the given best transactions and updates the execution info.
     ///
     /// Returns `Ok(Some(())` if the job was cancelled.
@@ -732,7 +798,11 @@ impl FlashblocksBuilderCtx {
         // transfers can be observed during the real-user candidate simulation; when it is disabled
         // the zero-overhead no-op inspector is kept and behavior is unchanged.
         if let Some(filter) = self.filter.clone() {
-            let inspector = RcsInspector::new(filter.max_native_transfers_per_tx());
+            let inspector = RcsInspector::with_callstack(
+                filter.max_native_transfers_per_tx(),
+                filter.max_callstack_observations_per_tx(),
+                self.callstack_capture_config(),
+            );
             let mut evm = self.evm_config.evm_with_env_and_inspector(
                 &mut *db,
                 self.evm_env.clone(),
@@ -999,8 +1069,10 @@ impl FlashblocksBuilderCtx {
             // the raw logs; a budget overflow or observation-invariant failure fails closed to
             // `Screen::Deny` via the same downstream handling, never entering the pending buffer.
             if let Some(filter) = self.filter.as_ref() {
-                let decision = if let CaptureOutcome::Complete(logs) = &capture_outcome {
-                    filter.screen_tx(&ScreenInput {
+                let decision = if let CaptureOutcome::Complete { logs, observations } =
+                    &capture_outcome
+                {
+                    let input = ScreenInput {
                         tx_hash,
                         origin: tx.signer(),
                         tx_to: tx.to(),
@@ -1008,7 +1080,30 @@ impl FlashblocksBuilderCtx {
                         value: tx.value(),
                         block_height: self.block_number(),
                         logs,
-                    })
+                        // Capture completed, so the set is authoritative — an empty list genuinely
+                        // means no observed frame, not an absence of capture. It carries the stamp
+                        // of the snapshot whose selector set configured it.
+                        observations: Observations::available(
+                            observations.stamp,
+                            &observations.items,
+                        ),
+                    };
+                    match self.rcs_rule_snapshot.as_ref() {
+                        // Screen against the very snapshot that configured capture.
+                        Some(pinned) => filter.screen_tx_with_snapshot(&input, pinned),
+                        // No snapshot was pinned for this block although screening is enabled:
+                        // the two could not be proven to agree, so fail closed rather than
+                        // evaluate against a possibly newer rule set.
+                        None => {
+                            error!(
+                                target: "rcs_filter::capture",
+                                %tx_hash,
+                                "no rule snapshot was pinned for this block; failing closed (Screen::Deny)"
+                            );
+                            filter.record_local_deny(LocalDenyReason::ObservationInvariant);
+                            Screen::Deny
+                        }
+                    }
                 } else {
                     // Every non-`Complete` outcome fails closed (budget overflow, observation
                     // invariant, or — a state-machine bug — an enabled filter seeing `Passthrough`).
@@ -1100,6 +1195,20 @@ impl FlashblocksBuilderCtx {
     }
 }
 
+/// An empty, available observation set for tests: capture ran and genuinely saw no frame.
+/// Deliberately not `Unavailable`, which would make every callstack rule fail closed.
+#[cfg(test)]
+fn test_observations() -> super::rcs_capture::CapturedObservations {
+    super::rcs_capture::CapturedObservations::new(
+        rcs_filter::callstack::SnapshotStamp {
+            protocol_version: 1,
+            content_version: 0,
+            selector_digest: B256::ZERO,
+        },
+        Vec::new(),
+    )
+}
+
 #[cfg(test)]
 mod capture_decision_tests {
     use super::*;
@@ -1117,7 +1226,11 @@ mod capture_decision_tests {
     fn complete_is_not_fail_closed() {
         let filter = test_filter();
         assert_eq!(
-            fail_closed_screen(&filter, B256::ZERO, &CaptureOutcome::Complete(vec![])),
+            fail_closed_screen(
+                &filter,
+                B256::ZERO,
+                &CaptureOutcome::Complete { logs: vec![], observations: test_observations() }
+            ),
             None
         );
     }
@@ -1129,7 +1242,11 @@ mod capture_decision_tests {
             fail_closed_screen(
                 &filter,
                 B256::ZERO,
-                &CaptureOutcome::LimitExceeded { attempted: 3, limit: 2 }
+                &CaptureOutcome::LimitExceeded {
+                    attempted: 3,
+                    limit: 2,
+                    budget: ObservationBudget::NativeTransfer,
+                }
             ),
             Some(Screen::Deny)
         );
@@ -1211,7 +1328,11 @@ mod capture_decision_tests {
             fail_closed_screen(
                 &filter,
                 B256::repeat_byte(0xCD),
-                &CaptureOutcome::LimitExceeded { attempted: 10_001, limit: 10_000 },
+                &CaptureOutcome::LimitExceeded {
+                    attempted: 10_001,
+                    limit: 10_000,
+                    budget: ObservationBudget::NativeTransfer,
+                },
             )
         });
         assert_eq!(decision, Some(Screen::Deny));
@@ -1306,7 +1427,7 @@ mod capture_decision_tests {
             fn scope_finish_capture(&mut self, _result_logs: &[Log]) -> CaptureOutcome {
                 self.finishes += 1;
                 self.active = false;
-                CaptureOutcome::Complete(Vec::new())
+                CaptureOutcome::Complete { logs: Vec::new(), observations: test_observations() }
             }
             fn scope_abort_capture(&mut self) {
                 self.aborts += 1;
@@ -1319,7 +1440,7 @@ mod capture_decision_tests {
         {
             let guard = CaptureGuard::new(&mut scope);
             let outcome = guard.finish(&[]);
-            assert!(matches!(outcome, CaptureOutcome::Complete(_)));
+            assert!(matches!(outcome, CaptureOutcome::Complete { .. }));
         }
         assert_eq!(scope.starts, 1, "start_capture runs once on construction");
         assert_eq!(scope.finishes, 1);
@@ -1510,7 +1631,9 @@ mod loop_level_fail_closed_tests {
             bridge_intercept_config: Default::default(),
             gasless_contract: None,
             gasless_block_gas_limit: None,
-            filter: Some(filter),
+            filter: Some(Arc::clone(&filter)),
+            // The test context pins the snapshot exactly as the real block payload job does.
+            rcs_rule_snapshot: Some(filter.rule_snapshot()),
         }
     }
 
@@ -2277,5 +2400,103 @@ mod bridge_intercept_tests {
         let config = BridgeInterceptConfig::default();
         let log = make_bridge_log(BRIDGE, DATA1);
         assert!(intercept_bridge_transaction_if_need(&[log], SENDER, &config).is_ok());
+    }
+}
+
+/// L2-block snapshot pinning: a rule hot reload becomes visible only at the next block's payload
+/// job, never between two transactions or two flashblocks of the block being built.
+#[cfg(test)]
+mod block_snapshot_pinning_tests {
+    use super::*;
+    use alloy_primitives::Address;
+    use rcs_filter::rules::{load_rules, RawRule};
+    use rcs_filter::{FilterConfig, FilterHandle, SystemClock};
+    use serde_json::json;
+
+    fn selector_rule(id: &str, address: Address) -> RawRule {
+        serde_json::from_value(json!({
+            "id": id,
+            "callstack": { "entry": { "address": format!("{address:#x}") } },
+            "condition": { "==": [ { "var": "entry.matched" }, true ] },
+            "action": "deny"
+        }))
+        .expect("valid rule")
+    }
+
+    fn handle_with(address: Address, content_version: u64) -> Arc<FilterHandle> {
+        let rules = load_rules(
+            rcs_filter::CALLSTACK_MIN_PROTOCOL_VERSION,
+            content_version,
+            vec![selector_rule("guard", address)],
+        );
+        assert!(rules.rejected.is_empty(), "{:?}", rules.rejected);
+        Arc::new(FilterHandle::for_test(FilterConfig::default(), rules, Arc::new(SystemClock)))
+    }
+
+    /// A context carrying the snapshot pinned for its block, exactly as the payload job builds it.
+    fn pin(filter: &Arc<FilterHandle>) -> Option<Arc<rcs_filter::rules::RuleSet>> {
+        Some(filter.rule_snapshot())
+    }
+
+    #[test]
+    fn the_capture_config_comes_from_the_pinned_snapshot_not_the_live_one() {
+        let first = Address::repeat_byte(0x11);
+        let second = Address::repeat_byte(0x22);
+        let filter = handle_with(first, 1);
+
+        // The block's payload job pins the snapshot once, up front.
+        let pinned = pin(&filter).expect("screening is enabled");
+        let pinned_stamp = pinned.stamp();
+        assert_eq!(pinned.callstack_selectors(), [first]);
+
+        // A hot reload lands mid-block. Rule installation is an immediate swap, so this is the
+        // moment that would leak new rules into the block already being built.
+        filter.install_rules(load_rules(
+            rcs_filter::CALLSTACK_MIN_PROTOCOL_VERSION,
+            2,
+            vec![selector_rule("guard", second)],
+        ));
+
+        // Every flashblock of this block builds a fresh inspector from the SAME pinned snapshot,
+        // so neither the selector set nor the stamp moves part-way through the block.
+        assert_eq!(pinned.callstack_selectors(), [first]);
+        assert_eq!(pinned.stamp(), pinned_stamp);
+
+        // The next block's payload job pins the reloaded snapshot, which is where it takes effect.
+        let next_block = pin(&filter).expect("screening is enabled");
+        assert_eq!(next_block.callstack_selectors(), [second]);
+        assert_ne!(next_block.stamp(), pinned_stamp);
+    }
+
+    #[test]
+    fn a_context_without_screening_pins_no_snapshot_and_captures_nothing() {
+        // With the master switch off there is no snapshot to pin, and the capture configuration
+        // is inert, so the observation hooks cost nothing.
+        let config = CallstackCaptureConfig::default();
+        assert!(config.is_inert());
+    }
+
+    #[test]
+    fn a_snapshot_with_no_selectors_yields_an_inert_capture_config() {
+        // Screening enabled but no active rule asking about call frames: the whole observation
+        // path stays inert rather than observing every frame "just in case".
+        let rules = load_rules(rcs_filter::CALLSTACK_MIN_PROTOCOL_VERSION, 1, vec![]);
+        assert!(!rules.has_callstack_rules());
+        let config =
+            CallstackCaptureConfig::new(rules.stamp(), rules.callstack_selectors().to_vec());
+        assert!(config.is_inert());
+    }
+
+    #[test]
+    fn a_snapshot_with_selectors_yields_an_active_capture_config_carrying_its_stamp() {
+        let address = Address::repeat_byte(0x33);
+        let filter = handle_with(address, 7);
+        let pinned = filter.rule_snapshot();
+        let config =
+            CallstackCaptureConfig::new(pinned.stamp(), pinned.callstack_selectors().to_vec());
+        assert!(!config.is_inert());
+        // The stamp travels with the selector set, so an inspector cannot be configured from one
+        // snapshot and stamped with another.
+        assert_eq!(config.stamp_for_test(), Some(pinned.stamp()));
     }
 }

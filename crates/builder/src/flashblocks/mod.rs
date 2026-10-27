@@ -272,6 +272,11 @@ fn build_rcs_filter_config(
     if args.max_event_bindings_per_tx == 0 {
         return Err(eyre::eyre!("rcs-filter --rcs-filter.max-event-bindings-per-tx must be >= 1"));
     }
+    if args.max_callstack_observations_per_tx == 0 {
+        return Err(eyre::eyre!(
+            "rcs-filter --rcs-filter.max-callstack-observations-per-tx must be >= 1"
+        ));
+    }
     if !args.enabled {
         return Ok(None);
     }
@@ -298,6 +303,7 @@ fn build_rcs_filter_config(
         terminal_entry_retention: Duration::from_secs(args.terminal_entry_retention_seconds),
         max_native_transfers_per_tx: args.max_native_transfers_per_tx,
         max_event_bindings_per_tx: args.max_event_bindings_per_tx,
+        max_callstack_observations_per_tx: args.max_callstack_observations_per_tx,
     };
     config.validate().map_err(|error| eyre::eyre!(error.to_string()))?;
     Ok(Some(config))
@@ -372,16 +378,33 @@ mod rcs_filter_config_tests {
     }
 
     #[test]
+    fn disabled_filter_with_zero_callstack_observation_budget_is_startup_error() {
+        // Validated even with the master switch off, like the other budgets: a zero budget is a
+        // startup misconfiguration whether or not screening is enabled.
+        let mut args = crate::args::BuilderArgs::default().rcs_filter;
+        args.enabled = false;
+        args.max_callstack_observations_per_tx = 0;
+        assert!(build_rcs_filter_config(&args).is_err());
+        assert!(build_rcs_filter_handle(&args).is_err());
+    }
+
+    #[test]
     fn budgets_default_to_10_000_and_map_into_config() {
         let config = build_rcs_filter_config(&enabled_args()).unwrap().unwrap();
         assert_eq!(config.max_native_transfers_per_tx, 10_000);
         assert_eq!(config.max_event_bindings_per_tx, 10_000);
+        assert_eq!(config.max_callstack_observations_per_tx, 10_000);
 
         let mut overridden = enabled_args();
         overridden.max_native_transfers_per_tx = 25;
         overridden.max_event_bindings_per_tx = 50;
+        overridden.max_callstack_observations_per_tx = 75;
         let config = build_rcs_filter_config(&overridden).unwrap().unwrap();
         assert_eq!(config.max_native_transfers_per_tx, 25);
         assert_eq!(config.max_event_bindings_per_tx, 50);
+        assert_eq!(
+            config.max_callstack_observations_per_tx, 75,
+            "the capture budget must reach the config, not silently keep its default"
+        );
     }
 }

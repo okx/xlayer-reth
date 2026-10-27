@@ -7,20 +7,42 @@
 //! interleaved in execution order with the real EVM logs. The flattened stream is handed to
 //! screening only; it never reaches a receipt, RPC log, bloom, the indexer, or consensus state.
 //!
+//! The same inspector also observes **call frames of rule-configured addresses**, exposing the
+//! runtime code hash that actually executed and, for the selected address's own first-level
+//! `DELEGATECALL`, the target address and the code hash that executed there. Only frames touching
+//! the active snapshot's selector set are observed, so observation cost scales with operator
+//! configuration rather than with transaction call depth. An empty selector set makes the whole
+//! path inert.
+//!
 //! The screening crate stays free of any EVM / frame-lifecycle dependency: the inspector, its
-//! capture-control seam, and the capture outcomes are all builder-owned types here.
+//! capture-control seam, and the capture outcomes are all builder-owned types here. The pure
+//! observation value type is owned by the screening crate so both the builder and the RPC layer
+//! can hand screening the same type.
+
+use std::collections::HashSet;
+use std::sync::Arc;
 
 use alloy_primitives::{address, keccak256, Address, Bytes, Log, LogData, B256, U256};
+use rcs_filter::callstack::{CallObservation, SnapshotStamp};
 use revm::{
     bytecode::opcode,
     context_interface::{ContextTr, CreateScheme, JournalTr},
     inspector::{JournalExt, NoOpInspector},
     interpreter::{
-        interpreter_types::Jumps, CallInputs, CallOutcome, CreateInputs, CreateOutcome,
-        Interpreter, InterpreterTypes,
+        interpreter_types::{Jumps, LegacyBytecode},
+        CallInputs, CallOutcome, CallScheme, CreateInputs, CreateOutcome, Interpreter,
+        InterpreterTypes,
     },
     Inspector,
 };
+
+/// Hard ceiling on concurrently open observed frames.
+///
+/// The EVM's own call-depth limit is 1024, so a balanced frame stack can never legitimately grow
+/// past that plus the outermost transaction frame. A stack that does is an invariant failure, not
+/// a deep transaction, and it fails closed rather than silently dropping frames — a dropped frame
+/// would turn an unobserved call into an apparent no-match.
+pub const MAX_OPEN_FRAMES: usize = 1025;
 
 /// The native-asset identifier used as the `log.address` of every virtual native transfer.
 ///
@@ -68,6 +90,13 @@ pub enum CaptureInvariantError {
     /// in the CREATE frame's `create_recipients` entry. `create_index` is the 0-based depth of
     /// open CREATE frames at the point the mismatch was detected.
     CreateAddressMismatch { create_index: usize },
+    /// The observed-frame stack exceeded [`MAX_OPEN_FRAMES`], so frame parentage — and therefore
+    /// direct-delegatecall discrimination — can no longer be established. `depth` is the open
+    /// frame count at detection.
+    FrameStackOverflow { depth: usize },
+    /// The observed-frame stack was unbalanced at the end of the capture window: a frame entry
+    /// was never matched by its exit, so the set may be missing or misattributing observations.
+    FrameStackUnbalanced { remaining: usize },
 }
 
 /// The outcome of finishing a capture window. Never an `Option`: an enabled filter can never
@@ -76,12 +105,89 @@ pub enum CaptureInvariantError {
 pub enum CaptureOutcome {
     /// Emitted only by the no-op inspector (filter disabled); the caller uses raw `result.logs()`.
     Passthrough,
-    /// A validated, flattened ordered stream of real + virtual logs; the RealLog cross-check passed.
-    Complete(Vec<Log>),
-    /// The per-transaction native-observation budget was exceeded. Fail closed.
-    LimitExceeded { attempted: usize, limit: usize },
+    /// A validated, flattened ordered stream of real + virtual logs plus the ordered call-frame
+    /// observations; the RealLog cross-check passed and both observation sets are complete.
+    ///
+    /// `observations` may legitimately be empty: that means capture ran and genuinely saw no
+    /// frame touching the selector set, which is the ordinary no-match case. It is never used to
+    /// represent "capture did not run".
+    Complete { logs: Vec<Log>, observations: CapturedObservations },
+    /// A per-transaction observation budget was exceeded. Fail closed.
+    LimitExceeded { attempted: usize, limit: usize, budget: ObservationBudget },
     /// An observation invariant failed. Fail closed.
     InvariantViolation { reason: CaptureInvariantError },
+}
+
+/// Which per-transaction observation budget overflowed. A fixed, low-cardinality enum used for
+/// bounded diagnostics, so the two capture budgets are never conflated in an operator's view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservationBudget {
+    /// Internal native-token transfer observations.
+    NativeTransfer,
+    /// Call-frame observations.
+    Callstack,
+}
+
+impl ObservationBudget {
+    /// Stable lowercase token for bounded diagnostics.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ObservationBudget::NativeTransfer => "native_transfer",
+            ObservationBudget::Callstack => "callstack",
+        }
+    }
+}
+
+/// A complete call-frame observation set together with the identity of the rule snapshot whose
+/// selector set configured its capture.
+///
+/// Screening compares the stamp against its own snapshot and fails closed on a mismatch: an
+/// observation set captured under a different selector set cannot distinguish "this frame did not
+/// happen" from "this frame was never observed".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedObservations {
+    pub stamp: SnapshotStamp,
+    pub items: Vec<CallObservation>,
+}
+
+impl CapturedObservations {
+    pub fn new(stamp: SnapshotStamp, items: Vec<CallObservation>) -> Self {
+        Self { stamp, items }
+    }
+}
+
+/// The capture selector set plus the identity of the snapshot it came from, built once per rule
+/// snapshot and handed to the inspector.
+///
+/// Carrying both together is what makes the same-snapshot requirement structural: an inspector
+/// cannot be configured with one snapshot's addresses and then stamp its output with another's.
+#[derive(Debug, Clone, Default)]
+pub struct CallstackCaptureConfig {
+    stamp: Option<SnapshotStamp>,
+    addresses: Arc<HashSet<Address>>,
+}
+
+impl CallstackCaptureConfig {
+    /// Builds a configuration from a snapshot's selector addresses and its stamp.
+    pub fn new(stamp: SnapshotStamp, addresses: impl IntoIterator<Item = Address>) -> Self {
+        Self { stamp: Some(stamp), addresses: Arc::new(addresses.into_iter().collect()) }
+    }
+
+    /// Whether any address is observed. `false` short-circuits every observation hook.
+    pub fn is_inert(&self) -> bool {
+        self.addresses.is_empty()
+    }
+
+    fn observes(&self, address: &Address) -> bool {
+        self.addresses.contains(address)
+    }
+
+    /// The stamp this configuration will attach to its observations. Test accessor: production
+    /// code never needs to read it back, because the inspector stamps its own output.
+    #[cfg(test)]
+    pub(crate) fn stamp_for_test(&self) -> Option<SnapshotStamp> {
+        self.stamp
+    }
 }
 
 /// Builder-internal capture-control seam. These methods are **not** part of revm's `Inspector`
@@ -350,12 +456,84 @@ pub struct RcsInspector {
     /// the `selfdestruct` callback's payload describes THIS opcode rather than a previous entry.
     /// Consumed with `mem::take` by the callback. Only ever written while `active`.
     selfdestruct_wrote_journal: bool,
+    /// Selector addresses plus the identity of the snapshot they came from.
+    callstack: CallstackCaptureConfig,
+    /// Open call/create frames, innermost last. Every entered frame is tracked — not just
+    /// observed ones — because direct-delegatecall discrimination needs the *parent* frame's
+    /// execution identity, and a parent is frequently an unobserved address.
+    frames: Vec<FrameRecord>,
+    /// Committed call-frame observations in execution order. Deliberately never truncated on
+    /// revert: code that executed and then reverted still executed, and its execution identity
+    /// is exactly what a risk rule needs to see.
+    observations: Vec<CallObservation>,
+    /// Cumulative count of committed call-frame observations; never rolls back.
+    callstack_observed_count: usize,
+    /// Sticky flag set once `callstack_observed_count` exceeds `callstack_limit`.
+    callstack_overflowed: bool,
+    /// The configured per-transaction call-frame observation budget.
+    callstack_limit: usize,
+    /// Sticky frame-stack invariant failure, surfaced by `finish_capture`.
+    frame_invariant: Option<CaptureInvariantError>,
+}
+
+/// One open call or create frame.
+///
+/// `target` is the frame's execution identity and `bytecode` is whose code it runs; a
+/// `DELEGATECALL` preserves the delegating context's `target` while changing `bytecode`, which is
+/// precisely what distinguishes a proxy's own direct delegatecall from one made inside the
+/// implementation's business logic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FrameRecord {
+    target: Address,
+    bytecode: Address,
+    /// `true` for a `CREATE`/`CREATE2` frame. A create frame executes init code, not the
+    /// deployed runtime code, so it neither produces an observation nor acts as the parent of a
+    /// direct-delegatecall observation: the only code hash available for it would be creation
+    /// bytecode, which must never be reported as a runtime code hash.
+    is_create: bool,
+    /// Hash of the bytecode this frame actually loaded and ran. `None` until the frame is
+    /// confirmed to execute.
+    code_hash: Option<B256>,
+    /// Observation staged at frame entry, promoted only once the frame really executes.
+    pending: Option<PendingObservation>,
+}
+
+/// An observation staged when a frame is entered but not yet confirmed to execute.
+///
+/// The `call` hook fires *before* the frame is initialized, and the frame can still fail to
+/// execute afterwards — a depth limit, a failed value transfer, a precompile, or empty code all
+/// return without ever creating an interpreter. Emitting at hook arrival would therefore report
+/// calls that never ran. Each variant carries everything known at entry; the code hash that is
+/// only knowable from the executing frame is filled in at commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingObservation {
+    /// The selected address is about to run its own code.
+    Call { address: Address },
+    /// The selected address's own code is about to delegatecall `impl_address`.
+    DirectDelegatecall { address: Address, code_hash: B256, impl_address: Address },
 }
 
 impl RcsInspector {
-    /// Creates an inactive inspector with the given native-transfer budget (`>= 1`, validated at
-    /// startup).
+    /// Creates an inactive inspector with the given native-transfer budget and no call-frame
+    /// selectors, leaving the callstack path inert.
+    ///
+    /// Test-only: production always builds the inspector from a pinned rule snapshot through
+    /// [`Self::with_callstack`], so that the selector set and the stamp it will be screened
+    /// against can never come from two different snapshots.
+    #[cfg(test)]
     pub fn new(max_native_transfers: usize) -> Self {
+        Self::with_callstack(max_native_transfers, usize::MAX, CallstackCaptureConfig::default())
+    }
+
+    /// Creates an inactive inspector with both observation budgets and a capture selector set.
+    ///
+    /// The selector set and the snapshot stamp travel together in `callstack`, so the inspector
+    /// cannot stamp its output with a snapshot other than the one that configured it.
+    pub fn with_callstack(
+        max_native_transfers: usize,
+        max_callstack_observations: usize,
+        callstack: CallstackCaptureConfig,
+    ) -> Self {
         Self {
             active: false,
             queue: Vec::new(),
@@ -367,6 +545,137 @@ impl RcsInspector {
             address_mismatch_create_index: None,
             selfdestruct_journal_mark: None,
             selfdestruct_wrote_journal: false,
+            callstack,
+            frames: Vec::new(),
+            observations: Vec::new(),
+            callstack_observed_count: 0,
+            callstack_overflowed: false,
+            callstack_limit: max_callstack_observations,
+            frame_invariant: None,
+        }
+    }
+
+    /// Enters a frame: records its execution identity and stages an observation candidate if the
+    /// selector predicate matches. Staging allocates no observation and consumes no budget.
+    ///
+    /// `scheme` is `None` for a `CREATE`/`CREATE2` frame. No-op while inactive or when no address
+    /// is observed, so the non-callstack path pays nothing beyond one branch.
+    fn enter_frame(&mut self, target: Address, bytecode: Address, scheme: Option<CallScheme>) {
+        if !self.active {
+            return;
+        }
+        let is_create = scheme.is_none();
+        let pending =
+            if self.callstack.is_inert() { None } else { self.stage(target, bytecode, scheme) };
+        if self.frames.len() >= MAX_OPEN_FRAMES {
+            // Parentage can no longer be tracked: fail closed instead of dropping the frame,
+            // which would make an unobserved call indistinguishable from an absent one.
+            self.frame_invariant.get_or_insert(CaptureInvariantError::FrameStackOverflow {
+                depth: self.frames.len(),
+            });
+            return;
+        }
+        self.frames.push(FrameRecord { target, bytecode, is_create, code_hash: None, pending });
+    }
+
+    /// Decides which observation, if any, a frame being entered should stage.
+    fn stage(
+        &self,
+        target: Address,
+        bytecode: Address,
+        scheme: Option<CallScheme>,
+    ) -> Option<PendingObservation> {
+        // A create frame runs init code; see `FrameRecord::is_create`.
+        let scheme = scheme?;
+        // The selected address running its own code.
+        if bytecode == target && self.callstack.observes(&target) {
+            return Some(PendingObservation::Call { address: target });
+        }
+        // The selected address's own code delegatecalling out. `CALLCODE` is excluded: it sets
+        // `target_address == caller`, so it is not a proxy-implementation relationship.
+        if scheme == CallScheme::DelegateCall {
+            let parent = self.frames.last()?;
+            // The parent must be running the selected address's OWN code. When the parent is
+            // running implementation code its `bytecode` differs from its `target`, which is what
+            // excludes implementation-internal business delegatecalls.
+            if !parent.is_create
+                && parent.bytecode == parent.target
+                && self.callstack.observes(&parent.target)
+            {
+                // The parent issued this DELEGATECALL, so it is executing and its executed code
+                // hash is known. Without it there is nothing truthful to report, so nothing is.
+                let code_hash = parent.code_hash?;
+                return Some(PendingObservation::DirectDelegatecall {
+                    address: parent.target,
+                    code_hash,
+                    impl_address: bytecode,
+                });
+            }
+        }
+        None
+    }
+
+    /// Confirms that the innermost frame really executes and commits its staged observation.
+    ///
+    /// Called once an interpreter has been created for the frame, which is the first moment the
+    /// frame is known to execute and the first moment the bytecode it actually loaded is
+    /// available. The hash is taken from that bytecode — not from an account-state lookup, which
+    /// under EIP-7702 names the delegation designator rather than the delegate code that runs.
+    fn confirm_frame_execution(&mut self, executed_code_hash: B256) {
+        if !self.active {
+            return;
+        }
+        let Some(frame) = self.frames.last_mut() else {
+            return;
+        };
+        frame.code_hash = Some(executed_code_hash);
+        let Some(pending) = frame.pending.take() else {
+            return;
+        };
+        let observation = match pending {
+            PendingObservation::Call { address } => {
+                CallObservation::call(address, executed_code_hash)
+            }
+            PendingObservation::DirectDelegatecall { address, code_hash, impl_address } => {
+                CallObservation::direct_delegatecall(
+                    address,
+                    code_hash,
+                    impl_address,
+                    executed_code_hash,
+                )
+            }
+        };
+        self.commit_observation(observation);
+    }
+
+    /// The single funnel where a confirmed call-frame observation is counted and appended, so
+    /// counting and overflow can never drift between the call and create paths.
+    ///
+    /// Mirrors the native-transfer budget: the count never rolls back, the `limit`-th observation
+    /// is accepted, the `(limit + 1)`-th sets a sticky overflow and is not appended, and the EVM
+    /// keeps executing normally — only new appends stop.
+    fn commit_observation(&mut self, observation: CallObservation) {
+        self.callstack_observed_count += 1;
+        if self.callstack_observed_count > self.callstack_limit {
+            self.callstack_overflowed = true;
+            return;
+        }
+        self.observations.push(observation);
+    }
+
+    /// Leaves a frame, discarding any still-staged candidate.
+    ///
+    /// A candidate that is still staged at exit never reached an interpreter, so the call never
+    /// executed and must not appear as an observation. Already-committed observations are
+    /// untouched: this is deliberately NOT the log checkpoint/truncate path, because a log
+    /// describes an effect while an observation describes execution identity.
+    fn exit_frame(&mut self) {
+        if !self.active {
+            return;
+        }
+        if self.frames.pop().is_none() {
+            self.frame_invariant
+                .get_or_insert(CaptureInvariantError::FrameStackUnbalanced { remaining: 0 });
         }
     }
 
@@ -471,8 +780,10 @@ impl RcsInspector {
     }
 }
 
-impl RcsCaptureControl for RcsInspector {
-    fn start_capture(&mut self) {
+impl RcsInspector {
+    /// Clears every piece of per-transaction capture state. Used by all three lifecycle
+    /// transitions so no state can leak from one capture window into the next.
+    fn reset_state(&mut self) {
         self.queue.clear();
         self.checkpoints.clear();
         self.create_recipients.clear();
@@ -481,6 +792,17 @@ impl RcsCaptureControl for RcsInspector {
         self.address_mismatch_create_index = None;
         self.selfdestruct_journal_mark = None;
         self.selfdestruct_wrote_journal = false;
+        self.frames.clear();
+        self.observations.clear();
+        self.callstack_observed_count = 0;
+        self.callstack_overflowed = false;
+        self.frame_invariant = None;
+    }
+}
+
+impl RcsCaptureControl for RcsInspector {
+    fn start_capture(&mut self) {
+        self.reset_state();
         self.active = true;
     }
 
@@ -501,14 +823,35 @@ impl RcsCaptureControl for RcsInspector {
         // implementation returned on the `LimitExceeded` / `InvariantViolation` paths *before*
         // clearing `queue`/`checkpoints`/`observed_count`/`overflowed`, leaking state into the next
         // capture window; cleanliness is now guaranteed immediately at finish, not only at reset.
+        // Every observed frame must have been exited by the time the window closes. A leftover
+        // entry means a frame entry was not matched by its exit, so parentage — and therefore the
+        // direct-delegatecall discrimination — cannot be trusted for this transaction.
+        if self.frame_invariant.is_none() && !self.frames.is_empty() {
+            self.frame_invariant =
+                Some(CaptureInvariantError::FrameStackUnbalanced { remaining: self.frames.len() });
+        }
         let outcome = if let Some(create_index) = self.address_mismatch_create_index {
             // D7b: a successful CREATE returned an address that differed from the pre-derived
             // expected address. Fail closed — never silently truncate with Complete.
             CaptureOutcome::InvariantViolation {
                 reason: CaptureInvariantError::CreateAddressMismatch { create_index },
             }
+        } else if let Some(reason) = self.frame_invariant {
+            CaptureOutcome::InvariantViolation { reason }
         } else if self.overflowed {
-            CaptureOutcome::LimitExceeded { attempted: self.observed_count, limit: self.limit }
+            CaptureOutcome::LimitExceeded {
+                attempted: self.observed_count,
+                limit: self.limit,
+                budget: ObservationBudget::NativeTransfer,
+            }
+        } else if self.callstack_overflowed {
+            // A truncated observation set cannot be adjudicated: a frame missing because of the
+            // budget is indistinguishable from a frame that never happened.
+            CaptureOutcome::LimitExceeded {
+                attempted: self.callstack_observed_count,
+                limit: self.callstack_limit,
+                budget: ObservationBudget::Callstack,
+            }
         } else {
             // Cross-check: the RealLog subsequence must equal `result.logs()` for count, content,
             // and order. Any mismatch fails closed. Only indices/counts are surfaced, never content.
@@ -538,41 +881,43 @@ impl RcsCaptureControl for RcsInspector {
                     },
                 },
                 None => {
-                    let stream = std::mem::take(&mut self.queue)
+                    let logs = std::mem::take(&mut self.queue)
                         .into_iter()
                         .map(QueuedLog::into_log)
                         .collect();
-                    CaptureOutcome::Complete(stream)
+                    // `stamp` is `None` only for an inspector built without a snapshot (the
+                    // native-transfer-only constructor). Such an inspector observes no frames, so
+                    // there is no snapshot identity to assert and an inert stamp is reported.
+                    let stamp = self.callstack.stamp.unwrap_or(INERT_SNAPSHOT_STAMP);
+                    let observations =
+                        CapturedObservations::new(stamp, std::mem::take(&mut self.observations));
+                    CaptureOutcome::Complete { logs, observations }
                 }
             }
         };
         // Uniform every-exit cleanup (R9 item 4): leave the inspector inactive and fully reset so
-        // nothing — queue, checkpoints, the native counter, the sticky overflow flag, or the sticky
-        // address-mismatch flag — can leak into the next `start_capture`.
-        self.queue.clear();
-        self.checkpoints.clear();
-        self.create_recipients.clear();
-        self.observed_count = 0;
-        self.overflowed = false;
-        self.address_mismatch_create_index = None;
-        self.selfdestruct_journal_mark = None;
-        self.selfdestruct_wrote_journal = false;
+        // nothing — queue, checkpoints, either observation counter, a sticky overflow flag, the
+        // sticky address-mismatch flag, the frame stack, or a frame invariant — can leak into the
+        // next `start_capture`.
+        self.reset_state();
         self.active = false;
         outcome
     }
 
     fn abort_capture(&mut self) {
-        self.queue.clear();
-        self.checkpoints.clear();
-        self.create_recipients.clear();
-        self.observed_count = 0;
-        self.overflowed = false;
-        self.address_mismatch_create_index = None;
-        self.selfdestruct_journal_mark = None;
-        self.selfdestruct_wrote_journal = false;
+        self.reset_state();
         self.active = false;
     }
 }
+
+/// The stamp reported by an inspector constructed without a rule snapshot.
+///
+/// Such an inspector observes no call frames, so its observation list is always empty and there is
+/// no snapshot identity to assert. Screening only ever compares stamps for rules that declare
+/// selectors, and no such rule can exist under a snapshot that produced no selector set, so this
+/// value can never be mistaken for a real one.
+const INERT_SNAPSHOT_STAMP: SnapshotStamp =
+    SnapshotStamp { protocol_version: 0, content_version: 0, selector_digest: B256::ZERO };
 
 /// revm `Inspector` hooks (spec §5.3/§5.5). All hooks no-op while inactive via the helper methods,
 /// so the gasless pre-check and any non-real-user simulation never capture. Every CALL/CREATE frame
@@ -587,10 +932,22 @@ where
         self.record_real_log(log);
     }
 
+    fn initialize_interp(&mut self, interp: &mut Interpreter<INTR>, _context: &mut CTX) {
+        // The first point at which this frame is known to execute: an interpreter exists for it.
+        // The hash is of the bytecode the EVM actually loaded for the frame, so an EIP-7702
+        // delegated call reports the delegate code that really ran rather than the designator
+        // stored on the account.
+        let executed_code_hash = keccak256(interp.bytecode.bytecode_slice());
+        self.confirm_frame_execution(executed_code_hash);
+    }
+
     fn call(&mut self, _context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
         // Every CALL-type frame (incl. zero-value / DELEGATECALL / STATICCALL / CALLCODE) gets a
         // checkpoint so real logs it captured roll back if it reverts.
         self.push_checkpoint();
+        // Frame entry stages an observation candidate; nothing is emitted until the frame is
+        // confirmed to execute in `initialize_interp`.
+        self.enter_frame(inputs.target_address, inputs.bytecode_address, Some(inputs.scheme));
         // `transfer_value()` is `Some` only for a real `CallValue::Transfer`; DELEGATECALL and
         // STATICCALL carry an *apparent* value (`None`) and never generate an event. CALLCODE does
         // report a transfer value, but its caller and target are the same account, so it is filtered
@@ -605,6 +962,9 @@ where
 
     fn call_end(&mut self, _context: &mut CTX, _inputs: &CallInputs, outcome: &mut CallOutcome) {
         self.pop_checkpoint(!outcome.result.is_ok());
+        // Discards a candidate that never reached an interpreter; a frame that executed and then
+        // reverted keeps its already-committed observation.
+        self.exit_frame();
     }
 
     fn create(&mut self, context: &mut CTX, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
@@ -645,6 +1005,10 @@ where
             }
             _ => (inputs.created_address(0), false),
         };
+        // A create frame is tracked for frame balance and parentage only: it runs init code, so it
+        // produces no observation and never acts as a direct-delegatecall parent (see
+        // `FrameRecord::is_create`).
+        self.enter_frame(created_address, created_address, None);
         // Test-only: when armed, push a WRONG expected address so `create_end` detects `e != a`
         // on a real successful CREATE and exercises the D7b fail-closed branch. One-shot: the flag
         // is consumed here so only the armed frame is affected. No effect in production builds.
@@ -679,6 +1043,8 @@ where
         if !self.active {
             return;
         }
+        // Balances the `create`-hook entry and discards any still-staged candidate.
+        self.exit_frame();
         let expected = self.create_recipients.pop();
         if !outcome.result.is_ok() {
             // (a) CREATE reverted — revoke the checkpoint
@@ -853,7 +1219,7 @@ mod tests {
         inspector.start_capture();
         assert_eq!(inspector.observed_count, 0);
         assert!(
-            matches!(inspector.finish_capture(&[]), CaptureOutcome::Complete(v) if v.is_empty())
+            matches!(inspector.finish_capture(&[]), CaptureOutcome::Complete { logs: v, .. } if v.is_empty())
         );
     }
 
@@ -937,7 +1303,11 @@ mod tests {
         );
         assert!(matches!(
             inspector.finish_capture(&[]),
-            CaptureOutcome::LimitExceeded { attempted: 3, limit: 2 }
+            CaptureOutcome::LimitExceeded {
+                attempted: 3,
+                limit: 2,
+                budget: ObservationBudget::NativeTransfer,
+            }
         ));
     }
 
@@ -958,7 +1328,7 @@ mod tests {
             NativeTransferKind::Call,
         );
         match inspector.finish_capture(&[]) {
-            CaptureOutcome::Complete(logs) => assert_eq!(logs.len(), 2),
+            CaptureOutcome::Complete { logs, .. } => assert_eq!(logs.len(), 2),
             other => panic!("expected Complete, got {other:?}"),
         }
     }
@@ -976,7 +1346,7 @@ mod tests {
         );
         assert_eq!(inspector.observed_count, 0);
         assert!(
-            matches!(inspector.finish_capture(&[]), CaptureOutcome::Complete(v) if v.is_empty())
+            matches!(inspector.finish_capture(&[]), CaptureOutcome::Complete { logs: v, .. } if v.is_empty())
         );
     }
 
@@ -1014,7 +1384,7 @@ mod tests {
         inspector.record_real_log(real_log(2));
         match inspector.finish_capture(&[real_log(1), real_log(2)]) {
             // real subsequence [1,2] == result.logs() [1,2]; virtual native log interleaves.
-            CaptureOutcome::Complete(stream) => assert_eq!(stream.len(), 3),
+            CaptureOutcome::Complete { logs: stream, .. } => assert_eq!(stream.len(), 3),
             other => panic!("expected Complete, got {other:?}"),
         }
     }
@@ -1086,7 +1456,11 @@ mod tests {
         inspector.selfdestruct_wrote_journal = true;
         assert!(matches!(
             inspector.finish_capture(&[]),
-            CaptureOutcome::LimitExceeded { attempted: 2, limit: 1 }
+            CaptureOutcome::LimitExceeded {
+                attempted: 2,
+                limit: 1,
+                budget: ObservationBudget::NativeTransfer,
+            }
         ));
         assert_capture_state_is_clean(&inspector);
     }
@@ -1126,7 +1500,7 @@ mod tests {
         inspector.selfdestruct_wrote_journal = true;
         assert_eq!(inspector.selfdestruct_journal_mark, Some(7));
         assert!(inspector.selfdestruct_wrote_journal);
-        assert!(matches!(inspector.finish_capture(&[]), CaptureOutcome::Complete(_)));
+        assert!(matches!(inspector.finish_capture(&[]), CaptureOutcome::Complete { .. }));
         assert_capture_state_is_clean(&inspector);
 
         // LimitExceeded.
@@ -1140,7 +1514,11 @@ mod tests {
         assert!(inspector.selfdestruct_wrote_journal);
         assert!(matches!(
             inspector.finish_capture(&[]),
-            CaptureOutcome::LimitExceeded { attempted: 2, limit: 1 }
+            CaptureOutcome::LimitExceeded {
+                attempted: 2,
+                limit: 1,
+                budget: ObservationBudget::NativeTransfer,
+            }
         ));
         assert_capture_state_is_clean(&inspector);
 
@@ -1188,7 +1566,7 @@ mod tests {
             NativeTransferKind::Call,
         );
         match inspector.finish_capture(&[]) {
-            CaptureOutcome::Complete(logs) => {
+            CaptureOutcome::Complete { logs, .. } => {
                 assert_eq!(
                     logs.len(),
                     1,
@@ -1213,7 +1591,7 @@ mod tests {
         ok.start_capture();
         observe_n(&mut ok, NativeTransferKind::Call, 10_000);
         match ok.finish_capture(&[]) {
-            CaptureOutcome::Complete(logs) => assert_eq!(logs.len(), 10_000),
+            CaptureOutcome::Complete { logs, .. } => assert_eq!(logs.len(), 10_000),
             other => panic!("expected Complete at limit, got {other:?}"),
         }
 
@@ -1222,7 +1600,11 @@ mod tests {
         observe_n(&mut over, NativeTransferKind::Call, 10_001);
         assert!(matches!(
             over.finish_capture(&[]),
-            CaptureOutcome::LimitExceeded { attempted: 10_001, limit: 10_000 }
+            CaptureOutcome::LimitExceeded {
+                attempted: 10_001,
+                limit: 10_000,
+                budget: ObservationBudget::NativeTransfer,
+            }
         ));
     }
 
@@ -1245,7 +1627,11 @@ mod tests {
         );
         assert!(matches!(
             inspector.finish_capture(&[]),
-            CaptureOutcome::LimitExceeded { attempted: 2, limit: 1 }
+            CaptureOutcome::LimitExceeded {
+                attempted: 2,
+                limit: 1,
+                budget: ObservationBudget::NativeTransfer,
+            }
         ));
     }
 
@@ -1284,7 +1670,7 @@ mod tests {
         );
         assert_eq!(inspector.observed_count, 0);
         assert!(
-            matches!(inspector.finish_capture(&[]), CaptureOutcome::Complete(v) if v.is_empty())
+            matches!(inspector.finish_capture(&[]), CaptureOutcome::Complete { logs: v, .. } if v.is_empty())
         );
     }
 
@@ -1312,7 +1698,7 @@ mod tests {
         i.record_call_observation(Some(U256::from(5u64)), addr(1), addr(2));
         assert_eq!(i.observed_count, 1);
         match i.finish_capture(&[]) {
-            CaptureOutcome::Complete(logs) => {
+            CaptureOutcome::Complete { logs, .. } => {
                 assert_eq!(logs.len(), 1);
                 assert_eq!(logs[0].address, NATIVE_ASSET_ADDRESS);
                 assert_eq!(logs[0].topics()[1], addr(1).into_word());
@@ -1352,7 +1738,7 @@ mod tests {
         let created = addr(9);
         i.record_create_observation(U256::from(7u64), addr(1), created);
         match i.finish_capture(&[]) {
-            CaptureOutcome::Complete(logs) => {
+            CaptureOutcome::Complete { logs, .. } => {
                 assert_eq!(logs.len(), 1);
                 assert_eq!(logs[0].topics()[2], created.into_word()); // recipient = created address
             }
@@ -1377,7 +1763,7 @@ mod tests {
         i.observe_native_transfer(addr(0xA), addr(0xB), U256::from(1u64), NativeTransferKind::Call);
         i.observe_native_transfer(addr(0xB), addr(0xA), U256::from(1u64), NativeTransferKind::Call);
         match i.finish_capture(&[]) {
-            CaptureOutcome::Complete(logs) => {
+            CaptureOutcome::Complete { logs, .. } => {
                 assert_eq!(logs.len(), 2, "net-zero pair must not be offset/deduped");
                 // Execution order preserved: first A→B, then B→A.
                 assert_eq!(logs[0].topics()[1], addr(0xA).into_word());
@@ -1491,6 +1877,9 @@ pub(crate) mod test_fixtures {
 /// replace this gate.
 #[cfg(test)]
 mod gating_integration_tests {
+    use super::super::rcs_capture::ObservationBudget;
+    use rcs_filter::callstack::Observations;
+
     use super::*;
     use alloy_consensus::{SignableTransaction, TxEip7702, TxLegacy};
     use alloy_eips::eip7702::Authorization;
@@ -1649,7 +2038,7 @@ mod gating_integration_tests {
         let (outcome, success) = run_capturing_tx(db, contract, 16);
         assert!(success, "top-level tx should succeed");
         match outcome {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert_eq!(stream.len(), 1, "exactly one internal native transfer expected");
                 assert_eq!(stream[0].address, NATIVE_ASSET_ADDRESS);
                 assert_eq!(stream[0].topics()[1], contract.into_word());
@@ -1681,7 +2070,7 @@ mod gating_integration_tests {
         let (outcome, success) = run_capturing_tx(db, factory, 16);
         assert!(success, "top-level tx should succeed");
         match outcome {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert_eq!(stream.len(), 1, "one CREATE endowment transfer expected");
                 assert_eq!(stream[0].address, NATIVE_ASSET_ADDRESS);
                 assert_eq!(stream[0].topics()[1], factory.into_word());
@@ -1718,7 +2107,7 @@ mod gating_integration_tests {
         let (outcome, success) = run_capturing_tx(db, victim, 16);
         assert!(success, "top-level tx should succeed");
         match outcome {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert_eq!(stream.len(), 1, "one SELFDESTRUCT transfer expected");
                 assert_eq!(stream[0].address, NATIVE_ASSET_ADDRESS);
                 assert_eq!(stream[0].topics()[1], victim.into_word());
@@ -1785,7 +2174,7 @@ mod gating_integration_tests {
         let (outcome, success) = run_capturing_tx(db, entry, 16);
         assert!(success, "top-level tx should succeed");
         match outcome {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert_eq!(
                     stream.len(),
                     1,
@@ -1813,7 +2202,7 @@ mod gating_integration_tests {
         let (outcome, success) = run_capturing_tx(db, entry, 16);
         assert!(success, "top-level tx should succeed");
         match outcome {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert_eq!(stream.len(), 1);
                 assert_eq!(stream[0].topics()[1], entry.into_word());
                 assert_eq!(stream[0].topics()[2], victim.into_word());
@@ -1837,7 +2226,7 @@ mod gating_integration_tests {
         let (outcome, success) = run_capturing_tx(db, entry, 1);
         assert!(success, "top-level tx should succeed");
         match outcome {
-            CaptureOutcome::Complete(stream) => assert_eq!(stream.len(), 1),
+            CaptureOutcome::Complete { logs: stream, .. } => assert_eq!(stream.len(), 1),
             other => panic!("expected Complete (budget 1 is not exceeded), got {other:?}"),
         }
     }
@@ -1856,7 +2245,7 @@ mod gating_integration_tests {
         let (outcome, success) = run_capturing_tx(db, entry, 1);
         assert!(success, "top-level tx should succeed");
         match outcome {
-            CaptureOutcome::Complete(stream) => assert_eq!(stream.len(), 1),
+            CaptureOutcome::Complete { logs: stream, .. } => assert_eq!(stream.len(), 1),
             other => panic!("expected Complete at budget 1, got {other:?}"),
         }
     }
@@ -1874,7 +2263,7 @@ mod gating_integration_tests {
         let (outcome, success) = run_capturing_tx(db, victim, 16);
         assert!(success, "top-level tx should succeed");
         match outcome {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert_eq!(stream.len(), 1, "genuine SELFDESTRUCT transfer must still be captured");
                 assert_eq!(stream[0].topics()[1], victim.into_word());
                 assert_eq!(stream[0].topics()[2], beneficiary.into_word());
@@ -1897,7 +2286,7 @@ mod gating_integration_tests {
         let (outcome, success) = run_capturing_tx(db, entry, 16);
         assert!(success, "top-level tx should succeed");
         match outcome {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert_eq!(stream.len(), 2, "two identical transfers must both be observed");
                 assert_eq!(stream[0].topics(), stream[1].topics());
                 assert_eq!(stream[0].data.data, stream[1].data.data);
@@ -1923,7 +2312,7 @@ mod gating_integration_tests {
         let (outcome, success) = run_capturing_tx(db, entry, 16);
         assert!(success, "top-level tx should succeed");
         match outcome {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert_eq!(
                     stream.len(),
                     2,
@@ -1953,7 +2342,7 @@ mod gating_integration_tests {
         let (outcome, success) = run_capturing_tx(db, entry, 16);
         assert!(success, "top-level tx should succeed");
         match outcome {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert_eq!(
                     stream.len(),
                     1,
@@ -2017,7 +2406,7 @@ mod gating_integration_tests {
         let (outcome, success) = run_capturing_tx(db, entry, 16);
         assert!(success, "top-level tx should succeed");
         let stream = match outcome {
-            CaptureOutcome::Complete(stream) => stream,
+            CaptureOutcome::Complete { logs: stream, .. } => stream,
             other => panic!("expected Complete, got {other:?}"),
         };
 
@@ -2030,6 +2419,7 @@ mod gating_integration_tests {
             value: U256::ZERO,
             block_height: 0,
             logs: &stream,
+            observations: Observations::NOT_CAPTURED,
         };
         match rcs_filter::matching::evaluate(&rules, &input) {
             rcs_filter::matching::MatchOutcome::Audit { actions, .. } => {
@@ -2054,7 +2444,7 @@ mod gating_integration_tests {
         let (outcome, success) = run_capturing_tx(db, entry, 16);
         assert!(success, "top-level tx should succeed");
         let stream = match outcome {
-            CaptureOutcome::Complete(stream) => stream,
+            CaptureOutcome::Complete { logs: stream, .. } => stream,
             other => panic!("expected Complete, got {other:?}"),
         };
 
@@ -2067,6 +2457,7 @@ mod gating_integration_tests {
             value: U256::ZERO,
             block_height: 0,
             logs: &stream,
+            observations: Observations::NOT_CAPTURED,
         };
         match rcs_filter::matching::evaluate(&rules, &input) {
             rcs_filter::matching::MatchOutcome::Audit { actions, .. } => {
@@ -2098,7 +2489,7 @@ mod gating_integration_tests {
             let (outcome, success) = run_capturing_tx(db, entry, 16);
             assert!(success, "top-level tx should succeed");
             match outcome {
-                CaptureOutcome::Complete(stream) => stream,
+                CaptureOutcome::Complete { logs: stream, .. } => stream,
                 other => panic!("expected Complete, got {other:?}"),
             }
         };
@@ -2227,7 +2618,7 @@ mod gating_integration_tests {
         assert!(result2.result.is_success());
         let outcome = evm.components_mut().1.finish_capture(result2.result.logs());
         match outcome {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert_eq!(stream.len(), 1, "exactly one virtual log for the value-bearing CALL");
                 assert_eq!(stream[0].topics()[1], entry.into_word());
                 assert_eq!(stream[0].topics()[2], victim.into_word());
@@ -2355,7 +2746,7 @@ mod gating_integration_tests {
 
         let outcome = inspector.finish_capture(result.result.logs());
         match &outcome {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert_eq!(stream.len(), 1, "only the separate successful transfer survives");
                 assert_eq!(stream[0].topics()[1], entry.into_word());
                 assert_eq!(stream[0].topics()[2], third.into_word());
@@ -2375,7 +2766,7 @@ mod gating_integration_tests {
         let result2 = evm.transact(call_tx_from(second_caller, entry2)).expect("tx executes");
         assert!(result2.result.is_success());
         match evm.components_mut().1.finish_capture(result2.result.logs()) {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert_eq!(stream.len(), 1, "the next window's ordinary transfer is observed once");
                 assert_eq!(stream[0].topics()[1], entry2.into_word());
                 assert_eq!(stream[0].topics()[2], dst2.into_word());
@@ -2427,7 +2818,7 @@ mod gating_integration_tests {
         println!("T14b GREEN observation: {green:?}");
 
         match evm.components_mut().1.finish_capture(result3.result.logs()) {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 // Unlike RED (where the victim frame's OutOfGas reverts its own incoming
                 // transfer), GREEN's victim CALL now succeeds, so its value-1 transfer survives
                 // alongside the entry's separate transfer to `third_green` and the SELFDESTRUCT
@@ -2491,7 +2882,7 @@ mod gating_integration_tests {
         let (outcome, success) = run_capturing_tx(db, factory, 16);
         assert!(success, "top-level tx should succeed");
         match outcome {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert_eq!(
                     stream.len(),
                     1,
@@ -2539,7 +2930,7 @@ mod gating_integration_tests {
         let (outcome, success) = run_capturing_tx(db, parent, 16);
         assert!(success, "parent tx ignores the child revert and succeeds");
         match outcome {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert!(
                     stream.is_empty(),
                     "reverted child frame's real log must be rolled back, got {stream:?}"
@@ -2575,7 +2966,7 @@ mod gating_integration_tests {
         let (outcome, success) = run_capturing_tx(db, contract, 16);
         assert!(success, "top-level tx should succeed");
         match outcome {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert_eq!(
                     stream.len(),
                     2,
@@ -2672,7 +3063,7 @@ mod gating_integration_tests {
         let r2 = evm.transact(call_tx_from(sender_b, c2)).expect("tx2 executes");
         let o2 = evm.components_mut().1.finish_capture(r2.result.logs());
         match o2 {
-            CaptureOutcome::Complete(s) => {
+            CaptureOutcome::Complete { logs: s, .. } => {
                 assert_eq!(
                     s.len(),
                     1,
@@ -2709,7 +3100,7 @@ mod gating_integration_tests {
         let (outcome, success) = run_capturing_tx(db, factory, 16);
         assert!(success, "top-level tx should succeed");
         match outcome {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert_eq!(stream.len(), 1, "one CREATE2 endowment transfer expected");
                 assert_eq!(stream[0].address, NATIVE_ASSET_ADDRESS);
                 assert_eq!(stream[0].topics()[1], factory.into_word());
@@ -2759,7 +3150,7 @@ mod gating_integration_tests {
         let (outcome, success) = run_capturing_tx(db, root, 16);
         assert!(success, "the top-level tx ignores the parent frame's revert and succeeds");
         match outcome {
-            CaptureOutcome::Complete(stream) => assert!(
+            CaptureOutcome::Complete { logs: stream, .. } => assert!(
                 stream.is_empty(),
                 "a parent-frame revert must truncate the child transfer AND its real log, got {stream:?}"
             ),
@@ -2825,7 +3216,7 @@ mod gating_integration_tests {
             let result = evm.transact(call_tx(target)).expect("warming tx executes");
             let outcome = evm.components_mut().1.finish_capture(result.result.logs());
             assert!(
-                matches!(outcome, CaptureOutcome::Complete(ref s) if s.is_empty()),
+                matches!(outcome, CaptureOutcome::Complete { logs: ref s, .. } if s.is_empty()),
                 "capture must run alongside warming (no native transfer from an SLOAD), got {outcome:?}"
             );
             evm.take_last_post_exec_tx_result().refund_total
@@ -2892,7 +3283,7 @@ mod gating_integration_tests {
 
         let (outcome, _) = run_capturing_create_tx(db, deployer, U256::ZERO, 10);
         assert!(
-            matches!(outcome, CaptureOutcome::Complete(ref s) if s.is_empty()),
+            matches!(outcome, CaptureOutcome::Complete { logs: ref s, .. } if s.is_empty()),
             "inactive inspector must produce an empty Complete on a CREATE tx"
         );
     }
@@ -2981,7 +3372,7 @@ mod gating_integration_tests {
         let (outcome, success) = run_capturing_tx(db, delegator, 10);
         assert!(success);
         match outcome {
-            CaptureOutcome::Complete(stream) => assert!(
+            CaptureOutcome::Complete { logs: stream, .. } => assert!(
                 stream.is_empty(),
                 "a DELEGATECALL with no value must not produce a native Transfer"
             ),
@@ -3014,7 +3405,7 @@ mod gating_integration_tests {
         let (outcome, success) = run_capturing_tx(db, delegator, 16);
         assert!(success, "top-level tx must succeed");
         match outcome {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert_eq!(stream.len(), 2, "expected two transfers: CALL(1) + CREATE(1)");
                 for log in &stream {
                     assert_eq!(log.address, NATIVE_ASSET_ADDRESS);
@@ -3082,7 +3473,7 @@ mod gating_integration_tests {
         let result = evm.transact(op_tx).expect("tx executes");
         let outcome = evm.components_mut().1.finish_capture(result.result.logs());
         match outcome {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert_eq!(
                     stream.len(),
                     2,
@@ -3124,7 +3515,7 @@ mod gating_integration_tests {
         let (outcome, success) = run_capturing_tx(db, root, 16);
         assert!(success, "2-hop DELEGATECALL chain tx must succeed");
         match outcome {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert_eq!(stream.len(), 2, "expected two transfers through 2-hop chain");
                 for log in &stream {
                     assert_eq!(
@@ -3156,7 +3547,7 @@ mod gating_integration_tests {
         let (outcome, success) = run_capturing_tx(db, factory, 16);
         assert!(success, "top-level CALL to factory must succeed even if inner CREATE2 fails");
         match outcome {
-            CaptureOutcome::Complete(stream) => assert!(
+            CaptureOutcome::Complete { logs: stream, .. } => assert!(
                 stream.is_empty(),
                 "EIP-684 collision must revoke the CREATE2 endowment; stream must be empty"
             ),
@@ -3196,7 +3587,7 @@ mod gating_integration_tests {
         );
         let outcome = evm.components_mut().1.finish_capture(result.result.logs());
         match outcome {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert!(stream.is_empty(), "revoked endowment must not appear in the final stream")
             }
             other => panic!("expected Complete(empty), got {other:?}"),
@@ -3235,7 +3626,14 @@ mod gating_integration_tests {
         let (outcome, success) = run_capturing_tx(db, factory, 1);
         assert!(success, "top-level CALL to factory must succeed even on budget overflow");
         assert!(
-            matches!(outcome, CaptureOutcome::LimitExceeded { attempted: 2, limit: 1 }),
+            matches!(
+                outcome,
+                CaptureOutcome::LimitExceeded {
+                    attempted: 2,
+                    limit: 1,
+                    budget: ObservationBudget::NativeTransfer,
+                }
+            ),
             "one CALL + one revoked CREATE2 must exceed budget=1; got {outcome:?}"
         );
     }
@@ -3252,7 +3650,7 @@ mod gating_integration_tests {
 
         let (outcome, _) = run_capturing_create_tx(db, deployer, U256::from(5u64), 10);
         match outcome {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert_eq!(stream.len(), 1, "one Transfer expected for top-level CREATE endowment");
                 assert_eq!(stream[0].address, NATIVE_ASSET_ADDRESS);
                 assert_eq!(
@@ -3583,7 +3981,7 @@ mod gating_integration_tests {
         let (outcome, success) = run_capturing_tx(db, factory, 16);
         assert!(success, "internal-CREATE tx must succeed");
         let stream = match outcome {
-            CaptureOutcome::Complete(s) => s,
+            CaptureOutcome::Complete { logs: s, .. } => s,
             other => panic!("expected Complete, got {other:?}"),
         };
         assert!(!stream.is_empty(), "CREATE endowment must produce a native transfer");
@@ -3597,6 +3995,7 @@ mod gating_integration_tests {
             value: U256::ZERO,
             block_height: 0,
             logs: &stream,
+            observations: Observations::NOT_CAPTURED,
         };
         assert_eq!(handle.screen_tx(&input), Screen::Deny);
     }
@@ -3613,7 +4012,7 @@ mod gating_integration_tests {
             run_capturing_call_tx_with_value(db, caller(), target, U256::from(1u64), 16);
         assert!(success, "top-level value CALL must succeed");
         let stream = match outcome {
-            CaptureOutcome::Complete(s) => s,
+            CaptureOutcome::Complete { logs: s, .. } => s,
             other => panic!("expected Complete, got {other:?}"),
         };
         assert_eq!(stream.len(), 1, "exactly one top-level native transfer expected");
@@ -3628,6 +4027,7 @@ mod gating_integration_tests {
             value: U256::from(1u64),
             block_height: 0,
             logs: &stream,
+            observations: Observations::NOT_CAPTURED,
         };
         assert_eq!(handle.screen_tx(&input), Screen::Deny);
     }
@@ -3647,7 +4047,7 @@ mod gating_integration_tests {
             run_capturing_call_tx_with_value(db, caller(), contract, U256::from(1u64), 16);
         assert!(success, "tx must succeed");
         let stream = match outcome {
-            CaptureOutcome::Complete(s) => s,
+            CaptureOutcome::Complete { logs: s, .. } => s,
             other => panic!("expected Complete, got {other:?}"),
         };
         assert_eq!(stream.len(), 2, "root-frame + internal-frame native transfers expected");
@@ -3661,6 +4061,7 @@ mod gating_integration_tests {
             value: U256::from(1u64),
             block_height: 0,
             logs: &stream,
+            observations: Observations::NOT_CAPTURED,
         };
         assert_eq!(handle.screen_tx(&input), Screen::Deny);
     }
@@ -3680,7 +4081,7 @@ mod gating_integration_tests {
         db1.insert_account_info(contract, account(1_000, Some(call_value_1_twice(a, b))));
         let (outcome1, _) = run_capturing_tx(db1, contract, 2);
         assert!(
-            matches!(&outcome1, CaptureOutcome::Complete(s) if s.len() == 2),
+            matches!(&outcome1, CaptureOutcome::Complete { logs: s, .. } if s.len() == 2),
             "budget=2 with 2 transfers must produce Complete(2), got {outcome1:?}"
         );
 
@@ -3690,7 +4091,14 @@ mod gating_integration_tests {
         db2.insert_account_info(contract, account(1_000, Some(call_value_1_twice(a, b))));
         let (outcome2, _) = run_capturing_tx(db2, contract, 1);
         assert!(
-            matches!(outcome2, CaptureOutcome::LimitExceeded { attempted: 2, limit: 1 }),
+            matches!(
+                outcome2,
+                CaptureOutcome::LimitExceeded {
+                    attempted: 2,
+                    limit: 1,
+                    budget: ObservationBudget::NativeTransfer,
+                }
+            ),
             "budget=1 with 2 transfers must produce LimitExceeded{{2,1}}, got {outcome2:?}"
         );
     }
@@ -3708,7 +4116,7 @@ mod gating_integration_tests {
         let (outcome, success) = run_capturing_tx(db, contract, 16);
         assert!(success);
         let stream = match outcome {
-            CaptureOutcome::Complete(s) => s,
+            CaptureOutcome::Complete { logs: s, .. } => s,
             other => panic!("expected Complete, got {other:?}"),
         };
         assert_eq!(stream.len(), 1, "one native transfer expected");
@@ -3724,6 +4132,7 @@ mod gating_integration_tests {
             value: U256::ZERO,
             block_height: 0,
             logs: &stream,
+            observations: Observations::NOT_CAPTURED,
         };
         assert_eq!(handle.screen_tx(&input), Screen::AuditPending);
 
@@ -3739,6 +4148,7 @@ mod gating_integration_tests {
             value: U256::ZERO,
             block_height: 0,
             logs: &[],
+            observations: Observations::NOT_CAPTURED,
         };
         assert_eq!(
             handle.screen_tx(&empty_input),
@@ -3762,7 +4172,7 @@ mod gating_integration_tests {
         let (outcome, success) = run_capturing_tx(db, contract, 16);
         assert!(success);
         let stream = match outcome {
-            CaptureOutcome::Complete(s) => s,
+            CaptureOutcome::Complete { logs: s, .. } => s,
             other => panic!("expected Complete, got {other:?}"),
         };
         assert_eq!(stream.len(), 2, "one native transfer + one real log expected");
@@ -3787,6 +4197,7 @@ mod gating_integration_tests {
             value: U256::from(1u64),
             block_height: 0,
             logs: &stream,
+            observations: Observations::NOT_CAPTURED,
         };
         assert_eq!(firing.screen_tx(&firing_input), Screen::Deny);
 
@@ -3843,7 +4254,7 @@ mod gating_integration_tests {
             16,
         );
         let stream_a = match outcome_a {
-            CaptureOutcome::Complete(s) => s,
+            CaptureOutcome::Complete { logs: s, .. } => s,
             other => panic!("expected Complete for stream-A, got {other:?}"),
         };
         assert_eq!(stream_a.len(), 1, "stream-A must carry exactly one native transfer");
@@ -3854,7 +4265,7 @@ mod gating_integration_tests {
         db_b.insert_account_info(contract, account(1_000, Some(call_value_1_twice(a, b))));
         let (outcome_b, _) = run_capturing_tx(db_b, contract, 16);
         let stream_b = match outcome_b {
-            CaptureOutcome::Complete(s) => s,
+            CaptureOutcome::Complete { logs: s, .. } => s,
             other => panic!("expected Complete for stream-B, got {other:?}"),
         };
         assert_eq!(stream_b.len(), 2, "stream-B must carry exactly two native transfers");
@@ -3867,6 +4278,7 @@ mod gating_integration_tests {
             value: U256::ZERO,
             block_height: 0,
             logs: &stream_a,
+            observations: Observations::NOT_CAPTURED,
         };
         let input_b = ScreenInput {
             tx_hash: B256::from([0x78; 32]),
@@ -3876,6 +4288,7 @@ mod gating_integration_tests {
             value: U256::ZERO,
             block_height: 0,
             logs: &stream_b,
+            observations: Observations::NOT_CAPTURED,
         };
 
         // Within budget: 1 binding, and the rule's condition is false → Allow. This is the
@@ -3943,7 +4356,7 @@ mod gating_integration_tests {
             run_capturing_call_tx_with_value(db, caller(), target, U256::from(1u64), 16);
         assert!(success, "top-level value CALL must succeed");
         let stream = match outcome {
-            CaptureOutcome::Complete(s) => s,
+            CaptureOutcome::Complete { logs: s, .. } => s,
             other => panic!("expected Complete, got {other:?}"),
         };
         assert_eq!(stream.len(), 1, "exactly one native transfer expected");
@@ -3969,6 +4382,7 @@ mod gating_integration_tests {
             value: U256::ZERO,
             block_height: 0,
             logs: &stream,
+            observations: Observations::NOT_CAPTURED,
         };
         assert_eq!(
             handle.screen_tx(&merged_input),
@@ -4033,6 +4447,7 @@ mod gating_integration_tests {
             value: U256::ZERO,
             block_height: 0,
             logs: &[],
+            observations: Observations::NOT_CAPTURED,
         };
         assert_eq!(
             null_handle.screen_tx(&empty_input),
@@ -4062,6 +4477,7 @@ mod gating_integration_tests {
             value: U256::ZERO,
             block_height: 0,
             logs: &stream,
+            observations: Observations::NOT_CAPTURED,
         };
         assert_eq!(
             null_handle.screen_tx(&backed_input),
@@ -4129,7 +4545,7 @@ mod gating_integration_tests {
         let outcome = evm.components_mut().1.finish_capture(result.result.logs());
 
         match outcome {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert_eq!(
                     stream.len(),
                     1,
@@ -4191,7 +4607,7 @@ mod gating_integration_tests {
         let outcome = evm.components_mut().1.finish_capture(result.result.logs());
 
         match outcome {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert_eq!(
                     stream.len(),
                     1,
@@ -4249,7 +4665,7 @@ mod gating_integration_tests {
         let outcome = evm.components_mut().1.finish_capture(result.result.logs());
 
         match outcome {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert_eq!(stream.len(), 1, "only root Transfer survives; child dropped");
                 assert_eq!(stream[0].topics()[1], caller().into_word(), "from = caller");
                 assert_eq!(stream[0].topics()[2], contract.into_word(), "to = contract");
@@ -4297,7 +4713,7 @@ mod gating_integration_tests {
         let outcome = evm.components_mut().1.finish_capture(result.result.logs());
 
         match outcome {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert!(stream.is_empty(), "root revert must drop all transfers");
             }
             other => panic!("expected Complete(empty), got {other:?}"),
@@ -4318,7 +4734,7 @@ mod gating_integration_tests {
         let (outcome, success) = run_capturing_tx(db, factory, 16);
         assert!(success, "top-level zero-value tx should succeed even if inner CREATE fails");
         match outcome {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert!(
                     stream.is_empty(),
                     "failed CREATE with zero-value top-level must leave an empty stream"
@@ -4392,7 +4808,7 @@ mod gating_integration_tests {
         let outcome2 = evm.components_mut().1.finish_capture(result2.result.logs());
 
         match outcome2 {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert!(stream.is_empty(), "second tx (zero value) must produce an empty stream");
             }
             other => panic!("expected Complete(empty) for second tx, got {other:?}"),
@@ -4436,7 +4852,7 @@ mod gating_integration_tests {
             "the revoked CREATE observation must stay counted (sticky observed_count)"
         );
         match outcome {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert!(
                     stream.is_empty(),
                     "nonce-overflow CREATE endowment must be revoked; stream must be empty"
@@ -4479,7 +4895,7 @@ mod gating_integration_tests {
             "the revoked CREATE2 observation must stay counted (sticky observed_count)"
         );
         match outcome {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert!(
                     stream.is_empty(),
                     "nonce-overflow CREATE2 endowment must be revoked; stream must be empty"
@@ -4605,7 +5021,7 @@ mod gating_integration_tests {
             "a transaction with no CREATE at any depth must never invoke the create hook"
         );
         assert!(
-            matches!(outcome, CaptureOutcome::Complete(ref s) if s.len() == 1),
+            matches!(outcome, CaptureOutcome::Complete { logs: ref s, .. } if s.len() == 1),
             "the internal CALL transfer really ran: {outcome:?}"
         );
     }
@@ -4656,7 +5072,7 @@ mod gating_integration_tests {
         let (outcome, success) = run_capturing_tx(db, factory, 16);
         assert!(success, "CREATE2 endowment tx must succeed");
         assert!(
-            matches!(outcome, CaptureOutcome::Complete(_)),
+            matches!(outcome, CaptureOutcome::Complete { .. }),
             "CREATE2 endowment must complete, got {outcome:?}"
         );
 
@@ -4763,7 +5179,7 @@ mod gating_integration_tests {
         let result1 = evm.transact(call_tx_from(sender1, target)).expect("tx1 executes");
         let outcome1 = evm.components_mut().1.finish_capture(result1.result.logs());
         match outcome1 {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert_eq!(stream.len(), 1, "tx1 must produce 1 transfer")
             }
             other => panic!("expected Complete with 1 transfer for tx1, got {other:?}"),
@@ -4772,7 +5188,7 @@ mod gating_integration_tests {
         let result2 = evm.transact(call_tx_from(sender2, recv)).expect("tx2 executes");
         let outcome2 = evm.components_mut().1.finish_capture(result2.result.logs());
         match outcome2 {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert!(stream.is_empty(), "tx2 must produce 0 transfers — no carry-over from tx1")
             }
             other => panic!("expected Complete(empty) for tx2, got {other:?}"),
@@ -4844,7 +5260,7 @@ mod gating_integration_tests {
         let deployed = deployed_address.expect("a successful CREATE reports its deployed address");
         let outcome = evm.components_mut().1.finish_capture(result.result.logs());
         match outcome {
-            CaptureOutcome::Complete(stream) => {
+            CaptureOutcome::Complete { logs: stream, .. } => {
                 assert_eq!(
                     stream.len(),
                     2,
@@ -4893,5 +5309,749 @@ mod gating_integration_tests {
             }
             other => panic!("expected Complete with 2 transfers, got {other:?}"),
         }
+    }
+}
+
+/// Call-frame observation behavior, driven through a real EVM.
+///
+/// These tests pin what distinguishes a proxy's own direct delegatecall from a delegatecall made
+/// inside implementation business logic, that the reported hash is of the code that actually
+/// executed, and that a frame which never executed never becomes an observation.
+#[cfg(test)]
+mod callstack_observation_tests {
+    use super::*;
+    use alloy_consensus::{SignableTransaction, TxEip7702, TxLegacy};
+    use alloy_eips::eip7702::Authorization;
+    use alloy_evm::{Evm, EvmEnv, EvmFactory, FromRecoveredTx};
+    use alloy_op_evm::{OpEvmFactory, OpTx};
+    use alloy_primitives::{Signature, TxKind};
+    use op_revm::OpSpecId;
+    use rcs_filter::callstack::{CallObservation, CallObservationKind};
+    use revm::context::{BlockEnv, CfgEnv};
+    use revm::database::InMemoryDB;
+    use revm::state::{AccountInfo, Bytecode};
+
+    fn caller() -> Address {
+        Address::from([0xAA; 20])
+    }
+
+    fn account(balance: u64, code: Option<Vec<u8>>) -> AccountInfo {
+        AccountInfo {
+            balance: U256::from(balance),
+            code: code.map(|c| Bytecode::new_raw(alloy_primitives::Bytes::from(c))),
+            ..Default::default()
+        }
+    }
+
+    /// The runtime code hash an observation must report for `code`: keccak256 of the bytecode the
+    /// EVM loads, which is also what the account's `code_hash` holds for a non-delegated account.
+    fn code_hash(code: &[u8]) -> B256 {
+        keccak256(code)
+    }
+
+    fn stamp() -> SnapshotStamp {
+        SnapshotStamp {
+            protocol_version: 2,
+            content_version: 42,
+            selector_digest: B256::repeat_byte(0x5e),
+        }
+    }
+
+    fn call_tx(target: Address) -> OpTx {
+        let tx = TxLegacy {
+            nonce: 0,
+            gas_limit: 3_000_000,
+            to: TxKind::Call(target),
+            value: U256::ZERO,
+            ..Default::default()
+        }
+        .into_signed(Signature::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
+        OpTx::from_recovered_tx(&tx, caller())
+    }
+
+    /// Executes one candidate transaction with the given capture selector set and observation
+    /// budget, through the same seam the builder uses.
+    fn run_observing_tx(
+        db: InMemoryDB,
+        target: Address,
+        selectors: &[Address],
+        observation_budget: usize,
+    ) -> (CaptureOutcome, bool) {
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::with_callstack(
+                1_000,
+                observation_budget,
+                CallstackCaptureConfig::new(stamp(), selectors.to_vec()),
+            ),
+        );
+        evm.components_mut().1.start_capture();
+        let result = evm.transact(call_tx(target)).expect("tx executes");
+        let success = result.result.is_success();
+        let outcome = evm.components_mut().1.finish_capture(result.result.logs());
+        (outcome, success)
+    }
+
+    /// Unwraps a completed capture, asserting the stamp travelled with the observations.
+    fn observations(outcome: CaptureOutcome) -> Vec<CallObservation> {
+        match outcome {
+            CaptureOutcome::Complete { observations, .. } => {
+                assert_eq!(observations.stamp, stamp(), "the capture must carry its own stamp");
+                observations.items
+            }
+            other => panic!("expected a completed capture, got {other:?}"),
+        }
+    }
+
+    // ── bytecode builders ────────────────────────────────────────────────────────────────────
+
+    /// `DELEGATECALL(500000, dst, 0, 0, 0, 0); POP; STOP`.
+    fn delegatecall_to(dst: Address) -> Vec<u8> {
+        let mut code = vec![
+            0x60, 0x00, // PUSH1 0  retSize
+            0x60, 0x00, // PUSH1 0  retOffset
+            0x60, 0x00, // PUSH1 0  argsSize
+            0x60, 0x00, // PUSH1 0  argsOffset
+            0x73, // PUSH20 dst
+        ];
+        code.extend_from_slice(dst.as_slice());
+        code.extend_from_slice(&[0x62, 0x07, 0xA1, 0x20, 0xF4, 0x50, 0x00]);
+        code
+    }
+
+    /// `CALLCODE(500000, dst, value=0, 0, 0, 0, 0); POP; STOP`.
+    ///
+    /// `CALLCODE` runs `dst`'s code but keeps the caller as BOTH the target and the executing
+    /// account, so it is not a proxy-implementation relationship.
+    fn callcode_to(dst: Address) -> Vec<u8> {
+        let mut code = vec![
+            0x60, 0x00, // PUSH1 0  retSize
+            0x60, 0x00, // PUSH1 0  retOffset
+            0x60, 0x00, // PUSH1 0  argsSize
+            0x60, 0x00, // PUSH1 0  argsOffset
+            0x60, 0x00, // PUSH1 0  value
+            0x73, // PUSH20 dst
+        ];
+        code.extend_from_slice(dst.as_slice());
+        code.extend_from_slice(&[0x62, 0x07, 0xA1, 0x20, 0xF2, 0x50, 0x00]);
+        code
+    }
+
+    /// `CALL(500000, dst, value=0, 0, 0, 0, 0); POP; STOP`.
+    fn call_to(dst: Address) -> Vec<u8> {
+        let mut code = vec![
+            0x60, 0x00, // PUSH1 0  retSize
+            0x60, 0x00, // PUSH1 0  retOffset
+            0x60, 0x00, // PUSH1 0  argsSize
+            0x60, 0x00, // PUSH1 0  argsOffset
+            0x60, 0x00, // PUSH1 0  value
+            0x73, // PUSH20 dst
+        ];
+        code.extend_from_slice(dst.as_slice());
+        code.extend_from_slice(&[0x62, 0x07, 0xA1, 0x20, 0xF1, 0x50, 0x00]);
+        code
+    }
+
+    /// `CALL` twice to the same destination, then STOP.
+    fn call_twice_to(dst: Address) -> Vec<u8> {
+        let mut code = call_to(dst);
+        code.pop(); // drop the trailing STOP
+        code.extend_from_slice(&call_to(dst));
+        code
+    }
+
+    /// `DELEGATECALL` twice from the same frame, to two destinations, then STOP.
+    fn delegatecall_twice(first: Address, second: Address) -> Vec<u8> {
+        let mut code = delegatecall_to(first);
+        code.pop();
+        code.extend_from_slice(&delegatecall_to(second));
+        code
+    }
+
+    /// `STOP` only.
+    fn stop_only() -> Vec<u8> {
+        vec![0x00]
+    }
+
+    /// `PUSH1 0; PUSH1 0; REVERT` — executes, then reverts the frame.
+    fn revert_after_executing() -> Vec<u8> {
+        vec![0x60, 0x00, 0x60, 0x00, 0xFD]
+    }
+
+    /// Proxy code that upgrades its own implementation pointer, delegatecalls through it, then
+    /// restores the pointer — all in one transaction:
+    /// `SSTORE(0, rogue); DELEGATECALL(SLOAD(0)); SSTORE(0, approved); STOP`.
+    ///
+    /// Pre-state and post-state storage both name `approved`, so any value derived from storage
+    /// rather than from execution would report the wrong implementation.
+    fn upgrade_execute_rollback(rogue: Address, approved: Address) -> Vec<u8> {
+        let mut code = vec![0x73];
+        code.extend_from_slice(rogue.as_slice());
+        code.extend_from_slice(&[0x60, 0x00, 0x55]); // PUSH1 0; SSTORE
+        code.extend_from_slice(&[
+            0x60, 0x00, // PUSH1 0  retSize
+            0x60, 0x00, // PUSH1 0  retOffset
+            0x60, 0x00, // PUSH1 0  argsSize
+            0x60, 0x00, // PUSH1 0  argsOffset
+            0x60, 0x00, 0x54, // PUSH1 0; SLOAD -> implementation address
+            0x62, 0x07, 0xA1, 0x20, // PUSH3 500000 gas
+            0xF4, // DELEGATECALL
+            0x50, // POP
+        ]);
+        code.push(0x73);
+        code.extend_from_slice(approved.as_slice());
+        code.extend_from_slice(&[0x60, 0x00, 0x55, 0x00]); // PUSH1 0; SSTORE; STOP
+        code
+    }
+
+    /// `CREATE(0, 0, 0)` with empty init code, twice, then STOP. Used to check that create frames
+    /// keep the frame stack balanced without producing observations.
+    fn create_twice() -> Vec<u8> {
+        let mut code = Vec::new();
+        for _ in 0..2 {
+            code.extend_from_slice(&[0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0xF0, 0x50]);
+        }
+        code.push(0x00);
+        code
+    }
+
+    // ── direct call vs. direct delegatecall ──────────────────────────────────────────────────
+
+    #[test]
+    fn a_selected_address_running_its_own_code_is_a_call_observation() {
+        let selected = Address::from([0xC1; 20]);
+        let code = stop_only();
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(selected, account(0, Some(code.clone())));
+
+        let (outcome, success) = run_observing_tx(db, selected, &[selected], 16);
+        assert!(success);
+        let items = observations(outcome);
+        assert_eq!(items, vec![CallObservation::call(selected, code_hash(&code))]);
+    }
+
+    #[test]
+    fn an_unselected_address_produces_no_observation() {
+        let other = Address::from([0xC2; 20]);
+        let selected = Address::from([0xC1; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(other, account(0, Some(stop_only())));
+
+        // Capture ran and genuinely saw nothing for the selector: an empty available set.
+        let (outcome, success) = run_observing_tx(db, other, &[selected], 16);
+        assert!(success);
+        assert!(observations(outcome).is_empty());
+    }
+
+    #[test]
+    fn an_inert_selector_set_observes_nothing() {
+        let target = Address::from([0xC3; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(target, account(0, Some(stop_only())));
+
+        let (outcome, success) = run_observing_tx(db, target, &[], 16);
+        assert!(success);
+        assert!(observations(outcome).is_empty());
+    }
+
+    #[test]
+    fn a_selected_proxy_reports_its_own_code_and_its_direct_delegatecall() {
+        // A standard proxy invocation legitimately yields BOTH observations.
+        let proxy = Address::from([0xB1; 20]);
+        let implementation = Address::from([0xB2; 20]);
+        let proxy_code = delegatecall_to(implementation);
+        let impl_code = stop_only();
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(proxy, account(0, Some(proxy_code.clone())));
+        db.insert_account_info(implementation, account(0, Some(impl_code.clone())));
+
+        let (outcome, success) = run_observing_tx(db, proxy, &[proxy], 16);
+        assert!(success);
+        let items = observations(outcome);
+        assert_eq!(
+            items,
+            vec![
+                CallObservation::call(proxy, code_hash(&proxy_code)),
+                CallObservation::direct_delegatecall(
+                    proxy,
+                    code_hash(&proxy_code),
+                    implementation,
+                    code_hash(&impl_code),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_implementation_internal_delegatecall_is_not_the_proxys_direct_delegatecall() {
+        // proxy -> DELEGATECALL -> relay -> DELEGATECALL -> library.
+        //
+        // Both inner frames keep `proxy` as their execution identity, so a predicate based on the
+        // frame's own target would report `library` as the proxy's implementation. Exactly one
+        // direct delegatecall exists, and its implementation is `relay`: the second hop is made
+        // by implementation business logic, which is explicitly out of scope.
+        let proxy = Address::from([0xB1; 20]);
+        let relay = Address::from([0xB2; 20]);
+        let library = Address::from([0xB3; 20]);
+        let proxy_code = delegatecall_to(relay);
+        let relay_code = delegatecall_to(library);
+        let library_code = stop_only();
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(proxy, account(0, Some(proxy_code.clone())));
+        db.insert_account_info(relay, account(0, Some(relay_code.clone())));
+        db.insert_account_info(library, account(0, Some(library_code)));
+
+        let (outcome, success) = run_observing_tx(db, proxy, &[proxy], 16);
+        assert!(success);
+        let items = observations(outcome);
+        let delegate: Vec<&CallObservation> =
+            items.iter().filter(|o| o.kind == CallObservationKind::DirectDelegatecall).collect();
+        assert_eq!(delegate.len(), 1, "exactly one direct delegatecall: {items:?}");
+        assert_eq!(delegate[0].impl_address, Some(relay));
+        assert_eq!(delegate[0].impl_code_hash, Some(code_hash(&relay_code)));
+        // `library` must appear nowhere.
+        assert!(
+            !items.iter().any(|o| o.impl_address == Some(library)),
+            "an implementation-internal delegatecall must not be reported: {items:?}"
+        );
+    }
+
+    #[test]
+    fn an_indirect_call_through_a_helper_still_observes_the_selected_address() {
+        let helper = Address::from([0xD1; 20]);
+        let selected = Address::from([0xD2; 20]);
+        let selected_code = stop_only();
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(helper, account(0, Some(call_to(selected))));
+        db.insert_account_info(selected, account(0, Some(selected_code.clone())));
+
+        let (outcome, success) = run_observing_tx(db, helper, &[selected], 16);
+        assert!(success);
+        assert_eq!(
+            observations(outcome),
+            vec![CallObservation::call(selected, code_hash(&selected_code))]
+        );
+    }
+
+    #[test]
+    fn repeated_calls_to_the_same_address_are_independent_observations() {
+        let helper = Address::from([0xD1; 20]);
+        let selected = Address::from([0xD2; 20]);
+        let selected_code = stop_only();
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(helper, account(0, Some(call_twice_to(selected))));
+        db.insert_account_info(selected, account(0, Some(selected_code.clone())));
+
+        let (outcome, success) = run_observing_tx(db, helper, &[selected], 16);
+        assert!(success);
+        let items = observations(outcome);
+        assert_eq!(items.len(), 2, "each frame is its own observation: {items:?}");
+        assert!(items
+            .iter()
+            .all(|o| *o == CallObservation::call(selected, code_hash(&selected_code))));
+    }
+
+    #[test]
+    fn two_direct_delegatecalls_from_one_frame_each_emit_an_observation() {
+        let proxy = Address::from([0xB1; 20]);
+        let first = Address::from([0xB2; 20]);
+        let second = Address::from([0xB3; 20]);
+        let proxy_code = delegatecall_twice(first, second);
+        let first_code = stop_only();
+        let second_code = revert_after_executing();
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(proxy, account(0, Some(proxy_code.clone())));
+        db.insert_account_info(first, account(0, Some(first_code.clone())));
+        db.insert_account_info(second, account(0, Some(second_code.clone())));
+
+        let (outcome, _) = run_observing_tx(db, proxy, &[proxy], 16);
+        let items = observations(outcome);
+        let impls: Vec<Option<Address>> = items
+            .iter()
+            .filter(|o| o.kind == CallObservationKind::DirectDelegatecall)
+            .map(|o| o.impl_address)
+            .collect();
+        assert_eq!(impls, vec![Some(first), Some(second)], "both hops observed: {items:?}");
+    }
+
+    #[test]
+    fn callcode_is_not_a_direct_delegatecall() {
+        // `CALLCODE` runs another account's code but leaves the caller as its own target, so it
+        // describes no proxy-implementation relationship and must not be reported as one.
+        let selected = Address::from([0xB1; 20]);
+        let other = Address::from([0xB2; 20]);
+        let selected_code = callcode_to(other);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(selected, account(0, Some(selected_code.clone())));
+        db.insert_account_info(other, account(0, Some(stop_only())));
+
+        let (outcome, success) = run_observing_tx(db, selected, &[selected], 16);
+        assert!(success);
+        let items = observations(outcome);
+        assert!(
+            items.iter().all(|o| o.kind == CallObservationKind::Call),
+            "CALLCODE must not produce a direct_delegatecall: {items:?}"
+        );
+        assert!(items.iter().all(|o| o.impl_address.is_none()));
+    }
+
+    // ── the hash must be of the code that actually executed ──────────────────────────────────
+
+    #[test]
+    fn an_upgrade_executed_and_rolled_back_in_one_transaction_reports_what_ran() {
+        // The proxy points at `approved` before and after the transaction, but delegatecalls
+        // through `rogue` in between. Reading the pointer from storage — before or after — would
+        // report `approved`; only the execution-time observation reports what really ran.
+        let proxy = Address::from([0xB1; 20]);
+        let rogue = Address::from([0xEE; 20]);
+        let approved = Address::from([0xB3; 20]);
+        let proxy_code = upgrade_execute_rollback(rogue, approved);
+        let rogue_code = vec![0x60, 0x01, 0x50, 0x00]; // PUSH1 1; POP; STOP — distinct bytecode
+        let approved_code = stop_only();
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(proxy, account(0, Some(proxy_code.clone())));
+        db.insert_account_info(rogue, account(0, Some(rogue_code.clone())));
+        db.insert_account_info(approved, account(0, Some(approved_code.clone())));
+
+        let (outcome, success) = run_observing_tx(db, proxy, &[proxy], 16);
+        assert!(success, "the upgrade/execute/rollback transaction itself succeeds");
+        let items = observations(outcome);
+        let delegate: Vec<&CallObservation> =
+            items.iter().filter(|o| o.kind == CallObservationKind::DirectDelegatecall).collect();
+        assert_eq!(delegate.len(), 1, "{items:?}");
+        assert_eq!(
+            delegate[0].impl_address,
+            Some(rogue),
+            "the executed implementation, not the pointer"
+        );
+        assert_eq!(delegate[0].impl_code_hash, Some(code_hash(&rogue_code)));
+        assert_ne!(
+            delegate[0].impl_code_hash,
+            Some(code_hash(&approved_code)),
+            "the restored pointer's code must not be what is reported"
+        );
+    }
+
+    #[test]
+    fn an_executed_then_reverted_frame_remains_observable() {
+        // A revert undoes effects, not the fact that the code ran. A malicious call that executed
+        // and was then reverted is exactly what a risk rule needs to still see.
+        let helper = Address::from([0xD1; 20]);
+        let selected = Address::from([0xD2; 20]);
+        let selected_code = revert_after_executing();
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(helper, account(0, Some(call_to(selected))));
+        db.insert_account_info(selected, account(0, Some(selected_code.clone())));
+
+        let (outcome, success) = run_observing_tx(db, helper, &[selected], 16);
+        assert!(success, "the helper swallows the inner revert");
+        assert_eq!(
+            observations(outcome),
+            vec![CallObservation::call(selected, code_hash(&selected_code))],
+            "the reverted frame's execution identity survives"
+        );
+    }
+
+    #[test]
+    fn a_frame_that_never_executed_produces_no_observation() {
+        // The `call` hook fires before the frame is initialized, and a call into an account with
+        // no code returns without ever creating an interpreter. Emitting at hook arrival would
+        // have reported this call as if it had run.
+        let helper = Address::from([0xD1; 20]);
+        let empty = Address::from([0xD3; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(helper, account(0, Some(call_to(empty))));
+        db.insert_account_info(empty, account(0, None));
+
+        let (outcome, success) = run_observing_tx(db, helper, &[empty], 16);
+        assert!(success);
+        assert!(
+            observations(outcome).is_empty(),
+            "a call whose frame never executed must not appear as an observation"
+        );
+    }
+
+    #[test]
+    fn a_precompile_frame_produces_no_observation() {
+        // A precompile is answered without an interpreter, so it never reaches the confirmed-
+        // execution point even though its `call` hook fires.
+        let helper = Address::from([0xD1; 20]);
+        let identity_precompile =
+            Address::from([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(helper, account(0, Some(call_to(identity_precompile))));
+
+        let (outcome, success) = run_observing_tx(db, helper, &[identity_precompile], 16);
+        assert!(success);
+        assert!(observations(outcome).is_empty(), "a precompile frame runs no bytecode");
+    }
+
+    #[test]
+    fn eip7702_delegation_is_a_call_observation_with_the_executed_delegate_code() {
+        // Under EIP-7702 the account's own `code_hash` names the delegation designator while the
+        // code that runs is the delegate's. The observation must report the delegate's executed
+        // code hash — and must NOT describe this as a direct delegatecall, which would
+        // misrepresent the relationship as a proxy implementation.
+        let delegate = Address::from([0xE1; 20]);
+        let delegate_code = stop_only();
+        let auth = Authorization { chain_id: U256::ZERO, address: delegate, nonce: 0 }
+            .into_signed(Signature::test_signature());
+        let authority = auth.recover_authority().expect("deterministic test authority");
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(authority, account(1_000_000, None));
+        db.insert_account_info(delegate, account(0, Some(delegate_code.clone())));
+        let tx = TxEip7702 {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 2_000_000,
+            max_fee_per_gas: 0,
+            max_priority_fee_per_gas: 0,
+            to: authority,
+            value: U256::ZERO,
+            authorization_list: vec![auth],
+            input: Default::default(),
+            access_list: Default::default(),
+        }
+        .into_signed(Signature::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
+        let op_tx = OpTx::from_recovered_tx(&tx, caller());
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::with_callstack(
+                1_000,
+                16,
+                CallstackCaptureConfig::new(stamp(), vec![authority]),
+            ),
+        );
+        evm.components_mut().1.start_capture();
+        let result = evm.transact(op_tx).expect("tx executes");
+        assert!(result.result.is_success());
+        let outcome = evm.components_mut().1.finish_capture(result.result.logs());
+        let items = observations(outcome);
+        assert_eq!(
+            items,
+            vec![CallObservation::call(authority, code_hash(&delegate_code))],
+            "a 7702-delegated call is a call observation carrying the delegate's executed hash"
+        );
+        assert!(items[0].impl_address.is_none(), "7702 delegation is not a direct delegatecall");
+        assert!(items[0].impl_code_hash.is_none());
+    }
+
+    // ── budgets and frame-stack invariants ───────────────────────────────────────────────────
+
+    #[test]
+    fn the_observation_budget_accepts_the_limit_th_and_fails_closed_on_the_next() {
+        let helper = Address::from([0xD1; 20]);
+        let selected = Address::from([0xD2; 20]);
+        let build = || {
+            let mut db = InMemoryDB::default();
+            db.insert_account_info(caller(), account(1_000_000_000, None));
+            db.insert_account_info(helper, account(0, Some(call_twice_to(selected))));
+            db.insert_account_info(selected, account(0, Some(stop_only())));
+            db
+        };
+
+        // Two observations with a budget of two: the limit-th is accepted.
+        let (outcome, _) = run_observing_tx(build(), helper, &[selected], 2);
+        assert_eq!(observations(outcome).len(), 2);
+
+        // The (limit+1)-th overflows, and a truncated set must never be screened as complete.
+        let (outcome, success) = run_observing_tx(build(), helper, &[selected], 1);
+        assert!(success, "the EVM keeps executing normally after an observation overflow");
+        match outcome {
+            CaptureOutcome::LimitExceeded { attempted, limit, budget } => {
+                assert_eq!(attempted, 2);
+                assert_eq!(limit, 1);
+                assert_eq!(budget, ObservationBudget::Callstack);
+                assert_eq!(budget.as_str(), "callstack");
+            }
+            other => panic!("expected a callstack budget overflow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_frames_keep_the_frame_stack_balanced_and_emit_no_observation() {
+        // A create frame runs init code, not deployed runtime code, so the only hash available
+        // for it would be creation bytecode. It is tracked purely for frame balance.
+        let factory = Address::from([0xF1; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(factory, account(1_000, Some(create_twice())));
+
+        let (outcome, success) = run_observing_tx(db, factory, &[factory, factory.create(0)], 16);
+        assert!(success);
+        let items = observations(outcome);
+        // The factory's own top-level frame is a call observation; neither CREATE frame is.
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].address, factory);
+        assert_eq!(items[0].kind, CallObservationKind::Call);
+        assert!(
+            !items.iter().any(|o| o.address == factory.create(0)),
+            "a created address's init-code frame is not an observation: {items:?}"
+        );
+    }
+
+    #[test]
+    fn an_unbalanced_frame_stack_fails_closed() {
+        // Driven directly, because a real EVM always balances its frames. A leftover entry means
+        // parentage cannot be trusted, so the capture must not be reported as complete.
+        let mut inspector = RcsInspector::with_callstack(
+            1_000,
+            16,
+            CallstackCaptureConfig::new(stamp(), vec![Address::repeat_byte(0x11)]),
+        );
+        inspector.start_capture();
+        inspector.enter_frame(
+            Address::repeat_byte(0x11),
+            Address::repeat_byte(0x11),
+            Some(CallScheme::Call),
+        );
+        match inspector.finish_capture(&[]) {
+            CaptureOutcome::InvariantViolation {
+                reason: CaptureInvariantError::FrameStackUnbalanced { remaining },
+            } => assert_eq!(remaining, 1),
+            other => panic!("expected an unbalanced frame stack, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exhausting_the_frame_stack_bound_fails_closed() {
+        let selected = Address::repeat_byte(0x11);
+        let mut inspector = RcsInspector::with_callstack(
+            1_000,
+            usize::MAX,
+            CallstackCaptureConfig::new(stamp(), vec![selected]),
+        );
+        inspector.start_capture();
+        for _ in 0..=MAX_OPEN_FRAMES {
+            inspector.enter_frame(selected, selected, Some(CallScheme::Call));
+        }
+        match inspector.finish_capture(&[]) {
+            CaptureOutcome::InvariantViolation {
+                reason: CaptureInvariantError::FrameStackOverflow { depth },
+            } => assert_eq!(depth, MAX_OPEN_FRAMES),
+            other => panic!("expected a frame-stack overflow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_staged_candidate_is_discarded_when_its_frame_never_executes() {
+        // The stage/commit/discard discipline, exercised directly: entering a frame allocates no
+        // observation, and leaving it without a confirmed execution leaves none behind.
+        let selected = Address::repeat_byte(0x11);
+        let mut inspector = RcsInspector::with_callstack(
+            1_000,
+            16,
+            CallstackCaptureConfig::new(stamp(), vec![selected]),
+        );
+        inspector.start_capture();
+        inspector.enter_frame(selected, selected, Some(CallScheme::Call));
+        assert!(inspector.observations.is_empty(), "staging allocates no observation");
+        assert_eq!(inspector.callstack_observed_count, 0, "staging consumes no budget");
+        inspector.exit_frame();
+        assert!(observations(inspector.finish_capture(&[])).is_empty());
+
+        // Whereas a confirmed execution commits exactly one.
+        inspector.start_capture();
+        inspector.enter_frame(selected, selected, Some(CallScheme::Call));
+        inspector.confirm_frame_execution(B256::repeat_byte(0xaa));
+        inspector.exit_frame();
+        assert_eq!(
+            observations(inspector.finish_capture(&[])),
+            vec![CallObservation::call(selected, B256::repeat_byte(0xaa))]
+        );
+    }
+
+    #[test]
+    fn capture_state_does_not_leak_between_transactions() {
+        let selected = Address::repeat_byte(0x11);
+        let mut inspector = RcsInspector::with_callstack(
+            1_000,
+            1,
+            CallstackCaptureConfig::new(stamp(), vec![selected]),
+        );
+        // First window overflows its observation budget.
+        inspector.start_capture();
+        for _ in 0..2 {
+            inspector.enter_frame(selected, selected, Some(CallScheme::Call));
+            inspector.confirm_frame_execution(B256::repeat_byte(0xaa));
+            inspector.exit_frame();
+        }
+        assert!(matches!(
+            inspector.finish_capture(&[]),
+            CaptureOutcome::LimitExceeded { budget: ObservationBudget::Callstack, .. }
+        ));
+        // The next window starts clean: the sticky overflow and the counter are both reset.
+        inspector.start_capture();
+        inspector.enter_frame(selected, selected, Some(CallScheme::Call));
+        inspector.confirm_frame_execution(B256::repeat_byte(0xbb));
+        inspector.exit_frame();
+        assert_eq!(
+            observations(inspector.finish_capture(&[])),
+            vec![CallObservation::call(selected, B256::repeat_byte(0xbb))]
+        );
+    }
+
+    #[test]
+    fn hooks_are_inert_until_capture_is_armed() {
+        let selected = Address::repeat_byte(0x11);
+        let mut inspector = RcsInspector::with_callstack(
+            1_000,
+            16,
+            CallstackCaptureConfig::new(stamp(), vec![selected]),
+        );
+        // Not armed: a gasless pre-check or any non-candidate simulation must capture nothing.
+        inspector.enter_frame(selected, selected, Some(CallScheme::Call));
+        inspector.confirm_frame_execution(B256::repeat_byte(0xaa));
+        inspector.exit_frame();
+        assert!(inspector.frames.is_empty());
+        assert!(inspector.observations.is_empty());
+        assert_eq!(inspector.callstack_observed_count, 0);
+    }
+
+    #[test]
+    fn aborting_a_capture_clears_the_observation_state() {
+        let selected = Address::repeat_byte(0x11);
+        let mut inspector = RcsInspector::with_callstack(
+            1_000,
+            16,
+            CallstackCaptureConfig::new(stamp(), vec![selected]),
+        );
+        inspector.start_capture();
+        inspector.enter_frame(selected, selected, Some(CallScheme::Call));
+        inspector.confirm_frame_execution(B256::repeat_byte(0xaa));
+        inspector.abort_capture();
+        assert!(inspector.observations.is_empty());
+        assert!(inspector.frames.is_empty());
+        assert_eq!(inspector.callstack_observed_count, 0);
     }
 }

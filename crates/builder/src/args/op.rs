@@ -288,6 +288,15 @@ pub struct RcsFilterArgs {
         default_value = "10000"
     )]
     pub max_event_bindings_per_tx: usize,
+
+    /// Maximum call-frame observations captured per transaction during simulation. Must be
+    /// `>= 1`; `0` is a startup error even when the filter is disabled.
+    #[arg(
+        long = "rcs-filter.max-callstack-observations-per-tx",
+        env = "RCS_MAX_CALLSTACK_OBSERVATIONS_PER_TX",
+        default_value = "10000"
+    )]
+    pub max_callstack_observations_per_tx: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
