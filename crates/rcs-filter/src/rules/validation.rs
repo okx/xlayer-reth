@@ -7,13 +7,13 @@
 use std::str::FromStr;
 
 use alloy_dyn_abi::DynSolType;
-use alloy_primitives::{keccak256, Address};
+use alloy_primitives::{keccak256, Address, B256};
 use tracing::warn;
 
 use super::jsonlogic::{compile, AddressSetInterner};
 use super::model::{
-    Action, CompiledEvent, CompiledInput, CompiledRule, EventAbi, RawRule, RejectedRule, RuleSet,
-    TimeoutAction,
+    Action, CompiledCallstackSelector, CompiledEvent, CompiledInput, CompiledRule, EventAbi,
+    RawCallstackSelector, RawRule, RejectedRule, RuleSet, TimeoutAction,
 };
 
 /// Fixed ERC20 `Transfer` quota shape (ordered input names).
@@ -46,7 +46,7 @@ pub fn load_rules(protocol_version: u32, content_version: u64, raw: Vec<RawRule>
             rejected.push(RejectedRule { id, reason });
             continue;
         }
-        match compile_rule_with_interner(rule, &mut interner) {
+        match compile_rule_with_interner(rule, protocol_version, &mut interner) {
             Ok(compiled) => rules.push(compiled),
             Err(reason) => {
                 warn!(target: "rcs_filter", rule_id = %id, %reason, "rule rejected during load");
@@ -69,14 +69,42 @@ pub fn load_rules(protocol_version: u32, content_version: u64, raw: Vec<RawRule>
         }
     }
 
-    RuleSet { protocol_version, content_version, rules, index, anonymous_index, rejected }
+    // The capture selector set: every address any active rule observes, sorted and deduplicated
+    // so the snapshot stamp's digest depends only on set membership.
+    let mut callstack_selector_addresses: Vec<Address> =
+        rules.iter().flat_map(|rule| rule.callstack.iter().map(|s| s.address)).collect();
+    callstack_selector_addresses.sort_unstable();
+    callstack_selector_addresses.dedup();
+
+    RuleSet {
+        protocol_version,
+        content_version,
+        rules,
+        index,
+        anonymous_index,
+        rejected,
+        callstack_selector_addresses,
+    }
 }
 
 /// Validates and compiles a single raw rule with a fresh single-use interner. This is the
 /// preserved public entry point; batch callers share address sets via
 /// [`compile_rule_with_interner`].
 pub fn compile_rule(raw: RawRule) -> std::result::Result<CompiledRule, String> {
-    compile_rule_with_interner(raw, &mut AddressSetInterner::new())
+    compile_rule_with_interner(
+        raw,
+        crate::config::MIN_PROTOCOL_VERSION,
+        &mut AddressSetInterner::new(),
+    )
+}
+
+/// Validates and compiles a single raw rule against an explicit rule `protocol_version`. Needed
+/// because the callstack section is only accepted from the protocol version that introduced it.
+pub fn compile_rule_at_protocol(
+    raw: RawRule,
+    protocol_version: u32,
+) -> std::result::Result<CompiledRule, String> {
+    compile_rule_with_interner(raw, protocol_version, &mut AddressSetInterner::new())
 }
 
 /// Validates and compiles a single raw rule, interning any static address-membership set through
@@ -84,11 +112,14 @@ pub fn compile_rule(raw: RawRule) -> std::result::Result<CompiledRule, String> {
 /// `audit_timeout_action` defaults to `allow` for `audit` rules that omit it.
 pub(crate) fn compile_rule_with_interner(
     raw: RawRule,
+    protocol_version: u32,
     interner: &mut AddressSetInterner,
 ) -> std::result::Result<CompiledRule, String> {
-    // Reject an empty event_abis map because the rule could never match.
-    if raw.event_abis.is_empty() {
-        return Err("event_abis is empty".to_string());
+    // A rule needs at least one selector family: with neither declared events nor callstack
+    // selectors it could never match. `event_abis` alone being empty is legitimate for a rule
+    // that selects purely on call frames.
+    if raw.event_abis.is_empty() && raw.callstack.is_empty() {
+        return Err("rule declares neither event_abis nor callstack selectors".to_string());
     }
     if raw.event_abis.len() > super::MAX_EVENTS_PER_RULE {
         return Err(format!(
@@ -101,6 +132,8 @@ pub(crate) fn compile_rule_with_interner(
         return Err("audit rule has no audit_types".to_string());
     }
     super::jsonlogic::validate(&raw.condition)?;
+
+    let callstack = compile_callstack(&raw, protocol_version)?;
 
     // `audit_types` is irrelevant to filter-only deny/allow rules. In particular, its wire
     // default is `["quota"]`, which must not make non-audit events subject to quota shapes.
@@ -143,12 +176,142 @@ pub(crate) fn compile_rule_with_interner(
         contract_address,
         origin,
         events,
+        callstack,
         audit_types: raw.audit_types,
         condition: raw.condition,
         action: raw.action,
         audit_timeout_action,
         compiled_condition,
     })
+}
+
+/// Validates and compiles a rule's `callstack` section.
+///
+/// Rejections (any one of which rejects the rule, and therefore the whole snapshot update):
+/// a selector without an address; exactly one of `implAddress` / `implCodeHash`; a malformed
+/// address or code-hash encoding; a callstack-only `audit` rule, whose action payload would have
+/// no content to carry; the section appearing under a protocol version that does not define it;
+/// more selectors than the per-rule bound; and a selector name colliding with an event alias,
+/// which would otherwise silently shadow one of them in the flat condition-variable keyspace.
+fn compile_callstack(
+    raw: &RawRule,
+    protocol_version: u32,
+) -> std::result::Result<Vec<CompiledCallstackSelector>, String> {
+    if raw.callstack.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !crate::config::protocol_supports_callstack(protocol_version) {
+        return Err(format!(
+            "callstack selectors require rule protocol_version {} or later; this set declares {protocol_version}",
+            crate::config::CALLSTACK_MIN_PROTOCOL_VERSION
+        ));
+    }
+    if raw.action == Action::Audit && raw.event_abis.is_empty() {
+        return Err("an audit rule selecting only on callstack declares no event payload content"
+            .to_string());
+    }
+    if raw.callstack.len() > super::MAX_CALLSTACK_SELECTORS_PER_RULE {
+        return Err(format!(
+            "callstack declares {} selectors; at most {} are allowed",
+            raw.callstack.len(),
+            super::MAX_CALLSTACK_SELECTORS_PER_RULE
+        ));
+    }
+
+    let mut out = Vec::with_capacity(raw.callstack.len());
+    for (var_name, selector) in &raw.callstack {
+        if raw.event_abis.contains_key(var_name) {
+            return Err(format!(
+                "callstack selector '{var_name}' collides with an event_abis alias; condition variables share one flat namespace"
+            ));
+        }
+        out.push(compile_callstack_selector(var_name, selector)?);
+    }
+    Ok(out)
+}
+
+/// Compiles one named selector, enforcing the encoding rules and the impl field pairing.
+fn compile_callstack_selector(
+    var_name: &str,
+    selector: &RawCallstackSelector,
+) -> std::result::Result<CompiledCallstackSelector, String> {
+    let address = match selector.address.as_deref() {
+        Some(value) => parse_lower_hex_address(value)
+            .map_err(|e| format!("callstack selector '{var_name}' address {e}"))?,
+        None => {
+            return Err(format!("callstack selector '{var_name}' has no address"));
+        }
+    };
+    if selector.impl_address.is_some() != selector.impl_code_hash.is_some() {
+        return Err(format!(
+            "callstack selector '{var_name}' must supply implAddress and implCodeHash together or not at all"
+        ));
+    }
+    let code_hash = match selector.code_hash.as_deref() {
+        Some(value) => Some(
+            parse_lower_hex_b256(value)
+                .map_err(|e| format!("callstack selector '{var_name}' codeHash {e}"))?,
+        ),
+        None => None,
+    };
+    let impl_address = match selector.impl_address.as_deref() {
+        Some(value) => Some(
+            parse_lower_hex_address(value)
+                .map_err(|e| format!("callstack selector '{var_name}' implAddress {e}"))?,
+        ),
+        None => None,
+    };
+    let impl_code_hash = match selector.impl_code_hash.as_deref() {
+        Some(value) => Some(
+            parse_lower_hex_b256(value)
+                .map_err(|e| format!("callstack selector '{var_name}' implCodeHash {e}"))?,
+        ),
+        None => None,
+    };
+    Ok(CompiledCallstackSelector {
+        var_name: var_name.to_string(),
+        address,
+        code_hash,
+        impl_address,
+        impl_code_hash,
+    })
+}
+
+/// Rejects anything that is not a lowercase `0x`-prefixed 20-byte address.
+///
+/// Case is enforced rather than normalized: observed values are emitted lowercase, so accepting a
+/// mixed-case selector would make an author believe a constraint is active while the exact-match
+/// comparison it performs is against a different string form.
+fn parse_lower_hex_address(value: &str) -> std::result::Result<Address, String> {
+    check_lower_hex(value, Address::len_bytes())?;
+    Address::from_str(value).map_err(|e| format!("is not a valid address: {e}"))
+}
+
+/// Rejects anything that is not a lowercase `0x`-prefixed 32-byte hash.
+fn parse_lower_hex_b256(value: &str) -> std::result::Result<B256, String> {
+    check_lower_hex(value, B256::len_bytes())?;
+    B256::from_str(value).map_err(|e| format!("is not a valid 32-byte hash: {e}"))
+}
+
+/// Shared encoding gate: `0x` prefix, exact byte length, lowercase hex digits only.
+fn check_lower_hex(value: &str, len_bytes: usize) -> std::result::Result<(), String> {
+    let Some(body) = value.strip_prefix("0x") else {
+        return Err("must be 0x-prefixed".to_string());
+    };
+    if body.len() != len_bytes * 2 {
+        return Err(format!(
+            "must be exactly {len_bytes} bytes ({} hex digits), got {}",
+            len_bytes * 2,
+            body.len()
+        ));
+    }
+    if body.chars().any(|c| c.is_ascii_uppercase()) {
+        return Err("must be lowercase hex".to_string());
+    }
+    if !body.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("must be hex digits only".to_string());
+    }
+    Ok(())
 }
 
 /// Compiles one named event, resolving input types and precomputing `topic0`.
@@ -294,9 +457,21 @@ mod tests {
     }
 
     #[test]
-    fn empty_event_abis_rejected() {
+    fn a_rule_with_no_selector_of_either_kind_is_rejected() {
+        // An empty `event_abis` is no longer rejected on its own — a rule may select purely on
+        // call frames. What must stay rejected is a rule with NEITHER selector family, which
+        // could never match anything.
         let json = r#"{"id":"r","event_abis":{},"condition":true,"action":"deny"}"#;
-        assert!(compile_rule(parse(json)).is_err());
+        let reason = compile_rule(parse(json)).expect_err("a rule that can never match");
+        assert!(reason.contains("neither event_abis nor callstack"), "{reason}");
+
+        // The same rule with a callstack selector is valid at the version that defines it.
+        let with_callstack = r#"{"id":"r","event_abis":{},"callstack":{"entry":{"address":"0x1111111111111111111111111111111111111111"}},"condition":true,"action":"deny"}"#;
+        assert!(super::compile_rule_at_protocol(
+            parse(with_callstack),
+            crate::config::CALLSTACK_MIN_PROTOCOL_VERSION
+        )
+        .is_ok());
     }
 
     #[test]
@@ -391,8 +566,16 @@ mod tests {
 
     #[test]
     fn missing_required_rule_and_event_fields_fail_decoding() {
+        // `event_abis` is optional on the wire now that a rule may select purely on call frames,
+        // so an omitted map decodes to an empty one. The rule is still refused — one layer later,
+        // at validation, with a reason naming both selector families.
         let missing_event_abis = r#"{"id":"r","condition":true,"action":"deny"}"#;
-        assert!(serde_json::from_str::<RawRule>(missing_event_abis).is_err());
+        let decoded = serde_json::from_str::<RawRule>(missing_event_abis)
+            .expect("an omitted event_abis decodes to an empty map");
+        assert!(decoded.event_abis.is_empty());
+        assert!(decoded.callstack.is_empty());
+        let reason = compile_rule(decoded).expect_err("a rule that can never match");
+        assert!(reason.contains("neither event_abis nor callstack"), "{reason}");
 
         for event in [
             r#"{"name":"E","inputs":[],"anonymous":false}"#,

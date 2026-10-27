@@ -28,6 +28,16 @@ pub(crate) struct RcsFilterMetrics {
     /// Builder-side local denies caused by an observation invariant failure (RealLog cross-check
     /// mismatch, or an enabled filter receiving a passthrough capture outcome).
     pub local_deny_observation_invariant_total: Counter,
+    /// Builder-side local denies caused by an exceeded per-transaction call-frame observation
+    /// budget.
+    pub local_deny_callstack_observation_limit_total: Counter,
+    /// Denies caused by a rule needing call-frame observations on a path that produced none, or
+    /// produced an incomplete set. Counted separately from a rule-driven denial: the rule did not
+    /// match, the engine could not adjudicate it.
+    pub deny_observations_unavailable_total: Counter,
+    /// Denies caused by an observation set whose rule-snapshot stamp did not equal the evaluating
+    /// snapshot's. Operationally distinct from an unavailable set.
+    pub deny_observation_snapshot_mismatch_total: Counter,
     /// Audit transactions deferred pending adjudication.
     pub audit_pending_total: Counter,
     /// Audit transactions released after approval.

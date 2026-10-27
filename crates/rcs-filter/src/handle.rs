@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use alloy_primitives::{Address, Log, B256, U256};
 use tracing::error;
 
+use crate::callstack::Observations;
 use crate::client::RcsClient;
 use crate::clock::Clock;
 use crate::config::FilterConfig;
@@ -76,6 +77,8 @@ pub enum LocalDenyReason {
     /// An observation invariant failed: the captured real-log subsequence did not match the
     /// execution result, or an enabled filter received a passthrough capture outcome.
     ObservationInvariant,
+    /// The per-transaction call-frame observation budget was exceeded during capture.
+    CallstackObservationLimit,
 }
 
 /// Input to [`FilterHandle::screen_tx`], borrowed from the builder loop.
@@ -91,6 +94,10 @@ pub struct ScreenInput<'a> {
     pub block_height: u64,
     /// Execution logs of the transaction (borrowed; screening does not consume them).
     pub logs: &'a [Log],
+    /// Call-frame observations for this execution. A tri-state: a path that captures nothing
+    /// passes [`Observations::NOT_CAPTURED`] so a rule with callstack selectors fails closed
+    /// instead of reading an empty list as "observed nothing".
+    pub observations: Observations<'a>,
 }
 
 /// Shared, cheaply-clonable filter state used by the handle and background workers.
@@ -207,6 +214,8 @@ fn binding_overflow_counts(
             (*attempted, *limit)
         }
         matching::MatchError::BindingCountOverflow { .. } => (usize::MAX, configured_limit),
+        matching::MatchError::ObservationsUnavailable { .. }
+        | matching::MatchError::ObservationSnapshotMismatch { .. } => (0, configured_limit),
     }
 }
 
@@ -266,11 +275,39 @@ impl FilterHandle {
             LocalDenyReason::ObservationInvariant => {
                 self.shared.metrics.local_deny_observation_invariant_total.increment(1)
             }
+            LocalDenyReason::CallstackObservationLimit => {
+                self.shared.metrics.local_deny_callstack_observation_limit_total.increment(1)
+            }
         }
     }
 
-    /// Screens one transaction (synchronous, no network IO). See [`Screen`].
+    /// The configured maximum call-frame observations per transaction. Single source of truth for
+    /// the builder's capture budget, read here rather than duplicated so the two cannot drift.
+    pub fn max_callstack_observations_per_tx(&self) -> usize {
+        self.shared.config.max_callstack_observations_per_tx
+    }
+
+    /// The current rule snapshot.
+    ///
+    /// A caller that observes call frames must acquire the snapshot **once**, configure capture
+    /// from it, and then screen against the very same `Arc`. Acquiring it again after simulation
+    /// could evaluate against rules whose selector set never configured the capture, which would
+    /// make an unobserved frame look like an absent one.
+    pub fn rule_snapshot(&self) -> Arc<RuleSet> {
+        self.shared.current_rules()
+    }
+
+    /// Screens one transaction (synchronous, no network IO) against the current rule snapshot.
+    /// See [`Screen`].
+    ///
+    /// Callers that captured call-frame observations must use
+    /// [`Self::screen_tx_with_snapshot`] with the snapshot that configured the capture.
     pub fn screen_tx(&self, input: &ScreenInput) -> Screen {
+        self.screen_tx_with_snapshot(input, &self.shared.current_rules())
+    }
+
+    /// Screens one transaction against an explicitly pinned rule snapshot.
+    pub fn screen_tx_with_snapshot(&self, input: &ScreenInput, pinned: &Arc<RuleSet>) -> Screen {
         // Stage zero: dedup short-circuit — a non-terminal buffered entry is reused without
         // re-decoding or re-submitting during the first screening stage.
         let existing = {
@@ -283,8 +320,8 @@ impl FilterHandle {
             return self.screen_existing(input, status, stored_hash, generation, rule_snapshot);
         }
 
-        // Fresh evaluation.
-        let rules = self.shared.current_rules();
+        // Fresh evaluation against the pinned snapshot.
+        let rules = Arc::clone(pinned);
         let outcome = match matching::try_evaluate(
             &rules,
             input,
@@ -292,19 +329,7 @@ impl FilterHandle {
         ) {
             Ok(outcome) => outcome,
             Err(error) => {
-                // Structured error-level diagnostics at a real budget-overflow decision point.
-                // Fields are bounded to tx_hash / observed_count / limit — the matched binding or
-                // transfer content is NEVER logged.
-                let (attempted, limit) =
-                    binding_overflow_counts(&error, self.shared.config.max_event_bindings_per_tx);
-                error!(
-                    target: "rcs_filter",
-                    tx_hash = %input.tx_hash,
-                    observed_count = attempted,
-                    limit = limit,
-                    "matcher binding budget exceeded; denying transaction (Screen::Deny)"
-                );
-                self.shared.metrics.deny_total.increment(1);
+                self.record_match_failure(input.tx_hash, &error);
                 return Screen::Deny;
             }
         };
@@ -359,6 +384,54 @@ impl FilterHandle {
                 self.shared.metrics.audit_pending_total.increment(1);
                 self.shared.update_buffer_metric();
                 Screen::AuditPending
+            }
+        }
+    }
+
+    /// Emits bounded diagnostics for a screening failure and counts the deny.
+    ///
+    /// The four fail-closed causes are operationally different incidents and are deliberately not
+    /// collapsed into one log line or one counter: a matcher-budget overflow is a capacity signal,
+    /// an unavailable observation set means the execution path cannot adjudicate callstack rules
+    /// at all, and a snapshot-stamp mismatch means capture and screening disagreed about which
+    /// rules were in force. Fields stay bounded to the hash, counts and a fixed reason token —
+    /// never the matched binding, the rule content, or any observation value.
+    fn record_match_failure(&self, tx_hash: B256, error: &matching::MatchError) {
+        let configured = self.shared.config.max_event_bindings_per_tx;
+        match error.kind() {
+            matching::MatchErrorKind::BindingBudget => {
+                let (attempted, limit) = binding_overflow_counts(error, configured);
+                error!(
+                    target: "rcs_filter",
+                    tx_hash = %tx_hash,
+                    observed_count = attempted,
+                    limit = limit,
+                    "matcher binding budget exceeded; denying transaction (Screen::Deny)"
+                );
+                self.shared.metrics.deny_total.increment(1);
+            }
+            matching::MatchErrorKind::ObservationsUnavailable => {
+                let reason = match error {
+                    matching::MatchError::ObservationsUnavailable { reason, .. } => reason.as_str(),
+                    _ => "unknown",
+                };
+                error!(
+                    target: "rcs_filter",
+                    tx_hash = %tx_hash,
+                    reason,
+                    "callstack observations unavailable for a rule that requires them; denying transaction (Screen::Deny)"
+                );
+                self.shared.metrics.deny_total.increment(1);
+                self.shared.metrics.deny_observations_unavailable_total.increment(1);
+            }
+            matching::MatchErrorKind::ObservationSnapshotMismatch => {
+                error!(
+                    target: "rcs_filter",
+                    tx_hash = %tx_hash,
+                    "observation set was captured under a different rule snapshot; denying transaction (Screen::Deny)"
+                );
+                self.shared.metrics.deny_total.increment(1);
+                self.shared.metrics.deny_observation_snapshot_mismatch_total.increment(1);
             }
         }
     }
@@ -513,14 +586,12 @@ impl FilterHandle {
                     }
                     Err(error) => {
                         // Determinism invariant: post-approval re-simulation runs against the SAME
-                        // rule snapshot, the SAME `max_event_bindings_per_tx`, and deterministic
-                        // execution logs as the first screen. A matcher-binding overflow is a pure
-                        // function of (rules, config, logs); since all three are identical to a
-                        // first screen that already passed, an overflow CANNOT newly fire here. This
-                        // `Err` arm — and the `Screen::Drop` it produces below — is therefore a
-                        // documented defensive dead branch, retained unchanged (see design §5.7).
-                        // Diagnostics use the same bounded error! fields (never the rule/transfer
-                        // content).
+                        // rule snapshot and the SAME `max_event_bindings_per_tx` as the first
+                        // screen, so a matcher-binding overflow cannot newly fire here. A
+                        // re-simulation does, however, re-capture its own observations, so an
+                        // unavailable or over-budget observation set CAN first appear at this
+                        // point; it must not be read as a clean no-match either, and inconsistency
+                        // is the fail-closed answer. Diagnostics stay bounded.
                         let (attempted, limit) = binding_overflow_counts(
                             &error,
                             self.shared.config.max_event_bindings_per_tx,
@@ -528,9 +599,10 @@ impl FilterHandle {
                         error!(
                             target: "rcs_filter",
                             tx_hash = %input.tx_hash,
+                            kind = ?error.kind(),
                             observed_count = attempted,
                             limit = limit,
-                            "matcher binding budget exceeded during consistency recompute"
+                            "screening failed closed during consistency recompute"
                         );
                         false
                     }
@@ -654,6 +726,7 @@ mod tests {
             value: U256::ZERO,
             block_height: 1_000_000,
             logs,
+            observations: Observations::NOT_CAPTURED,
         }
     }
 
@@ -706,6 +779,7 @@ mod tests {
             value: U256::ZERO,
             block_height: 0,
             logs: &logs,
+            observations: Observations::NOT_CAPTURED,
         };
         // Tight budget of 2: 3 × 3 = 9 bindings > 2 → fail-closed Deny (proves screen_tx reads
         // the configured limit, not a fixed constant).
@@ -771,6 +845,7 @@ mod tests {
             value: U256::ZERO,
             block_height: 0,
             logs: &logs,
+            observations: Observations::NOT_CAPTURED,
         };
         let handle = FilterHandle::for_test(
             FilterConfig { max_event_bindings_per_tx: 2, ..FilterConfig::default() },
@@ -831,6 +906,7 @@ mod tests {
             value: U256::ZERO,
             block_height: 1_000_000,
             logs: &logs,
+            observations: Observations::NOT_CAPTURED,
         };
         assert_eq!(h.screen_tx(&input), Screen::Deny);
         assert!(h.buffer_status(&golden::tx_b()).is_none());
@@ -890,6 +966,7 @@ mod tests {
             value: U256::ZERO,
             block_height,
             logs,
+            observations: Observations::NOT_CAPTURED,
         }
     }
 

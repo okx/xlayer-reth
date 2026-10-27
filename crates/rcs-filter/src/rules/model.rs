@@ -1,12 +1,14 @@
 //! Rule data model: raw (wire) shapes deserialized from RCS, and compiled shapes used by
 //! the matching hot path.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use alloy_dyn_abi::DynSolType;
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{keccak256, Address, B256};
 use serde::{Deserialize, Serialize};
+
+use crate::callstack::SnapshotStamp;
 
 /// Rule action. Priority when merging: `deny > audit > allow`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -77,13 +79,99 @@ pub struct RawRule {
     pub contract_address: Option<String>,
     #[serde(default)]
     pub origin: Option<String>,
-    pub event_abis: std::collections::BTreeMap<String, EventAbi>,
+    /// Named event declarations. Defaults to empty so a rule may select purely on call frames;
+    /// a rule declaring neither events nor callstack selectors could never match and is rejected
+    /// at load.
+    #[serde(default)]
+    pub event_abis: BTreeMap<String, EventAbi>,
+    /// Named call-frame selectors, keyed by a rule-local variable name the engine attaches no
+    /// meaning to. Deserialized through [`deserialize_unique_selectors`] so a repeated variable
+    /// name is rejected instead of silently collapsing to the last occurrence.
+    #[serde(default, deserialize_with = "deserialize_unique_selectors")]
+    pub callstack: BTreeMap<String, RawCallstackSelector>,
     #[serde(default = "default_audit_types")]
     pub audit_types: Vec<String>,
     pub condition: serde_json::Value,
     pub action: Action,
     #[serde(default)]
     pub audit_timeout_action: Option<TimeoutAction>,
+}
+
+/// A raw call-frame selector as delivered on the wire. Every field is kept as an optional
+/// string so load-time validation can reject a missing address and malformed encodings with a
+/// precise reason instead of failing deserialization of the whole snapshot with a generic error.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RawCallstackSelector {
+    #[serde(default)]
+    pub address: Option<String>,
+    /// Exact-match constraint on the code executed in the observed frame.
+    #[serde(default, rename = "codeHash")]
+    pub code_hash: Option<String>,
+    /// Exact-match constraint on the direct delegatecall target. Must be supplied together with
+    /// `implCodeHash`.
+    #[serde(default, rename = "implAddress")]
+    pub impl_address: Option<String>,
+    /// Exact-match constraint on the direct delegatecall target's executed code.
+    #[serde(default, rename = "implCodeHash")]
+    pub impl_code_hash: Option<String>,
+}
+
+/// Deserializes the `callstack` map while rejecting a repeated variable name.
+///
+/// A plain `BTreeMap` silently keeps the last of several equal keys. Because every selector
+/// contributes flat condition variables under its own name, a duplicate would quietly discard one
+/// author-visible selector, so it is surfaced as a deserialization error and the snapshot is
+/// rejected whole.
+fn deserialize_unique_selectors<'de, D>(
+    deserializer: D,
+) -> std::result::Result<BTreeMap<String, RawCallstackSelector>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{Error, MapAccess, Visitor};
+
+    struct UniqueSelectors;
+
+    impl<'de> Visitor<'de> for UniqueSelectors {
+        type Value = BTreeMap<String, RawCallstackSelector>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a map of unique callstack selector names")
+        }
+
+        fn visit_map<A: MapAccess<'de>>(
+            self,
+            mut access: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut out = BTreeMap::new();
+            while let Some((name, selector)) =
+                access.next_entry::<String, RawCallstackSelector>()?
+            {
+                if out.insert(name.clone(), selector).is_some() {
+                    return Err(A::Error::custom(format!(
+                        "duplicate callstack selector name '{name}'"
+                    )));
+                }
+            }
+            Ok(out)
+        }
+    }
+
+    deserializer.deserialize_map(UniqueSelectors)
+}
+
+/// A validated call-frame selector ready for matching. Supplied exact values act as additional
+/// selector constraints that narrow which observations the selector accepts; omitted ones leave
+/// the actual observed value inspectable from `condition`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompiledCallstackSelector {
+    /// Rule-local name used as the `<name>` prefix of this selector's condition variables.
+    pub var_name: String,
+    /// Address whose call frames are observed.
+    pub address: Address,
+    pub code_hash: Option<B256>,
+    pub impl_address: Option<Address>,
+    pub impl_code_hash: Option<B256>,
 }
 
 /// A compiled ABI input: the resolved [`DynSolType`] plus indexed flag and name.
@@ -138,6 +226,9 @@ pub struct CompiledRule {
     pub contract_address: Option<Address>,
     pub origin: Option<Address>,
     pub events: Vec<CompiledEvent>,
+    /// Call-frame selectors in declared (name) order. Empty for every rule that does not use the
+    /// callstack section, which keeps those rules on the unchanged matching path.
+    pub callstack: Vec<CompiledCallstackSelector>,
     pub audit_types: Vec<String>,
     pub condition: serde_json::Value,
     pub action: Action,
@@ -172,9 +263,39 @@ pub struct RuleSet {
     /// require all-or-nothing semantics (hot-reload install, the audit RPC) must check this
     /// before trusting `rules` as complete.
     pub rejected: Vec<RejectedRule>,
+    /// Sorted, deduplicated set of every address named by an active rule's callstack selectors.
+    /// An observation producer observes only frames touching this set, so observation cost scales
+    /// with operator-controlled rule configuration rather than with transaction call depth. Empty
+    /// means the whole callstack path is inert.
+    pub callstack_selector_addresses: Vec<Address>,
 }
 
 impl RuleSet {
+    /// Identity of this snapshot for stamping an observation set: the full rule identity
+    /// (`protocol_version` + `content_version`) plus a digest of the selector addresses.
+    ///
+    /// The digest alone is deliberately not the identity. Two snapshots can name exactly the same
+    /// addresses while evaluating different conditions against them, so observations captured
+    /// under one must not be adjudicated by the other.
+    pub fn stamp(&self) -> SnapshotStamp {
+        SnapshotStamp {
+            protocol_version: self.protocol_version,
+            content_version: self.content_version,
+            selector_digest: selector_set_digest(&self.callstack_selector_addresses),
+        }
+    }
+
+    /// The capture selector set: every address named by an active rule's callstack selectors.
+    pub fn callstack_selectors(&self) -> &[Address] {
+        &self.callstack_selector_addresses
+    }
+
+    /// Whether any active rule declares callstack selectors. `false` means observation capture
+    /// can be skipped entirely and every rule follows the pre-existing matching path.
+    pub fn has_callstack_rules(&self) -> bool {
+        !self.callstack_selector_addresses.is_empty()
+    }
+
     /// Returns the candidate rule indices for a log whose first topic is `topic0`.
     pub fn candidates_for_topic0(&self, topic0: &B256) -> &[usize] {
         self.index.get(topic0).map(|v| v.as_slice()).unwrap_or(&[])
@@ -184,4 +305,16 @@ impl RuleSet {
     pub fn candidates_for_anonymous(&self, indexed_topics: usize) -> &[usize] {
         self.anonymous_index.get(&indexed_topics).map(|v| v.as_slice()).unwrap_or(&[])
     }
+}
+
+/// `keccak256` over the sorted, deduplicated selector addresses, in 20-byte big-endian order.
+///
+/// Callers must pass an already sorted and deduplicated slice (as [`RuleSet`] stores it) so the
+/// digest depends only on set membership, never on rule declaration order.
+pub(crate) fn selector_set_digest(addresses: &[Address]) -> B256 {
+    let mut buf = Vec::with_capacity(addresses.len() * Address::len_bytes());
+    for address in addresses {
+        buf.extend_from_slice(address.as_slice());
+    }
+    keccak256(&buf)
 }

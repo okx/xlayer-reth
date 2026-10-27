@@ -20,6 +20,12 @@ use async_trait::async_trait;
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 use serde_json::json;
 
+use crate::callstack::Observations;
+
+/// A rule `protocol_version` this build does not know. Derived from the supported set rather than
+/// hard-coded, so adding a version cannot silently turn this into a supported-version test.
+const UNSUPPORTED_PROTOCOL_VERSION: u32 =
+    *crate::config::SUPPORTED_PROTOCOL_VERSIONS.last().unwrap() + 1;
 use crate::client::{
     QueryParams, QueryResponse, QueryTx, RcsClient, RulesResponse, SubmitRequest, SubmitResponse,
     VersionResponse,
@@ -88,6 +94,7 @@ fn scenario_a_input(tx_hash: B256, logs: &[Log]) -> ScreenInput<'_> {
         value: U256::ZERO,
         block_height: 1_000_000,
         logs,
+        observations: Observations::NOT_CAPTURED,
     }
 }
 
@@ -1150,7 +1157,8 @@ async fn load_and_install_installs_and_marks_ready() {
 async fn load_and_install_rejects_unsupported_protocol() {
     let mock = Arc::new(MockRcsClient::new());
     mock.set_rules_fixture(&[golden::RULE_SCENARIO_A]);
-    mock.set_rules_protocol_version(2);
+    // Both shipped versions are supported, so an unsupported one must be outside that set.
+    mock.set_rules_protocol_version(UNSUPPORTED_PROTOCOL_VERSION);
     let client: Arc<dyn RcsClient> = mock.clone();
     let shared = shared_with(Arc::new(TestClock::new(START)), RuleSet::default(), false);
 
@@ -1873,6 +1881,7 @@ async fn scenario_b_deny_makes_zero_rcs_calls() {
         value: U256::ZERO,
         block_height: 1_000_000,
         logs: &logs,
+        observations: Observations::NOT_CAPTURED,
     };
     assert_eq!(h.screen_tx(&input), Screen::Deny);
     assert!(h.buffer_status(&golden::tx_b()).is_none(), "deny tx is not buffered");
@@ -1963,7 +1972,7 @@ async fn unsupported_protocol_at_runtime_keeps_old_rules() {
     wait_ready(&h).await;
 
     // Advertise an unsupported protocol on the next content version.
-    mock.set_rules_protocol_version(2);
+    mock.set_rules_protocol_version(UNSUPPORTED_PROTOCOL_VERSION);
     mock.bump_rules_version();
     spin(3000).await;
 
@@ -2290,7 +2299,7 @@ async fn unsupported_protocol_skips_pull_and_recovers_without_content_bump() {
 
     // Advertise an unsupported protocol on a new content version → the probe filters it out;
     // the full body is never pulled, no matter how many polls elapse.
-    mock.set_rules_protocol_version(2);
+    mock.set_rules_protocol_version(UNSUPPORTED_PROTOCOL_VERSION);
     mock.bump_rules_version();
     spin(8000).await;
     assert_eq!(
@@ -2324,6 +2333,7 @@ async fn unsupported_protocol_skips_pull_and_recovers_without_content_bump() {
         value: U256::ZERO,
         block_height: 1_000_000,
         logs: &logs,
+        observations: Observations::NOT_CAPTURED,
     };
     assert_eq!(h.screen_tx(&input), Screen::Deny, "recovered rules took effect");
 }

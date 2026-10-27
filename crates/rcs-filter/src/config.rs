@@ -5,8 +5,23 @@ use std::time::Duration;
 
 /// Locally supported RCS `protocol_version` set. Membership is an **exact match**:
 /// `protocol_version` only bumps on breaking schema changes, so there is no "partial
-/// compatibility" middle state.
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[1];
+/// compatibility" middle state. Both versions are supported at once so a rule source can be
+/// upgraded independently of the node fleet.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[1, 2];
+
+/// The oldest rule protocol version this build accepts.
+pub const MIN_PROTOCOL_VERSION: u32 = 1;
+
+/// The rule protocol version that introduced the `callstack` selector section. A `callstack`
+/// field under an earlier version is rejected, never ignored: because the supported set is an
+/// exact match and an unsupported version already rejects the whole snapshot, a node that does
+/// not know the field can never silently accept a rule that depends on it.
+pub const CALLSTACK_MIN_PROTOCOL_VERSION: u32 = 2;
+
+/// Returns true iff rules at `pv` may declare the `callstack` selector section.
+pub fn protocol_supports_callstack(pv: u32) -> bool {
+    pv >= CALLSTACK_MIN_PROTOCOL_VERSION
+}
 
 /// Hard safety ceiling for concurrent RCS submit requests from one filter instance.
 pub const MAX_SUBMIT_CONCURRENCY: usize = 64;
@@ -63,6 +78,11 @@ pub struct FilterConfig {
     /// the historical fixed matcher ceiling; used identically in first screening and the
     /// post-approval consistency recompute. Must be `>= 1` (default 10_000).
     pub max_event_bindings_per_tx: usize,
+    /// Maximum call-frame observations captured for one transaction during simulation. The Nth
+    /// candidate is allowed; the (N+1)th overflows and fails the transaction closed. Bounds
+    /// capture-side volume; `max_event_bindings_per_tx` separately bounds match-side
+    /// combinatorics. Must be `>= 1` (default 10_000).
+    pub max_callstack_observations_per_tx: usize,
 }
 
 impl Default for FilterConfig {
@@ -83,6 +103,7 @@ impl Default for FilterConfig {
             terminal_entry_retention: Duration::from_secs(300),
             max_native_transfers_per_tx: 10_000,
             max_event_bindings_per_tx: 10_000,
+            max_callstack_observations_per_tx: 10_000,
         }
     }
 }
@@ -152,6 +173,11 @@ impl FilterConfig {
                 "rcs-filter max_event_bindings_per_tx must be >= 1".to_string(),
             ));
         }
+        if self.max_callstack_observations_per_tx == 0 {
+            return Err(crate::FilterError::Config(
+                "rcs-filter max_callstack_observations_per_tx must be >= 1".to_string(),
+            ));
+        }
         Ok(())
     }
 }
@@ -201,9 +227,32 @@ mod tests {
 
     #[test]
     fn protocol_version_is_exact_match() {
+        // Both shipped versions are accepted so a rule source can move to the newer schema
+        // independently of the node fleet; anything outside the set is still refused outright,
+        // which is what stops an unknown field from being silently tolerated.
         assert!(is_supported_protocol(1));
-        assert!(!is_supported_protocol(2));
+        assert!(is_supported_protocol(2));
         assert!(!is_supported_protocol(0));
+        assert!(!is_supported_protocol(3));
+    }
+
+    #[test]
+    fn callstack_requires_the_version_that_introduced_it() {
+        assert!(!protocol_supports_callstack(1));
+        assert!(protocol_supports_callstack(CALLSTACK_MIN_PROTOCOL_VERSION));
+        assert_eq!(CALLSTACK_MIN_PROTOCOL_VERSION, 2);
+    }
+
+    #[test]
+    fn callstack_observation_budget_must_be_at_least_one() {
+        let zero = FilterConfig { max_callstack_observations_per_tx: 0, ..Default::default() };
+        // Validated even while disabled: a zero budget is a startup misconfiguration either way.
+        assert!(!zero.enabled);
+        assert!(zero.validate().is_err());
+        assert!(FilterConfig { max_callstack_observations_per_tx: 1, ..Default::default() }
+            .validate()
+            .is_ok());
+        assert_eq!(FilterConfig::default().max_callstack_observations_per_tx, 10_000);
     }
 
     #[test]

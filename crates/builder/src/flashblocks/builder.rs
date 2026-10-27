@@ -350,6 +350,10 @@ where
             gasless_contract: self.evm_config.gasless_contract(),
             gasless_block_gas_limit: self.config.gasless_block_gas_limit,
             filter: self.config.rcs_filter.clone(),
+            // Pinned once here, for the whole L2 block payload job: this context is built once
+            // per block and shared by every flashblock, so a rule hot reload landing mid-block is
+            // held pending and first takes effect at the next block's payload job.
+            rcs_rule_snapshot: self.config.rcs_filter.as_ref().map(|f| f.rule_snapshot()),
         })
     }
 

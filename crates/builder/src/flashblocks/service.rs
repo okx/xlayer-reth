@@ -370,6 +370,8 @@ where
 
 #[cfg(test)]
 mod rcs_txpool_tests {
+    use rcs_filter::callstack::Observations;
+
     use super::{reconcile_absent_non_terminal, run_terminal_discard};
     use alloy_primitives::{Address, B256};
     use reth_transaction_pool::{
@@ -458,6 +460,7 @@ mod rcs_txpool_tests {
             value: alloy_primitives::U256::ZERO,
             block_height: 1_000_000,
             logs: &logs,
+            observations: Observations::NOT_CAPTURED,
         };
         tokio::time::timeout(Duration::from_secs(2), async {
             while !filter_for_screen.is_ready() {
@@ -533,6 +536,7 @@ mod rcs_txpool_tests {
             value: alloy_primitives::U256::ZERO,
             block_height: 1_000_000,
             logs: &logs,
+            observations: Observations::NOT_CAPTURED,
         };
         assert_eq!(filter.screen_tx(&input), rcs_filter::Screen::AuditPending);
 
@@ -599,6 +603,7 @@ mod rcs_txpool_tests {
             value: alloy_primitives::U256::ZERO,
             block_height: 1_000_000,
             logs: &logs,
+            observations: Observations::NOT_CAPTURED,
         };
         assert_eq!(filter.screen_tx(&input), rcs_filter::Screen::AuditPending);
         tokio::time::timeout(Duration::from_secs(3), async {

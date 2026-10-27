@@ -6,15 +6,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::ControlFlow;
 
 use alloy_dyn_abi::{DynSolEvent, DynSolType, DynSolValue};
-use alloy_primitives::{Address, Log};
+use alloy_primitives::{Address, Log, B256};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::callstack::{CallObservation, ObservationUnavailable, Observations};
 use crate::client::ActionItem;
 use crate::handle::ScreenInput;
 use crate::rules::{
-    eval_compiled, Action, CompiledEvent, CompiledRule, RuleSet, TimeoutAction,
-    DEFAULT_MAX_EVENT_BINDINGS_PER_TX,
+    eval_compiled, Action, CompiledCallstackSelector, CompiledEvent, CompiledRule, RuleSet,
+    TimeoutAction, DEFAULT_MAX_EVENT_BINDINGS_PER_TX,
 };
 
 type ActionsByLog = BTreeMap<String, BTreeMap<usize, ActionItem>>;
@@ -40,15 +41,50 @@ pub enum MatchOutcome {
     },
 }
 
-/// Resource-budget failure detected before visiting complete event bindings.
+/// A failure detected before visiting complete bindings: either a resource budget, or an
+/// observation set that cannot be adjudicated. Every variant fails closed at the caller — none of
+/// them may degrade to allow.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MatchError {
-    #[error("rule '{rule_id}' complete event binding count overflowed")]
+    #[error("rule '{rule_id}' complete binding count overflowed")]
     BindingCountOverflow { rule_id: String },
     #[error(
-        "rule '{rule_id}' would raise the complete event binding count to {attempted}, exceeding the per-transaction budget of {limit}"
+        "rule '{rule_id}' would raise the complete binding count to {attempted}, exceeding the per-transaction budget of {limit}"
     )]
     BindingBudgetExceeded { rule_id: String, attempted: usize, limit: usize },
+    /// A rule declares callstack selectors but the execution path produced no adjudicable
+    /// observation set. Distinct from "observed nothing", which is an ordinary no-match.
+    #[error("rule '{rule_id}' declares callstack selectors but observations are unavailable ({reason})", reason = reason.as_str())]
+    ObservationsUnavailable { rule_id: String, reason: ObservationUnavailable },
+    /// The observation set was captured under a different rule snapshot than the one evaluating
+    /// it, so an unobserved frame is indistinguishable from an absent one.
+    #[error("rule '{rule_id}' observation set was captured under a different rule snapshot")]
+    ObservationSnapshotMismatch { rule_id: String },
+}
+
+impl MatchError {
+    /// Operational classification, so the four cases can be logged and counted separately rather
+    /// than sharing one line: a rule-driven denial, a budget overflow, an unavailable or
+    /// incomplete observation set, and a snapshot-stamp mismatch are different incidents.
+    pub fn kind(&self) -> MatchErrorKind {
+        match self {
+            MatchError::BindingCountOverflow { .. } | MatchError::BindingBudgetExceeded { .. } => {
+                MatchErrorKind::BindingBudget
+            }
+            MatchError::ObservationsUnavailable { .. } => MatchErrorKind::ObservationsUnavailable,
+            MatchError::ObservationSnapshotMismatch { .. } => {
+                MatchErrorKind::ObservationSnapshotMismatch
+            }
+        }
+    }
+}
+
+/// Fixed, low-cardinality classification of a [`MatchError`], suitable as a metric label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchErrorKind {
+    BindingBudget,
+    ObservationsUnavailable,
+    ObservationSnapshotMismatch,
 }
 
 /// Fallible screening entry used by callers that can surface malformed/error outcomes.
@@ -125,8 +161,17 @@ fn evaluate_checked(
                 }
             })
             .collect();
-        let rule_binding_count = checked_binding_count(candidates.iter().map(Vec::len))
-            .ok_or_else(|| MatchError::BindingCountOverflow { rule_id: rule.id.clone() })?;
+        // Callstack candidates, resolved against the observation set. A rule without selectors
+        // takes no part in this and keeps the pre-existing path byte for byte, including when the
+        // observation set is unavailable.
+        let frame_candidates = callstack_candidates(rule, &input.observations, rules)?;
+        // The budget covers the full event x callstack product, not each family separately:
+        // bounding them independently would still let a handful of selectors and a handful of
+        // events enumerate a large combination count.
+        let rule_binding_count = checked_binding_count(
+            candidates.iter().map(Vec::len).chain(frame_candidates.iter().map(Vec::len)),
+        )
+        .ok_or_else(|| MatchError::BindingCountOverflow { rule_id: rule.id.clone() })?;
         complete_binding_count = complete_binding_count
             .checked_add(rule_binding_count)
             .ok_or_else(|| MatchError::BindingCountOverflow { rule_id: rule.id.clone() })?;
@@ -138,42 +183,48 @@ fn evaluate_checked(
             });
         }
         let mut current = Vec::with_capacity(candidates.len());
+        let mut frame_current: Vec<Option<&CallObservation>> =
+            Vec::with_capacity(frame_candidates.len());
         let mut visit = |binding: &[Option<MatchedEvent>]| {
             // Missing events are null-bound; evaluate the condition for every binding, including
             // no-log transactions. Whether any *physical* event backed this binding decides only
             // whether an Audit may carry content (an all-null binding must never submit empties).
+            // Callstack observations never make a binding physical: the action payload is
+            // event-oriented, and a callstack-only audit rule is rejected at load.
             let has_physical = binding.iter().any(Option::is_some);
-            let bindings = build_bindings(rule, input, binding);
-            if !eval_compiled(&rule.compiled_condition, &bindings) {
-                return ControlFlow::Continue(());
-            }
-
-            // Stage three: action merge with deny short-circuit.
-            match rule.action {
-                Action::Deny => ControlFlow::Break(MatchOutcome::Deny),
-                Action::Allow => ControlFlow::Continue(()),
-                Action::Audit => {
-                    // Never emit an empty-action Audit: an all-null binding that satisfies an
-                    // audit condition submits no content to RCS. Treat it as a no-op.
-                    if !has_physical {
-                        return ControlFlow::Continue(());
-                    }
-                    has_audit = true;
-                    timeout_action = timeout_action.stricter(rule.audit_timeout_action);
-                    for audit_type in &rule.audit_types {
-                        let by_log = actions_by_log.entry(audit_type.clone()).or_default();
-                        for (event, matched) in rule.events.iter().zip(binding) {
-                            let Some(matched) = matched else { continue };
-                            by_log.entry(matched.log_index).or_insert_with(|| ActionItem {
-                                name: event.var_name.clone(),
-                                address: matched.address.clone(),
-                                params: matched.params.clone(),
-                            });
-                        }
-                    }
-                    ControlFlow::Continue(())
+            visit_frame_bindings(0, &frame_candidates, &mut frame_current, &mut |frames| {
+                let bindings = build_bindings(rule, input, binding, frames);
+                if !eval_compiled(&rule.compiled_condition, &bindings) {
+                    return ControlFlow::Continue(());
                 }
-            }
+
+                // Stage three: action merge with deny short-circuit.
+                match rule.action {
+                    Action::Deny => ControlFlow::Break(MatchOutcome::Deny),
+                    Action::Allow => ControlFlow::Continue(()),
+                    Action::Audit => {
+                        // Never emit an empty-action Audit: an all-null binding that satisfies an
+                        // audit condition submits no content to RCS. Treat it as a no-op.
+                        if !has_physical {
+                            return ControlFlow::Continue(());
+                        }
+                        has_audit = true;
+                        timeout_action = timeout_action.stricter(rule.audit_timeout_action);
+                        for audit_type in &rule.audit_types {
+                            let by_log = actions_by_log.entry(audit_type.clone()).or_default();
+                            for (event, matched) in rule.events.iter().zip(binding) {
+                                let Some(matched) = matched else { continue };
+                                by_log.entry(matched.log_index).or_insert_with(|| ActionItem {
+                                    name: event.var_name.clone(),
+                                    address: matched.address.clone(),
+                                    params: matched.params.clone(),
+                                });
+                            }
+                        }
+                        ControlFlow::Continue(())
+                    }
+                }
+            })
         };
         if let ControlFlow::Break(outcome) =
             visit_bindings(0, &candidates, &mut current, &mut visit)
@@ -231,6 +282,7 @@ fn build_bindings(
     rule: &CompiledRule,
     input: &ScreenInput,
     binding: &[Option<MatchedEvent>],
+    frames: &[Option<&CallObservation>],
 ) -> crate::rules::Bindings {
     let mut b = crate::rules::Bindings::new();
     b.insert(
@@ -262,7 +314,156 @@ fn build_bindings(
         }
     }
 
+    for (selector, observed) in rule.callstack.iter().zip(frames) {
+        bind_callstack_selector(&mut b, selector, *observed);
+    }
+
     b
+}
+
+/// Binds one selector's six flat condition variables.
+///
+/// `matched` is mandatory and is the guard an author needs: without it, a negated allowlist test
+/// over an absent (null) hash evaluates true and a deny rule would reject every unrelated
+/// transaction, because the evaluator treats a one-sided null as not equal.
+fn bind_callstack_selector(
+    b: &mut crate::rules::Bindings,
+    selector: &CompiledCallstackSelector,
+    observed: Option<&CallObservation>,
+) {
+    let name = &selector.var_name;
+    match observed {
+        Some(observation) => {
+            b.insert(format!("{name}.matched"), Value::Bool(true));
+            b.insert(
+                format!("{name}.callType"),
+                Value::String(observation.kind.as_str().to_string()),
+            );
+            b.insert(format!("{name}.address"), Value::String(addr_lower(observation.address)));
+            b.insert(format!("{name}.codeHash"), Value::String(hash_lower(observation.code_hash)));
+            b.insert(
+                format!("{name}.implAddress"),
+                observation.impl_address.map(addr_lower).map(Value::String).unwrap_or(Value::Null),
+            );
+            b.insert(
+                format!("{name}.implCodeHash"),
+                observation
+                    .impl_code_hash
+                    .map(hash_lower)
+                    .map(Value::String)
+                    .unwrap_or(Value::Null),
+            );
+        }
+        None => {
+            b.insert(format!("{name}.matched"), Value::Bool(false));
+            for field in ["callType", "address", "codeHash", "implAddress", "implCodeHash"] {
+                b.insert(format!("{name}.{field}"), Value::Null);
+            }
+        }
+    }
+}
+
+/// Resolves each selector of `rule` to its candidate observations.
+///
+/// A selector with no matching observation contributes exactly one `None` candidate, so a no-match
+/// never multiplies the candidate count to zero and never skips condition evaluation — the
+/// explicit `matched = false` binding is what the condition guards on.
+///
+/// Returns an error for a rule that declares selectors while the observation set cannot be
+/// adjudicated: unavailable or incomplete capture, or a set captured under a different snapshot.
+/// Rules without selectors are untouched by either condition.
+fn callstack_candidates<'obs>(
+    rule: &CompiledRule,
+    observations: &Observations<'obs>,
+    rules: &RuleSet,
+) -> Result<Vec<Vec<Option<&'obs CallObservation>>>, MatchError> {
+    if rule.callstack.is_empty() {
+        return Ok(Vec::new());
+    }
+    let items = match observations {
+        Observations::Unavailable { reason } => {
+            return Err(MatchError::ObservationsUnavailable {
+                rule_id: rule.id.clone(),
+                reason: *reason,
+            });
+        }
+        Observations::Available { stamp, items } => {
+            if *stamp != rules.stamp() {
+                return Err(MatchError::ObservationSnapshotMismatch { rule_id: rule.id.clone() });
+            }
+            *items
+        }
+    };
+    Ok(rule
+        .callstack
+        .iter()
+        .map(|selector| {
+            let matched: Vec<Option<&CallObservation>> = items
+                .iter()
+                .filter(|observation| selector_accepts(selector, observation))
+                .map(Some)
+                .collect();
+            if matched.is_empty() {
+                vec![None]
+            } else {
+                matched
+            }
+        })
+        .collect())
+}
+
+/// Whether an observation satisfies a selector. Supplied exact values narrow the selector;
+/// omitted ones accept any observed value and leave it inspectable from `condition`.
+fn selector_accepts(selector: &CompiledCallstackSelector, observation: &CallObservation) -> bool {
+    if selector.address != observation.address {
+        return false;
+    }
+    if let Some(expected) = selector.code_hash
+        && expected != observation.code_hash
+    {
+        return false;
+    }
+    // The impl fields are validated as an all-or-nothing pair, so constraining them selects only
+    // direct-delegatecall observations: a plain call observation has no impl values to match.
+    if let Some(expected) = selector.impl_address
+        && observation.impl_address != Some(expected)
+    {
+        return false;
+    }
+    if let Some(expected) = selector.impl_code_hash
+        && observation.impl_code_hash != Some(expected)
+    {
+        return false;
+    }
+    true
+}
+
+/// Visits every callstack-candidate combination in candidate order without allocating the product,
+/// mirroring [`visit_bindings`]. A visitor can break immediately to return a pure deny verdict.
+fn visit_frame_bindings<'obs, F>(
+    selector_idx: usize,
+    candidates: &[Vec<Option<&'obs CallObservation>>],
+    current: &mut Vec<Option<&'obs CallObservation>>,
+    visit: &mut F,
+) -> ControlFlow<MatchOutcome>
+where
+    F: FnMut(&[Option<&'obs CallObservation>]) -> ControlFlow<MatchOutcome>,
+{
+    if selector_idx == candidates.len() {
+        return visit(current);
+    }
+
+    for candidate in &candidates[selector_idx] {
+        current.push(*candidate);
+        if let ControlFlow::Break(outcome) =
+            visit_frame_bindings(selector_idx + 1, candidates, current, visit)
+        {
+            current.pop();
+            return ControlFlow::Break(outcome);
+        }
+        current.pop();
+    }
+    ControlFlow::Continue(())
 }
 
 /// Visits every complete event binding in candidate order without allocating the Cartesian
@@ -383,6 +584,12 @@ fn addr_lower(a: Address) -> String {
     format!("{a:#x}")
 }
 
+/// Lower-cased `0x`-prefixed hex form of a 32-byte hash, matching the selector encoding rules so
+/// an author's configured value and the observed value compare as equal strings.
+fn hash_lower(h: B256) -> String {
+    format!("{h:#x}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,6 +665,7 @@ mod tests {
             value: U256::ZERO,
             block_height: 1_000_000,
             logs,
+            observations: Observations::NOT_CAPTURED,
         }
     }
 
@@ -496,6 +704,7 @@ mod tests {
             value: U256::ZERO,
             block_height: 1_000_000,
             logs,
+            observations: Observations::NOT_CAPTURED,
         }
     }
 
@@ -1014,6 +1223,7 @@ mod tests {
             value: alloy_primitives::U256::ZERO,
             block_height: 1_000_000,
             logs: &logs,
+            observations: Observations::NOT_CAPTURED,
         };
         match evaluate(&rules, &input) {
             MatchOutcome::Audit { actions, .. } => {
@@ -1065,6 +1275,7 @@ mod tests {
             value: U256::ZERO,
             block_height: 1_000_000,
             logs: &logs,
+            observations: Observations::NOT_CAPTURED,
         };
 
         let MatchOutcome::Audit { actions, .. } = evaluate(&rules, &input) else {
@@ -1107,6 +1318,7 @@ mod tests {
             value: alloy_primitives::U256::ZERO,
             block_height: 1_000_000,
             logs: &logs,
+            observations: Observations::NOT_CAPTURED,
         };
 
         match evaluate(&rules, &input) {
@@ -1177,6 +1389,7 @@ mod tests {
             value: alloy_primitives::U256::ZERO,
             block_height: 1_000_000,
             logs: &logs,
+            observations: Observations::NOT_CAPTURED,
         };
         let MatchOutcome::Audit { actions, .. } = evaluate(&rules, &input) else {
             panic!("expected audit")
@@ -1200,6 +1413,7 @@ mod tests {
             value: alloy_primitives::U256::ZERO,
             block_height: 1_000_000,
             logs: &logs,
+            observations: Observations::NOT_CAPTURED,
         };
         assert_eq!(evaluate(&rules, &input), MatchOutcome::Allow);
     }
@@ -1233,6 +1447,7 @@ mod tests {
                 value: alloy_primitives::U256::ZERO,
                 block_height: 1_000_000,
                 logs: &logs,
+                observations: Observations::NOT_CAPTURED,
             };
             assert_eq!(evaluate(&rules, &input), want);
         }
@@ -1263,6 +1478,7 @@ mod tests {
             value: alloy_primitives::U256::ZERO,
             block_height: 1_000_000,
             logs: &logs,
+            observations: Observations::NOT_CAPTURED,
         };
         let MatchOutcome::Audit { actions, .. } = evaluate(&rules, &input) else {
             panic!("expected audit")
@@ -1307,6 +1523,7 @@ mod tests {
                 value: alloy_primitives::U256::ZERO,
                 block_height: 1_000_000,
                 logs: &logs,
+                observations: Observations::NOT_CAPTURED,
             };
             assert_eq!(evaluate(&rules, &input), MatchOutcome::Allow);
         }
@@ -1331,6 +1548,7 @@ mod tests {
             value: alloy_primitives::U256::ZERO,
             block_height: 1_000_000,
             logs: &logs,
+            observations: Observations::NOT_CAPTURED,
         };
         let MatchOutcome::Audit { actions, .. } = evaluate(&rules, &input) else {
             panic!("expected audit")
@@ -1362,6 +1580,7 @@ mod tests {
             value: alloy_primitives::U256::ZERO,
             block_height: 1_000_000,
             logs: &logs,
+            observations: Observations::NOT_CAPTURED,
         };
 
         match evaluate(&rules, &input) {
@@ -1392,6 +1611,7 @@ mod tests {
             value: alloy_primitives::U256::ZERO,
             block_height: 1_000_000,
             logs: &logs,
+            observations: Observations::NOT_CAPTURED,
         };
         assert_eq!(evaluate(&rules, &input), MatchOutcome::Deny);
     }
@@ -1407,6 +1627,7 @@ mod tests {
             value: alloy_primitives::U256::ZERO,
             block_height: 1_000_000,
             logs: &[],
+            observations: Observations::NOT_CAPTURED,
         };
         assert_eq!(evaluate(&rules, &input), MatchOutcome::Allow);
     }
