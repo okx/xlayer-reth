@@ -297,6 +297,20 @@ impl FilterHandle {
         self.shared.current_rules()
     }
 
+    /// The rule snapshot a candidate already present in the buffer pool must be re-simulated and
+    /// re-screened under, or `None` when it has no entry.
+    ///
+    /// A buffered entry keeps the snapshot it was first evaluated against, and
+    /// [`Self::screen_tx_with_snapshot`] re-evaluates an `Approved` entry against that saved
+    /// snapshot rather than the one its caller pinned. A caller that also *captures* call frames
+    /// must therefore configure capture from this snapshot, not from the one pinned for the block:
+    /// otherwise the observation set would carry the block snapshot's stamp while the consistency
+    /// recompute evaluates the saved one, and a reload that changed nothing but `content_version`
+    /// would turn a legitimate re-simulation into a stamp mismatch.
+    pub fn saved_rule_snapshot(&self, tx_hash: &B256) -> Option<Arc<RuleSet>> {
+        self.shared.pool_lock().get(tx_hash).map(|entry| Arc::clone(&entry.rule_snapshot))
+    }
+
     /// Screens one transaction (synchronous, no network IO) against the current rule snapshot.
     /// See [`Screen`].
     ///

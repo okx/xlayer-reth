@@ -1091,6 +1091,14 @@ fn screen_tx_without_an_explicit_snapshot_uses_the_current_one() {
     assert_eq!(handle.screen_tx(&input), Screen::Deny);
 }
 
+/// Unit-level check of the handle contract only: it hands the re-simulation observations that
+/// already carry the saved snapshot's stamp, so it pins what `screen_existing` evaluates against
+/// and nothing about how a caller obtains that stamp.
+///
+/// The end-to-end counterpart — a candidate captured and screened through the real builder chain
+/// across a cross-block reload — lives where the capture is wired, in
+/// `xlayer-builder`'s `approved_resimulation_after_a_cross_block_reload_uses_the_saved_snapshot`.
+/// Keep both: this one would still pass if the builder configured capture from the wrong snapshot.
 #[test]
 fn an_approved_transaction_re_evaluates_under_its_saved_snapshot() {
     use crate::clock::SystemClock;
@@ -1159,6 +1167,74 @@ fn an_approved_transaction_re_evaluates_under_its_saved_snapshot() {
         handle.screen_tx(&reinput),
         Screen::AuditApproved,
         "a buffered transaction is never reinterpreted under a newer rule set"
+    );
+}
+
+/// The accessor a capturing caller uses to pick a buffered candidate's snapshot keeps naming the
+/// SAVED snapshot across a reload, and reports `None` for a transaction with no entry so the
+/// caller falls back to its own pinned snapshot.
+#[test]
+fn the_saved_snapshot_of_a_buffered_transaction_survives_a_reload() {
+    use crate::clock::SystemClock;
+    use crate::config::FilterConfig;
+    use crate::handle::{FilterHandle, Screen};
+    use crate::test_support::log_builder::erc20_transfer;
+    use std::sync::Arc;
+
+    let token: Address = "0x5555555555555555555555555555555555555555".parse().unwrap();
+    let from: Address = "0x6666666666666666666666666666666666666666".parse().unwrap();
+    let to: Address = "0x7777777777777777777777777777777777777777".parse().unwrap();
+
+    let rules = rule_set(vec![json!({
+        "id": "gated-audit",
+        "event_abis": { "t": {
+            "type": "event",
+            "name": "Transfer",
+            "inputs": [
+                {"name": "from", "type": "address", "indexed": true},
+                {"name": "to", "type": "address", "indexed": true},
+                {"name": "value", "type": "uint256", "indexed": false}
+            ],
+            "anonymous": false
+        }},
+        "callstack": { "entry": { "address": hex_addr(proxy()) } },
+        "condition": { "==": [ { "var": "entry.matched" }, true ] },
+        "action": "audit"
+    })]);
+    let handle = FilterHandle::for_test(FilterConfig::default(), rules, Arc::new(SystemClock));
+    let pinned = handle.rule_snapshot();
+
+    let tx_hash = B256::repeat_byte(0x07);
+    assert!(
+        handle.saved_rule_snapshot(&tx_hash).is_none(),
+        "an unbuffered transaction has no saved snapshot, so the caller's pinned one applies"
+    );
+
+    let logs = vec![erc20_transfer(token, from, to, U256::from(3u64))];
+    let observed = [CallObservation::call(proxy(), approved_proxy_code())];
+    let input = ScreenInput {
+        tx_hash,
+        origin: from,
+        tx_to: Some(proxy()),
+        nonce: 0,
+        value: U256::ZERO,
+        block_height: 1,
+        logs: &logs,
+        observations: Observations::available(pinned.stamp(), &observed),
+    };
+    assert_eq!(handle.screen_tx_with_snapshot(&input, &pinned), Screen::AuditPending);
+
+    // A reload changes only the content version; the buffered entry must keep its own snapshot.
+    handle.install_rules(load_rules(
+        PV_CALLSTACK,
+        99,
+        vec![raw(deny_on_selector("unrelated", "entry", other_proxy(), json!(true)))],
+    ));
+    assert_ne!(handle.rule_snapshot().stamp(), pinned.stamp(), "the live snapshot did move");
+    assert_eq!(
+        handle.saved_rule_snapshot(&tx_hash).map(|rules| rules.stamp()),
+        Some(pinned.stamp()),
+        "the buffered candidate's capture configuration must come from its saved snapshot"
     );
 }
 
