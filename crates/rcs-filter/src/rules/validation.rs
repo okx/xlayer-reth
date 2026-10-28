@@ -12,9 +12,12 @@ use tracing::warn;
 
 use super::jsonlogic::{compile, AddressSetInterner};
 use super::model::{
-    Action, CompiledEvent, CompiledInput, CompiledRule, EventAbi, RawRule, RejectedRule, RuleSet,
-    TimeoutAction,
+    duplicate_rule_root_key_reason, is_accepted_rule_root_key, unknown_rule_keys_reason, Action,
+    CompiledDirectDelegatecall, CompiledEvent, CompiledInput, CompiledRule, EventAbi, RawRule,
+    RejectedRule, RuleSet, TimeoutAction,
 };
+use super::raw::{rule_locator, scan_rule_root};
+use crate::callstack::MAX_DIRECT_DELEGATECALL_ALIASES;
 
 /// Fixed ERC20 `Transfer` quota shape (ordered input names).
 const ERC20_TRANSFER_SHAPE: &[&str] = &["from", "to", "value"];
@@ -55,6 +58,17 @@ pub fn load_rules(protocol_version: u32, content_version: u64, raw: Vec<RawRule>
         }
     }
 
+    finish_rule_set(protocol_version, content_version, rules, rejected)
+}
+
+/// Builds the topic0 / anonymous indices and assembles the final snapshot. Shared by both
+/// loaders so the two entry points can never drift on index construction.
+fn finish_rule_set(
+    protocol_version: u32,
+    content_version: u64,
+    rules: Vec<CompiledRule>,
+    rejected: Vec<RejectedRule>,
+) -> RuleSet {
     let mut index: std::collections::HashMap<_, Vec<usize>> = std::collections::HashMap::new();
     let mut anonymous_index: std::collections::HashMap<_, Vec<usize>> =
         std::collections::HashMap::new();
@@ -72,6 +86,194 @@ pub fn load_rules(protocol_version: u32, content_version: u64, raw: Vec<RawRule>
     RuleSet { protocol_version, content_version, rules, index, anonymous_index, rejected }
 }
 
+/// Whether `s` is a lowercase, `0x`-prefixed, 20-byte hex address.
+///
+/// Checked on the **string form before parsing**, because `Address::from_str` accepts any case.
+/// A checksummed address is a rejection, not a normalisation: the producer contract owns the
+/// canonical form, and silently accepting both would make two textually different rule sets hash
+/// differently while behaving identically.
+fn is_lowercase_hex_address(s: &str) -> bool {
+    s.len() == 42
+        && s.starts_with("0x")
+        && s.as_bytes()[2..].iter().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+
+/// Validates the `callstack` section and compiles its aliases.
+///
+/// Whether a rule declares neither section is decided by the caller, which can see
+/// `event_abis` too.
+fn compile_direct_delegatecalls(
+    raw: &RawRule,
+) -> std::result::Result<Vec<CompiledDirectDelegatecall>, String> {
+    let declared = match &raw.callstack {
+        // Absent: nothing to compile. The caller decides whether that is acceptable.
+        None => return Ok(Vec::new()),
+        // An explicit null is rejected rather than being treated as absent, so a producer
+        // that nulls the field out learns about it instead of silently shipping a weaker rule.
+        Some(None) => {
+            return Err("callstack is explicitly null; omit the field instead".to_string());
+        }
+        Some(Some(callstack)) => &callstack.direct_delegatecalls,
+    };
+
+    // An empty map could never bind anything, so it is a rule-authoring mistake.
+    if declared.is_empty() {
+        return Err("direct_delegatecalls is empty".to_string());
+    }
+    // Bounds the per-rule candidate product the combined budget accounts for.
+    if declared.len() > MAX_DIRECT_DELEGATECALL_ALIASES {
+        return Err(format!(
+            "direct_delegatecalls declares {} aliases; at most {} are allowed",
+            declared.len(),
+            MAX_DIRECT_DELEGATECALL_ALIASES
+        ));
+    }
+
+    let mut compiled = Vec::with_capacity(declared.len());
+    for (alias, value) in declared {
+        // Only an EMPTY alias name is rejected. A non-empty non-ASCII alias is accepted and
+        // must never be reported with the empty-alias message: no necessity or compatibility
+        // evidence supports a narrower grammar, and inventing one would tighten the contract
+        // unilaterally.
+        if alias.is_empty() {
+            return Err("direct_delegatecalls declares an empty alias name".to_string());
+        }
+        // An alias must not shadow an event alias, or the flat binding keys would collide.
+        if raw.event_abis.contains_key(alias) {
+            return Err(format!(
+                "direct_delegatecalls alias '{alias}' collides with an event alias"
+            ));
+        }
+        // Checked on the string form, before parsing.
+        if !is_lowercase_hex_address(value) {
+            return Err(format!(
+                "direct_delegatecalls alias '{alias}' is not a lowercase 0x 20-byte address"
+            ));
+        }
+        let address = Address::from_str(value).map_err(|e| {
+            format!("direct_delegatecalls alias '{alias}' is not a valid address: {e}")
+        })?;
+        compiled.push(CompiledDirectDelegatecall { alias: alias.clone(), address });
+    }
+
+    Ok(compiled)
+}
+
+/// Loads and validates a batch of rules from their **preserved original JSON bytes** into an
+/// immutable [`RuleSet`] snapshot — the per-rule phase shared by both entry points.
+///
+/// Each rule is processed independently from its own bytes, so one bad rule cannot hide the
+/// others, and **every** rejection is aggregated into [`RuleSet::rejected`] (which both entry
+/// points already treat as all-or-nothing). Per-rule order:
+///
+/// 1. streaming root-key scan — collects keys in order with duplicates preserved, and lifts `id`;
+/// 2. unknown root key, then duplicate root key — from that key list, which still
+///    contains repeats;
+/// 3. typed decode **from the bytes** — unknown key inside `callstack`, duplicate alias, wrong
+///    JSON type. Decoding from the original bytes is what lets the duplicate-rejecting
+///    visitor actually see both entries;
+/// 4. the semantic checks, in their documented order.
+///
+/// Steps 2 and 3 are ordered deliberately: a misspelled safety field is diagnosable only if the
+/// raw-key check precedes the typed decode.
+pub fn load_rules_from_raw(
+    protocol_version: u32,
+    content_version: u64,
+    raw: &[Box<serde_json::value::RawValue>],
+) -> RuleSet {
+    let mut compiled: Vec<CompiledRule> = Vec::new();
+    let mut rejected: Vec<RejectedRule> = Vec::new();
+    let mut interner = AddressSetInterner::new();
+    // Collected across the whole batch so a duplicate id is reported for every occurrence,
+    // matching the existing behaviour.
+    let mut scans: Vec<(usize, Option<String>)> = Vec::with_capacity(raw.len());
+    let mut parsed: Vec<Option<RawRule>> = Vec::with_capacity(raw.len());
+
+    for (index, element) in raw.iter().enumerate() {
+        let src = element.get();
+
+        // (1) + (2): scan the original bytes. A rule element that is not a JSON object is
+        // rejected here explicitly, by index, with nothing executed or installed.
+        let scan = match scan_rule_root(src) {
+            Ok(scan) => scan,
+            Err(reason) => {
+                scans.push((index, None));
+                parsed.push(None);
+                rejected.push(RejectedRule { id: rule_locator(None, index), reason });
+                continue;
+            }
+        };
+        let locator = rule_locator(scan.id.as_deref(), index);
+
+        let unknown: Vec<&str> = {
+            let mut seen = std::collections::BTreeSet::new();
+            scan.keys
+                .iter()
+                .map(String::as_str)
+                .filter(|key| !is_accepted_rule_root_key(key))
+                .filter(|key| seen.insert(*key))
+                .collect()
+        };
+        if !unknown.is_empty() {
+            scans.push((index, scan.id.clone()));
+            parsed.push(None);
+            rejected.push(RejectedRule { id: locator, reason: unknown_rule_keys_reason(&unknown) });
+            continue;
+        }
+        if let Some(duplicate) = scan.duplicate_keys().first() {
+            scans.push((index, scan.id.clone()));
+            parsed.push(None);
+            rejected.push(RejectedRule {
+                id: locator,
+                reason: duplicate_rule_root_key_reason(duplicate),
+            });
+            continue;
+        }
+
+        // (3): typed decode FROM THE BYTES — never through a `Value`, which would already have
+        // folded a duplicate alias away.
+        match serde_json::from_str::<RawRule>(src) {
+            Ok(rule) => {
+                scans.push((index, Some(rule.id.clone())));
+                parsed.push(Some(rule));
+            }
+            Err(error) => {
+                scans.push((index, scan.id.clone()));
+                parsed.push(None);
+                rejected.push(RejectedRule { id: locator, reason: error.to_string() });
+            }
+        }
+    }
+
+    // Duplicate rule ids are decided across the batch, as before.
+    let mut id_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for rule in parsed.iter().flatten() {
+        *id_counts.entry(rule.id.clone()).or_insert(0) += 1;
+    }
+
+    for (slot, rule) in parsed.into_iter().enumerate() {
+        let Some(rule) = rule else { continue };
+        let index = scans[slot].0;
+        let id = rule.id.clone();
+        if id_counts.get(&id).copied().unwrap_or_default() > 1 {
+            warn!(target: "rcs_filter", rule_id = %id, "duplicate rule id rejected");
+            rejected.push(RejectedRule { id, reason: "duplicate rule id".to_string() });
+            continue;
+        }
+        // (4): semantic validation. The error is collected and the loop continues to the next
+        // rule, which is what makes the aggregate report real.
+        match compile_rule_with_interner(rule, &mut interner) {
+            Ok(rule) => compiled.push(rule),
+            Err(reason) => {
+                warn!(target: "rcs_filter", rule_id = %id, %reason, "rule rejected during load");
+                rejected.push(RejectedRule { id: rule_locator(Some(&id), index), reason });
+            }
+        }
+    }
+
+    finish_rule_set(protocol_version, content_version, compiled, rejected)
+}
+
 /// Validates and compiles a single raw rule with a fresh single-use interner. This is the
 /// preserved public entry point; batch callers share address sets via
 /// [`compile_rule_with_interner`].
@@ -86,9 +288,20 @@ pub(crate) fn compile_rule_with_interner(
     raw: RawRule,
     interner: &mut AddressSetInterner,
 ) -> std::result::Result<CompiledRule, String> {
-    // Reject an empty event_abis map because the rule could never match.
-    if raw.event_abis.is_empty() {
-        return Err("event_abis is empty".to_string());
+    // The `callstack` section is compiled first, so a malformed one is reported even on a rule
+    // that also declares events.
+    let direct_delegatecalls = compile_direct_delegatecalls(&raw)?;
+
+    // The previously unconditional `"event_abis is empty"` rejection becomes conditional:
+    // a rule may now declare `callstack` instead. A rule declaring NEITHER section is still
+    // rejected, and keeps its original reason so the pre-existing contract cannot weaken.
+    if raw.event_abis.is_empty() && raw.callstack.is_none() {
+        return Err("rule declares neither event_abis nor callstack".to_string());
+    }
+    // A direct-delegatecall-only rule has no event side to take an audit payload from, so
+    // it can only ever be allow/deny.
+    if raw.action == Action::Audit && raw.event_abis.is_empty() {
+        return Err("direct-delegatecall-only rule cannot be an audit rule".to_string());
     }
     if raw.event_abis.len() > super::MAX_EVENTS_PER_RULE {
         return Err(format!(
@@ -148,6 +361,7 @@ pub(crate) fn compile_rule_with_interner(
         action: raw.action,
         audit_timeout_action,
         compiled_condition,
+        direct_delegatecalls,
     })
 }
 
@@ -391,8 +605,17 @@ mod tests {
 
     #[test]
     fn missing_required_rule_and_event_fields_fail_decoding() {
+        // `event_abis` is now DEFAULTED so a direct-delegatecall-only rule may omit it, so this
+        // rule decodes. It is rejected one step later, at compile, and keeps the pre-existing
+        // guarantee that a rule declaring neither section never loads. `event_abis` is still a
+        // required *section* in effect; it is just enforced semantically instead of by serde.
         let missing_event_abis = r#"{"id":"r","condition":true,"action":"deny"}"#;
-        assert!(serde_json::from_str::<RawRule>(missing_event_abis).is_err());
+        let decoded = serde_json::from_str::<RawRule>(missing_event_abis)
+            .expect("event_abis is defaulted, so the rule decodes");
+        assert_eq!(
+            compile_rule(decoded).expect_err("a rule declaring neither section must be rejected"),
+            "rule declares neither event_abis nor callstack"
+        );
 
         for event in [
             r#"{"name":"E","inputs":[],"anonymous":false}"#,

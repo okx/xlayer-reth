@@ -6,7 +6,11 @@
 
 mod jsonlogic;
 mod model;
+pub mod raw;
 mod validation;
+
+#[cfg(test)]
+mod callstack_acceptance_tests;
 
 /// Maximum named event aliases in one rule. Production snapshots currently use at most three;
 /// eight leaves room for richer joins while placing a hard bound on recursive binding depth.
@@ -22,7 +26,10 @@ pub const DEFAULT_MAX_EVENT_BINDINGS_PER_TX: usize = 10_000;
 pub(crate) use jsonlogic::eval_compiled;
 pub use jsonlogic::{truthy, Bindings};
 pub use model::{
-    AbiInput, Action, CompiledCondition, CompiledEvent, CompiledInput, CompiledRule, EventAbi,
-    RawRule, RejectedRule, RuleSet, TimeoutAction,
+    duplicate_alias_reason, duplicate_rule_root_key_reason, is_accepted_rule_root_key,
+    unknown_rule_keys_reason, AbiInput, Action, CompiledCondition, CompiledDirectDelegatecall,
+    CompiledEvent, CompiledInput, CompiledRule, EventAbi, RawCallstack, RawRule, RawRuleWire,
+    RejectedRule, RuleBindingClass, RuleSet, TimeoutAction, MODELLED_RULE_ROOT_KEYS,
+    RULE_LEGACY_TOLERATED_KEYS,
 };
-pub use validation::{compile_rule, load_rules};
+pub use validation::{compile_rule, load_rules, load_rules_from_raw};

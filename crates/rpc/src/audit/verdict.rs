@@ -53,24 +53,57 @@ impl AuditResult {
     }
 }
 
-/// Classifies one already-executed deposit transaction against `rules`. `tx_hash` and `logs`
-/// come from the caller's EVM execution; this function does no execution itself —
-/// zero network IO, zero side effects (unlike `FilterHandle::screen_tx`, this never touches a
-/// `BufferPool`).
+/// What one deposit's simulation produced. Grouped so the classifier takes the execution facts as
+/// one value rather than a long positional list whose order a caller could silently get wrong.
+pub struct SimulatedDeposit<'a> {
+    pub from: Address,
+    pub to: Option<Address>,
+    pub tx_hash: B256,
+    pub value: U256,
+    /// The execution result's own logs.
+    pub logs: &'a [Log],
+    /// Direct-delegatecall observations captured from **this** deposit's simulation.
+    pub observations: &'a rcs_filter::callstack::Observations,
+}
+
+/// Classifies one already-executed deposit transaction against `rules`. The execution facts come
+/// from the caller's EVM run; this function does no execution itself — zero network IO, zero side
+/// effects (unlike `FilterHandle::screen_tx`, this never touches a `BufferPool`).
 pub fn verdict_for(
     req: &DepositTxRequest,
-    from: Address,
-    to: Option<Address>,
-    tx_hash: B256,
-    value: U256,
-    logs: &[Log],
+    simulated: &SimulatedDeposit<'_>,
     rules: &RuleSet,
 ) -> AuditResult {
-    let input =
-        ScreenInput { tx_hash, origin: from, tx_to: to, nonce: 0, value, block_height: 0, logs };
+    let tx_hash = simulated.tx_hash;
+    let input = ScreenInput {
+        tx_hash,
+        origin: simulated.from,
+        tx_to: simulated.to,
+        nonce: 0,
+        value: simulated.value,
+        block_height: 0,
+        logs: simulated.logs,
+        // Captured from this deposit's own simulation. An unavailable or wrongly-stamped set is
+        // fail-closed input: it becomes a non-verdict with no state committed, never an allow.
+        direct_delegatecalls: simulated.observations,
+    };
     // The audit RPC path holds no FilterConfig, so it uses the default binding budget. This keeps
     // its existing matcher-overflow `Malformed` semantics unchanged.
     match try_evaluate(rules, &input, DEFAULT_MAX_EVENT_BINDINGS_PER_TX) {
+        Err(rcs_filter::matching::MatchError::ObservationsUnavailable { reason }) => {
+            // Exactly one bounded event and one metric per fail-closed decision point. The fields
+            // are the deposit's own identifier and the fixed reason discriminant; observation
+            // contents, addresses and code hashes are never logged.
+            tracing::error!(
+                target: "xlayer_audit_rpc",
+                source_hash = %req.source_hash,
+                reason = reason.label(),
+                "direct-delegatecall observations unavailable; returning a non-verdict and \
+                 committing no state"
+            );
+            rcs_filter::metrics::record_callstack_observations_unavailable(reason);
+            AuditResult::malformed(req.source_hash.clone())
+        }
         Err(error) => {
             tracing::warn!(
                 target: "xlayer_audit_rpc",
@@ -133,11 +166,14 @@ mod tests {
         let req = sample_request();
         let result = verdict_for(
             &req,
-            origin(),
-            Some(recipient()),
-            B256::ZERO,
-            U256::ZERO,
-            &[],
+            &SimulatedDeposit {
+                from: origin(),
+                to: Some(recipient()),
+                tx_hash: B256::ZERO,
+                value: U256::ZERO,
+                logs: &[],
+                observations: rcs_filter::callstack::Observations::not_captured(),
+            },
             &no_rules(),
         );
         assert_eq!(result.verdict, Verdict::Allow);
@@ -186,11 +222,14 @@ mod tests {
 
         let result = verdict_for(
             &req,
-            origin(),
-            Some(recipient()),
-            B256::ZERO,
-            one_token,
-            &[log],
+            &SimulatedDeposit {
+                from: origin(),
+                to: Some(recipient()),
+                tx_hash: B256::ZERO,
+                value: one_token,
+                logs: &[log],
+                observations: rcs_filter::callstack::Observations::not_captured(),
+            },
             &deny_above_threshold_rule(),
         );
 
@@ -208,11 +247,14 @@ mod tests {
 
         let result = verdict_for(
             &req,
-            origin(),
-            Some(recipient()),
-            B256::ZERO,
-            below_threshold,
-            &[log],
+            &SimulatedDeposit {
+                from: origin(),
+                to: Some(recipient()),
+                tx_hash: B256::ZERO,
+                value: below_threshold,
+                logs: &[log],
+                observations: rcs_filter::callstack::Observations::not_captured(),
+            },
             &deny_above_threshold_rule(),
         );
 
@@ -255,11 +297,14 @@ mod tests {
 
         let result = verdict_for(
             &req,
-            origin(),
-            Some(recipient()),
-            B256::ZERO,
-            value,
-            &[log],
+            &SimulatedDeposit {
+                from: origin(),
+                to: Some(recipient()),
+                tx_hash: B256::ZERO,
+                value,
+                logs: &[log],
+                observations: rcs_filter::callstack::Observations::not_captured(),
+            },
             &audit_quota_rule(),
         );
 
@@ -285,11 +330,14 @@ mod tests {
 
         let result = verdict_for(
             &req,
-            origin(),
-            Some(recipient()),
-            B256::ZERO,
-            U256::ZERO,
-            &logs,
+            &SimulatedDeposit {
+                from: origin(),
+                to: Some(recipient()),
+                tx_hash: B256::ZERO,
+                value: U256::ZERO,
+                logs: &logs,
+                observations: rcs_filter::callstack::Observations::not_captured(),
+            },
             &audit_quota_rule(),
         );
 
@@ -319,11 +367,14 @@ mod tests {
 
         let result = verdict_for(
             &sample_request(),
-            origin(),
-            Some(recipient()),
-            B256::ZERO,
-            U256::ZERO,
-            &logs,
+            &SimulatedDeposit {
+                from: origin(),
+                to: Some(recipient()),
+                tx_hash: B256::ZERO,
+                value: U256::ZERO,
+                logs: &logs,
+                observations: rcs_filter::callstack::Observations::not_captured(),
+            },
             &rules,
         );
 
@@ -347,11 +398,14 @@ mod tests {
 
         let result = verdict_for(
             &sample_request(),
-            origin(),
-            Some(recipient()),
-            B256::ZERO,
-            U256::ZERO,
-            &logs,
+            &SimulatedDeposit {
+                from: origin(),
+                to: Some(recipient()),
+                tx_hash: B256::ZERO,
+                value: U256::ZERO,
+                logs: &logs,
+                observations: rcs_filter::callstack::Observations::not_captured(),
+            },
             &rules,
         );
 
@@ -390,11 +444,14 @@ mod tests {
 
         let allowed = verdict_for(
             &sample_request(),
-            origin(),
-            Some(recipient()),
-            B256::ZERO,
-            U256::ZERO,
-            &logs_of(70),
+            &SimulatedDeposit {
+                from: origin(),
+                to: Some(recipient()),
+                tx_hash: B256::ZERO,
+                value: U256::ZERO,
+                logs: &logs_of(70),
+                observations: rcs_filter::callstack::Observations::not_captured(),
+            },
             &two_rules(),
         );
         assert_eq!(allowed.verdict, Verdict::Audit);
@@ -405,11 +462,14 @@ mod tests {
 
         let malformed = verdict_for(
             &sample_request(),
-            origin(),
-            Some(recipient()),
-            B256::ZERO,
-            U256::ZERO,
-            &logs_of(71),
+            &SimulatedDeposit {
+                from: origin(),
+                to: Some(recipient()),
+                tx_hash: B256::ZERO,
+                value: U256::ZERO,
+                logs: &logs_of(71),
+                observations: rcs_filter::callstack::Observations::not_captured(),
+            },
             &two_rules(),
         );
         assert_eq!(malformed.verdict, Verdict::Malformed);
@@ -460,11 +520,15 @@ mod tests {
         let req = sample_request();
         let result = verdict_for(
             &req,
-            origin(),
-            Some(recipient()), // normal business target, not the TxBlacklist contract
-            B256::ZERO,
-            U256::ZERO,
-            &[], // no logs
+            &SimulatedDeposit {
+                from: origin(),
+                // Normal business target, not the TxBlacklist contract.
+                to: Some(recipient()),
+                tx_hash: B256::ZERO,
+                value: U256::ZERO,
+                logs: &[],
+                observations: rcs_filter::callstack::Observations::not_captured(),
+            },
             &emergency_deny_all_rule(),
         );
         assert_eq!(result.verdict, Verdict::Deny);

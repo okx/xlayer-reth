@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use alloy_primitives::{Address, Log, B256, U256};
 use tracing::error;
 
+use crate::callstack::Observations;
 use crate::client::RcsClient;
 use crate::clock::Clock;
 use crate::config::FilterConfig;
@@ -76,6 +77,10 @@ pub enum LocalDenyReason {
     /// An observation invariant failed: the captured real-log subsequence did not match the
     /// execution result, or an enabled filter received a passthrough capture outcome.
     ObservationInvariant,
+    /// A rule declared a direct-delegatecall alias but no trustworthy observation set was
+    /// available for this simulation (capture unavailable, frame stack incomplete, observation
+    /// budget exceeded, snapshot stamp mismatch, or an indeterminate own-code signal).
+    CallstackObservationUnavailable,
 }
 
 /// Input to [`FilterHandle::screen_tx`], borrowed from the builder loop.
@@ -91,6 +96,13 @@ pub struct ScreenInput<'a> {
     pub block_height: u64,
     /// Execution logs of the transaction (borrowed; screening does not consume them).
     pub logs: &'a [Log],
+    /// Direct-delegatecall observations for this simulation. `Unavailable` is **fail-closed
+    /// input, never "nothing matched"**.
+    ///
+    /// Callers on a path that performs no frame capture pass
+    /// [`crate::callstack::Observations::not_captured`]; screening ignores that value unless some
+    /// rule declares an alias.
+    pub direct_delegatecalls: &'a Observations,
 }
 
 /// Shared, cheaply-clonable filter state used by the handle and background workers.
@@ -207,6 +219,24 @@ fn binding_overflow_counts(
             (*attempted, *limit)
         }
         matching::MatchError::BindingCountOverflow { .. } => (usize::MAX, configured_limit),
+        // An unavailable observation set carries its own bounded counts when it was a budget
+        // overflow; otherwise there is no count to report and the configured limit is echoed.
+        matching::MatchError::ObservationsUnavailable { reason } => match reason {
+            crate::callstack::ObservationsUnavailable::BudgetExceeded { attempted, limit } => {
+                (*attempted, *limit)
+            }
+            _ => (0, configured_limit),
+        },
+    }
+}
+
+/// Whether a match error is an unavailable direct-delegatecall observation set, and its bounded
+/// reason discriminant. The discriminant is a fixed, low-cardinality label — never an address, a
+/// code hash, or any other observation content.
+fn observations_unavailable_reason(error: &matching::MatchError) -> Option<&'static str> {
+    match error {
+        matching::MatchError::ObservationsUnavailable { reason } => Some(reason.label()),
+        _ => None,
     }
 }
 
@@ -253,6 +283,28 @@ impl FilterHandle {
         self.shared.config.max_native_transfers_per_tx
     }
 
+    /// The configured maximum direct-delegatecall observations per transaction, read here for the
+    /// same reason as the native budget above: the capture layer must never carry its own copy.
+    pub fn max_callstack_observations_per_tx(&self) -> usize {
+        self.shared.config.max_callstack_observations_per_tx
+    }
+
+    /// The rule snapshot that must BOTH configure capture for `tx_hash` and evaluate its result.
+    ///
+    /// Acquired **once, before simulation**. A buffered entry re-simulates against the snapshot
+    /// saved on that entry, so a re-evaluation can never be judged by a snapshot it was not
+    /// captured for; a fresh candidate uses the installed snapshot. Taking this decision here,
+    /// before execution, is what stops capture and screening from straddling a hot reload — the
+    /// inspector is built once per block-building pass while the snapshot can swap mid-loop.
+    pub fn capture_snapshot_for(&self, tx_hash: &B256) -> Arc<RuleSet> {
+        if let Some(snapshot) =
+            self.shared.pool_lock().get(tx_hash).map(|e| Arc::clone(&e.rule_snapshot))
+        {
+            return snapshot;
+        }
+        self.shared.current_rules()
+    }
+
     /// Records a builder-side local deny that bypassed rule evaluation (native-transfer budget
     /// overflow or an observation invariant failure). Increments the total-deny metric once and the
     /// matching reason metric once. Creates no buffer-pool entry and performs no txpool removal —
@@ -266,11 +318,25 @@ impl FilterHandle {
             LocalDenyReason::ObservationInvariant => {
                 self.shared.metrics.local_deny_observation_invariant_total.increment(1)
             }
+            LocalDenyReason::CallstackObservationUnavailable => {
+                self.shared.metrics.callstack_observations_unavailable_total.increment(1)
+            }
         }
     }
 
     /// Screens one transaction (synchronous, no network IO). See [`Screen`].
+    ///
+    /// Acquires the installed snapshot itself. A caller that armed frame capture must instead use
+    /// [`Self::screen_tx_with_snapshot`] with the snapshot it captured against, or a hot reload
+    /// between simulation and screening would judge an observation set against a snapshot that
+    /// never configured it.
     pub fn screen_tx(&self, input: &ScreenInput) -> Screen {
+        self.screen_tx_with_snapshot(input, self.shared.current_rules())
+    }
+
+    /// [`Self::screen_tx`] against an explicitly supplied snapshot — the one
+    /// [`Self::capture_snapshot_for`] returned before simulation.
+    pub fn screen_tx_with_snapshot(&self, input: &ScreenInput, snapshot: Arc<RuleSet>) -> Screen {
         // Stage zero: dedup short-circuit — a non-terminal buffered entry is reused without
         // re-decoding or re-submitting during the first screening stage.
         let existing = {
@@ -283,13 +349,15 @@ impl FilterHandle {
             return self.screen_existing(input, status, stored_hash, generation, rule_snapshot);
         }
 
-        // Fresh evaluation.
-        let rules = self.shared.current_rules();
-        let outcome = match matching::try_evaluate(
+        // Fresh evaluation, against the snapshot the caller captured with — never a second,
+        // freshly acquired one.
+        let rules = snapshot;
+        let (evaluated, stats) = matching::try_evaluate_with_stats(
             &rules,
             input,
             self.shared.config.max_event_bindings_per_tx,
-        ) {
+        );
+        let outcome = match evaluated {
             Ok(outcome) => outcome,
             Err(error) => {
                 // Structured error-level diagnostics at a real budget-overflow decision point.
@@ -297,6 +365,40 @@ impl FilterHandle {
                 // transfer content is NEVER logged.
                 let (attempted, limit) =
                     binding_overflow_counts(&error, self.shared.config.max_event_bindings_per_tx);
+                if let Some(reason) = observations_unavailable_reason(&error) {
+                    // Exactly one bounded error! and one metric per fail-closed decision point.
+                    // Fields are bounded to tx_hash, the reason discriminant and attempted/limit;
+                    // observation contents, addresses and hashes are NEVER logged.
+                    error!(
+                        target: "rcs_filter",
+                        tx_hash = %input.tx_hash,
+                        reason = reason,
+                        observed_count = attempted,
+                        limit = limit,
+                        "direct-delegatecall observations unavailable; denying transaction (Screen::Deny)"
+                    );
+                    self.record_local_deny(LocalDenyReason::CallstackObservationUnavailable);
+                    if matches!(
+                        error,
+                        matching::MatchError::ObservationsUnavailable {
+                            reason: crate::callstack::ObservationsUnavailable::BudgetExceeded { .. }
+                        }
+                    ) {
+                        self.shared
+                            .metrics
+                            .callstack_observation_budget_overflow_total
+                            .increment(1);
+                    }
+                    if matches!(
+                        error,
+                        matching::MatchError::ObservationsUnavailable {
+                            reason: crate::callstack::ObservationsUnavailable::SnapshotMismatch
+                        }
+                    ) {
+                        self.shared.metrics.callstack_snapshot_mismatch_total.increment(1);
+                    }
+                    return Screen::Deny;
+                }
                 error!(
                     target: "rcs_filter",
                     tx_hash = %input.tx_hash,
@@ -335,6 +437,9 @@ impl FilterHandle {
             }
             MatchOutcome::Deny => {
                 self.shared.metrics.deny_total.increment(1);
+                if stats.deny_from_callstack_rule {
+                    self.shared.metrics.callstack_deny_total.increment(1);
+                }
                 Screen::Deny
             }
             MatchOutcome::Audit { actions, timeout_action } => {
@@ -654,6 +759,7 @@ mod tests {
             value: U256::ZERO,
             block_height: 1_000_000,
             logs,
+            direct_delegatecalls: Observations::not_captured(),
         }
     }
 
@@ -706,6 +812,7 @@ mod tests {
             value: U256::ZERO,
             block_height: 0,
             logs: &logs,
+            direct_delegatecalls: Observations::not_captured(),
         };
         // Tight budget of 2: 3 × 3 = 9 bindings > 2 → fail-closed Deny (proves screen_tx reads
         // the configured limit, not a fixed constant).
@@ -771,6 +878,7 @@ mod tests {
             value: U256::ZERO,
             block_height: 0,
             logs: &logs,
+            direct_delegatecalls: Observations::not_captured(),
         };
         let handle = FilterHandle::for_test(
             FilterConfig { max_event_bindings_per_tx: 2, ..FilterConfig::default() },
@@ -831,6 +939,7 @@ mod tests {
             value: U256::ZERO,
             block_height: 1_000_000,
             logs: &logs,
+            direct_delegatecalls: Observations::not_captured(),
         };
         assert_eq!(h.screen_tx(&input), Screen::Deny);
         assert!(h.buffer_status(&golden::tx_b()).is_none());
@@ -890,6 +999,7 @@ mod tests {
             value: U256::ZERO,
             block_height,
             logs,
+            direct_delegatecalls: Observations::not_captured(),
         }
     }
 

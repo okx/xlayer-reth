@@ -18,6 +18,7 @@ members = [
     "crates/chainspec",
     "crates/flashblocks",
     "crates/intercept",
+    "crates/rcs-capture",
     "crates/rcs-filter",
     "crates/legacy-rpc",
     "crates/monitor",
@@ -70,6 +71,9 @@ xlayer-builder = { path = "crates/builder" }
 xlayer-chainspec = { path = "crates/chainspec" }
 xlayer-flashblocks = { path = "crates/flashblocks" }
 rcs-filter = { path = "crates/rcs-filter" }
+# Shared execution-frame capture layer: owns the capture inspector and its frame logic, so the
+# builder and the RPC crate drive the SAME type instead of duplicating frame identification.
+xlayer-rcs-capture = { path = "crates/rcs-capture" }
 # `kms:<name>` secret resolution, shared with the op-node side of the stack. The
 # private SDK behind it is pulled in only by this crate's `kms` feature; see
 # deps/optimism/rust/xlayer-kms/ for why the default build needs no credentials.
@@ -262,7 +266,10 @@ once_cell = "1.19"
 parking_lot = { version = "0.12.3" }
 secp256k1 = { version = "0.30", default-features = false }
 serde = "1"
-serde_json = "1.0"
+# `raw_value` is REQUIRED and is a non-default feature: a rule's original JSON bytes must
+# survive untouched until duplicate-alias detection has run, and a `Value` would already have
+# folded a repeated key last-wins.
+serde_json = { version = "1.0", features = ["raw_value"] }
 serde_with = { version = "3.8.1" }
 thiserror = { version = "2.0.18" }
 humantime = "2.1"

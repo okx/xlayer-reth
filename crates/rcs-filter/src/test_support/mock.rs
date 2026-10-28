@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::client::{
     QueryParams, QueryResponse, QueryTx, RcsClient, RulesResponse, SubmitRequest, SubmitResponse,
@@ -25,8 +25,11 @@ struct QueryState {
 struct MockState {
     protocol_version: u32,
     content_version: u64,
-    rules: Vec<Value>,
-    rules_response_override: Option<Value>,
+    /// Rule fixtures kept as their **original JSON text**, so a fixture carrying a duplicate key
+    /// still carries it when the mock serves it. Holding `Value` here would fold a repeated key
+    /// last-wins inside the test double and make the duplicate checks unexercisable.
+    rules: Vec<String>,
+    rules_response_override: Option<String>,
     submit_accepted: Option<Vec<String>>,
     submit_rejected: Vec<String>,
     query_states: HashMap<String, QueryState>,
@@ -69,9 +72,12 @@ impl MockRcsClient {
 
     /// Registers the rule fixtures (each a JSON rule object string, e.g. golden RULE_SCENARIO_A).
     pub fn set_rules_fixture(&self, rules: &[&str]) {
-        let parsed =
-            rules.iter().map(|r| serde_json::from_str(r).expect("valid rule json")).collect();
-        self.lock().rules = parsed;
+        // Only syntax is checked here; validity is the loader's decision, and the exact bytes are
+        // what gets served.
+        for rule in rules {
+            serde_json::from_str::<Value>(rule).expect("syntactically valid rule json");
+        }
+        self.lock().rules = rules.iter().map(|r| (*r).to_string()).collect();
     }
 
     /// Bumps `content_version` to simulate an RCS-side rule content change.
@@ -86,7 +92,14 @@ impl MockRcsClient {
 
     /// Overrides the complete `GET /rules` body to exercise wire decode failures.
     pub fn set_rules_response_override(&self, body: Value) {
-        self.lock().rules_response_override = Some(body);
+        self.lock().rules_response_override = Some(body.to_string());
+    }
+
+    /// Overrides the complete `GET /rules` body with **exact bytes**, for cases a `Value` cannot
+    /// express — a duplicate key, or any other byte-level shape that must reach the decoder
+    /// unmodified.
+    pub fn set_rules_response_raw_override(&self, body: &str) {
+        self.lock().rules_response_override = Some(body.to_string());
     }
 
     /// Registers the `202` submit response (accepted / rejected_malformed hash lists).
@@ -178,14 +191,17 @@ impl RcsClient for MockRcsClient {
         if s.unavailable {
             return Err(FilterError::Transport("mock unavailable".into()));
         }
+        // Assembled as TEXT and decoded from text, so the bytes a test registers are exactly the
+        // bytes the decoder sees.
         let body = s.rules_response_override.clone().unwrap_or_else(|| {
-            json!({
-                "protocol_version": s.protocol_version,
-                "content_version": s.content_version,
-                "rules": Value::Array(s.rules.clone()),
-            })
+            format!(
+                r#"{{"protocol_version":{},"content_version":{},"rules":[{}]}}"#,
+                s.protocol_version,
+                s.content_version,
+                s.rules.join(",")
+            )
         });
-        serde_json::from_value(body).map_err(|e| FilterError::Decode(e.to_string()))
+        serde_json::from_str(&body).map_err(|e| FilterError::Decode(e.to_string()))
     }
 
     async fn get_rules_version(&self) -> Result<VersionResponse> {

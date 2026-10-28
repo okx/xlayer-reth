@@ -458,6 +458,7 @@ mod rcs_txpool_tests {
             value: alloy_primitives::U256::ZERO,
             block_height: 1_000_000,
             logs: &logs,
+            direct_delegatecalls: rcs_filter::callstack::Observations::not_captured(),
         };
         tokio::time::timeout(Duration::from_secs(2), async {
             while !filter_for_screen.is_ready() {
@@ -533,6 +534,7 @@ mod rcs_txpool_tests {
             value: alloy_primitives::U256::ZERO,
             block_height: 1_000_000,
             logs: &logs,
+            direct_delegatecalls: rcs_filter::callstack::Observations::not_captured(),
         };
         assert_eq!(filter.screen_tx(&input), rcs_filter::Screen::AuditPending);
 
@@ -599,6 +601,7 @@ mod rcs_txpool_tests {
             value: alloy_primitives::U256::ZERO,
             block_height: 1_000_000,
             logs: &logs,
+            direct_delegatecalls: rcs_filter::callstack::Observations::not_captured(),
         };
         assert_eq!(filter.screen_tx(&input), rcs_filter::Screen::AuditPending);
         tokio::time::timeout(Duration::from_secs(3), async {

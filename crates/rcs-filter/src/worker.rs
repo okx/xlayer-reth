@@ -22,7 +22,7 @@ use crate::config::is_supported_protocol;
 use crate::handle::{Shared, TerminalEvent, TerminalReason};
 use crate::metrics::RequestEndpoint;
 use crate::pool::{QueryResolution, Resolution};
-use crate::rules::load_rules;
+use crate::rules::load_rules_from_raw;
 
 pub(crate) use crate::submit::submit_once;
 
@@ -184,7 +184,7 @@ pub(crate) async fn load_and_install(
         );
         return Ok(false);
     }
-    let set = load_rules(resp.protocol_version, resp.content_version, resp.rules);
+    let set = load_rules_from_raw(resp.protocol_version, resp.content_version, &resp.rules);
     if !set.rejected.is_empty() {
         // Fail the whole update rather than installing a rule set that's silently missing
         // the rule(s) that failed validation — a partial/degraded rule set with no operator

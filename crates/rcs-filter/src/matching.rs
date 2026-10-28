@@ -10,14 +10,28 @@ use alloy_primitives::{Address, Log};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::callstack::{
+    observation_bindings, DirectDelegatecallObservation, Observations, ObservationsUnavailable,
+};
 use crate::client::ActionItem;
 use crate::handle::ScreenInput;
 use crate::rules::{
-    eval_compiled, Action, CompiledEvent, CompiledRule, RuleSet, TimeoutAction,
+    eval_compiled, Action, CompiledEvent, CompiledRule, RuleBindingClass, RuleSet, TimeoutAction,
     DEFAULT_MAX_EVENT_BINDINGS_PER_TX,
 };
 
 type ActionsByLog = BTreeMap<String, BTreeMap<usize, ActionItem>>;
+
+/// Test-only wrapper that supplies the metrics sink, so the existing budget tests keep their
+/// shape instead of threading a sink they do not assert on.
+#[cfg(test)]
+fn evaluate_checked_for_test(
+    rules: &RuleSet,
+    input: &ScreenInput,
+    max_event_bindings: usize,
+) -> Result<MatchOutcome, MatchError> {
+    evaluate_checked(rules, input, max_event_bindings, &mut MatchStats::default())
+}
 
 #[cfg(test)]
 std::thread_local! {
@@ -49,6 +63,11 @@ pub enum MatchError {
         "rule '{rule_id}' would raise the complete event binding count to {attempted}, exceeding the per-transaction budget of {limit}"
     )]
     BindingBudgetExceeded { rule_id: String, attempted: usize, limit: usize },
+    /// A rule declares a direct-delegatecall alias but no trustworthy observation set is
+    /// available. **Fail-closed input, never "nothing matched"**: treating it as an empty set
+    /// would silently turn an unavailable capture into a clean allow.
+    #[error("direct-delegatecall observations unavailable: {}", reason.label())]
+    ObservationsUnavailable { reason: ObservationsUnavailable },
 }
 
 /// Fallible screening entry used by callers that can surface malformed/error outcomes.
@@ -61,7 +80,28 @@ pub fn try_evaluate(
     input: &ScreenInput,
     max_event_bindings: usize,
 ) -> Result<MatchOutcome, MatchError> {
-    evaluate_checked(rules, input, max_event_bindings)
+    try_evaluate_with_stats(rules, input, max_event_bindings).0
+}
+
+/// Bounded, content-free facts about one evaluation, for metrics only. Carries no rule id, no
+/// address and no observation content, so it can never widen what a counter label exposes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MatchStats {
+    /// Whether the rule that produced a `Deny` declared a direct-delegatecall alias. Lets a
+    /// caller attribute the deny to the callstack dimension instead of guessing from the
+    /// snapshot, which could not distinguish a concurrent event-only deny.
+    pub deny_from_callstack_rule: bool,
+}
+
+/// [`try_evaluate`] plus the bounded per-evaluation facts a metrics caller needs.
+pub fn try_evaluate_with_stats(
+    rules: &RuleSet,
+    input: &ScreenInput,
+    max_event_bindings: usize,
+) -> (Result<MatchOutcome, MatchError>, MatchStats) {
+    let mut stats = MatchStats::default();
+    let outcome = evaluate_checked(rules, input, max_event_bindings, &mut stats);
+    (outcome, stats)
 }
 
 fn checked_binding_count(candidate_counts: impl IntoIterator<Item = usize>) -> Option<usize> {
@@ -84,6 +124,7 @@ fn evaluate_checked(
     rules: &RuleSet,
     input: &ScreenInput,
     max_event_bindings: usize,
+    stats: &mut MatchStats,
 ) -> Result<MatchOutcome, MatchError> {
     // Merge audit rules at the physical-log level. Multiple rules can match the same log, but
     // RCS must receive that event only once per audit type or it would account the same action
@@ -92,6 +133,29 @@ fn evaluate_checked(
     let mut has_audit = false;
     let mut timeout_action = TimeoutAction::Allow;
     let mut complete_binding_count = 0usize;
+
+    // Trustworthiness of the observation set is decided ONCE, before any rule work, and only
+    // when the snapshot actually declares an alias.
+    //
+    // When no rule declares an alias, an `Unavailable` set is ignored entirely: an event-only
+    // deployment keeps today's exact behaviour and pays nothing. When some rule does declare
+    // one, an unavailable or wrongly-stamped set fails closed through the existing error
+    // channel — it is never resolved by suppressing candidates or by treating the set as empty,
+    // because that would convert a configuration or capture error into an allow.
+    let observations = input.direct_delegatecalls;
+    if rules.declares_any_alias() {
+        match observations {
+            Observations::Unavailable(reason) => {
+                return Err(MatchError::ObservationsUnavailable { reason: *reason });
+            }
+            Observations::Available { stamp, .. } if *stamp != rules.snapshot_stamp() => {
+                return Err(MatchError::ObservationsUnavailable {
+                    reason: ObservationsUnavailable::SnapshotMismatch,
+                });
+            }
+            Observations::Available { .. } => {}
+        }
+    }
 
     // Emergency Deny-All: evaluate every rule for every transaction. The legacy
     // topic0 candidate index is intentionally bypassed here (see `candidate_rule_indices`).
@@ -110,14 +174,54 @@ fn evaluate_checked(
             continue;
         }
 
-        // Stage two: decode every physical match. Missing events contribute one null candidate,
-        // then complete bindings are visited lazily instead of materializing their Cartesian
-        // product.
-        let candidates: Vec<Vec<Option<MatchedEvent>>> = rule
-            .events
-            .iter()
-            .map(|event| {
-                let matched = find_logs_for_event(event, input.logs);
+        // Stage two, alias side: one candidate dimension per declared alias, in execution order.
+        //
+        // A declared alias with NO observation suppresses the whole rule — `continue`, so no
+        // binding is built, `condition` never runs, and the rule contributes ZERO to the budget
+        // (not one). This is the deliberate mechanical difference from events: null-binding an
+        // alias would make the canonical negated allowlist
+        // `{"!": {"in": [{"var": "a.delegateCodeHash"}, [..]]}}` evaluate TRUE for every
+        // transaction that never touched the proxy, because comparing a value with null yields
+        // false — a production-wide false deny.
+        //
+        // For a rule declaring several aliases this means ALL of them must have produced at
+        // least one observation; independent per-proxy monitoring needs separate rules.
+        let mut alias_candidates: Vec<Vec<&DirectDelegatecallObservation>> =
+            Vec::with_capacity(rule.direct_delegatecalls.len());
+        let mut alias_suppressed = false;
+        for declared in &rule.direct_delegatecalls {
+            let items = observations.items_for(declared.address);
+            if items.is_empty() {
+                alias_suppressed = true;
+                break;
+            }
+            alias_candidates.push(items);
+        }
+        if alias_suppressed {
+            continue;
+        }
+
+        // Stage two, event side: decode every physical match. Missing events contribute one null
+        // candidate, then complete bindings are visited lazily instead of materializing their
+        // Cartesian product.
+        let event_matches: Vec<Vec<MatchedEvent>> =
+            rule.events.iter().map(|event| find_logs_for_event(event, input.logs)).collect();
+
+        // A MIXED rule requires BOTH binding kinds to be physically present. Without this, a
+        // mixed deny whose condition inspects only `delegateCodeHash` would still fire with a
+        // direct observation present and no event at all, because the missing event's null
+        // candidate keeps the rule evaluable. An EVENT-ONLY rule keeps the null candidate and is
+        // still evaluated, which is what preserves deployed rule semantics and Emergency
+        // Deny-All exactly.
+        if rule.binding_class() == RuleBindingClass::Mixed
+            && event_matches.iter().any(Vec::is_empty)
+        {
+            continue;
+        }
+
+        let candidates: Vec<Vec<Option<MatchedEvent>>> = event_matches
+            .into_iter()
+            .map(|matched| {
                 if matched.is_empty() {
                     vec![None]
                 } else {
@@ -125,8 +229,14 @@ fn evaluate_checked(
                 }
             })
             .collect();
-        let rule_binding_count = checked_binding_count(candidates.iter().map(Vec::len))
-            .ok_or_else(|| MatchError::BindingCountOverflow { rule_id: rule.id.clone() })?;
+
+        // Combined budget: Π(event candidate counts) × Π(alias observation counts), accumulated
+        // across rules with the existing checked discipline so an overflow in EITHER dimension
+        // fails closed.
+        let rule_binding_count = checked_binding_count(
+            candidates.iter().map(Vec::len).chain(alias_candidates.iter().map(Vec::len)),
+        )
+        .ok_or_else(|| MatchError::BindingCountOverflow { rule_id: rule.id.clone() })?;
         complete_binding_count = complete_binding_count
             .checked_add(rule_binding_count)
             .ok_or_else(|| MatchError::BindingCountOverflow { rule_id: rule.id.clone() })?;
@@ -137,13 +247,13 @@ fn evaluate_checked(
                 limit: max_event_bindings,
             });
         }
-        let mut current = Vec::with_capacity(candidates.len());
-        let mut visit = |binding: &[Option<MatchedEvent>]| {
+        let mut visit = |binding: &[Option<MatchedEvent>],
+                         aliases: &[&DirectDelegatecallObservation]| {
             // Missing events are null-bound; evaluate the condition for every binding, including
             // no-log transactions. Whether any *physical* event backed this binding decides only
             // whether an Audit may carry content (an all-null binding must never submit empties).
             let has_physical = binding.iter().any(Option::is_some);
-            let bindings = build_bindings(rule, input, binding);
+            let bindings = build_bindings(rule, input, binding, aliases);
             if !eval_compiled(&rule.compiled_condition, &bindings) {
                 return ControlFlow::Continue(());
             }
@@ -175,9 +285,13 @@ fn evaluate_checked(
                 }
             }
         };
+        let mut alias_current = Vec::with_capacity(alias_candidates.len());
         if let ControlFlow::Break(outcome) =
-            visit_bindings(0, &candidates, &mut current, &mut visit)
+            visit_alias_bindings(0, &alias_candidates, &mut alias_current, &candidates, &mut visit)
         {
+            if outcome == MatchOutcome::Deny {
+                stats.deny_from_callstack_rule = rule.declares_alias();
+            }
             return Ok(outcome);
         }
     }
@@ -231,6 +345,7 @@ fn build_bindings(
     rule: &CompiledRule,
     input: &ScreenInput,
     binding: &[Option<MatchedEvent>],
+    aliases: &[&DirectDelegatecallObservation],
 ) -> crate::rules::Bindings {
     let mut b = crate::rules::Bindings::new();
     b.insert(
@@ -262,28 +377,77 @@ fn build_bindings(
         }
     }
 
+    // Four flat keys per declared alias for the observation bound on this candidate. There is no
+    // null branch here: an alias with no observation suppressed the rule before any binding was
+    // built, so these keys are only ever bound to a real executed observation.
+    for (declared, observation) in rule.direct_delegatecalls.iter().zip(aliases) {
+        b.extend(observation_bindings(&declared.alias, observation));
+    }
+
     b
 }
 
-/// Visits every complete event binding in candidate order without allocating the Cartesian
-/// product. A visitor can break immediately, which is used to return a pure deny verdict.
-fn visit_bindings<F>(
-    event_idx: usize,
-    candidates: &[Vec<Option<MatchedEvent>>],
-    current: &mut Vec<Option<MatchedEvent>>,
+/// Walks the alias candidate dimensions, and for each alias binding walks the event dimensions,
+/// so the visitor sees the full event × alias product lazily rather than materialized. A visitor
+/// can break immediately, which is used to return a pure deny verdict.
+fn visit_alias_bindings<'o, F>(
+    alias_idx: usize,
+    alias_candidates: &[Vec<&'o DirectDelegatecallObservation>],
+    alias_current: &mut Vec<&'o DirectDelegatecallObservation>,
+    event_candidates: &[Vec<Option<MatchedEvent>>],
     visit: &mut F,
 ) -> ControlFlow<MatchOutcome>
 where
-    F: FnMut(&[Option<MatchedEvent>]) -> ControlFlow<MatchOutcome>,
+    F: FnMut(
+        &[Option<MatchedEvent>],
+        &[&'o DirectDelegatecallObservation],
+    ) -> ControlFlow<MatchOutcome>,
+{
+    if alias_idx == alias_candidates.len() {
+        let mut event_current = Vec::with_capacity(event_candidates.len());
+        return visit_bindings(0, event_candidates, &mut event_current, alias_current, visit);
+    }
+
+    for candidate in &alias_candidates[alias_idx] {
+        alias_current.push(candidate);
+        if let ControlFlow::Break(outcome) = visit_alias_bindings(
+            alias_idx + 1,
+            alias_candidates,
+            alias_current,
+            event_candidates,
+            visit,
+        ) {
+            alias_current.pop();
+            return ControlFlow::Break(outcome);
+        }
+        alias_current.pop();
+    }
+    ControlFlow::Continue(())
+}
+
+/// Visits every complete event binding in candidate order without allocating the Cartesian
+/// product, carrying the already-bound alias observations through to the visitor.
+fn visit_bindings<'o, F>(
+    event_idx: usize,
+    candidates: &[Vec<Option<MatchedEvent>>],
+    current: &mut Vec<Option<MatchedEvent>>,
+    aliases: &[&'o DirectDelegatecallObservation],
+    visit: &mut F,
+) -> ControlFlow<MatchOutcome>
+where
+    F: FnMut(
+        &[Option<MatchedEvent>],
+        &[&'o DirectDelegatecallObservation],
+    ) -> ControlFlow<MatchOutcome>,
 {
     if event_idx == candidates.len() {
-        return visit(current);
+        return visit(current, aliases);
     }
 
     for candidate in &candidates[event_idx] {
         current.push(candidate.clone());
         if let ControlFlow::Break(outcome) =
-            visit_bindings(event_idx + 1, candidates, current, visit)
+            visit_bindings(event_idx + 1, candidates, current, aliases, visit)
         {
             current.pop();
             return ControlFlow::Break(outcome);
@@ -458,6 +622,7 @@ mod tests {
             value: U256::ZERO,
             block_height: 1_000_000,
             logs,
+            direct_delegatecalls: Observations::not_captured(),
         }
     }
 
@@ -496,6 +661,7 @@ mod tests {
             value: U256::ZERO,
             block_height: 1_000_000,
             logs,
+            direct_delegatecalls: Observations::not_captured(),
         }
     }
 
@@ -853,10 +1019,12 @@ mod tests {
     fn binding_budget_boundary_100_121() {
         let rules = two_event_rule();
         // 10 × 10 = 100 == limit → allowed (budget check is strictly greater-than).
-        assert!(evaluate_checked(&rules, &transfer_input(&zero_topic_logs(10)), 100).is_ok());
+        assert!(
+            evaluate_checked_for_test(&rules, &transfer_input(&zero_topic_logs(10)), 100).is_ok()
+        );
         // 11 × 11 = 121 > 100 → rejected.
         assert!(matches!(
-            evaluate_checked(&rules, &transfer_input(&zero_topic_logs(11)), 100),
+            evaluate_checked_for_test(&rules, &transfer_input(&zero_topic_logs(11)), 100),
             Err(MatchError::BindingBudgetExceeded { .. })
         ));
     }
@@ -873,9 +1041,9 @@ mod tests {
         }))
         .unwrap();
         let rules = load_rules(1, 1, vec![raw]);
-        assert!(evaluate_checked(&rules, &transfer_input(&zero_topic_logs(2)), 2).is_ok());
+        assert!(evaluate_checked_for_test(&rules, &transfer_input(&zero_topic_logs(2)), 2).is_ok());
         assert!(matches!(
-            evaluate_checked(&rules, &transfer_input(&zero_topic_logs(3)), 2),
+            evaluate_checked_for_test(&rules, &transfer_input(&zero_topic_logs(3)), 2),
             Err(MatchError::BindingBudgetExceeded { .. })
         ));
     }
@@ -1014,6 +1182,7 @@ mod tests {
             value: alloy_primitives::U256::ZERO,
             block_height: 1_000_000,
             logs: &logs,
+            direct_delegatecalls: Observations::not_captured(),
         };
         match evaluate(&rules, &input) {
             MatchOutcome::Audit { actions, .. } => {
@@ -1065,6 +1234,7 @@ mod tests {
             value: U256::ZERO,
             block_height: 1_000_000,
             logs: &logs,
+            direct_delegatecalls: Observations::not_captured(),
         };
 
         let MatchOutcome::Audit { actions, .. } = evaluate(&rules, &input) else {
@@ -1107,6 +1277,7 @@ mod tests {
             value: alloy_primitives::U256::ZERO,
             block_height: 1_000_000,
             logs: &logs,
+            direct_delegatecalls: Observations::not_captured(),
         };
 
         match evaluate(&rules, &input) {
@@ -1177,6 +1348,7 @@ mod tests {
             value: alloy_primitives::U256::ZERO,
             block_height: 1_000_000,
             logs: &logs,
+            direct_delegatecalls: Observations::not_captured(),
         };
         let MatchOutcome::Audit { actions, .. } = evaluate(&rules, &input) else {
             panic!("expected audit")
@@ -1200,6 +1372,7 @@ mod tests {
             value: alloy_primitives::U256::ZERO,
             block_height: 1_000_000,
             logs: &logs,
+            direct_delegatecalls: Observations::not_captured(),
         };
         assert_eq!(evaluate(&rules, &input), MatchOutcome::Allow);
     }
@@ -1233,6 +1406,7 @@ mod tests {
                 value: alloy_primitives::U256::ZERO,
                 block_height: 1_000_000,
                 logs: &logs,
+                direct_delegatecalls: Observations::not_captured(),
             };
             assert_eq!(evaluate(&rules, &input), want);
         }
@@ -1263,6 +1437,7 @@ mod tests {
             value: alloy_primitives::U256::ZERO,
             block_height: 1_000_000,
             logs: &logs,
+            direct_delegatecalls: Observations::not_captured(),
         };
         let MatchOutcome::Audit { actions, .. } = evaluate(&rules, &input) else {
             panic!("expected audit")
@@ -1307,6 +1482,7 @@ mod tests {
                 value: alloy_primitives::U256::ZERO,
                 block_height: 1_000_000,
                 logs: &logs,
+                direct_delegatecalls: Observations::not_captured(),
             };
             assert_eq!(evaluate(&rules, &input), MatchOutcome::Allow);
         }
@@ -1331,6 +1507,7 @@ mod tests {
             value: alloy_primitives::U256::ZERO,
             block_height: 1_000_000,
             logs: &logs,
+            direct_delegatecalls: Observations::not_captured(),
         };
         let MatchOutcome::Audit { actions, .. } = evaluate(&rules, &input) else {
             panic!("expected audit")
@@ -1362,6 +1539,7 @@ mod tests {
             value: alloy_primitives::U256::ZERO,
             block_height: 1_000_000,
             logs: &logs,
+            direct_delegatecalls: Observations::not_captured(),
         };
 
         match evaluate(&rules, &input) {
@@ -1392,6 +1570,7 @@ mod tests {
             value: alloy_primitives::U256::ZERO,
             block_height: 1_000_000,
             logs: &logs,
+            direct_delegatecalls: Observations::not_captured(),
         };
         assert_eq!(evaluate(&rules, &input), MatchOutcome::Deny);
     }
@@ -1407,6 +1586,7 @@ mod tests {
             value: alloy_primitives::U256::ZERO,
             block_height: 1_000_000,
             logs: &[],
+            direct_delegatecalls: Observations::not_captured(),
         };
         assert_eq!(evaluate(&rules, &input), MatchOutcome::Allow);
     }

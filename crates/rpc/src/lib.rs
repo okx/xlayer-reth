@@ -7,7 +7,7 @@ pub mod xlayer_ext;
 
 use std::time::Instant;
 // Re-export for convenience
-pub use audit::rpc::{XlayerAuditApiServer, XlayerAuditRpc};
+pub use audit::rpc::{AuditCaptureConfig, XlayerAuditApiServer, XlayerAuditRpc};
 pub use eth::{FlashblocksEthApiExt, FlashblocksEthApiOverrideServer};
 pub use xlayer_ext::{
     PendingFlashBlockProvider, SequencerClientProvider, XlayerRpcExt, XlayerRpcExtApiServer,

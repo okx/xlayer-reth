@@ -51,7 +51,10 @@ use revm::{
     context::result::ResultAndState, interpreter::as_u64_saturated, DatabaseCommit, Inspector,
 };
 
-use super::rcs_capture::{CaptureInvariantError, CaptureOutcome, RcsCaptureControl, RcsInspector};
+use xlayer_rcs_capture::{
+    CaptureInvariantError, CaptureOutcome, DirectDelegatecallConfig, RcsCaptureControl,
+    RcsInspector,
+};
 
 /// Container type that holds all necessities to build a new payload.
 #[derive(Debug)]
@@ -190,8 +193,10 @@ thread_local! {
 /// (delegating to the composite's inner inspector via `components_mut`) and, in tests, for a
 /// lifecycle-counting double.
 trait RcsCaptureScope {
+    fn scope_configure_direct_delegatecalls(&mut self, config: Option<DirectDelegatecallConfig>);
     fn scope_start_capture(&mut self);
     fn scope_finish_capture(&mut self, result_logs: &[Log]) -> CaptureOutcome;
+    fn scope_take_direct_delegatecalls(&mut self) -> rcs_filter::callstack::Observations;
     fn scope_abort_capture(&mut self);
 }
 
@@ -200,12 +205,20 @@ where
     DB: Database,
     I: Inspector<OpEvmContext<DB>> + RcsCaptureControl,
 {
+    fn scope_configure_direct_delegatecalls(&mut self, config: Option<DirectDelegatecallConfig>) {
+        self.components_mut().1.configure_direct_delegatecalls(config);
+    }
+
     fn scope_start_capture(&mut self) {
         self.components_mut().1.start_capture();
     }
 
     fn scope_finish_capture(&mut self, result_logs: &[Log]) -> CaptureOutcome {
         self.components_mut().1.finish_capture(result_logs)
+    }
+
+    fn scope_take_direct_delegatecalls(&mut self) -> rcs_filter::callstack::Observations {
+        self.components_mut().1.take_direct_delegatecalls()
     }
 
     fn scope_abort_capture(&mut self) {
@@ -225,8 +238,13 @@ struct CaptureGuard<'a, E: RcsCaptureScope> {
 }
 
 impl<'a, E: RcsCaptureScope> CaptureGuard<'a, E> {
-    /// Arms capture: calls `start_capture` on construction.
-    fn new(scope: &'a mut E) -> Self {
+    /// Installs the selected-address configuration for this window and arms capture.
+    ///
+    /// Configuring per candidate — rather than once when the inspector is built — is what stops a
+    /// fresh candidate and a re-simulation in the same round from sharing one configuration, and
+    /// what keeps the alias set tied to the snapshot the result will be judged against.
+    fn new(scope: &'a mut E, config: Option<DirectDelegatecallConfig>) -> Self {
+        scope.scope_configure_direct_delegatecalls(config);
         scope.scope_start_capture();
         Self { scope, armed: true }
     }
@@ -238,10 +256,16 @@ impl<'a, E: RcsCaptureScope> CaptureGuard<'a, E> {
 
     /// Closes the capture window normally and disarms the guard so its `Drop` is a no-op — exactly
     /// one lifecycle-ending call (this `finish`), never a `finish` followed by a `Drop` abort.
-    fn finish(mut self, result_logs: &[Log]) -> CaptureOutcome {
+    fn finish(
+        mut self,
+        result_logs: &[Log],
+    ) -> (CaptureOutcome, rcs_filter::callstack::Observations) {
         let outcome = self.scope.scope_finish_capture(result_logs);
+        // Taken immediately, inside the same window, so an observation set can never be attributed
+        // to a later transaction.
+        let observations = self.scope.scope_take_direct_delegatecalls();
         self.armed = false;
-        outcome
+        (outcome, observations)
     }
 }
 
@@ -442,8 +466,14 @@ impl FlashblocksBuilderCtx {
         &self,
         evm: &mut OpEvm<DB, I, PrecompilesMap>,
         tx: &Recovered<OpTransactionSigned>,
+        capture_config: Option<DirectDelegatecallConfig>,
     ) -> Result<
-        (ResultAndState<<OpEvm<DB, I, PrecompilesMap> as Evm>::HaltReason>, bool, CaptureOutcome),
+        (
+            ResultAndState<<OpEvm<DB, I, PrecompilesMap> as Evm>::HaltReason>,
+            bool,
+            CaptureOutcome,
+            rcs_filter::callstack::Observations,
+        ),
         <OpEvm<DB, I, PrecompilesMap> as Evm>::Error,
     >
     where
@@ -468,12 +498,12 @@ impl FlashblocksBuilderCtx {
         // successful `finish`. Every early return / unwind below therefore leaves the inspector
         // inactive without relying on manual cleanup, and abort runs exactly once (spec §5.2, R9
         // item 3). So every early exit downstream sees an inactive inspector.
-        let mut guard = CaptureGuard::new(evm);
+        let mut guard = CaptureGuard::new(evm, capture_config);
         // On the `Err` path `?` early-returns while the guard is still armed, so its `Drop` runs a
         // single `abort_capture`; on `Ok`, `guard.finish` disarms it (no double-abort).
         let result = guard.scope_mut().transact(tx_env)?;
-        let capture = guard.finish(result.result.logs());
-        Ok((result, is_gasless, capture))
+        let (capture, observations) = guard.finish(result.result.logs());
+        Ok((result, is_gasless, capture, observations))
     }
 
     fn is_gasless<DB, I>(
@@ -544,8 +574,9 @@ impl FlashblocksBuilderCtx {
                     ))
                 })?;
 
-            let (ResultAndState { result, state }, _is_gasless, _capture) =
-                match self.transact_maybe_gasless(&mut evm, &sequencer_tx) {
+            // Not a real-user candidate: capture stays inert on this path.
+            let (ResultAndState { result, state }, _is_gasless, _capture, _observations) =
+                match self.transact_maybe_gasless(&mut evm, &sequencer_tx, None) {
                     Ok(res) => res,
                     Err(err) => {
                         if err.is_invalid_tx_err() {
@@ -669,8 +700,8 @@ impl FlashblocksBuilderCtx {
             }
 
             // Ensure transaction execution is valid.
-            let (ResultAndState { result, state }, _is_gasless, _capture) =
-                match self.transact_maybe_gasless(&mut evm, &recovered_tx) {
+            let (ResultAndState { result, state }, _is_gasless, _capture, _observations) =
+                match self.transact_maybe_gasless(&mut evm, &recovered_tx, None) {
                     Ok(res) => res,
                     Err(err) => {
                         trace!(
@@ -885,14 +916,36 @@ impl FlashblocksBuilderCtx {
                 continue;
             }
 
+            // ONE snapshot decides both what capture observes and what judges the result.
+            //
+            // The inspector is built once per block-building pass while the installed snapshot can
+            // hot-swap mid-loop, so acquiring it here — before simulation — is what stops capture
+            // and screening from straddling a reload. A buffered transaction re-simulates against
+            // the snapshot saved on its own entry.
+            //
+            // A snapshot that selects no address installs no configuration at all: the inspector's
+            // frame hooks then return before any frame work, so a deployment without such a rule
+            // pays nothing.
+            let capture_snapshot = self.filter.as_ref().map(|f| f.capture_snapshot_for(&tx_hash));
+            let capture_config = match (self.filter.as_ref(), capture_snapshot.as_ref()) {
+                (Some(filter), Some(snapshot)) if snapshot.declares_any_alias() => {
+                    Some(DirectDelegatecallConfig {
+                        aliases: snapshot.alias_addresses().into_iter().collect(),
+                        stamp: snapshot.snapshot_stamp(),
+                        max_observations: filter.max_callstack_observations_per_tx(),
+                    })
+                }
+                _ => None,
+            };
+
             let tx_simulation_start_time = Instant::now();
             // Gasless: zero-priced, whitelisted txs are executed with a transaction-scoped base-fee
             // validation bypass (a per-tx `cfg.disable_base_fee` toggle applied and restored by the
             // Optimism layer, never a `block.basefee` mutation), gated on the chain's gasless
             // contract approving the tx. Non-gasless txs are unaffected — see
             // [`Self::transact_maybe_gasless`].
-            let (ResultAndState { result, state }, is_gasless, capture_outcome) =
-                match self.transact_maybe_gasless(&mut *evm, &tx) {
+            let (ResultAndState { result, state }, is_gasless, capture_outcome, observations) =
+                match self.transact_maybe_gasless(&mut *evm, &tx, capture_config) {
                     Ok(res) => res,
                     Err(err) => {
                         if let Some(err) = err.as_invalid_tx_err() {
@@ -1000,15 +1053,27 @@ impl FlashblocksBuilderCtx {
             // `Screen::Deny` via the same downstream handling, never entering the pending buffer.
             if let Some(filter) = self.filter.as_ref() {
                 let decision = if let CaptureOutcome::Complete(logs) = &capture_outcome {
-                    filter.screen_tx(&ScreenInput {
-                        tx_hash,
-                        origin: tx.signer(),
-                        tx_to: tx.to(),
-                        nonce: tx.nonce(),
-                        value: tx.value(),
-                        block_height: self.block_number(),
-                        logs,
-                    })
+                    // The observation set goes to screening as captured. An unavailable or
+                    // wrongly-stamped set is fail-closed input there, never "nothing matched", and
+                    // is ignored outright when no rule selects an address.
+                    filter.screen_tx_with_snapshot(
+                        &ScreenInput {
+                            tx_hash,
+                            origin: tx.signer(),
+                            tx_to: tx.to(),
+                            nonce: tx.nonce(),
+                            value: tx.value(),
+                            block_height: self.block_number(),
+                            logs,
+                            direct_delegatecalls: &observations,
+                        },
+                        capture_snapshot.clone().unwrap_or_else(|| {
+                            // Unreachable: `capture_snapshot` is `Some` whenever a filter exists.
+                            // Falling back to the installed snapshot keeps that unreachable branch
+                            // conservative rather than panicking in a block-building loop.
+                            filter.capture_snapshot_for(&tx_hash)
+                        }),
+                    )
                 } else {
                     // Every non-`Complete` outcome fails closed (budget overflow, observation
                     // invariant, or — a state-machine bug — an enabled filter seeing `Passthrough`).
@@ -1103,7 +1168,7 @@ impl FlashblocksBuilderCtx {
 #[cfg(test)]
 mod capture_decision_tests {
     use super::*;
-    use crate::flashblocks::rcs_capture::CaptureInvariantError;
+    use xlayer_rcs_capture::CaptureInvariantError;
 
     fn test_filter() -> FilterHandle {
         rcs_filter::FilterHandle::for_test(
@@ -1293,12 +1358,20 @@ mod capture_decision_tests {
         // aborts exactly once and leaves the scope inactive.
         #[derive(Default)]
         struct CountingScope {
+            configures: u32,
             starts: u32,
             finishes: u32,
+            takes: u32,
             aborts: u32,
             active: bool,
         }
         impl RcsCaptureScope for CountingScope {
+            fn scope_configure_direct_delegatecalls(
+                &mut self,
+                _config: Option<DirectDelegatecallConfig>,
+            ) {
+                self.configures += 1;
+            }
             fn scope_start_capture(&mut self) {
                 self.starts += 1;
                 self.active = true;
@@ -1307,6 +1380,12 @@ mod capture_decision_tests {
                 self.finishes += 1;
                 self.active = false;
                 CaptureOutcome::Complete(Vec::new())
+            }
+            fn scope_take_direct_delegatecalls(&mut self) -> rcs_filter::callstack::Observations {
+                self.takes += 1;
+                rcs_filter::callstack::Observations::Unavailable(
+                    rcs_filter::callstack::ObservationsUnavailable::NotCaptured,
+                )
             }
             fn scope_abort_capture(&mut self) {
                 self.aborts += 1;
@@ -1317,19 +1396,21 @@ mod capture_decision_tests {
         // (a) success → finish disarms → Drop is a no-op.
         let mut scope = CountingScope::default();
         {
-            let guard = CaptureGuard::new(&mut scope);
-            let outcome = guard.finish(&[]);
+            let guard = CaptureGuard::new(&mut scope, None);
+            let (outcome, _observations) = guard.finish(&[]);
             assert!(matches!(outcome, CaptureOutcome::Complete(_)));
         }
+        assert_eq!(scope.configures, 1, "the window is configured once, before it is armed");
         assert_eq!(scope.starts, 1, "start_capture runs once on construction");
         assert_eq!(scope.finishes, 1);
+        assert_eq!(scope.takes, 1, "a successful finish takes the result exactly once");
         assert_eq!(scope.aborts, 0, "a disarmed guard must not abort on Drop");
         assert!(!scope.active);
 
         // (b) Err path → guard dropped armed → exactly one abort, no double-abort.
         let mut scope = CountingScope::default();
         {
-            let _guard = CaptureGuard::new(&mut scope);
+            let _guard = CaptureGuard::new(&mut scope, None);
             // Mirror the `evm.transact` Err path: return without `finish`; guard drops armed.
         }
         assert_eq!(scope.starts, 1);
@@ -1342,7 +1423,7 @@ mod capture_decision_tests {
         let prev_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {})); // silence the expected panic in test output
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = CaptureGuard::new(&mut scope);
+            let _guard = CaptureGuard::new(&mut scope, None);
             panic!("simulated transact panic");
         }));
         std::panic::set_hook(prev_hook);
@@ -1376,7 +1457,6 @@ mod capture_decision_tests {
 #[cfg(test)]
 mod loop_level_fail_closed_tests {
     use super::*;
-    use crate::flashblocks::rcs_capture::{FORCE_CREATE_ADDRESS_MISMATCH, FORCE_REALLOG_MISMATCH};
     use alloy_consensus::TxEip1559;
     use alloy_genesis::Genesis;
     use alloy_primitives::{keccak256, Address, TxKind};
@@ -1393,6 +1473,7 @@ mod loop_level_fail_closed_tests {
     use revm::context::{BlockEnv, CfgEnv};
     use revm::database::{CacheDB, EmptyDB};
     use revm::state::{AccountInfo, Bytecode};
+    use xlayer_rcs_capture::{CaptureFaults, FaultsGuard};
     // Bring revm's `Database` trait into scope (anonymously, to avoid shadowing the `alloy_evm::Database`
     // already in scope) so `state.basic(..)` resolves for the P1.3 sender nonce/balance reads.
     use revm::Database as _;
@@ -1400,16 +1481,10 @@ mod loop_level_fail_closed_tests {
     /// Panic-safe RAII guard for the `FORCE_REALLOG_MISMATCH` test seam (spec §5.10.3 P2): arms the
     /// flag on construction and RESETS it on `Drop` — on success AND on a panic/unwind — so it can
     /// never leak into another test running later on the same thread.
-    struct ForceMismatchGuard;
+    struct ForceMismatchGuard(#[allow(dead_code)] FaultsGuard);
     impl ForceMismatchGuard {
         fn arm() -> Self {
-            FORCE_REALLOG_MISMATCH.with(|f| f.set(true));
-            Self
-        }
-    }
-    impl Drop for ForceMismatchGuard {
-        fn drop(&mut self) {
-            FORCE_REALLOG_MISMATCH.with(|f| f.set(false));
+            Self(CaptureFaults { force_real_log_mismatch: true, ..CaptureFaults::NONE }.scoped())
         }
     }
 
@@ -1594,7 +1669,7 @@ mod loop_level_fail_closed_tests {
             // before the screen decision) the flag would still be set. (The guard additionally guarantees
             // the flag is reset on any panic/unwind, so it cannot leak to another test on this thread.)
             assert!(
-                !FORCE_REALLOG_MISMATCH.with(|f| f.get()),
+                !CaptureFaults::ambient().force_real_log_mismatch,
                 "the loop's finish_capture must have consumed the one-shot mismatch seam"
             );
             r
@@ -1693,16 +1768,13 @@ mod loop_level_fail_closed_tests {
     /// Panic-safe RAII guard for the `FORCE_CREATE_ADDRESS_MISMATCH` test seam: arms the flag on
     /// construction and RESETS it on `Drop` — on success AND on a panic/unwind — so it cannot leak
     /// into another test running later on this thread.
-    struct ForceCreateAddressMismatchGuard;
+    struct ForceCreateAddressMismatchGuard(#[allow(dead_code)] FaultsGuard);
     impl ForceCreateAddressMismatchGuard {
         fn arm() -> Self {
-            FORCE_CREATE_ADDRESS_MISMATCH.with(|f| f.set(true));
-            Self
-        }
-    }
-    impl Drop for ForceCreateAddressMismatchGuard {
-        fn drop(&mut self) {
-            FORCE_CREATE_ADDRESS_MISMATCH.with(|f| f.set(false));
+            Self(
+                CaptureFaults { force_create_address_mismatch: true, ..CaptureFaults::NONE }
+                    .scoped(),
+            )
         }
     }
 
@@ -1794,7 +1866,7 @@ mod loop_level_fail_closed_tests {
             // own `create` hook consumed the one-shot seam, so it is already false here. If the
             // candidate never reached the create hook this would still be set.
             assert!(
-                !FORCE_CREATE_ADDRESS_MISMATCH.with(|f| f.get()),
+                !CaptureFaults::ambient().force_create_address_mismatch,
                 "the loop's CREATE hook must have consumed the one-shot mismatch seam"
             );
             r
@@ -1949,6 +2021,184 @@ mod loop_level_fail_closed_tests {
         );
         let state = State::builder().with_database(cache).with_bundle_update().build();
         (ctx, state, candidate_hash, pooled)
+    }
+
+    /// Runtime bytecode: `DELEGATECALL(gas, dst, 0, 0, 0, 0); POP; STOP`.
+    fn delegatecall_code(dst: Address) -> Vec<u8> {
+        let mut code = vec![0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x73];
+        code.extend_from_slice(dst.as_slice());
+        code.extend_from_slice(&[0x5A, 0xF4, 0x50, 0x00]);
+        code
+    }
+
+    /// A direct-delegatecall rule denying any delegate code hash outside `approved`.
+    fn direct_delegatecall_deny_rule(proxy: Address, approved: B256) -> rcs_filter::rules::RawRule {
+        let json = format!(
+            r#"{{"id":"proxy-codehash-guard","event_abis":{{}},
+                 "callstack":{{"direct_delegatecalls":{{"proxy1":"0x{}"}}}},
+                 "condition":{{"!":{{"in":[{{"var":"proxy1.delegateCodeHash"}},["0x{}"]]}}}},
+                 "action":"deny"}}"#,
+            alloy_primitives::hex::encode(proxy.as_slice()),
+            alloy_primitives::hex::encode(approved.as_slice()),
+        );
+        serde_json::from_str(&json).expect("the fixture rule is valid")
+    }
+
+    /// Builds a candidate that calls a selected proxy which delegatecalls `implementation`.
+    fn delegatecall_candidate_fixture(
+        filter: Arc<FilterHandle>,
+        signer: &crate::signer::Signer,
+        proxy: Address,
+        implementation: Address,
+        implementation_code: Vec<u8>,
+    ) -> (FlashblocksBuilderCtx, State<CacheDB<EmptyDB>>, B256, OpPooledTransaction) {
+        let ctx = build_ctx(filter);
+        let candidate = OpTypedTransaction::Eip1559(TxEip1559 {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 300_000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 0,
+            to: TxKind::Call(proxy),
+            value: U256::ZERO,
+            ..Default::default()
+        });
+        let recovered = signer.sign_tx(candidate).expect("sign candidate");
+        let candidate_hash: B256 = recovered.tx_hash();
+        let encoded_len = recovered.encode_2718_len();
+        let pooled = OpPooledTransaction::new(recovered, encoded_len);
+
+        let mut cache = CacheDB::new(EmptyDB::default());
+        cache.insert_account_info(
+            signer.address,
+            AccountInfo { balance: U256::from(10u128.pow(18)), nonce: 0, ..Default::default() },
+        );
+        cache.insert_account_info(
+            proxy,
+            AccountInfo {
+                code: Some(Bytecode::new_raw(Bytes::from(delegatecall_code(implementation)))),
+                ..Default::default()
+            },
+        );
+        cache.insert_account_info(
+            implementation,
+            AccountInfo {
+                code: Some(Bytecode::new_raw(Bytes::from(implementation_code))),
+                ..Default::default()
+            },
+        );
+        let state = State::builder().with_database(cache).with_bundle_update().build();
+        (ctx, state, candidate_hash, pooled)
+    }
+
+    /// The candidate loop really passes the **captured** observation set to screening.
+    ///
+    /// This is the test that distinguishes a wired capture layer from an unwired one. With a rule
+    /// that selects an address, an unavailable observation set fails closed, so an unwired loop
+    /// would deny **both** runs below. Only a loop that hands screening the real observations can
+    /// produce a deny for the unapproved implementation and a non-deny for the approved one.
+    ///
+    /// Falsifiable twice over: passing a not-captured set makes the approved run deny; dropping the
+    /// alias dimension from candidate generation makes the unapproved run stop denying.
+    #[tokio::test]
+    async fn loop_level_direct_delegatecall_rule_is_adjudicated_against_real_captured_frames() {
+        let proxy = Address::repeat_byte(0x11);
+        let implementation = Address::repeat_byte(0xC1);
+        // The implementation's runtime code, and therefore the hash the frame really executes.
+        let implementation_code = vec![0x00u8]; // STOP
+        let executed_hash = keccak256(&implementation_code);
+        let limits =
+            TransactionLimits { block_gas: 30_000_000, block_da: None, block_da_footprint: None };
+        let signer = crate::tests::funded_signer();
+
+        // ===== DENY RUN — the allowlist holds a hash this transaction never executes =====
+        let unapproved_rules =
+            load_rules(1, 1, vec![direct_delegatecall_deny_rule(proxy, keccak256([0xFEu8]))]);
+        assert!(unapproved_rules.rejected.is_empty(), "{:?}", unapproved_rules.rejected);
+        let filter = Arc::new(FilterHandle::for_test(
+            FilterConfig::default(),
+            unapproved_rules,
+            Arc::new(SystemClock),
+        ));
+        let (ctx, mut state, candidate_hash, pooled) = delegatecall_candidate_fixture(
+            filter.clone(),
+            &signer,
+            proxy,
+            implementation,
+            implementation_code.clone(),
+        );
+        let pool = testing_pool();
+        pool.add_transaction(
+            TransactionOrigin::External,
+            MockTransaction::legacy()
+                .with_sender(signer.address)
+                .with_nonce(0)
+                .with_gas_price(100)
+                .with_hash(candidate_hash),
+        )
+        .await
+        .unwrap();
+
+        LAST_SCREEN_DECISION.with(|d| d.set(None));
+        let mut best_txs = RecordingTxs { tx: Some(pooled), marked: Vec::new() };
+        let mut info = ExecutionInfo::with_capacity(1);
+        let result =
+            ctx.execute_best_transactions(&mut info, &mut state, &mut best_txs, &pool, limits);
+        assert!(matches!(result, Ok(None)), "loop completes: {result:?}");
+        assert_eq!(
+            LAST_SCREEN_DECISION.with(|d| d.get()),
+            Some(Screen::Deny),
+            "an unapproved delegate code hash, observed from the real frame, must deny"
+        );
+        assert!(info.executed_transactions.is_empty(), "a denied candidate is not packaged");
+        assert!(info.receipts.is_empty(), "a denied candidate produces no receipt");
+
+        // ===== ALLOW RUN — the SAME frames, with that executed hash approved =====
+        let approved_rules =
+            load_rules(1, 1, vec![direct_delegatecall_deny_rule(proxy, executed_hash)]);
+        assert!(approved_rules.rejected.is_empty(), "{:?}", approved_rules.rejected);
+        let filter2 = Arc::new(FilterHandle::for_test(
+            FilterConfig::default(),
+            approved_rules,
+            Arc::new(SystemClock),
+        ));
+        let (ctx2, mut state2, candidate_hash2, pooled2) = delegatecall_candidate_fixture(
+            filter2.clone(),
+            &signer,
+            proxy,
+            implementation,
+            implementation_code,
+        );
+        let pool2 = testing_pool();
+        pool2
+            .add_transaction(
+                TransactionOrigin::External,
+                MockTransaction::legacy()
+                    .with_sender(signer.address)
+                    .with_nonce(0)
+                    .with_gas_price(100)
+                    .with_hash(candidate_hash2),
+            )
+            .await
+            .unwrap();
+
+        LAST_SCREEN_DECISION.with(|d| d.set(None));
+        let mut best_txs2 = RecordingTxs { tx: Some(pooled2), marked: Vec::new() };
+        let mut info2 = ExecutionInfo::with_capacity(1);
+        let control =
+            ctx2.execute_best_transactions(&mut info2, &mut state2, &mut best_txs2, &pool2, limits);
+        assert!(matches!(control, Ok(None)), "control loop completes: {control:?}");
+        assert_eq!(
+            LAST_SCREEN_DECISION.with(|d| d.get()),
+            Some(Screen::Allow),
+            "the approved implementation must be allowed — which is only reachable if the loop \
+             handed screening the REAL observation set rather than an unavailable one"
+        );
+        assert_eq!(
+            info2.executed_transactions.len(),
+            1,
+            "the allowed candidate is packaged into the block"
+        );
     }
 
     /// The native-transfer budget fail-closed chain, driven through the ACTUAL candidate loop

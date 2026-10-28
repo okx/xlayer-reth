@@ -23,7 +23,7 @@ use alloy_eips::BlockId;
 use alloy_evm::Evm;
 use alloy_op_evm::OpEvmFactory;
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
-use rcs_filter::rules::{load_rules, RawRule};
+use rcs_filter::rules::load_rules_from_raw;
 use reth_evm::{block::BlockExecutorFactory, ConfigureEvm};
 use reth_rpc_eth_api::{
     helpers::{Call, LoadState},
@@ -31,6 +31,8 @@ use reth_rpc_eth_api::{
 };
 use reth_storage_api::BlockReaderIdExt;
 use revm::{context_interface::result::ResultAndState, DatabaseCommit};
+
+use xlayer_rcs_capture::{DirectDelegatecallConfig, RcsCaptureControl, RcsInspector};
 
 use super::deposit::{build_deposit_tx, DepositTxRequest};
 use super::verdict::AuditResult;
@@ -84,17 +86,174 @@ fn known_allowed_result(tx_hash: alloy_primitives::B256, source_hash: &str) -> A
     }
 }
 
-#[derive(Debug, serde::Deserialize)]
+/// Reports the direct-delegatecall result of an already-approved deposit as a **diagnostic only**.
+///
+/// This row's verdict and state handling are unchanged: it is allowed and committed, and no
+/// verdict reads anything recorded here. The limitation is deliberate and disclosed rather than
+/// hidden — an already-approved deposit that executes unapproved implementation code is **not**
+/// denied in this revision. Acting on it would need a caller-supplied class label on the request,
+/// because this node cannot tell an ordinary already-resolved deposit from a replay prefix, and
+/// the two have opposite safe defaults.
+///
+/// The record is bounded to counts and the fixed reason discriminant. No address, code hash or
+/// other observation content is logged.
+pub(super) fn record_known_allowed_diagnostic(
+    source_hash: &str,
+    observations: &rcs_filter::callstack::Observations,
+) {
+    rcs_filter::metrics::record_callstack_known_allowed_diagnostic();
+    match observations {
+        rcs_filter::callstack::Observations::Available { items, .. } => {
+            if !items.is_empty() {
+                tracing::info!(
+                    target: "xlayer_audit_rpc",
+                    source_hash = %source_hash,
+                    observations = items.len(),
+                    "already-approved deposit produced direct-delegatecall observations; \
+                     reported as a diagnostic only, verdict and state unchanged"
+                );
+            }
+        }
+        rcs_filter::callstack::Observations::Unavailable(reason) => {
+            tracing::info!(
+                target: "xlayer_audit_rpc",
+                source_hash = %source_hash,
+                reason = reason.label(),
+                "already-approved deposit produced no trustworthy direct-delegatecall result; \
+                 reported as a diagnostic only, verdict and state unchanged"
+            );
+        }
+    }
+}
+
+/// Modelled top-level request keys. Anything else is named and rejected by Phase A.
+const AUDIT_REQUEST_KEYS: &[&str] = &["protocol_version", "rules", "txs", "known_allowed"];
+
+/// The default `protocol_version` for a request that omits it, so every existing caller stays
+/// byte-compatible.
+const fn default_protocol_version() -> u32 {
+    1
+}
+
+/// Per-transaction direct-delegatecall capture budget for this RPC.
+///
+/// Threaded in explicitly because this struct carries no other configuration: the value comes
+/// from the same `--rcs-filter.*` argument group the builder uses, so the two budgets cannot
+/// drift. The audit RPC is deliberately **not** gated by `--rcs-filter.enabled` — it adjudicates
+/// the rules carried in the request, not the node's installed snapshot — and only the budget
+/// *value* is read from that group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuditCaptureConfig {
+    pub max_callstack_observations_per_tx: usize,
+}
+
+impl Default for AuditCaptureConfig {
+    fn default() -> Self {
+        Self { max_callstack_observations_per_tx: 10_000 }
+    }
+}
+
+/// `xlayer_auditTransactions` request.
+///
+/// `rules` holds each rule's **original JSON bytes**. The elements are completely isomorphic to
+/// `GET /rules` rule objects and go through the same per-rule phase, so the rule schema and its
+/// validation order apply verbatim and the request can never be trimmed to event-only.
+///
+/// `Deserialize` is hand-written for the same two reasons as the `GET /rules` envelope:
+/// `#[serde(flatten)]` cannot coexist with a raw value, and the visitor must be able to name an
+/// unknown or repeated top-level key. It also makes the Phase A order explicit — unknown
+/// top-level key first, then `protocol_version` — rather than leaving it to serde's field order.
+#[derive(Debug)]
 pub struct AuditTransactionsRequest {
-    pub rules: Vec<RawRule>,
+    /// Omitted means `1`. Only `1` is accepted; any other value is `-32602`.
+    pub protocol_version: u32,
+    /// Original bytes per rule. Never `Value`, never a map, never re-serialized.
+    pub rules: Vec<Box<serde_json::value::RawValue>>,
     pub txs: Vec<DepositTxRequest>,
     /// `source_hash` values RCS has already resolved to Allow: both original deposits that
     /// RCS's adjudicator approved in an earlier round and synthetic ban deposits prepended for
     /// replay. Executed and committed unconditionally, skipping rule (re-)classification — a
     /// `quota`-type rule match is unconditional on the tx's own logs and has no memory of a
     /// prior decision, so re-classifying it would just produce `audit` again forever.
-    #[serde(default)]
+    ///
+    /// **Disclosed limitation of this round:** a deposit listed here that executes unapproved
+    /// implementation code is **not denied**. The node cannot distinguish an ordinary
+    /// already-approved deposit from a synthetic ban replay prefix — this is a flat list with no
+    /// kind label, and the two classes have opposite safe defaults — so its callstack result is
+    /// recorded as a bounded diagnostic only and no verdict depends on it. This is the direct
+    /// cost of keeping `known_allowed` semantics unchanged without a producer-supplied class
+    /// label, and it is a known limitation, not an oversight.
     pub known_allowed: Vec<String>,
+}
+
+impl<'de> serde::Deserialize<'de> for AuditTransactionsRequest {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct RequestVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for RequestVisitor {
+            type Value = AuditTransactionsRequest;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("an xlayer_auditTransactions request object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut tracker = rcs_filter::rules::raw::EnvelopeKeyTracker::new();
+                let mut protocol_version: Option<u32> = None;
+                let mut rules: Option<Vec<Box<serde_json::value::RawValue>>> = None;
+                let mut txs: Option<Vec<DepositTxRequest>> = None;
+                let mut known_allowed: Option<Vec<String>> = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    let repeated = tracker.already_seen(&key);
+                    tracker.record(&key, AUDIT_REQUEST_KEYS);
+                    // A repeated key's value is consumed but discarded, so the first occurrence
+                    // is never silently overwritten before the duplicate is reported.
+                    if repeated {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                        continue;
+                    }
+                    match key.as_str() {
+                        "protocol_version" => protocol_version = Some(map.next_value()?),
+                        "rules" => rules = Some(map.next_value()?),
+                        "txs" => txs = Some(map.next_value()?),
+                        "known_allowed" => known_allowed = Some(map.next_value()?),
+                        _ => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+
+                // Phase A, step 1: an unknown (then a repeated) top-level key, named.
+                if let Some(problem) = tracker.problem() {
+                    return Err(serde::de::Error::custom(problem));
+                }
+
+                // Phase A, step 2: the version, naming the received value and the supported set.
+                let protocol_version = protocol_version.unwrap_or_else(default_protocol_version);
+                if !rcs_filter::config::is_supported_protocol(protocol_version) {
+                    return Err(serde::de::Error::custom(
+                        rcs_filter::rules::raw::unsupported_protocol_reason(protocol_version),
+                    ));
+                }
+
+                Ok(AuditTransactionsRequest {
+                    protocol_version,
+                    rules: rules.ok_or_else(|| serde::de::Error::missing_field("rules"))?,
+                    txs: txs.ok_or_else(|| serde::de::Error::missing_field("txs"))?,
+                    known_allowed: known_allowed.unwrap_or_default(),
+                })
+            }
+        }
+
+        deserializer.deserialize_map(RequestVisitor)
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -130,6 +289,8 @@ pub trait XlayerAuditApi {
 #[derive(Debug)]
 pub struct XlayerAuditRpc<T> {
     pub backend: Arc<T>,
+    /// Per-transaction direct-delegatecall capture budget, injected rather than hard-coded.
+    pub capture: AuditCaptureConfig,
 }
 
 #[jsonrpsee::core::async_trait]
@@ -146,7 +307,10 @@ where
         &self,
         req: AuditTransactionsRequest,
     ) -> RpcResult<AuditTransactionsResponse> {
-        let rules = load_rules(1, 0, req.rules);
+        // Phase B: the per-rule phase, from the request's preserved rule bytes. The request does
+        // not accept a `content_version`; honouring one would imply a persistence this path does
+        // not have, so the snapshot identity uses 0 for it.
+        let rules = load_rules_from_raw(req.protocol_version, 0, &req.rules);
         if !rules.rejected.is_empty() {
             // Fail the whole request rather than silently classifying against a rule set
             // that's missing the rule(s) the caller actually asked for — a caller testing a
@@ -210,19 +374,61 @@ where
         let backend = self.backend.as_ref().clone();
         let block_id = BlockId::hash(latest_header.hash());
         let txs = req.txs;
+        // The request's own snapshot identity. `content_version` is 0 because a request carries no
+        // persisted version and honouring one would imply a persistence this path does not have;
+        // it matches how the request's rules are compiled.
+        // Copied out of `self` before the closure below takes ownership of what it needs.
+        let capture_budget = self.capture.max_callstack_observations_per_tx;
+        let capture_config = rules.declares_any_alias().then(|| DirectDelegatecallConfig {
+            aliases: rules.alias_addresses().into_iter().collect(),
+            stamp: rules.snapshot_stamp(),
+            max_observations: capture_budget,
+        });
         let results: Vec<AuditResult> = backend
             .spawn_with_state_at_block(block_id, move |this, mut state_db| {
-                let mut evm = this.evm_config().evm_with_env(&mut state_db, evm_env);
+                // Built WITH the shared capture inspector, in the mode that drives the
+                // direct-delegatecall channel only: this path screens the execution result's own
+                // logs, so it needs no native log stream, while the frame logic that identifies a
+                // direct delegatecall is the SAME code the block builder runs. That shared code is
+                // what makes "both paths agree on the same frames" a testable property.
+                //
+                // When no rule selects an address, no configuration is installed below and every
+                // frame hook returns before any frame work, so the response is unchanged.
+                let inspector = RcsInspector::new_callstack_only(capture_budget);
+                let mut evm =
+                    this.evm_config().evm_with_env_and_inspector(&mut state_db, evm_env, inspector);
 
                 let mut executed: Vec<Option<AuditResult>> =
                     (0..ordered_txs.len()).map(|_| None).collect();
                 for (exec_idx, tx) in ordered_txs.iter().enumerate() {
                     let tx_req = &ordered_tx_reqs[exec_idx];
-                    let ResultAndState { result, state } =
-                        evm.transact(tx).map_err(T::Error::from_evm_err)?;
+                    // One window per deposit, each beginning with a full reset, so a deposit's
+                    // observations can never be attributed to another. Ordered state effects are
+                    // untouched: a prior deposit's committed upgrade is still visible here, so a
+                    // later deposit resolves the new, real delegate target and its real code hash.
+                    {
+                        let inspector = evm.components_mut().1;
+                        inspector.configure_direct_delegatecalls(capture_config.clone());
+                        inspector.start_capture();
+                    }
+                    let transacted = evm.transact(tx);
+                    let ResultAndState { result, state } = match transacted {
+                        Ok(res) => res,
+                        Err(err) => {
+                            // An execution error leaves nothing behind, parked result included.
+                            evm.components_mut().1.abort_capture();
+                            return Err(T::Error::from_evm_err(err));
+                        }
+                    };
+                    let observations = {
+                        let inspector = evm.components_mut().1;
+                        inspector.finish_capture(result.logs());
+                        inspector.take_direct_delegatecalls()
+                    };
 
                     if known_allowed.contains(&tx_req.source_hash) {
                         evm.db_mut().commit(state);
+                        record_known_allowed_diagnostic(&tx_req.source_hash, &observations);
                         executed[exec_idx] =
                             Some(known_allowed_result(tx.tx_hash(), &tx_req.source_hash));
                         continue;
@@ -231,11 +437,14 @@ where
                     let logs = result.logs().to_vec();
                     let verdict_result = super::verdict::verdict_for(
                         tx_req,
-                        tx.signer(),
-                        tx.to(),
-                        tx.tx_hash(),
-                        tx.value(),
-                        &logs,
+                        &super::verdict::SimulatedDeposit {
+                            from: tx.signer(),
+                            to: tx.to(),
+                            tx_hash: tx.tx_hash(),
+                            value: tx.value(),
+                            logs: &logs,
+                            observations: &observations,
+                        },
                         &rules,
                     );
                     let (commit, keep_going) = commit_and_continue(verdict_result.verdict);
@@ -254,6 +463,160 @@ where
             .map_err(Into::into)?;
 
         Ok(AuditTransactionsResponse { results })
+    }
+}
+
+#[cfg(test)]
+mod request_contract_tests {
+    use super::{AuditCaptureConfig, AuditTransactionsRequest};
+    use rcs_filter::rules::load_rules_from_raw;
+
+    const PROXY1: &str = "0x1111111111111111111111111111111111111111";
+    const PROXY2: &str = "0x2222222222222222222222222222222222222222";
+
+    /// A syntactically valid deposit tx entry, so `txs` is never the reason a request fails.
+    const TX: &str = r#"{"source_hash":"0xa","from":"0x0404040404040404040404040404040404040404","mint":"0","value":"0","gas_limit":100000,"is_system_transaction":false,"data":"0x"}"#;
+
+    /// Decodes a request from **exact bytes**, exactly as the JSON-RPC layer does. A decode
+    /// failure is what the layer turns into `-32602`.
+    fn decode(body: &str) -> Result<AuditTransactionsRequest, String> {
+        serde_json::from_str(body).map_err(|e| e.to_string())
+    }
+
+    /// An omitted `protocol_version` means 1, so every existing caller is
+    /// byte-compatible and unaffected.
+    #[test]
+    fn an_omitted_protocol_version_defaults_to_one() {
+        let req = decode(&format!(r#"{{"rules":[],"txs":[{TX}]}}"#)).expect("decodes");
+        assert_eq!(req.protocol_version, 1);
+        assert!(req.known_allowed.is_empty(), "known_allowed defaults to empty");
+    }
+
+    #[test]
+    fn protocol_version_one_is_accepted_explicitly() {
+        let req = decode(&format!(r#"{{"protocol_version":1,"rules":[],"txs":[{TX}]}}"#))
+            .expect("decodes");
+        assert_eq!(req.protocol_version, 1);
+    }
+
+    /// Any value other than 1, including 2, is rejected naming the value AND the
+    /// supported set. The v2 selector contract is not part of this protocol.
+    #[test]
+    fn any_protocol_version_other_than_one_is_rejected_naming_value_and_supported_set() {
+        for version in [0u32, 2, 3, 99] {
+            let error =
+                decode(&format!(r#"{{"protocol_version":{version},"rules":[],"txs":[{TX}]}}"#))
+                    .expect_err("must be rejected");
+            assert!(error.contains(&version.to_string()), "{error}");
+            assert!(error.contains('1'), "must name the supported set: {error}");
+        }
+    }
+
+    /// An unknown top-level key is cited AHEAD of the version and of any rule problem,
+    /// proving the Phase A order is real and not an artifact of decode order.
+    #[test]
+    fn t53_unknown_top_level_key_is_cited_ahead_of_version_and_rule_problems() {
+        let malformed_rule =
+            r#"{"id":"m","event_abis":{},"callstack":7,"condition":true,"action":"deny"}"#;
+        let error = decode(&format!(
+            r#"{{"surprise":1,"protocol_version":2,"rules":[{malformed_rule}],"txs":[{TX}]}}"#
+        ))
+        .expect_err("must be rejected");
+        assert!(error.contains("surprise"), "must cite the unknown key: {error}");
+        assert!(!error.contains("unsupported protocol_version"), "version came first: {error}");
+        assert!(!error.contains("callstack"), "rule error came first: {error}");
+    }
+
+    /// With no unknown top-level key, the version is cited, not the rule.
+    #[test]
+    fn t54_version_is_cited_when_there_is_no_unknown_top_level_key() {
+        let malformed_rule =
+            r#"{"id":"m","event_abis":{},"callstack":7,"condition":true,"action":"deny"}"#;
+        let error =
+            decode(&format!(r#"{{"protocol_version":2,"rules":[{malformed_rule}],"txs":[{TX}]}}"#))
+                .expect_err("must be rejected");
+        assert!(error.contains("unsupported protocol_version"), "{error}");
+        assert!(!error.contains("callstack"), "the rule must not be cited first: {error}");
+    }
+
+    /// The verdict is not a function of input key order.
+    #[test]
+    fn t56_reordering_top_level_keys_does_not_change_the_verdict() {
+        let a = format!(r#"{{"surprise":1,"protocol_version":2,"rules":[],"txs":[{TX}]}}"#);
+        let b = format!(r#"{{"txs":[{TX}],"rules":[],"protocol_version":2,"surprise":1}}"#);
+        assert_eq!(
+            decode(&a).expect_err("rejected"),
+            decode(&b).expect_err("rejected"),
+            "Phase A must not depend on key order"
+        );
+    }
+
+    #[test]
+    fn a_repeated_top_level_key_is_named() {
+        let error = decode(&format!(r#"{{"rules":[],"rules":[],"txs":[{TX}]}}"#))
+            .expect_err("must be rejected");
+        assert!(error.contains("rules") && error.contains("more than once"), "{error}");
+    }
+
+    #[test]
+    fn missing_required_top_level_fields_still_fail_decoding() {
+        assert!(decode(r#"{"rules":[]}"#).is_err(), "txs is required");
+        assert!(decode(&format!(r#"{{"txs":[{TX}]}}"#)).is_err(), "rules is required");
+    }
+
+    /// At THIS entry point too: a duplicate alias inside a request rule is rejected, which is
+    /// only possible because the request preserves each rule's original bytes.
+    #[test]
+    fn a_duplicate_alias_in_a_request_rule_is_rejected_through_this_entry_point() {
+        let rule = format!(
+            r#"{{"id":"dup","event_abis":{{}},"callstack":{{"direct_delegatecalls":{{"p":"{PROXY1}","p":"{PROXY2}"}}}},"condition":true,"action":"deny"}}"#
+        );
+        let req = decode(&format!(r#"{{"rules":[{rule}],"txs":[{TX}]}}"#)).expect("decodes");
+        // The bytes survived the envelope decode.
+        assert_eq!(req.rules[0].get().matches(r#""p""#).count(), 2);
+        // And the per-rule phase rejects it, so the handler returns -32602 with nothing executed.
+        let set = load_rules_from_raw(req.protocol_version, 0, &req.rules);
+        assert!(set.rules.is_empty());
+        assert_eq!(set.rejected.len(), 1);
+        assert!(set.rejected[0].reason.contains("more than once"));
+    }
+
+    /// At THIS entry point too: every rejected rule is reported, each with its id and reason.
+    #[test]
+    fn t55_all_rejected_request_rules_are_reported_together() {
+        let v0 = r#"{"id":"r-v0","event_abis":{},"callStack":{},"condition":true,"action":"deny"}"#;
+        let v4 = r#"{"id":"r-v4","event_abis":{},"callstack":{"direct_delegatecalls":{"p":"0x111111111111111111111111111111111111111A"}},"condition":true,"action":"deny"}"#;
+        let req = decode(&format!(r#"{{"rules":[{v0},{v4}],"txs":[{TX}]}}"#)).expect("decodes");
+        let set = load_rules_from_raw(req.protocol_version, 0, &req.rules);
+        assert_eq!(set.rejected.len(), 2, "{:?}", set.rejected);
+        let ids: Vec<&str> = set.rejected.iter().map(|r| r.id.as_str()).collect();
+        assert!(ids.contains(&"r-v0") && ids.contains(&"r-v4"), "{ids:?}");
+    }
+
+    /// A valid direct-delegatecall rule is accepted on this path, so the request can carry the
+    /// new schema rather than being limited to event-only rules.
+    #[test]
+    fn a_valid_direct_delegatecall_request_rule_compiles_on_this_path() {
+        let rule = format!(
+            r#"{{"id":"ok","event_abis":{{}},"callstack":{{"direct_delegatecalls":{{"p":"{PROXY1}"}}}},"condition":true,"action":"deny"}}"#
+        );
+        let req = decode(&format!(r#"{{"rules":[{rule}],"txs":[{TX}]}}"#)).expect("decodes");
+        let set = load_rules_from_raw(req.protocol_version, 0, &req.rules);
+        assert!(set.rejected.is_empty(), "{:?}", set.rejected);
+        assert_eq!(set.rules.len(), 1);
+        assert!(set.declares_any_alias());
+    }
+
+    #[test]
+    fn known_allowed_is_read_when_present() {
+        let req = decode(&format!(r#"{{"rules":[],"txs":[{TX}],"known_allowed":["0xa","0xb"]}}"#))
+            .expect("decodes");
+        assert_eq!(req.known_allowed, vec!["0xa".to_string(), "0xb".to_string()]);
+    }
+
+    #[test]
+    fn the_capture_budget_default_matches_the_filter_default() {
+        assert_eq!(AuditCaptureConfig::default().max_callstack_observations_per_tx, 10_000);
     }
 }
 

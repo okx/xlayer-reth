@@ -63,6 +63,11 @@ pub struct FilterConfig {
     /// the historical fixed matcher ceiling; used identically in first screening and the
     /// post-approval consistency recompute. Must be `>= 1` (default 10_000).
     pub max_event_bindings_per_tx: usize,
+    /// Maximum direct-delegatecall observations collected for one transaction during simulation.
+    /// The Nth observation is kept; the (N+1)th overflows and fails the transaction closed. This
+    /// budget is **independent** of `max_native_transfers_per_tx`, so an event-only deployment's
+    /// native behaviour is unchanged. Must be `>= 1` (default 10_000).
+    pub max_callstack_observations_per_tx: usize,
 }
 
 impl Default for FilterConfig {
@@ -83,6 +88,7 @@ impl Default for FilterConfig {
             terminal_entry_retention: Duration::from_secs(300),
             max_native_transfers_per_tx: 10_000,
             max_event_bindings_per_tx: 10_000,
+            max_callstack_observations_per_tx: 10_000,
         }
     }
 }
@@ -150,6 +156,15 @@ impl FilterConfig {
         if self.max_event_bindings_per_tx == 0 {
             return Err(crate::FilterError::Config(
                 "rcs-filter max_event_bindings_per_tx must be >= 1".to_string(),
+            ));
+        }
+        // A zero callstack budget would make the FIRST observation overflow and fail every
+        // selected transaction closed, so it is rejected at startup rather than silently
+        // degrading at runtime. Validated unconditionally, like the budgets above: the audit RPC
+        // reads this value even when the filter itself is disabled.
+        if self.max_callstack_observations_per_tx == 0 {
+            return Err(crate::FilterError::Config(
+                "rcs-filter max_callstack_observations_per_tx must be >= 1".to_string(),
             ));
         }
         Ok(())

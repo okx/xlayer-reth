@@ -30,7 +30,7 @@ use crate::handle::{
 };
 use crate::matching::{self, MatchOutcome};
 use crate::pool::{BufferEntry, BufferPool, BufferStatus};
-use crate::rules::{load_rules, RuleSet};
+use crate::rules::{load_rules, load_rules_from_raw, RuleSet};
 use crate::test_support::{golden, log_builder, MockRcsClient, TestClock};
 use crate::worker;
 
@@ -57,7 +57,7 @@ fn official_snapshot_rules() -> RuleSet {
             .expect("official RCS snapshot must deserialize");
     assert_eq!(response.protocol_version, 1);
     assert_eq!(response.content_version, 1_784_019_568);
-    load_rules(response.protocol_version, response.content_version, response.rules)
+    load_rules_from_raw(response.protocol_version, response.content_version, &response.rules)
 }
 
 fn official_snapshot_token() -> Address {
@@ -88,6 +88,7 @@ fn scenario_a_input(tx_hash: B256, logs: &[Log]) -> ScreenInput<'_> {
         value: U256::ZERO,
         block_height: 1_000_000,
         logs,
+        direct_delegatecalls: crate::callstack::Observations::not_captured(),
     }
 }
 
@@ -1873,6 +1874,7 @@ async fn scenario_b_deny_makes_zero_rcs_calls() {
         value: U256::ZERO,
         block_height: 1_000_000,
         logs: &logs,
+        direct_delegatecalls: crate::callstack::Observations::not_captured(),
     };
     assert_eq!(h.screen_tx(&input), Screen::Deny);
     assert!(h.buffer_status(&golden::tx_b()).is_none(), "deny tx is not buffered");
@@ -2324,6 +2326,7 @@ async fn unsupported_protocol_skips_pull_and_recovers_without_content_bump() {
         value: U256::ZERO,
         block_height: 1_000_000,
         logs: &logs,
+        direct_delegatecalls: crate::callstack::Observations::not_captured(),
     };
     assert_eq!(h.screen_tx(&input), Screen::Deny, "recovered rules took effect");
 }

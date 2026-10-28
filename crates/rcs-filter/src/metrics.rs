@@ -1,3 +1,4 @@
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use reth_metrics::{
@@ -28,6 +29,22 @@ pub(crate) struct RcsFilterMetrics {
     /// Builder-side local denies caused by an observation invariant failure (RealLog cross-check
     /// mismatch, or an enabled filter receiving a passthrough capture outcome).
     pub local_deny_observation_invariant_total: Counter,
+    /// Transactions denied because a direct-delegatecall condition matched a `deny` rule.
+    pub callstack_deny_total: Counter,
+    /// Direct-delegatecall observation budget overflows.
+    pub callstack_observation_budget_overflow_total: Counter,
+    /// Fail-closed denies caused by an unavailable direct-delegatecall observation set.
+    pub callstack_observations_unavailable_total: Counter,
+    /// Observation sets refused because their snapshot stamp did not match the evaluating
+    /// snapshot.
+    pub callstack_snapshot_mismatch_total: Counter,
+    /// Direct-delegatecall results produced for an already-approved deposit, where the result is
+    /// reported as a diagnostic and no verdict depends on it.
+    ///
+    /// Deliberately its own name rather than a reuse of the fail-closed counters above: an
+    /// already-approved deposit is still allowed and still committed, so counting it as a
+    /// fail-closed deny would misreport the one row where an objection is knowingly not acted on.
+    pub callstack_known_allowed_diagnostic_total: Counter,
     /// Audit transactions deferred pending adjudication.
     pub audit_pending_total: Counter,
     /// Audit transactions released after approval.
@@ -192,4 +209,48 @@ impl RcsFilterMetrics {
             }
         }
     }
+}
+
+/// Process-wide metrics for a caller that holds no [`crate::FilterHandle`].
+///
+/// The deposit-audit RPC adjudicates the rules carried in a request rather than the node's
+/// installed snapshot, and is deliberately not gated by the filter's master switch, so it has no
+/// handle to borrow a metrics instance from. Registering once here keeps every metric name in this
+/// one module instead of letting a second crate mint its own.
+fn shared() -> &'static RcsFilterMetrics {
+    static SHARED: OnceLock<RcsFilterMetrics> = OnceLock::new();
+    SHARED.get_or_init(RcsFilterMetrics::default)
+}
+
+/// Records a fail-closed direct-delegatecall decision taken without a filter handle.
+///
+/// Takes only the fixed reason discriminant. Observation contents, addresses and code hashes are
+/// never passed in and so can never be exported as a label.
+pub fn record_callstack_observations_unavailable(
+    reason: crate::callstack::ObservationsUnavailable,
+) {
+    let metrics = shared();
+    metrics.callstack_observations_unavailable_total.increment(1);
+    match reason {
+        crate::callstack::ObservationsUnavailable::BudgetExceeded { .. } => {
+            metrics.callstack_observation_budget_overflow_total.increment(1)
+        }
+        crate::callstack::ObservationsUnavailable::SnapshotMismatch => {
+            metrics.callstack_snapshot_mismatch_total.increment(1)
+        }
+        _ => {}
+    }
+}
+
+/// Records the bounded diagnostic for an already-approved deposit, whose verdict and state
+/// handling are unchanged and depend on nothing observed here.
+pub fn record_callstack_known_allowed_diagnostic() {
+    shared().callstack_known_allowed_diagnostic_total.increment(1);
+}
+
+/// Records that a direct-delegatecall condition denied a transaction on a path without a handle.
+pub fn record_callstack_deny() {
+    let metrics = shared();
+    metrics.deny_total.increment(1);
+    metrics.callstack_deny_total.increment(1);
 }

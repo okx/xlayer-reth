@@ -288,6 +288,21 @@ pub struct RcsFilterArgs {
         default_value = "10000"
     )]
     pub max_event_bindings_per_tx: usize,
+
+    /// Maximum direct-delegatecall observations collected per transaction during simulation.
+    /// Independent of the native-transfer budget. Must be `>= 1`; `0` is a startup error even
+    /// when the filter is disabled, because a zero budget would make the FIRST observation
+    /// overflow and fail every selected transaction closed.
+    ///
+    /// The audit RPC reads this value too, and is deliberately not gated by
+    /// `--rcs-filter.enabled`: it adjudicates the rules carried in the request, not the node's
+    /// installed snapshot.
+    #[arg(
+        long = "rcs-filter.max-callstack-observations-per-tx",
+        env = "RCS_MAX_CALLSTACK_OBSERVATIONS_PER_TX",
+        default_value = "10000"
+    )]
+    pub max_callstack_observations_per_tx: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]

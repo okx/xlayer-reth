@@ -16,11 +16,86 @@ use crate::error::{FilterError, Result};
 const MAX_RESPONSE_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 /// `GET /rules` response. `rules` may be an empty array.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// `rules` holds each rule's **original JSON bytes**, not a typed or `Value`-decoded form: a
+/// repeated key inside a rule must survive until duplicate detection runs, and a `Value` would
+/// already have folded it last-wins. The per-rule typed decode happens in
+/// [`crate::rules::load_rules_from_raw`].
+///
+/// `Deserialize` is hand-written rather than derived, for two reasons: `#[serde(flatten)]` cannot
+/// coexist with a raw value (flatten buffers every field through serde's content representation,
+/// which a raw value cannot survive), and the hand-written visitor can name an unknown or
+/// repeated **envelope** key, which surfaces on the existing `get_rules()` decode path as a
+/// [`FilterError`] with last-known-good rules left in force.
+#[derive(Debug, Clone)]
 pub struct RulesResponse {
     pub protocol_version: u32,
     pub content_version: u64,
-    pub rules: Vec<crate::rules::RawRule>,
+    /// Original bytes per rule. Never `Value`, never a map, never re-serialized.
+    pub rules: Vec<Box<serde_json::value::RawValue>>,
+}
+
+/// Modelled `GET /rules` envelope keys. Anything else is named and rejected.
+const RULES_RESPONSE_KEYS: &[&str] = &["protocol_version", "content_version", "rules"];
+
+impl<'de> Deserialize<'de> for RulesResponse {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct RulesResponseVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for RulesResponseVisitor {
+            type Value = RulesResponse;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a GET /rules response object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut tracker = crate::rules::raw::EnvelopeKeyTracker::new();
+                let mut protocol_version: Option<u32> = None;
+                let mut content_version: Option<u64> = None;
+                let mut rules: Option<Vec<Box<serde_json::value::RawValue>>> = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    let repeated = tracker.already_seen(&key);
+                    tracker.record(&key, RULES_RESPONSE_KEYS);
+                    // A repeated key's value is consumed but discarded, so the first occurrence
+                    // is never silently overwritten before the duplicate is reported.
+                    if repeated {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                        continue;
+                    }
+                    match key.as_str() {
+                        "protocol_version" => protocol_version = Some(map.next_value()?),
+                        "content_version" => content_version = Some(map.next_value()?),
+                        "rules" => rules = Some(map.next_value()?),
+                        _ => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+
+                if let Some(problem) = tracker.problem() {
+                    return Err(serde::de::Error::custom(problem));
+                }
+
+                Ok(RulesResponse {
+                    protocol_version: protocol_version
+                        .ok_or_else(|| serde::de::Error::missing_field("protocol_version"))?,
+                    content_version: content_version
+                        .ok_or_else(|| serde::de::Error::missing_field("content_version"))?,
+                    rules: rules.ok_or_else(|| serde::de::Error::missing_field("rules"))?,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(RulesResponseVisitor)
+    }
 }
 
 /// `GET /rules/version` response — no `rules`.

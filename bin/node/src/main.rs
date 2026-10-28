@@ -29,7 +29,8 @@ use xlayer_legacy_rpc::{layer::LegacyRpcRouterLayer, LegacyRpcRouterConfig};
 use xlayer_monitor::{start_monitor_handle, start_pool_admission_trace_handle, XLayerMonitor};
 use xlayer_rpc::xlayer_ext::{XlayerRpcExt, XlayerRpcExtApiServer};
 use xlayer_rpc::{
-    FlashblocksEthApiExt, FlashblocksEthApiOverrideServer, XlayerAuditApiServer, XlayerAuditRpc,
+    AuditCaptureConfig, FlashblocksEthApiExt, FlashblocksEthApiOverrideServer,
+    XlayerAuditApiServer, XlayerAuditRpc,
 };
 
 #[global_allocator]
@@ -99,6 +100,10 @@ fn main() {
 
             // Clone xlayer_args early to avoid partial move issues
             let xlayer_args = args.xlayer_args.clone();
+            // Read the callstack observation budget before `xlayer_args` is partially moved
+            // below, so the audit RPC registration can inject it.
+            let audit_callstack_budget =
+                xlayer_args.builder.rcs_filter.max_callstack_observations_per_tx;
             let datadir = builder.config().datadir().clone();
 
             let legacy_config = LegacyRpcRouterConfig {
@@ -191,9 +196,17 @@ fn main() {
                     ))?;
                     info!(target: "reth::cli", "xlayer rpc extension enabled");
 
-                    // Register the side-effect-free L1 deposit audit RPC.
-                    let xlayer_audit_rpc =
-                        XlayerAuditRpc { backend: new_op_eth_api.clone() };
+                    // Register the side-effect-free L1 deposit audit RPC. Its capture budget
+                    // comes from the same `--rcs-filter.*` argument group the builder uses, so the
+                    // two cannot drift. The RPC itself is deliberately not gated by
+                    // `--rcs-filter.enabled`: it adjudicates the rules carried in the request,
+                    // not the node's installed snapshot.
+                    let xlayer_audit_rpc = XlayerAuditRpc {
+                        backend: new_op_eth_api.clone(),
+                        capture: AuditCaptureConfig {
+                            max_callstack_observations_per_tx: audit_callstack_budget,
+                        },
+                    };
                     ctx.modules.merge_configured(XlayerAuditApiServer::into_rpc(
                         xlayer_audit_rpc,
                     ))?;

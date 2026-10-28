@@ -17,7 +17,6 @@ mod context;
 mod generator;
 mod handler;
 mod handler_ctx;
-mod rcs_capture;
 mod service;
 mod timing;
 pub(crate) mod utils;
@@ -272,6 +271,11 @@ fn build_rcs_filter_config(
     if args.max_event_bindings_per_tx == 0 {
         return Err(eyre::eyre!("rcs-filter --rcs-filter.max-event-bindings-per-tx must be >= 1"));
     }
+    if args.max_callstack_observations_per_tx == 0 {
+        return Err(eyre::eyre!(
+            "rcs-filter --rcs-filter.max-callstack-observations-per-tx must be >= 1"
+        ));
+    }
     if !args.enabled {
         return Ok(None);
     }
@@ -298,6 +302,7 @@ fn build_rcs_filter_config(
         terminal_entry_retention: Duration::from_secs(args.terminal_entry_retention_seconds),
         max_native_transfers_per_tx: args.max_native_transfers_per_tx,
         max_event_bindings_per_tx: args.max_event_bindings_per_tx,
+        max_callstack_observations_per_tx: args.max_callstack_observations_per_tx,
     };
     config.validate().map_err(|error| eyre::eyre!(error.to_string()))?;
     Ok(Some(config))
@@ -376,12 +381,44 @@ mod rcs_filter_config_tests {
         let config = build_rcs_filter_config(&enabled_args()).unwrap().unwrap();
         assert_eq!(config.max_native_transfers_per_tx, 10_000);
         assert_eq!(config.max_event_bindings_per_tx, 10_000);
+        assert_eq!(config.max_callstack_observations_per_tx, 10_000);
 
         let mut overridden = enabled_args();
         overridden.max_native_transfers_per_tx = 25;
         overridden.max_event_bindings_per_tx = 50;
+        overridden.max_callstack_observations_per_tx = 75;
         let config = build_rcs_filter_config(&overridden).unwrap().unwrap();
         assert_eq!(config.max_native_transfers_per_tx, 25);
         assert_eq!(config.max_event_bindings_per_tx, 50);
+        assert_eq!(config.max_callstack_observations_per_tx, 75);
+    }
+
+    /// A zero callstack budget is rejected at startup, so it can never
+    /// silently make the first observation overflow at runtime. Rejected even with the filter
+    /// disabled, because the audit RPC reads this value independently of `--rcs-filter.enabled`.
+    #[test]
+    fn disabled_filter_with_zero_callstack_budget_is_startup_error() {
+        let mut args = crate::args::BuilderArgs::default().rcs_filter;
+        args.enabled = false;
+        args.max_callstack_observations_per_tx = 0;
+        let error = build_rcs_filter_config(&args).unwrap_err();
+        assert!(
+            error.to_string().contains("max-callstack-observations-per-tx"),
+            "unexpected error: {error}"
+        );
+        assert!(build_rcs_filter_handle(&args).is_err());
+    }
+
+    /// The callstack budget is an INJECTED value, not a hard-coded
+    /// constant — a non-default argument really reaches the config the node runs with.
+    #[test]
+    fn a_non_default_callstack_budget_is_injected_rather_than_hard_coded() {
+        let mut args = enabled_args();
+        args.max_callstack_observations_per_tx = 3;
+        let config = build_rcs_filter_config(&args).unwrap().unwrap();
+        assert_eq!(config.max_callstack_observations_per_tx, 3);
+        // And it is independent of the native budget, so an event-only deployment's native
+        // behaviour cannot be changed by tuning this one.
+        assert_eq!(config.max_native_transfers_per_tx, 10_000);
     }
 }

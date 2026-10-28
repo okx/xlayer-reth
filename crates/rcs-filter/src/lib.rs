@@ -17,13 +17,16 @@
 //! 2. All RCS network IO happens on background tokio workers ([`worker`]).
 //! 3. Rules are hot-swapped atomically ([`Arc<RwLock<Arc<RuleSet>>>`]).
 
+pub mod callstack;
 pub mod client;
 pub mod clock;
 pub mod config;
 pub mod error;
 pub mod handle;
 pub mod matching;
-mod metrics;
+/// Metric recorders. The struct itself stays crate-private; only the handle-free recorders a
+/// caller without a [`FilterHandle`] needs are public, so every metric name lives in one module.
+pub mod metrics;
 pub mod pool;
 pub mod quota_hash;
 pub mod rules;
@@ -32,8 +35,14 @@ pub mod test_support;
 pub mod worker;
 
 #[cfg(test)]
+mod callstack_matching_tests;
+#[cfg(test)]
 mod integration_tests;
 
+pub use callstack::{
+    alias_set_digest, DirectDelegatecallObservation, Observations, ObservationsUnavailable,
+    SnapshotStamp, MAX_DIRECT_DELEGATECALL_ALIASES,
+};
 pub use client::{
     ActionItem, QueryParams, QueryResponse, QueryTx, RcsClient, ReqwestRcsClient, RulesResponse,
     SubmitRequest, SubmitResponse, SubmitTx, VersionResponse,
@@ -45,4 +54,7 @@ pub use handle::{
     FilterHandle, LocalDenyReason, PreScreen, Screen, ScreenInput, TerminalEvent, TerminalReason,
 };
 pub use pool::{BufferPool, BufferStatus};
-pub use rules::{Action, CompiledRule, RejectedRule, RuleSet, TimeoutAction};
+pub use rules::{
+    Action, CompiledDirectDelegatecall, CompiledRule, RejectedRule, RuleBindingClass, RuleSet,
+    TimeoutAction,
+};

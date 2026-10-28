@@ -1,26 +1,51 @@
-//! Builder-side capture of internal native-token (OKB) balance transfers during simulation.
+//! Shared execution-frame capture during simulation.
 //!
-//! This module adapts EVM execution to the risk-control screening input. During the real-user
-//! candidate simulation the inspector records internal native-value movements — non-zero internal
-//! `CALL` transfers, `CREATE`/`CREATE2` endowments, and `SELFDESTRUCT` beneficiary transfers — as
-//! virtual `Transfer(address,address,uint256)` logs whose address is the native-asset identifier,
-//! interleaved in execution order with the real EVM logs. The flattened stream is handed to
-//! screening only; it never reaches a receipt, RPC log, bloom, the indexer, or consensus state.
+//! This crate adapts EVM execution to the risk-control screening input, and it is the **only**
+//! place frame logic lives: the block builder and the deposit-audit RPC both drive this one
+//! inspector, so the two paths identify frames with the same code instead of each reimplementing
+//! it. It owns two independent observation channels over one capture window:
 //!
-//! The screening crate stays free of any EVM / frame-lifecycle dependency: the inspector, its
-//! capture-control seam, and the capture outcomes are all builder-owned types here.
+//! 1. **Native transfers.** Internal native-value movements — non-zero internal `CALL` transfers,
+//!    `CREATE`/`CREATE2` endowments, and `SELFDESTRUCT` beneficiary transfers — recorded as
+//!    virtual `Transfer(address,address,uint256)` logs whose address is the native-asset
+//!    identifier, interleaved in execution order with the real EVM logs. The flattened stream is
+//!    handed to screening only; it never reaches a receipt, RPC log, bloom, the indexer, or
+//!    consensus state.
+//! 2. **Direct delegatecalls.** For a selected contract address, the contract's **own** direct
+//!    `DELEGATECALL`, taken from real execution frames: the execution context and the delegate
+//!    target, each with the hash of the runtime code that genuinely executed. Nothing is inferred
+//!    from a storage slot, from calldata, or from an account's `code_hash` — an account field can
+//!    name a delegation designator rather than the bytecode that actually ran.
+//!
+//! The two channels share the window but never share state: the native budget, its outcome and
+//! its cross-check are untouched by the second channel, so a deployment that selects no address
+//! behaves exactly as it did before this channel existed.
+//!
+//! The screening crate stays free of any EVM / frame-lifecycle dependency: it owns the finished
+//! observation values, while the inspector, its capture-control seam and the capture outcomes live
+//! here.
+
+use std::cell::Cell;
+use std::collections::HashSet;
 
 use alloy_primitives::{address, keccak256, Address, Bytes, Log, LogData, B256, U256};
+use rcs_filter::callstack::{
+    DirectDelegatecallObservation, Observations, ObservationsUnavailable, SnapshotStamp,
+};
 use revm::{
     bytecode::opcode,
     context_interface::{ContextTr, CreateScheme, JournalTr},
     inspector::{JournalExt, NoOpInspector},
     interpreter::{
-        interpreter_types::Jumps, CallInputs, CallOutcome, CreateInputs, CreateOutcome,
-        Interpreter, InterpreterTypes,
+        interpreter_types::{Jumps, LegacyBytecode},
+        CallInputs, CallOutcome, CallScheme, CreateInputs, CreateOutcome, Interpreter,
+        InterpreterTypes,
     },
     Inspector,
 };
+
+#[cfg(test)]
+mod direct_delegatecall_tests;
 
 /// The native-asset identifier used as the `log.address` of every virtual native transfer.
 ///
@@ -84,26 +109,213 @@ pub enum CaptureOutcome {
     InvariantViolation { reason: CaptureInvariantError },
 }
 
-/// Builder-internal capture-control seam. These methods are **not** part of revm's `Inspector`
-/// trait, so a generic execution loop bounds its inspector on `Inspector + RcsCaptureControl` to
-/// drive capture without a runtime downcast. The `rcs-filter` crate gains no revm dependency.
+/// Which observation channels a capture window drives.
+///
+/// The two modes exist because the two consuming paths need different channels from the *same*
+/// frame logic. Frame identification is identical in both, which is what makes "both paths agree
+/// on the same frames" testable rather than merely asserted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CaptureMode {
+    /// Both channels. Bit-for-bit the behaviour the block builder had before the second channel
+    /// existed, and the mode its candidate loop keeps using.
+    #[default]
+    NativeAndCallstack,
+    /// Direct-delegatecall observations only. The native channel's hooks become genuine no-ops,
+    /// its queue stays empty, its counters are untouched, and finishing skips both the native
+    /// budget check and the real-log cross-check. The deposit-audit path screens the execution
+    /// result's own logs, so it needs no native log stream at all.
+    CallstackOnly,
+}
+
+/// Maximum simultaneously open frame records. Above the EVM's own call-depth limit, so a normal
+/// execution can never reach it; exceeding it is treated as an incomplete capture and fails
+/// closed rather than silently dropping frames.
+pub const MAX_OPEN_FRAMES: usize = 1024;
+
+/// The selected addresses a capture window observes, plus the identity of the snapshot they came
+/// from. `None` (or an empty alias set) makes every frame hook a strict no-op before any per-frame
+/// work, so a deployment that selects nothing pays nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectDelegatecallConfig {
+    /// Selected addresses, deduplicated.
+    pub aliases: HashSet<Address>,
+    /// Full identity of the snapshot that produced `aliases`. Stamped onto the result so an
+    /// evaluation against a different snapshot is detected instead of being trusted.
+    pub stamp: SnapshotStamp,
+    /// Per-transaction observation budget. Injected, never defaulted here.
+    pub max_observations: usize,
+}
+
+/// Deliberate capture faults, for driving the fail-closed paths through real execution.
+///
+/// This is a **real API input**, not a test-only item: a crate compiled as a dependency does not
+/// enable its own test configuration, so a seam that existed only under `cfg(test)` would be
+/// invisible to the consuming crates' tests — exactly the tests that need to prove the fail-closed
+/// behaviour end to end. Every field defaults to "no fault", and constructing a value changes no
+/// production default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CaptureFaults {
+    /// Append one extra real-log entry at finish, so the real cross-check genuinely diverges from
+    /// the execution result's logs.
+    pub force_real_log_mismatch: bool,
+    /// Record a wrong expected recipient for the next endowed `CREATE`, so completion genuinely
+    /// sees a differing address.
+    pub force_create_address_mismatch: bool,
+    /// Treat the own-code evidence of a selected frame as undecidable.
+    pub force_own_code_indeterminate: bool,
+    /// Treat the frame stack as unbalanced.
+    pub force_frames_unbalanced: bool,
+}
+
+impl CaptureFaults {
+    /// No faults. The production value.
+    pub const NONE: Self = Self {
+        force_real_log_mismatch: false,
+        force_create_address_mismatch: false,
+        force_own_code_indeterminate: false,
+        force_frames_unbalanced: false,
+    };
+
+    /// Whether any fault is requested. Lets the hot path skip fault handling entirely.
+    const fn any(&self) -> bool {
+        self.force_real_log_mismatch
+            || self.force_create_address_mismatch
+            || self.force_own_code_indeterminate
+            || self.force_frames_unbalanced
+    }
+
+    /// Installs `self` for the current thread until the returned guard drops, for a caller that
+    /// cannot reach the inspector instance — a candidate loop builds its own inspector internally.
+    /// The guard restores the previous value on every exit path, including an unwind.
+    pub fn scoped(self) -> FaultsGuard {
+        let previous = AMBIENT_FAULTS.with(|f| f.replace(self));
+        FaultsGuard { previous }
+    }
+
+    /// The ambient value installed for this thread, or [`Self::NONE`].
+    pub fn ambient() -> Self {
+        AMBIENT_FAULTS.with(Cell::get)
+    }
+
+    /// Union of an inspector's own faults with the thread's ambient ones.
+    fn union(self, other: Self) -> Self {
+        Self {
+            force_real_log_mismatch: self.force_real_log_mismatch || other.force_real_log_mismatch,
+            force_create_address_mismatch: self.force_create_address_mismatch
+                || other.force_create_address_mismatch,
+            force_own_code_indeterminate: self.force_own_code_indeterminate
+                || other.force_own_code_indeterminate,
+            force_frames_unbalanced: self.force_frames_unbalanced || other.force_frames_unbalanced,
+        }
+    }
+}
+
+// Kept as `//` so no doc comment is orphaned onto the macro. Defaults to no faults, so a
+// production build that never calls `CaptureFaults::scoped` behaves identically to one compiled
+// without this seam.
+thread_local! {
+    static AMBIENT_FAULTS: Cell<CaptureFaults> = const { Cell::new(CaptureFaults::NONE) };
+}
+
+/// Restores the previous ambient [`CaptureFaults`] when dropped.
+#[derive(Debug)]
+pub struct FaultsGuard {
+    previous: CaptureFaults,
+}
+
+impl Drop for FaultsGuard {
+    fn drop(&mut self) {
+        AMBIENT_FAULTS.with(|f| f.set(self.previous));
+    }
+}
+
+/// Whether a frame was executing its selected account's **own** code.
+///
+/// Decided from two independent signals that must agree — the account's delegation state and the
+/// identity of the code that actually executed — and recorded when the frame's interpreter is
+/// initialised, never re-read later: a transaction can change the account between the frame's
+/// entry and a child call, which is precisely the case this whole channel exists to catch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnCode {
+    /// Both signals agree the frame ran the account's own code.
+    Yes,
+    /// Both signals agree it did not — a delegated account running someone else's code. A correct
+    /// exclusion, not an error.
+    No,
+    /// The signals disagreed, or the account's code was unavailable. Never silently resolved in
+    /// either direction: a wrong "observe" would misattribute code and a wrong "skip" would drop a
+    /// real observation, so the window fails closed instead.
+    Indeterminate,
+}
+
+/// One open CALL/CREATE frame. Pushed on frame entry, popped on frame completion.
+#[derive(Debug, Clone)]
+struct FrameRecord {
+    /// The execution context address — whose storage this frame may modify.
+    target_address: Address,
+    /// The address whose code this frame runs. `None` for a CREATE frame.
+    bytecode_address: Option<Address>,
+    /// `None` for a CREATE frame.
+    scheme: Option<CallScheme>,
+    /// Hash of the code this frame actually loaded. `Some` **proves** the frame entered the
+    /// interpreter: an early failure (precompile, empty code, depth limit, failed value transfer)
+    /// completes the frame without ever initialising one.
+    executed_code_hash: Option<B256>,
+    /// Entry-time own-code evidence. `None` until the interpreter is initialised, and computed
+    /// only for a frame whose context address is selected, so an unselected frame costs nothing.
+    own_code: Option<OwnCode>,
+    /// A direct delegatecall of a selected address, awaiting proof that the frame really executed.
+    staged: Option<StagedCandidate>,
+}
+
+/// A candidate observation whose context fields are already known, pending the delegate frame's
+/// own execution confirmation. Staging allocates no observation and consumes no budget.
+#[derive(Debug, Clone, Copy)]
+struct StagedCandidate {
+    context_address: Address,
+    context_code_hash: B256,
+    delegate_address: Address,
+}
+
+/// Capture-control seam. These methods are **not** part of revm's `Inspector` trait, so a generic
+/// execution loop bounds its inspector on `Inspector + RcsCaptureControl` to drive capture without
+/// a runtime downcast. The `rcs-filter` crate gains no revm dependency.
 pub trait RcsCaptureControl {
-    /// Resets all capture state and arms the inspector for one real-user candidate simulation.
+    /// Installs the selected-address configuration for the **next** window. `None` means inert.
+    ///
+    /// Called per candidate immediately before its simulation, so a fresh candidate and a
+    /// re-simulation of a buffered transaction in the same round can never share one
+    /// configuration.
+    fn configure_direct_delegatecalls(&mut self, config: Option<DirectDelegatecallConfig>);
+    /// Resets all per-window state and arms the inspector for one real-user candidate simulation.
     fn start_capture(&mut self);
     /// Ends the capture window, cross-checks the real-log subsequence against `result_logs`
-    /// (the execution result's logs), and returns the outcome. Disarms the inspector.
+    /// (the execution result's logs), and returns the native outcome. Disarms the inspector and
+    /// **parks** the direct-delegatecall result for a subsequent
+    /// [`Self::take_direct_delegatecalls`].
     fn finish_capture(&mut self, result_logs: &[Log]) -> CaptureOutcome;
-    /// Aborts capture (e.g. the transaction returned an error), clearing state and disarming.
+    /// Removes and returns the parked direct-delegatecall result. A second call returns
+    /// `Unavailable(ResultAlreadyTaken)` — never a stale clone and never a panic.
+    fn take_direct_delegatecalls(&mut self) -> Observations;
+    /// Aborts capture (e.g. the transaction returned an error), clearing everything **including**
+    /// any parked result, and disarming.
     fn abort_capture(&mut self);
 }
 
 /// The filter-disabled inspector performs no capture: `start`/`abort` are no-ops and `finish`
 /// always returns [`CaptureOutcome::Passthrough`], so the loop falls back to raw `result.logs()`.
 impl RcsCaptureControl for NoOpInspector {
+    fn configure_direct_delegatecalls(&mut self, _config: Option<DirectDelegatecallConfig>) {}
+
     fn start_capture(&mut self) {}
 
     fn finish_capture(&mut self, _result_logs: &[Log]) -> CaptureOutcome {
         CaptureOutcome::Passthrough
+    }
+
+    /// Never captured, so never "captured and empty".
+    fn take_direct_delegatecalls(&mut self) -> Observations {
+        Observations::Unavailable(ObservationsUnavailable::NotCaptured)
     }
 
     fn abort_capture(&mut self) {}
@@ -124,31 +336,6 @@ impl QueuedLog {
             QueuedLog::Real(log) | QueuedLog::Virtual(log) => log,
         }
     }
-}
-
-// Test-only "controlled inspector outcome" seam (spec §5.10.2 / §8 test 35). When set, the next
-// `finish_capture` on an active inspector injects one extra real-log entry so the REAL RealLog
-// cross-check diverges from `result.logs()` and returns a genuine
-// `CaptureOutcome::InvariantViolation { RealLogMismatch }`. This lets the loop-level builder-path
-// test drive a real runtime mismatch through the actual `execute_best_transactions` candidate loop
-// (the loop's own inspector honors it) instead of hand-constructing a `CaptureOutcome`. One-shot:
-// the flag is cleared as it is consumed so only the armed candidate is affected. Kept as `//` (not
-// `///`) so the RcsInspector doc comment below is not orphaned onto this macro invocation.
-#[cfg(test)]
-thread_local! {
-    pub(crate) static FORCE_REALLOG_MISMATCH: std::cell::Cell<bool> =
-        const { std::cell::Cell::new(false) };
-}
-
-// Test-only "forced CREATE address mismatch" seam (D7b). When set, the next `create` hook on an
-// active inspector pushes `Address::repeat_byte(0xFE)` as the expected recipient instead of the
-// real derived address, so `create_end` sees `e != a` on a genuinely successful CREATE. One-shot:
-// the flag is consumed (replaced with `false`) by the `create` hook so only the armed frame is
-// affected. Kept as `//` so the struct doc below is not orphaned onto the macro.
-#[cfg(test)]
-thread_local! {
-    pub(crate) static FORCE_CREATE_ADDRESS_MISMATCH: std::cell::Cell<bool> =
-        const { std::cell::Cell::new(false) };
 }
 
 // Test-only create-hook gate snapshot. The `create` hook writes here at the exact point where it
@@ -350,12 +537,65 @@ pub struct RcsInspector {
     /// the `selfdestruct` callback's payload describes THIS opcode rather than a previous entry.
     /// Consumed with `mem::take` by the callback. Only ever written while `active`.
     selfdestruct_wrote_journal: bool,
+
+    // ---- direct-delegatecall channel -----------------------------------------------------------
+    /// Which observation channels this inspector drives.
+    mode: CaptureMode,
+    /// Deliberate faults. [`CaptureFaults::NONE`] in production.
+    faults: CaptureFaults,
+    /// Selected addresses for the current window, with the stamp of the snapshot they came from.
+    /// `None` or an empty alias set means inert: every frame hook returns before any frame work.
+    callstack: Option<DirectDelegatecallConfig>,
+    /// One record per open CALL/CREATE frame, pushed on entry and popped on completion.
+    frames: Vec<FrameRecord>,
+    /// Confirmed observations for the current window, in execution order.
+    observations: Vec<DirectDelegatecallObservation>,
+    /// Cumulative observation candidates. Never rolls back: an executed-then-reverted delegatecall
+    /// is still an execution fact.
+    observation_count: usize,
+    /// Set once `observation_count` exceeds the configured budget (sticky).
+    callstack_overflowed: bool,
+    /// Set when the frame stack was popped empty or exceeded [`MAX_OPEN_FRAMES`] (sticky).
+    frames_unbalanced: bool,
+    /// Set when a selected frame's own-code evidence could not be decided and that frame issued a
+    /// delegatecall whose attribution therefore could not be settled (sticky).
+    own_code_indeterminate: bool,
+    /// The result of the window that just finished, awaiting exactly one `take`. Cleared on a
+    /// `take`, on `start_capture` and on `abort_capture` — but deliberately **not** by
+    /// `finish_capture`, which is what installs it.
+    parked: Option<Observations>,
 }
 
 impl RcsInspector {
-    /// Creates an inactive inspector with the given native-transfer budget (`>= 1`, validated at
-    /// startup).
+    /// Creates an inactive inspector driving both channels, with the given native-transfer budget
+    /// (`>= 1`, validated at startup) and no faults.
     pub fn new(max_native_transfers: usize) -> Self {
+        Self::with_mode_and_faults(
+            max_native_transfers,
+            CaptureMode::NativeAndCallstack,
+            CaptureFaults::NONE,
+        )
+    }
+
+    /// Creates an inactive inspector that drives the direct-delegatecall channel only.
+    ///
+    /// The native budget is irrelevant in this mode (its hooks are no-ops), so it is set to the
+    /// observation budget the caller already has rather than inventing a second value.
+    pub fn new_callstack_only(max_callstack_observations: usize) -> Self {
+        Self::with_mode_and_faults(
+            max_callstack_observations,
+            CaptureMode::CallstackOnly,
+            CaptureFaults::NONE,
+        )
+    }
+
+    /// Full constructor. The fault argument is a real API input; passing [`CaptureFaults::NONE`]
+    /// yields exactly the production inspector.
+    pub fn with_mode_and_faults(
+        max_native_transfers: usize,
+        mode: CaptureMode,
+        faults: CaptureFaults,
+    ) -> Self {
         Self {
             active: false,
             queue: Vec::new(),
@@ -367,6 +607,274 @@ impl RcsInspector {
             address_mismatch_create_index: None,
             selfdestruct_journal_mark: None,
             selfdestruct_wrote_journal: false,
+            mode,
+            faults,
+            callstack: None,
+            frames: Vec::new(),
+            observations: Vec::new(),
+            observation_count: 0,
+            callstack_overflowed: false,
+            frames_unbalanced: false,
+            own_code_indeterminate: false,
+            parked: None,
+        }
+    }
+
+    /// This inspector's mode.
+    pub fn mode(&self) -> CaptureMode {
+        self.mode
+    }
+
+    /// Whether the native channel is driven in this mode.
+    const fn native_enabled(&self) -> bool {
+        matches!(self.mode, CaptureMode::NativeAndCallstack)
+    }
+
+    /// The faults in force: the inspector's own, unioned with the thread's ambient ones. Read once
+    /// per decision point rather than cached, so a scoped override installed after construction is
+    /// still honoured.
+    fn faults(&self) -> CaptureFaults {
+        if self.faults.any() {
+            self.faults.union(CaptureFaults::ambient())
+        } else {
+            CaptureFaults::ambient()
+        }
+    }
+
+    /// Takes a **one-shot** fault, clearing it wherever it was armed so only the first occurrence
+    /// is affected.
+    ///
+    /// The two injected invariant failures are one-shot by design: a caller arms one for a single
+    /// candidate, and its having been consumed is itself the evidence that the hook really ran.
+    /// The remaining faults describe a whole window and are deliberately not consumed.
+    fn take_one_shot(
+        &mut self,
+        read: fn(&CaptureFaults) -> bool,
+        clear: fn(&mut CaptureFaults),
+    ) -> bool {
+        if read(&self.faults) {
+            clear(&mut self.faults);
+            return true;
+        }
+        AMBIENT_FAULTS.with(|cell| {
+            let mut faults = cell.get();
+            if read(&faults) {
+                clear(&mut faults);
+                cell.set(faults);
+                true
+            } else {
+                false
+            }
+        })
+    }
+
+    /// Whether the direct-delegatecall channel does any per-frame work at all.
+    ///
+    /// This single gate is what keeps a deployment that selects no address at zero cost: it is
+    /// checked before any frame record is pushed, any hash is computed, or any account is read.
+    fn callstack_armed(&self) -> bool {
+        self.active && self.callstack.as_ref().is_some_and(|c| !c.aliases.is_empty())
+    }
+
+    /// The single funnel where a direct-delegatecall observation is counted and (within budget)
+    /// kept, so counting, filtering and overflow can never drift from each other.
+    ///
+    /// The count never decrements. Unlike the native log queue, which truncates to a frame
+    /// checkpoint when the frame reverts, a confirmed observation is **never** removed: code that
+    /// ran and then reverted still ran, and that is the whole point of observing frames rather
+    /// than reading state afterwards.
+    fn observe_direct_delegatecall(&mut self, observation: DirectDelegatecallObservation) {
+        let Some(limit) = self.callstack.as_ref().map(|c| c.max_observations) else {
+            return;
+        };
+        self.observation_count += 1;
+        if self.observation_count > limit {
+            // Sticky. The EVM keeps executing normally; only new observations stop being kept, and
+            // the window as a whole becomes untrustworthy rather than quietly truncated.
+            self.callstack_overflowed = true;
+            return;
+        }
+        self.observations.push(observation);
+    }
+
+    /// Pushes a frame record, bounding the stack. No-op when the channel is inert.
+    fn push_frame(&mut self, record: FrameRecord) {
+        if !self.callstack_armed() {
+            return;
+        }
+        if self.frames.len() >= MAX_OPEN_FRAMES {
+            self.frames_unbalanced = true;
+            return;
+        }
+        self.frames.push(record);
+    }
+
+    /// Pops this frame's record. A staged-but-unconfirmed candidate is discarded here, which is
+    /// exactly the frame that never entered the interpreter. Popping an empty stack is an
+    /// imbalance and fails the window closed.
+    fn pop_frame(&mut self) {
+        if !self.callstack_armed() {
+            return;
+        }
+        if self.frames.pop().is_none() {
+            self.frames_unbalanced = true;
+        }
+    }
+
+    /// Decides whether this new frame is a selected address's own direct `DELEGATECALL` and, if
+    /// so, stages it. Reads the parent record's **entry-time** evidence only, never the account
+    /// state as it stands now: a transaction can change the account between the parent's entry and
+    /// this call, and re-reading it would attribute the call to whatever the account became.
+    fn stage_if_direct_delegatecall(&mut self) {
+        // Reads this frame's own record, so the decision is taken from recorded frame facts rather
+        // than from arguments a caller could pass inconsistently.
+        let Some(frame) = self.frames.last() else {
+            return;
+        };
+        // Structural exclusion first: only DELEGATECALL can be a direct delegatecall. CALL,
+        // STATICCALL and CALLCODE are excluded by opcode identity, not by comparing addresses.
+        if frame.scheme != Some(CallScheme::DelegateCall) {
+            return;
+        }
+        let Some(delegate_address) = frame.bytecode_address else {
+            return;
+        };
+        // The deciding identity is the PARENT of this frame — as recorded on entry to the parent,
+        // never the current top of stack and never the transaction's destination.
+        let Some(parent) = self.frames.len().checked_sub(2).and_then(|i| self.frames.get(i)) else {
+            return;
+        };
+        let context_address = parent.target_address;
+        if !self.callstack.as_ref().is_some_and(|c| c.aliases.contains(&context_address)) {
+            // An unselected contract's delegatecall is not recorded at all.
+            return;
+        }
+        // The parent must have been running the selected account's OWN code. A parent that is
+        // itself a delegate frame has a bytecode address differing from its context, so an
+        // implementation's own nested delegatecall is never attributed to the selected contract.
+        if parent.bytecode_address != Some(context_address) {
+            return;
+        }
+        // `Some` proves the parent really entered the interpreter, so the hash below is the hash of
+        // code that genuinely executed.
+        let Some(context_code_hash) = parent.executed_code_hash else {
+            return;
+        };
+        match parent.own_code {
+            Some(OwnCode::Yes) => {
+                let staged =
+                    StagedCandidate { context_address, context_code_hash, delegate_address };
+                if let Some(frame) = self.frames.last_mut() {
+                    frame.staged = Some(staged);
+                }
+            }
+            // A correct exclusion: the parent ran someone else's code, so this delegatecall is not
+            // the selected contract's own.
+            Some(OwnCode::No) => {}
+            // Undecidable, and it decides this observation's attribution — so the window fails
+            // closed instead of guessing in either direction.
+            Some(OwnCode::Indeterminate) | None => {
+                self.own_code_indeterminate = true;
+            }
+        }
+    }
+
+    /// Decides whether a frame ran `address`'s **own** code, from two independent signals that
+    /// must agree.
+    ///
+    /// 1. **Delegation state** — the account's code, read from the journal. The account ran its own
+    ///    code only if that code is present and is not a delegation designator.
+    /// 2. **Executed-code identity** — the hash of the bytes this frame actually loaded, compared
+    ///    to the account's own code hash. Equal for an ordinary contract; unequal for a delegated
+    ///    account, because the account's hash is the designator's while the executed bytes are the
+    ///    delegate's.
+    ///
+    /// Addresses alone cannot answer this. A delegated account's frame still records the original
+    /// callee as its bytecode address while running someone else's code, so an address-only test
+    /// would attribute that code's delegatecalls to the selected contract.
+    ///
+    /// A disagreement, or an account whose code is unavailable, is `Indeterminate`: resolving it
+    /// either way would mean silently misattributing code or silently dropping a real observation.
+    fn decide_own_code<CTX>(
+        &self,
+        context: &CTX,
+        address: Address,
+        executed_code_hash: B256,
+    ) -> OwnCode
+    where
+        CTX: ContextTr<Journal: JournalExt>,
+    {
+        if self.faults().force_own_code_indeterminate {
+            return OwnCode::Indeterminate;
+        }
+        // Same journal-read pattern the CREATE hook already uses for the caller nonce.
+        let Some(account) = context.journal_ref().evm_state().get(&address) else {
+            return OwnCode::Indeterminate;
+        };
+        let Some(code) = account.info.code.as_ref() else {
+            return OwnCode::Indeterminate;
+        };
+        let not_delegated = !code.is_eip7702();
+        let hashes_agree = executed_code_hash == account.info.code_hash;
+        match (not_delegated, hashes_agree) {
+            (true, true) => OwnCode::Yes,
+            (false, false) => OwnCode::No,
+            _ => OwnCode::Indeterminate,
+        }
+    }
+
+    /// Clears **active window state** only, leaving any parked result alone.
+    ///
+    /// The separation is load-bearing: "cleared on every exit path" and "the result survives for
+    /// exactly one take" are contradictory demands on one state group, and conflating them would
+    /// make a successful window's result unreachable.
+    fn clear_active_window(&mut self) {
+        self.queue.clear();
+        self.checkpoints.clear();
+        self.create_recipients.clear();
+        self.observed_count = 0;
+        self.overflowed = false;
+        self.address_mismatch_create_index = None;
+        self.selfdestruct_journal_mark = None;
+        self.selfdestruct_wrote_journal = false;
+        self.frames.clear();
+        self.observations.clear();
+        self.observation_count = 0;
+        self.callstack_overflowed = false;
+        self.frames_unbalanced = false;
+        self.own_code_indeterminate = false;
+        self.active = false;
+    }
+
+    /// Computes the direct-delegatecall result from the still-populated window state.
+    ///
+    /// Reason precedence: an incomplete frame stack first (it can hide observations outright),
+    /// then a budget overflow (it is known to have dropped some), then undecidable own-code
+    /// evidence. All three fail closed, so the precedence only decides which reason is reported.
+    fn compute_callstack_result(&mut self) -> Observations {
+        let Some(config) = self.callstack.as_ref() else {
+            return Observations::Unavailable(ObservationsUnavailable::NotCaptured);
+        };
+        if config.aliases.is_empty() || !self.active {
+            // Inert, or a finish that no start ever armed. Either way nothing was captured — which
+            // is not the same as "captured nothing".
+            return Observations::Unavailable(ObservationsUnavailable::NotCaptured);
+        }
+        if self.frames_unbalanced || self.faults().force_frames_unbalanced {
+            return Observations::Unavailable(ObservationsUnavailable::IncompleteFrames);
+        }
+        if self.callstack_overflowed {
+            return Observations::Unavailable(ObservationsUnavailable::BudgetExceeded {
+                attempted: self.observation_count,
+                limit: config.max_observations,
+            });
+        }
+        if self.own_code_indeterminate {
+            return Observations::Unavailable(ObservationsUnavailable::OwnCodeIndeterminate);
+        }
+        Observations::Available {
+            stamp: config.stamp,
+            items: std::mem::take(&mut self.observations),
         }
     }
 
@@ -385,7 +893,7 @@ impl RcsInspector {
         value: U256,
         _kind: NativeTransferKind,
     ) {
-        if !self.active {
+        if !self.active || !self.native_enabled() {
             return;
         }
         // Zero-amount and self-transfers never qualify (defensive; hooks pre-filter too).
@@ -427,17 +935,20 @@ impl RcsInspector {
         self.observe_native_transfer(caller, created_address, value, NativeTransferKind::Create);
     }
 
-    /// Records a real EVM log into the unified ordered queue. No-op while inactive.
+    /// Records a real EVM log into the unified ordered queue. No-op while inactive, and a genuine
+    /// no-op in callstack-only mode: that mode keeps the queue empty rather than building a stream
+    /// nobody consumes.
     pub fn record_real_log(&mut self, log: Log) {
-        if !self.active {
+        if !self.active || !self.native_enabled() {
             return;
         }
         self.queue.push(QueuedLog::Real(log));
     }
 
-    /// Pushes a checkpoint at the current queue position on frame entry. No-op while inactive.
+    /// Pushes a checkpoint at the current queue position on frame entry. No-op while inactive, and
+    /// a genuine no-op in callstack-only mode.
     pub fn push_checkpoint(&mut self) {
-        if !self.active {
+        if !self.active || !self.native_enabled() {
             return;
         }
         self.checkpoints.push(self.queue.len());
@@ -472,36 +983,53 @@ impl RcsInspector {
 }
 
 impl RcsCaptureControl for RcsInspector {
+    fn configure_direct_delegatecalls(&mut self, config: Option<DirectDelegatecallConfig>) {
+        self.callstack = config;
+    }
+
     fn start_capture(&mut self) {
-        self.queue.clear();
-        self.checkpoints.clear();
-        self.create_recipients.clear();
-        self.observed_count = 0;
-        self.overflowed = false;
-        self.address_mismatch_create_index = None;
-        self.selfdestruct_journal_mark = None;
-        self.selfdestruct_wrote_journal = false;
+        self.clear_active_window();
+        // A new window must never serve the previous one's result.
+        self.parked = None;
         self.active = true;
     }
 
     fn finish_capture(&mut self, result_logs: &[Log]) -> CaptureOutcome {
-        // Test-only controlled-outcome seam (spec §5.10.2): when armed, inject a real-log divergence
-        // so the REAL cross-check below yields a genuine `RealLogMismatch` on the live candidate-loop
-        // path (used by the loop-level test 35 driving `execute_best_transactions`). No effect in
-        // production builds — the whole block is `#[cfg(test)]`.
-        #[cfg(test)]
-        if self.active && FORCE_REALLOG_MISMATCH.with(|f| f.replace(false)) {
+        // A finish that no start armed — including a second finish without an intervening start —
+        // runs on a cleared, disarmed window. It parks "not captured" (deliberately overwriting any
+        // earlier result, because a stale result must never be served against a new call) and
+        // reports passthrough. An enabled filter receiving passthrough already fails closed, so
+        // this can never become an allow.
+        if !self.active {
+            self.clear_active_window();
+            self.parked = Some(Observations::Unavailable(ObservationsUnavailable::NotCaptured));
+            return CaptureOutcome::Passthrough;
+        }
+        // Compute the direct-delegatecall result from the still-populated window state, BEFORE the
+        // clear below. It is installed last, after the clear, so no exit path can erase it.
+        let callstack = self.compute_callstack_result();
+        // Deliberate real-log divergence, so the real cross-check below yields a genuine mismatch
+        // on the live candidate-loop path instead of a hand-constructed outcome. Inert unless a
+        // caller asked for it; no production default changes.
+        if self.take_one_shot(|f| f.force_real_log_mismatch, |f| f.force_real_log_mismatch = false)
+        {
             self.queue.push(QueuedLog::Real(Log {
                 address: NATIVE_ASSET_ADDRESS,
                 data: LogData::new_unchecked(Vec::new(), Bytes::new()),
             }));
         }
         // Compute the outcome first — copying every count the outcome needs into locals — so the
-        // uniform state clear below can run on EVERY return path (spec §5.2, R9 item 4). The earlier
-        // implementation returned on the `LimitExceeded` / `InvariantViolation` paths *before*
-        // clearing `queue`/`checkpoints`/`observed_count`/`overflowed`, leaking state into the next
-        // capture window; cleanliness is now guaranteed immediately at finish, not only at reset.
-        let outcome = if let Some(create_index) = self.address_mismatch_create_index {
+        // uniform state clear below can run on EVERY return path. An earlier implementation
+        // returned on the `LimitExceeded` / `InvariantViolation` paths *before* clearing
+        // `queue`/`checkpoints`/`observed_count`/`overflowed`, leaking state into the next capture
+        // window; cleanliness is now guaranteed immediately at finish, not only at reset.
+        let outcome = if !self.native_enabled() {
+            // Callstack-only: the native channel never ran, so neither its budget check nor its
+            // real-log cross-check has anything to decide. The queue is empty by construction and
+            // this stream is not consumed on that path, which screens the execution result's own
+            // logs.
+            CaptureOutcome::Complete(Vec::new())
+        } else if let Some(create_index) = self.address_mismatch_create_index {
             // D7b: a successful CREATE returned an address that differed from the pre-derived
             // expected address. Fail closed — never silently truncate with Complete.
             CaptureOutcome::InvariantViolation {
@@ -546,31 +1074,30 @@ impl RcsCaptureControl for RcsInspector {
                 }
             }
         };
-        // Uniform every-exit cleanup (R9 item 4): leave the inspector inactive and fully reset so
-        // nothing — queue, checkpoints, the native counter, the sticky overflow flag, or the sticky
-        // address-mismatch flag — can leak into the next `start_capture`.
-        self.queue.clear();
-        self.checkpoints.clear();
-        self.create_recipients.clear();
-        self.observed_count = 0;
-        self.overflowed = false;
-        self.address_mismatch_create_index = None;
-        self.selfdestruct_journal_mark = None;
-        self.selfdestruct_wrote_journal = false;
-        self.active = false;
+        // Uniform every-exit cleanup: leave the inspector inactive and fully reset so nothing —
+        // queue, checkpoints, either counter, either sticky flag, the frame stack or the
+        // observations — can leak into the next `start_capture`. This does NOT touch the parked
+        // slot, which is installed immediately below.
+        self.clear_active_window();
+        // Installed LAST, so "cleared on every exit path" above and "the result survives for one
+        // take" are no longer in conflict. Ordering here is the whole contract.
+        self.parked = Some(callstack);
         outcome
     }
 
+    fn take_direct_delegatecalls(&mut self) -> Observations {
+        // Move-consume: a second take, or a take with no preceding finish, reports that the result
+        // is gone rather than handing back a stale clone that a later transaction could be judged
+        // against.
+        self.parked
+            .take()
+            .unwrap_or(Observations::Unavailable(ObservationsUnavailable::ResultAlreadyTaken))
+    }
+
     fn abort_capture(&mut self) {
-        self.queue.clear();
-        self.checkpoints.clear();
-        self.create_recipients.clear();
-        self.observed_count = 0;
-        self.overflowed = false;
-        self.address_mismatch_create_index = None;
-        self.selfdestruct_journal_mark = None;
-        self.selfdestruct_wrote_journal = false;
-        self.active = false;
+        self.clear_active_window();
+        // An aborted transaction leaves nothing behind at all, parked result included.
+        self.parked = None;
     }
 }
 
@@ -587,10 +1114,79 @@ where
         self.record_real_log(log);
     }
 
+    /// The execution-confirmation point.
+    ///
+    /// This hook runs **only** when a real interpreter frame was created. An early failure
+    /// (precompile, empty code, the depth limit, a failed value transfer) completes the frame
+    /// without it ever running, which is what makes "the frame actually executed" an observed fact
+    /// here rather than an assumption.
+    ///
+    /// Two things happen, in this order:
+    /// 1. The hash of the code this frame really loaded is recorded, together with the frame's
+    ///    entry-time own-code evidence. Recording at entry is required for correctness: a
+    ///    transaction can change the account between this moment and a later child call, and a
+    ///    child reading the account then would attribute the call to whatever the account became.
+    /// 2. If this frame was staged as a selected address's own direct delegatecall, it is now
+    ///    confirmed and funnelled into the observation set with this frame's hash as the delegate
+    ///    code hash.
+    fn initialize_interp(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
+        if !self.callstack_armed() {
+            return;
+        }
+        let Some(record) = self.frames.last() else {
+            // An interpreter without a frame record means the frame stack does not describe this
+            // execution. Fail the window closed rather than attribute the hash to another frame.
+            self.frames_unbalanced = true;
+            return;
+        };
+        // The hash of the bytes the interpreter actually loaded — never the account's `code_hash`,
+        // which for a delegated account names the designator instead of the code that ran.
+        let executed_code_hash = keccak256(interp.bytecode.bytecode_slice());
+        let target_address = record.target_address;
+        let is_own_code_shape = record.bytecode_address == Some(target_address);
+        let selected = self.callstack.as_ref().is_some_and(|c| c.aliases.contains(&target_address));
+
+        // The account read happens ONLY for a selected address running its own code's shape, so an
+        // unselected frame performs no journal lookup at all.
+        let own_code = if selected && is_own_code_shape {
+            Some(self.decide_own_code(context, target_address, executed_code_hash))
+        } else {
+            Some(OwnCode::No)
+        };
+
+        let staged = {
+            let record = self.frames.last_mut().expect("frame record checked above");
+            record.executed_code_hash = Some(executed_code_hash);
+            record.own_code = own_code;
+            record.staged.take()
+        };
+        if let Some(staged) = staged {
+            self.observe_direct_delegatecall(DirectDelegatecallObservation {
+                context_address: staged.context_address,
+                context_code_hash: staged.context_code_hash,
+                delegate_address: staged.delegate_address,
+                delegate_code_hash: executed_code_hash,
+            });
+        }
+    }
+
     fn call(&mut self, _context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
         // Every CALL-type frame (incl. zero-value / DELEGATECALL / STATICCALL / CALLCODE) gets a
         // checkpoint so real logs it captured roll back if it reverts.
         self.push_checkpoint();
+        // Frame bookkeeping for the direct-delegatecall channel. Both calls return before touching
+        // any state when the channel is inert, so an unselected deployment pays nothing here.
+        self.push_frame(FrameRecord {
+            target_address: inputs.target_address,
+            bytecode_address: Some(inputs.bytecode_address),
+            scheme: Some(inputs.scheme),
+            executed_code_hash: None,
+            own_code: None,
+            staged: None,
+        });
+        if self.callstack_armed() {
+            self.stage_if_direct_delegatecall();
+        }
         // `transfer_value()` is `Some` only for a real `CallValue::Transfer`; DELEGATECALL and
         // STATICCALL carry an *apparent* value (`None`) and never generate an event. CALLCODE does
         // report a transfer value, but its caller and target are the same account, so it is filtered
@@ -605,6 +1201,10 @@ where
 
     fn call_end(&mut self, _context: &mut CTX, _inputs: &CallInputs, outcome: &mut CallOutcome) {
         self.pop_checkpoint(!outcome.result.is_ok());
+        // Discards a staged-but-unconfirmed candidate, which is exactly the frame that completed
+        // without ever entering the interpreter — a precompile, empty code, the depth limit, or a
+        // failed value transfer.
+        self.pop_frame();
     }
 
     fn create(&mut self, context: &mut CTX, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
@@ -645,13 +1245,27 @@ where
             }
             _ => (inputs.created_address(0), false),
         };
-        // Test-only: when armed, push a WRONG expected address so `create_end` detects `e != a`
-        // on a real successful CREATE and exercises the D7b fail-closed branch. One-shot: the flag
-        // is consumed here so only the armed frame is affected. No effect in production builds.
-        #[cfg(test)]
-        if !value.is_zero() && FORCE_CREATE_ADDRESS_MISMATCH.with(|f| f.replace(false)) {
+        // Deliberate fault: record a WRONG expected address so completion detects a differing
+        // address on a real successful CREATE and exercises the fail-closed branch. Inert unless a
+        // caller asked for it.
+        if !value.is_zero()
+            && self.take_one_shot(
+                |f| f.force_create_address_mismatch,
+                |f| f.force_create_address_mismatch = false,
+            )
+        {
             self.create_recipients.push(Some(Address::repeat_byte(0xFE)));
             self.record_create_observation(value, caller, created_address);
+            // Balanced on this path too: `create_end` pops unconditionally.
+            self.push_frame(FrameRecord {
+                target_address: created_address,
+                bytecode_address: None,
+                scheme: None,
+                executed_code_hash: None,
+                own_code: None,
+                staged: None,
+            });
+            #[cfg(test)]
             CREATE_GATE_SNAPSHOT.with(|s| {
                 s.set((self.create_recipients.len(), self.checkpoints.len(), true, derivation_ran))
             });
@@ -659,6 +1273,17 @@ where
         }
         self.create_recipients.push(if !value.is_zero() { Some(created_address) } else { None });
         self.record_create_observation(value, caller, created_address);
+        // A CREATE frame carries no bytecode address, so it can never satisfy the own-code
+        // predicate and can never be the context of a direct delegatecall. It still gets a record,
+        // because the stack has to stay balanced for the frames above and below it.
+        self.push_frame(FrameRecord {
+            target_address: created_address,
+            bytecode_address: None,
+            scheme: None,
+            executed_code_hash: None,
+            own_code: None,
+            staged: None,
+        });
         #[cfg(test)]
         CREATE_GATE_SNAPSHOT.with(|s| {
             s.set((self.create_recipients.len(), self.checkpoints.len(), true, derivation_ran))
@@ -679,6 +1304,9 @@ where
         if !self.active {
             return;
         }
+        // Popped before the branching below, so every completion path balances the push in
+        // `create` exactly once.
+        self.pop_frame();
         let expected = self.create_recipients.pop();
         if !outcome.result.is_ok() {
             // (a) CREATE reverted — revoke the checkpoint
@@ -2030,6 +2658,7 @@ mod gating_integration_tests {
             value: U256::ZERO,
             block_height: 0,
             logs: &stream,
+            direct_delegatecalls: rcs_filter::callstack::Observations::not_captured(),
         };
         match rcs_filter::matching::evaluate(&rules, &input) {
             rcs_filter::matching::MatchOutcome::Audit { actions, .. } => {
@@ -2067,6 +2696,7 @@ mod gating_integration_tests {
             value: U256::ZERO,
             block_height: 0,
             logs: &stream,
+            direct_delegatecalls: rcs_filter::callstack::Observations::not_captured(),
         };
         match rcs_filter::matching::evaluate(&rules, &input) {
             rcs_filter::matching::MatchOutcome::Audit { actions, .. } => {
@@ -3273,18 +3903,19 @@ mod gating_integration_tests {
     // ── D7b: successful-CREATE address mismatch fails closed (InvariantViolation) ────────────────
     #[test]
     fn create_address_mismatch_through_real_create_end_fails_closed() {
-        // D7b: a successful CREATE whose actual deployed address differs from the pre-derived
-        // expected address stored in `create_recipients` must produce
-        // `InvariantViolation { CreateAddressMismatch }`, NEVER `Complete`. The
-        // `FORCE_CREATE_ADDRESS_MISMATCH` seam pushes `Address::repeat_byte(0xFE)` as the expected
-        // recipient in the real `create` hook, so `create_end` sees a genuine `e != a` on an
-        // actually-successful, value-bearing CREATE (is_ok=true, address=Some(real)).
-        // Falsifiable: deleting the D7b branch in `create_end` causes this test to fail
+        // A successful CREATE whose actual deployed address differs from the pre-derived expected
+        // address stored in `create_recipients` must produce
+        // `InvariantViolation { CreateAddressMismatch }`, NEVER `Complete`. The fault records
+        // `Address::repeat_byte(0xFE)` as the expected recipient in the real `create` hook, so
+        // completion sees a genuine difference on an actually-successful, value-bearing CREATE
+        // (is_ok=true, address=Some(real)).
+        // Falsifiable: deleting the mismatch branch in `create_end` causes this test to fail
         // (`Complete(empty)` instead of `InvariantViolation`); deleting the variant causes a
         // compile error in this `matches!`.
         let mut db = InMemoryDB::default();
         db.insert_account_info(caller(), account(1_000_000_000, None));
-        FORCE_CREATE_ADDRESS_MISMATCH.with(|f| f.set(true));
+        let _faults =
+            CaptureFaults { force_create_address_mismatch: true, ..CaptureFaults::NONE }.scoped();
         let (outcome, success) = run_capturing_create_tx(db, caller(), U256::from(1), 16);
         assert!(success, "the CREATE must succeed (is_ok=true) for D7b to be reachable");
         assert!(
@@ -3597,6 +4228,7 @@ mod gating_integration_tests {
             value: U256::ZERO,
             block_height: 0,
             logs: &stream,
+            direct_delegatecalls: rcs_filter::callstack::Observations::not_captured(),
         };
         assert_eq!(handle.screen_tx(&input), Screen::Deny);
     }
@@ -3628,6 +4260,7 @@ mod gating_integration_tests {
             value: U256::from(1u64),
             block_height: 0,
             logs: &stream,
+            direct_delegatecalls: rcs_filter::callstack::Observations::not_captured(),
         };
         assert_eq!(handle.screen_tx(&input), Screen::Deny);
     }
@@ -3661,6 +4294,7 @@ mod gating_integration_tests {
             value: U256::from(1u64),
             block_height: 0,
             logs: &stream,
+            direct_delegatecalls: rcs_filter::callstack::Observations::not_captured(),
         };
         assert_eq!(handle.screen_tx(&input), Screen::Deny);
     }
@@ -3724,6 +4358,7 @@ mod gating_integration_tests {
             value: U256::ZERO,
             block_height: 0,
             logs: &stream,
+            direct_delegatecalls: rcs_filter::callstack::Observations::not_captured(),
         };
         assert_eq!(handle.screen_tx(&input), Screen::AuditPending);
 
@@ -3739,6 +4374,7 @@ mod gating_integration_tests {
             value: U256::ZERO,
             block_height: 0,
             logs: &[],
+            direct_delegatecalls: rcs_filter::callstack::Observations::not_captured(),
         };
         assert_eq!(
             handle.screen_tx(&empty_input),
@@ -3787,6 +4423,7 @@ mod gating_integration_tests {
             value: U256::from(1u64),
             block_height: 0,
             logs: &stream,
+            direct_delegatecalls: rcs_filter::callstack::Observations::not_captured(),
         };
         assert_eq!(firing.screen_tx(&firing_input), Screen::Deny);
 
@@ -3867,6 +4504,7 @@ mod gating_integration_tests {
             value: U256::ZERO,
             block_height: 0,
             logs: &stream_a,
+            direct_delegatecalls: rcs_filter::callstack::Observations::not_captured(),
         };
         let input_b = ScreenInput {
             tx_hash: B256::from([0x78; 32]),
@@ -3876,6 +4514,7 @@ mod gating_integration_tests {
             value: U256::ZERO,
             block_height: 0,
             logs: &stream_b,
+            direct_delegatecalls: rcs_filter::callstack::Observations::not_captured(),
         };
 
         // Within budget: 1 binding, and the rule's condition is false → Allow. This is the
@@ -3969,6 +4608,7 @@ mod gating_integration_tests {
             value: U256::ZERO,
             block_height: 0,
             logs: &stream,
+            direct_delegatecalls: rcs_filter::callstack::Observations::not_captured(),
         };
         assert_eq!(
             handle.screen_tx(&merged_input),
@@ -4033,6 +4673,7 @@ mod gating_integration_tests {
             value: U256::ZERO,
             block_height: 0,
             logs: &[],
+            direct_delegatecalls: rcs_filter::callstack::Observations::not_captured(),
         };
         assert_eq!(
             null_handle.screen_tx(&empty_input),
@@ -4062,6 +4703,7 @@ mod gating_integration_tests {
             value: U256::ZERO,
             block_height: 0,
             logs: &stream,
+            direct_delegatecalls: rcs_filter::callstack::Observations::not_captured(),
         };
         assert_eq!(
             null_handle.screen_tx(&backed_input),

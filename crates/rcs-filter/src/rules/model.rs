@@ -1,12 +1,14 @@
 //! Rule data model: raw (wire) shapes deserialized from RCS, and compiled shapes used by
 //! the matching hot path.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt;
 use std::sync::Arc;
 
 use alloy_dyn_abi::DynSolType;
 use alloy_primitives::{Address, B256};
-use serde::{Deserialize, Serialize};
+use serde::de::{self, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Rule action. Priority when merging: `deny > audit > allow`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -68,22 +70,216 @@ fn default_audit_types() -> Vec<String> {
     vec!["quota".to_string()]
 }
 
-/// Raw rule as delivered by RCS `GET /rules`. `condition` is kept as a raw
-/// JSON value (may be the literal `true` or a JSONLogic object).
+/// Rule-level keys this build knowingly tolerates, each paired with the recorded reason that
+/// tolerating it cannot weaken a rule's constraint.
+///
+/// **Empty, deliberately.** Every wire key of the producer's rule — including `callstack` — is
+/// modelled by [`RawRuleWire`], and no additional rule-root field has been identified that could
+/// be safely ignored. A producer that tolerates case variations of a key *on read* does not mean
+/// it emits those keys to this node.
+///
+/// Consequence: **every** unmodelled rule-root key rejects the rule. Adding an exception requires
+/// per-key evidence and a fresh design review; this list is not left open "in case there is a
+/// production extension".
+pub const RULE_LEGACY_TOLERATED_KEYS: &[(&str, &str)] = &[];
+
+/// Every modelled rule-root key. Used by the root-level gate, which rejects anything outside this
+/// set and [`RULE_LEGACY_TOLERATED_KEYS`].
+pub const MODELLED_RULE_ROOT_KEYS: &[&str] = &[
+    "id",
+    "contract_address",
+    "origin",
+    "event_abis",
+    "audit_types",
+    "condition",
+    "action",
+    "audit_timeout_action",
+    "callstack",
+];
+
+/// Whether `key` is a rule-root key this build models or knowingly tolerates.
+pub fn is_accepted_rule_root_key(key: &str) -> bool {
+    MODELLED_RULE_ROOT_KEYS.contains(&key)
+        || RULE_LEGACY_TOLERATED_KEYS.iter().any(|(tolerated, _)| *tolerated == key)
+}
+
+/// The `callstack` rule section. Under `protocol_version` 1 the **only** admissible field is
+/// `direct_delegatecalls`; `deny_unknown_fields` is what makes a typo such as
+/// `direct_delegatecall` or `directDelegatecalls` a rejection rather than a silent ignore.
+///
+/// It is applied here and not to [`RawRuleWire`]: `callstack` is new and has no deployed shapes to
+/// protect, whereas the rule root is gated explicitly instead (see [`RULE_LEGACY_TOLERATED_KEYS`]).
 #[derive(Debug, Clone, Deserialize)]
-pub struct RawRule {
+#[serde(deny_unknown_fields)]
+pub struct RawCallstack {
+    /// Deserialized through a duplicate-rejecting visitor, **not** straight into a map: a
+    /// `BTreeMap` folds a repeated key last-wins, which would destroy the evidence the duplicate
+    /// check needs.
+    #[serde(deserialize_with = "alias_map_reject_duplicates")]
+    pub direct_delegatecalls: BTreeMap<String, String>,
+}
+
+/// Rejects a duplicate alias key **before** the map folds, so a repeated alias can never be
+/// silently collapsed to its last value. Identical values are still a duplicate key — a repeated
+/// alias is not "harmlessly redundant", because accepting it would mean the rule the producer
+/// wrote is not the rule this node enforces.
+fn alias_map_reject_duplicates<'de, D>(d: D) -> Result<BTreeMap<String, String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct AliasMapVisitor;
+
+    impl<'de> Visitor<'de> for AliasMapVisitor {
+        type Value = BTreeMap<String, String>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            // Names the field, so a wrong-JSON-type rejection is diagnosable without the
+            // reader having to know which field serde was decoding.
+            f.write_str(
+                "direct_delegatecalls as a map of alias name to lowercase 0x 20-byte address",
+            )
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let mut out = BTreeMap::new();
+            // Entry-at-a-time, so each key is inspected against what is already present rather
+            // than being inserted over it.
+            while let Some((alias, address)) = map.next_entry::<String, String>()? {
+                if out.contains_key(&alias) {
+                    return Err(de::Error::custom(duplicate_alias_reason(&alias)));
+                }
+                out.insert(alias, address);
+            }
+            Ok(out)
+        }
+    }
+
+    d.deserialize_map(AliasMapVisitor)
+}
+
+/// Verbatim duplicate-alias rejection reason.
+pub fn duplicate_alias_reason(alias: &str) -> String {
+    format!("direct_delegatecalls declares alias '{alias}' more than once")
+}
+
+/// Preserves present-vs-explicit-null for `callstack`: with `#[serde(default)]`, `None` means the
+/// field was absent, `Some(None)` means it was explicitly `null`, and `Some(Some(_))` means a real
+/// object. Without this, `"callstack": null` would be indistinguishable from an omitted
+/// `callstack`.
+///
+/// The error is re-emitted with the field name, because serde's own message for a wrong JSON type
+/// here (for example a struct decoded from a sequence) does not mention which field it was
+/// decoding, and a wrong-type rejection has to name the field to be diagnosable.
+fn callstack_double_option<'de, D>(d: D) -> Result<Option<Option<RawCallstack>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match Option::<RawCallstack>::deserialize(d) {
+        Ok(value) => Ok(Some(value)),
+        Err(e) => Err(de::Error::custom(format!("callstack: {e}"))),
+    }
+}
+
+/// The wire shape of a rule, including the flattened catch-all that makes an unmodelled rule-root
+/// key visible. Converted into [`RawRule`] by a `TryFrom` that applies the root-level gate, so
+/// `unknown` never survives into the compiled pipeline.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RawRuleWire {
     pub id: String,
     #[serde(default)]
     pub contract_address: Option<String>,
     #[serde(default)]
     pub origin: Option<String>,
-    pub event_abis: std::collections::BTreeMap<String, EventAbi>,
+    /// Defaulted so a direct-delegatecall-only rule may omit it. A rule declaring **neither**
+    /// section is still rejected, with its original reason.
+    #[serde(default)]
+    pub event_abis: BTreeMap<String, EventAbi>,
     #[serde(default = "default_audit_types")]
     pub audit_types: Vec<String>,
     pub condition: serde_json::Value,
     pub action: Action,
     #[serde(default)]
     pub audit_timeout_action: Option<TimeoutAction>,
+    #[serde(default, deserialize_with = "callstack_double_option")]
+    pub callstack: Option<Option<RawCallstack>>,
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
+}
+
+/// Raw rule as delivered by RCS `GET /rules`. `condition` is kept as a raw
+/// JSON value (may be the literal `true` or a JSONLogic object).
+///
+/// Produced only through [`RawRuleWire`], whose conversion applies the root-level gate: an
+/// unmodelled rule-root key rejects the rule instead of being silently dropped. Before this
+/// gate existed, a rule carrying a valid `event_abis` **and** a misspelled `callStack` loaded as a
+/// weakened event-only rule.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(try_from = "RawRuleWire")]
+pub struct RawRule {
+    pub id: String,
+    pub contract_address: Option<String>,
+    pub origin: Option<String>,
+    pub event_abis: BTreeMap<String, EventAbi>,
+    pub audit_types: Vec<String>,
+    pub condition: serde_json::Value,
+    pub action: Action,
+    pub audit_timeout_action: Option<TimeoutAction>,
+    /// `None` = absent, `Some(None)` = explicitly `null` (rejected at compile), `Some(Some(_))` = a
+    /// real object.
+    pub callstack: Option<Option<RawCallstack>>,
+}
+
+impl TryFrom<RawRuleWire> for RawRule {
+    type Error = String;
+
+    fn try_from(wire: RawRuleWire) -> Result<Self, Self::Error> {
+        // The root-level gate. Naming every offending key makes a misspelled safety field
+        // fail loudly instead of degrading the rule.
+        let offending: Vec<&str> = wire
+            .unknown
+            .keys()
+            .map(String::as_str)
+            .filter(|key| !is_accepted_rule_root_key(key))
+            .collect();
+        if !offending.is_empty() {
+            return Err(unknown_rule_keys_reason(&offending));
+        }
+
+        Ok(RawRule {
+            id: wire.id,
+            contract_address: wire.contract_address,
+            origin: wire.origin,
+            event_abis: wire.event_abis,
+            audit_types: wire.audit_types,
+            condition: wire.condition,
+            action: wire.action,
+            audit_timeout_action: wire.audit_timeout_action,
+            callstack: wire.callstack,
+        })
+    }
+}
+
+/// Verbatim unknown-rule-key rejection reason.
+pub fn unknown_rule_keys_reason(keys: &[&str]) -> String {
+    format!("rule declares unknown field(s): {}", keys.join(", "))
+}
+
+/// Verbatim duplicate-root-key rejection reason — a duplicate rule-root key is the same
+/// fidelity defect one
+/// level up: it is folded last-wins and could hide a modelled field.
+pub fn duplicate_rule_root_key_reason(key: &str) -> String {
+    format!("rule declares root key '{key}' more than once")
+}
+
+impl RawRule {
+    /// The rule's `direct_delegatecalls` map, or an empty map when `callstack` is absent or null.
+    /// Callers that must distinguish those cases read [`RawRule::callstack`] directly.
+    pub fn direct_delegatecalls(&self) -> Option<&BTreeMap<String, String>> {
+        self.callstack.as_ref()?.as_ref().map(|cs| &cs.direct_delegatecalls)
+    }
 }
 
 /// A compiled ABI input: the resolved [`DynSolType`] plus indexed flag and name.
@@ -131,6 +327,31 @@ pub enum CompiledCondition {
     Raw(serde_json::Value),
 }
 
+/// One compiled `direct_delegatecalls` entry: a rule-local alias bound to the selected address
+/// whose own direct `DELEGATECALL`s the rule observes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompiledDirectDelegatecall {
+    /// Rule-local alias; the `<alias>` prefix of the four condition variables.
+    pub alias: String,
+    pub address: Address,
+}
+
+/// How a rule binds execution facts, decided once at compile time. The three classes exist
+/// because they cannot share one candidate rule without either breaking deployed semantics or
+/// creating a production-wide false deny.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleBindingClass {
+    /// `event_abis` only. **Unchanged behaviour:** a missing event contributes one null candidate
+    /// and the rule is still evaluated, which is what preserves Emergency Deny-All.
+    EventOnly,
+    /// `direct_delegatecalls` only. Every declared alias must have at least one observation, or
+    /// the rule is not evaluated at all.
+    DirectOnly,
+    /// Both sections. Every declared alias must have an observation **and** every declared event
+    /// must have a physical binding, or the rule is not evaluated.
+    Mixed,
+}
+
 /// A rule that passed load validation and is ready for matching.
 #[derive(Debug, Clone)]
 pub struct CompiledRule {
@@ -145,6 +366,28 @@ pub struct CompiledRule {
     pub audit_timeout_action: TimeoutAction,
     /// Compiled form of `condition`, evaluated on the matching hot path.
     pub compiled_condition: CompiledCondition,
+    /// Declared direct-delegatecall aliases, in rule-declared (alias-sorted) order. Empty for an
+    /// event-only rule, which is what keeps that rule's cost and semantics unchanged.
+    pub direct_delegatecalls: Vec<CompiledDirectDelegatecall>,
+}
+
+impl CompiledRule {
+    /// This rule's binding class, derived from which sections it declares.
+    pub fn binding_class(&self) -> RuleBindingClass {
+        match (self.events.is_empty(), self.direct_delegatecalls.is_empty()) {
+            (false, true) => RuleBindingClass::EventOnly,
+            (true, false) => RuleBindingClass::DirectOnly,
+            // A rule declaring neither section is rejected at load, so it never reaches
+            // matching; classifying it as Mixed makes any future leak fail closed (suppressed)
+            // rather than evaluate an unconstrained condition.
+            _ => RuleBindingClass::Mixed,
+        }
+    }
+
+    /// Whether this rule declares at least one direct-delegatecall alias.
+    pub fn declares_alias(&self) -> bool {
+        !self.direct_delegatecalls.is_empty()
+    }
 }
 
 /// One rule dropped during [`super::load_rules`] (per-rule id + why it failed), surfaced
@@ -175,6 +418,39 @@ pub struct RuleSet {
 }
 
 impl RuleSet {
+    /// Whether any rule in this snapshot declares a direct-delegatecall alias.
+    ///
+    /// This is the switch for the whole feature: when it is `false`, capture is installed inert,
+    /// no frame work happens, and screening ignores an unavailable observation set — so an
+    /// event-only deployment keeps its exact existing behaviour and pays nothing.
+    pub fn declares_any_alias(&self) -> bool {
+        self.rules.iter().any(CompiledRule::declares_alias)
+    }
+
+    /// Every selected address across the snapshot, deduplicated. Drives the capture alias set and
+    /// its order-independent digest.
+    pub fn alias_addresses(&self) -> Vec<Address> {
+        let mut out: Vec<Address> = self
+            .rules
+            .iter()
+            .flat_map(|rule| rule.direct_delegatecalls.iter().map(|dd| dd.address))
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// The full identity of this snapshot, as stamped onto any observation set its alias
+    /// configuration produced. A digest alone is never sufficient, because two different
+    /// protocol/content versions can select the same addresses.
+    pub fn snapshot_stamp(&self) -> crate::callstack::SnapshotStamp {
+        crate::callstack::SnapshotStamp {
+            protocol_version: self.protocol_version,
+            content_version: self.content_version,
+            alias_set_digest: crate::callstack::alias_set_digest(self.alias_addresses()),
+        }
+    }
+
     /// Returns the candidate rule indices for a log whose first topic is `topic0`.
     pub fn candidates_for_topic0(&self, topic0: &B256) -> &[usize] {
         self.index.get(topic0).map(|v| v.as_slice()).unwrap_or(&[])

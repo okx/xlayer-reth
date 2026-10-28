@@ -32,6 +32,7 @@ op-alloy-network.workspace = true
 op-revm.workspace = true
 
 rcs-filter.workspace = true
+xlayer-rcs-capture.workspace = true
 
 jsonrpsee.workspace = true
 serde.workspace = true
