@@ -859,6 +859,48 @@ fn the_selector_set_is_the_sorted_union_over_active_rules() {
     assert_eq!(reordered.stamp().selector_digest, rules.stamp().selector_digest);
 }
 
+/// the selector-bearing RULE count is not the selector ADDRESS count: the two diverge in both
+/// directions, and an event-only rule contributes to neither.
+#[test]
+fn the_selector_bearing_rule_count_counts_rules_not_addresses() {
+    // Two rules, different ids, naming ONE address.
+    let two_rules_one_address = rule_set(vec![
+        deny_on_selector("r1", "a", proxy(), json!(true)),
+        deny_on_selector("r2", "b", proxy(), json!(true)),
+    ]);
+    assert_eq!(two_rules_one_address.callstack_selectors().len(), 1, "one deduplicated address");
+    assert_eq!(two_rules_one_address.selector_bearing_rule_count(), 2, "two rules carry it");
+
+    // ONE rule naming SEVERAL addresses.
+    let one_rule_two_addresses = rule_set(vec![json!({
+        "id": "r1",
+        "callstack": {
+            "a": { "address": hex_addr(proxy()) },
+            "b": { "address": hex_addr(other_proxy()) }
+        },
+        "condition": true,
+        "action": "deny"
+    })]);
+    assert_eq!(one_rule_two_addresses.callstack_selectors().len(), 2, "two addresses");
+    assert_eq!(one_rule_two_addresses.selector_bearing_rule_count(), 1, "declared by one rule");
+
+    // An event-only rule carries no selector and is counted by neither.
+    let mixed = rule_set(vec![
+        deny_on_selector("r1", "a", proxy(), json!(true)),
+        event_and_selector_rule("r2"),
+        json!({
+            "id": "r3",
+            "event_abis": { "t": { "type": "event", "name": "T",
+                "inputs": [{ "name": "a", "type": "address", "indexed": false }],
+                "anonymous": false } },
+            "condition": true,
+            "action": "deny"
+        }),
+    ]);
+    assert_eq!(mixed.selector_bearing_rule_count(), 2, "the event-only rule is not counted");
+    assert_eq!(mixed.rules.len(), 3, "while all three rules are active");
+}
+
 // --------------------------------------------------------------------------------------------
 // Combined per-transaction budget
 // --------------------------------------------------------------------------------------------

@@ -316,6 +316,18 @@ impl RuleSet {
         !self.callstack_selector_addresses.is_empty()
     }
 
+    /// How many active rules actually carry at least one call-frame selector.
+    ///
+    /// Deliberately NOT the length of [`Self::callstack_selectors`]: that is the sorted,
+    /// deduplicated ADDRESS set, which answers "how much does capture observe" and is what the
+    /// capture configuration and the snapshot digest are built from. This answers the different
+    /// question an operator diagnostic asks — "how large is the rule surface that could have
+    /// adjudicated this" — and the two diverge in both directions: several rules may name one
+    /// address, and one rule may name several.
+    pub fn selector_bearing_rule_count(&self) -> usize {
+        self.rules.iter().filter(|rule| !rule.callstack.is_empty()).count()
+    }
+
     /// Returns the candidate rule indices for a log whose first topic is `topic0`.
     pub fn candidates_for_topic0(&self, topic0: &B256) -> &[usize] {
         self.index.get(topic0).map(|v| v.as_slice()).unwrap_or(&[])
