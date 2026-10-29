@@ -14714,12 +14714,15 @@ dependencies = [
  "alloy-op-evm",
  "alloy-primitives",
  "jsonrpsee",
+ "metrics",
+ "metrics-util",
  "op-alloy-consensus",
  "op-alloy-network",
  "op-revm",
  "rcs-filter",
  "reth-chain-state",
  "reth-evm",
+ "reth-metrics",
  "reth-optimism-evm",
  "reth-optimism-primitives",
  "reth-optimism-rpc",
@@ -14733,6 +14736,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-subscriber 0.3.23",
  "xlayer-rcs-capture",
 ]
 

@@ -25,7 +25,7 @@ use alloy_eips::BlockId;
 use alloy_evm::{Evm, IntoTxEnv};
 use alloy_op_evm::OpEvmFactory;
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
-use rcs_filter::callstack::Observations;
+use rcs_filter::callstack::{ObservationUnavailable, Observations};
 use rcs_filter::config::{is_supported_protocol, MIN_PROTOCOL_VERSION};
 use rcs_filter::rules::{load_rules, RawRule, RuleSet, UnknownFields};
 use reth_evm::{block::BlockExecutorFactory, ConfigureEvm};
@@ -42,6 +42,7 @@ use xlayer_rcs_capture::{
 };
 
 use super::deposit::{build_deposit_tx, DepositTxRequest};
+use super::metrics::SyntheticBanIdentificationMetrics;
 use super::verdict::AuditResult;
 use super::verdict::CallstackIdentification;
 use super::verdict::ExecutedTx;
@@ -387,6 +388,80 @@ impl AuditBatch<'_> {
     }
 }
 
+/// One request's validated, owned batch inputs.
+///
+/// The handler validates and compiles a request ONCE, then moves the whole plan into the blocking
+/// task that executes it, which is why these are owned values rather than the borrows
+/// [`AuditBatch`] carries. Keeping the assembly in one place is what lets a test drive the real
+/// request pipeline — validation, compilation, the callstack-only projection and the batch body —
+/// instead of a re-implementation of it that could agree with production by luck.
+pub struct AuditBatchPlan {
+    rules: RuleSet,
+    known_allowed_rules: Option<RuleSet>,
+    known_allowed: HashSet<String>,
+    kinds: Option<BTreeMap<String, KnownAllowedKind>>,
+    report_identification: bool,
+}
+
+impl AuditBatchPlan {
+    /// Validates one request and compiles everything its batch needs, returning the exact
+    /// JSON-RPC error a caller would see on the first failing check.
+    fn prepare(req: &AuditTransactionsRequest) -> Result<Self, jsonrpsee::types::ErrorObjectOwned> {
+        // The protocol version belongs to the REQUEST. An omitted field means 1, so every
+        // existing caller is byte-compatible; a version outside the supported set is named in
+        // the error rather than silently downgraded.
+        validate_protocol_version(req.protocol_version)?;
+        // `content_version = 0` matches the previous hard-coded call. The audit RPC has no
+        // hot-reload and no block pinning: one request carries its own rules and is adjudicated
+        // in one call, so the snapshot stamp is derived from the request's OWN compiled set and
+        // the request deliberately does not accept a `content_version` (honouring one would
+        // imply a persistence this path does not have).
+        let rules = load_rules(req.protocol_version, 0, req.rules.clone());
+        validate_compiled_rules(&rules)?;
+        validate_known_allowed_labels(
+            req.protocol_version,
+            &req.known_allowed,
+            req.known_allowed_kinds.as_ref(),
+            rules.has_callstack_rules(),
+        )?;
+        let known_allowed_rules =
+            callstack_only_projection(req.protocol_version, &rules, &req.rules);
+        debug_assert!(
+            known_allowed_rules.as_ref().is_none_or(|set| set.stamp() == rules.stamp()),
+            "the callstack-only projection must carry the same snapshot stamp"
+        );
+        Ok(Self {
+            rules,
+            known_allowed_rules,
+            known_allowed: req.known_allowed.iter().cloned().collect(),
+            kinds: req.known_allowed_kinds.clone(),
+            report_identification: req.protocol_version >= 2,
+        })
+    }
+
+    /// The request's own compiled rule set — what decides whether capture is armed at all.
+    pub fn rules(&self) -> &RuleSet {
+        &self.rules
+    }
+
+    /// Borrows the plan for one ordered set of built transactions.
+    fn batch<'a>(
+        &'a self,
+        txs: &'a [Recovered<OpTransactionSigned>],
+        reqs: &'a [DepositTxRequest],
+    ) -> AuditBatch<'a> {
+        AuditBatch {
+            txs,
+            reqs,
+            rules: &self.rules,
+            known_allowed_rules: self.known_allowed_rules.as_ref(),
+            known_allowed: &self.known_allowed,
+            kinds: self.kinds.as_ref(),
+            report_identification: self.report_identification,
+        }
+    }
+}
+
 /// Maps a non-`Complete` capture outcome to the observation state screening must see. Every
 /// variant is an EXPLICIT unavailable reason — never `Available { items: [] }`, which would read
 /// as "captured, nothing matched".
@@ -411,6 +486,56 @@ fn observations_from(outcome: &CaptureOutcome) -> Observations<'_> {
     }
 }
 
+/// Why one transaction cannot be adjudicated AT ALL against the request's rules, decided from the
+/// request's own compiled set before a single rule is filtered or matched.
+///
+/// This has to be a request-level question, not a per-rule one. Matching skips a rule narrowed by
+/// `contract_address` / `origin` with zero decoding, so for such a rule the per-rule observation
+/// check is never reached and an unidentifiable execution would fall through to an authoritative
+/// `Allow` — exactly what the highest-priority rule forbids. `has_callstack_rules()` keeps a
+/// request that declares no selector byte-identical to its previous behaviour: nothing is
+/// declared, so nothing can be unidentifiable.
+///
+/// The stamp comparison mirrors the matcher's own: an observation set produced under a different
+/// rule snapshot cannot distinguish an absent frame from an unobserved one, so it is unavailable
+/// rather than empty.
+fn unadjudicable_observations(
+    rules: &RuleSet,
+    observations: Observations<'_>,
+) -> Option<ObservationUnavailable> {
+    if !rules.has_callstack_rules() {
+        return None;
+    }
+    match observations {
+        Observations::Unavailable { reason } => Some(reason),
+        Observations::Available { stamp, .. } if stamp != rules.stamp() => {
+            Some(ObservationUnavailable::SnapshotMismatch)
+        }
+        Observations::Available { .. } => None,
+    }
+}
+
+/// The non-verdict for a transaction whose executed code could not be identified, with the
+/// bounded diagnostic that used to come from the matcher's own failure path.
+///
+/// Bounded deliberately: the request's `source_hash`, the fixed low-cardinality reason token and
+/// the COUNT of selector-bearing rules. No rule id, no observed address, no code hash.
+fn unadjudicable_result(
+    batch: &AuditBatch<'_>,
+    source_hash: &str,
+    reason: ObservationUnavailable,
+) -> AuditResult {
+    tracing::warn!(
+        target: "xlayer_audit_rpc",
+        %source_hash,
+        reason = reason.as_str(),
+        selector_bearing_rules = batch.rules.callstack_selectors().len(),
+        "observations unavailable for a selector-bearing request; returning the non-verdict"
+    );
+    AuditResult::malformed(source_hash.to_string())
+        .with_identification(batch.identification(CallstackIdentification::NotIdentified))
+}
+
 /// Opens one capture window around the real `transact` of a single audit transaction and returns
 /// the execution outcome together with the capture outcome.
 ///
@@ -433,6 +558,39 @@ where
     Ok((outcome, capture))
 }
 
+/// Records, in batch order, the observation set the production batch body actually fed to
+/// screening for each transaction.
+///
+/// Compiled only for this crate's own tests and for the non-default `test-utils` feature, so no
+/// production build contains it. It exists because "the three paths observe the same frames" is
+/// only meaningful if the compared frames are the ones production really used: three decisions
+/// can agree while resting on different observations, and a path that silently dropped its
+/// capture would still produce a decision.
+#[cfg(any(test, feature = "test-utils"))]
+pub mod observation_recorder {
+    use rcs_filter::callstack::{CallObservation, Observations};
+    use std::cell::RefCell;
+
+    thread_local! {
+        static RECORDED: RefCell<Vec<Option<Vec<CallObservation>>>> =
+            const { RefCell::new(Vec::new()) };
+    }
+
+    /// `None` records an unavailable set, which is deliberately NOT the same as an empty one.
+    pub(super) fn record(observations: Observations<'_>) {
+        let entry = match observations {
+            Observations::Available { items, .. } => Some(items.to_vec()),
+            Observations::Unavailable { .. } => None,
+        };
+        RECORDED.with(|recorded| recorded.borrow_mut().push(entry));
+    }
+
+    /// Returns everything recorded since the previous take, and clears the recording.
+    pub fn take() -> Vec<Option<Vec<CallObservation>>> {
+        RECORDED.with(|recorded| std::mem::take(&mut *recorded.borrow_mut()))
+    }
+}
+
 /// Executes one ordered batch against `evm`, filling `executed`.
 ///
 /// Generic over the EVM so the capturing and the inert construction share ONE loop body: with no
@@ -452,6 +610,10 @@ where
     E::Inspector: RcsCaptureControl,
     for<'tx> &'tx Recovered<OpTransactionSigned>: IntoTxEnv<E::Tx>,
 {
+    // Built on first use rather than per batch: a request without a replay prefix registers
+    // nothing, and the derive caches the registration so a later batch only clones handles.
+    let mut synthetic_ban_metrics: Option<SyntheticBanIdentificationMetrics> = None;
+
     for (exec_idx, tx) in batch.txs.iter().enumerate() {
         let tx_req = &batch.reqs[exec_idx];
 
@@ -460,8 +622,26 @@ where
         let ResultAndState { result, state } = outcome;
         let logs = result.logs().to_vec();
         let observations = observations_from(&capture);
+        #[cfg(any(test, feature = "test-utils"))]
+        observation_recorder::record(observations);
+        let kind = batch.known_allowed_kind(&tx_req.source_hash);
 
-        match batch.known_allowed_kind(&tx_req.source_hash) {
+        // Highest priority, and deliberately BEFORE any rule is filtered or matched: a request
+        // that declares a selector and whose observation set cannot be adjudicated gets the
+        // non-verdict, with no state committed. Rule-level filtering (`contract_address` /
+        // `origin`) short-circuits with zero decoding, so leaving this to the matcher would let
+        // an unidentifiable execution be reported as an authoritative `Allow` whenever the
+        // narrowed rules happened to be skipped. The `SyntheticBan` class is the ONE explicit
+        // exception: its contract is unconditional (it executes, commits and stays `Allow`), so
+        // it is handled by its own arm below and never reaches this gate.
+        if kind != Some(KnownAllowedKind::SyntheticBan)
+            && let Some(reason) = unadjudicable_observations(batch.rules, observations)
+        {
+            executed[exec_idx] = Some(unadjudicable_result(batch, &tx_req.source_hash, reason));
+            continue;
+        }
+
+        match kind {
             // A synthetic replay prefix keeps the pre-existing contract UNCONDITIONALLY: it
             // executes, its state IS committed, and its verdict stays `Allow`. The caller skips
             // such a prefix's verdict entirely and *depends* on it committing so the blacklist /
@@ -476,6 +656,16 @@ where
                     }
                     _ => synthetic_ban_identification(batch, tx, tx_req, &logs, observations),
                 };
+                // Observation only, and the one place an operator can see it: the consumer
+                // skips this prefix's verdict, so the response diagnostic reaches nobody.
+                report_synthetic_ban_identification(
+                    synthetic_ban_metrics
+                        .get_or_insert_with(SyntheticBanIdentificationMetrics::default),
+                    tx.tx_hash(),
+                    &tx_req.source_hash,
+                    identification,
+                    batch.rules.callstack_selectors().len(),
+                );
                 executed[exec_idx] = Some(
                     known_allowed_result(tx.tx_hash(), &tx_req.source_hash)
                         .with_identification(batch.identification(identification)),
@@ -581,6 +771,52 @@ where
     Ok(())
 }
 
+/// Emits the per-class counter and the bounded anomaly log for one synthetic replay prefix's
+/// identification.
+///
+/// The prefix's `Allow` and its state commit are unconditional and are decided by the caller;
+/// nothing here can change either. This is the runtime observability that makes a compromised or
+/// unidentifiable replay prefix visible, because the consumer skips such a prefix's verdict
+/// entirely and so an optional response field alone would reach no operator.
+///
+/// Bounded exactly like the deposit path's diagnostic: the request's `source_hash`, the executed
+/// transaction hash, the fixed outcome token and the COUNT of selector-bearing rules. No rule id
+/// (`MatchOutcome::Deny` carries none and `MatchError`'s `Display` does, which is why neither is
+/// formatted here), no observed address, no code hash, no log content.
+fn report_synthetic_ban_identification(
+    metrics: &SyntheticBanIdentificationMetrics,
+    tx_hash: alloy_primitives::B256,
+    source_hash: &str,
+    identification: CallstackIdentification,
+    selector_bearing_rules: usize,
+) {
+    metrics.counter(identification).increment(1);
+    match identification {
+        // Nothing anomalous happened, so the counter alone carries it.
+        CallstackIdentification::Clean | CallstackIdentification::NotApplicable => {}
+        CallstackIdentification::Objected => {
+            tracing::error!(
+                target: "xlayer_audit_rpc::synthetic_ban_identification",
+                %tx_hash,
+                %source_hash,
+                outcome = "objected",
+                selector_bearing_rules,
+                "replay prefix executed code a rule objects to; reported, its allow and commit are unchanged"
+            );
+        }
+        CallstackIdentification::NotIdentified => {
+            tracing::error!(
+                target: "xlayer_audit_rpc::synthetic_ban_identification",
+                %tx_hash,
+                %source_hash,
+                outcome = "not_identified",
+                selector_bearing_rules,
+                "replay prefix executed code could not be identified; reported, its allow and commit are unchanged"
+            );
+        }
+    }
+}
+
 /// The reported identification of a synthetic replay prefix: observation only.
 fn synthetic_ban_identification(
     batch: &AuditBatch<'_>,
@@ -667,36 +903,10 @@ where
         &self,
         req: AuditTransactionsRequest,
     ) -> RpcResult<AuditTransactionsResponse> {
-        // The protocol version now belongs to the REQUEST. An omitted field means 1, so every
-        // existing caller is byte-compatible; a version outside the supported set is named in
-        // the error rather than silently downgraded.
-        validate_protocol_version(req.protocol_version)?;
-        // `content_version = 0` matches the previous hard-coded call. The audit RPC has no
-        // hot-reload and no block pinning: one request carries its own rules and is adjudicated
-        // in one call, so the snapshot stamp is derived from the request's OWN compiled set and
-        // the request deliberately does not accept a `content_version` (honouring one would imply
-        // a persistence this path does not have).
-        let rules = load_rules(req.protocol_version, 0, req.rules.clone());
-        validate_compiled_rules(&rules)?;
-
-        let known_allowed: HashSet<String> = req.known_allowed.iter().cloned().collect();
-
-        validate_known_allowed_labels(
-            req.protocol_version,
-            &req.known_allowed,
-            req.known_allowed_kinds.as_ref(),
-            rules.has_callstack_rules(),
-        )?;
-
-        let known_allowed_rules =
-            callstack_only_projection(req.protocol_version, &rules, &req.rules);
-        debug_assert!(
-            known_allowed_rules.as_ref().is_none_or(|set| set.stamp() == rules.stamp()),
-            "the callstack-only projection must carry the same snapshot stamp"
-        );
-        let report_identification = req.protocol_version >= 2;
+        // Every request-level check, the rule compilation and the callstack-only projection, in
+        // the one place a test can drive them too.
+        let plan = AuditBatchPlan::prepare(&req)?;
         let capture_config = self.capture;
-        let known_allowed_kinds = req.known_allowed_kinds.clone();
 
         // Build every tx up front so a per-item construction failure produces a `Malformed`
         // result without aborting the rest of the batch.
@@ -735,7 +945,7 @@ where
             jsonrpsee::types::ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>)
         })?;
 
-        // `ordered_txs`/`ordered_tx_reqs`/`txs`/`built`/`rules` all move into the closure below:
+        // `ordered_txs`/`ordered_tx_reqs`/`txs`/`built`/`plan` all move into the closure below:
         // assembling each request's `AuditResult` has to happen there too, since the executed
         // subset's logs (`ordered_txs`-indexed) never leave the blocking task.
         let backend = self.backend.as_ref().clone();
@@ -745,15 +955,7 @@ where
             .spawn_with_state_at_block(block_id, move |this, mut state_db| {
                 let mut executed: Vec<Option<AuditResult>> =
                     (0..ordered_txs.len()).map(|_| None).collect();
-                let batch = AuditBatch {
-                    txs: &ordered_txs,
-                    reqs: &ordered_tx_reqs,
-                    rules: &rules,
-                    known_allowed_rules: known_allowed_rules.as_ref(),
-                    known_allowed: &known_allowed,
-                    kinds: known_allowed_kinds.as_ref(),
-                    report_identification,
-                };
+                let batch = plan.batch(&ordered_txs, &ordered_tx_reqs);
 
                 // Two typed EVM-construction branches feed one generic batch body. When the
                 // request declares at least one call-frame selector the shared capture inspector
@@ -761,7 +963,7 @@ where
                 // uses, which is what makes equal identification structural rather than
                 // coincidental. With no selector declared, NO inspector is constructed at all and
                 // this path takes its pre-existing plain `evm_with_env` branch.
-                if let Some(inspector) = audit_capture_inspector(&rules, capture_config) {
+                if let Some(inspector) = audit_capture_inspector(plan.rules(), capture_config) {
                     #[cfg(test)]
                     AUDIT_INSPECTOR_CONSTRUCTIONS.with(|c| c.set(c.get() + 1));
                     let mut evm = this.evm_config().evm_with_env_and_inspector(
@@ -808,6 +1010,33 @@ pub mod test_seams {
     /// Delegates to this path's own [`super::observations_from`].
     pub fn observations_from(outcome: &CaptureOutcome) -> Observations<'_> {
         super::observations_from(outcome)
+    }
+
+    /// Validates and compiles one request exactly as the handler does, including the strict wire
+    /// schema's own checks, and returns the plan the production batch body executes.
+    pub fn prepare_audit_batch_plan(
+        req: &AuditTransactionsRequest,
+    ) -> Result<AuditBatchPlan, jsonrpsee::types::ErrorObjectOwned> {
+        AuditBatchPlan::prepare(req)
+    }
+
+    /// Runs the production [`super::run_audit_batch`] over `plan`, so a cross-crate test reaches
+    /// the real capture window, the real `known_allowed` policy, the real commit decision and the
+    /// real verdict mapping rather than any subset of them.
+    pub fn run_audit_batch<E>(
+        evm: &mut E,
+        plan: &AuditBatchPlan,
+        txs: &[Recovered<OpTransactionSigned>],
+        reqs: &[DepositTxRequest],
+        executed: &mut [Option<AuditResult>],
+    ) -> Result<(), E::Error>
+    where
+        E: Evm,
+        E::DB: DatabaseCommit,
+        E::Inspector: RcsCaptureControl,
+        for<'tx> &'tx Recovered<OpTransactionSigned>: IntoTxEnv<E::Tx>,
+    {
+        super::run_audit_batch(evm, &plan.batch(txs, reqs), executed)
     }
 
     /// Delegates to this path's own [`super::audit_capture_window`].
@@ -1033,6 +1262,31 @@ mod capture_path_tests {
             "action": "deny"
         }))
         .expect("the normative sample must deserialize")
+    }
+
+    /// The origin the request's rules are narrowed to in the skip tests: deliberately NOT the
+    /// depositor, so every rule is filtered out with zero decoding before any observation is
+    /// consulted.
+    const OTHER_ORIGIN: Address = Address::repeat_byte(0x99);
+
+    /// The same normative pattern, additionally narrowed to one `origin`. Stage one of matching
+    /// skips such a rule on an origin mismatch before stage two resolves any call frame, so no
+    /// per-rule observation check can ever be reached for it.
+    fn proxy_impl_allowlist_rule_from_origin(origin: Address) -> RawRule {
+        let approved = vec![format!("{:#x}", approved_hash())];
+        serde_json::from_value(serde_json::json!({
+            "id": "proxy-impl-allowlist-origin-narrowed",
+            "origin": format!("{origin:#x}"),
+            "event_abis": {},
+            "callstack": { "entry": { "address": format!("{PROXY:#x}") } },
+            "condition": { "and": [
+                { "==": [ { "var": "entry.matched" }, true ] },
+                { "!=": [ { "var": "entry.implCodeHash" }, null ] },
+                { "!": { "in": [ { "var": "entry.implCodeHash" }, approved ] } }
+            ] },
+            "action": "deny"
+        }))
+        .expect("the origin-narrowed sample must deserialize")
     }
 
     /// A v1 event rule declaring no `callstack` section at all.
@@ -1321,6 +1575,98 @@ mod capture_path_tests {
         assert_eq!(run.proxy_slot0, U256::ZERO);
     }
 
+    /// the non-verdict survives a rule that is filtered out BEFORE its selectors are ever
+    /// resolved. The request's only rule is narrowed to an origin the transaction does not have,
+    /// so the matcher skips it with zero decoding and therefore never looks at the (unavailable)
+    /// observation set. Priority is a property of the REQUEST, not of whichever rule happened to
+    /// survive filtering, so an unidentifiable execution must still be the non-verdict with no
+    /// state committed.
+    #[test]
+    fn capture_failure_is_the_non_verdict_even_when_every_rule_is_skipped_by_origin() {
+        let source = format!("0x{}", "33".repeat(32));
+        let run = run_batch(
+            &[deposit_request(&source, PROXY)],
+            vec![proxy_impl_allowlist_rule_from_origin(OTHER_ORIGIN)],
+            2,
+            &[&source],
+            Some([(source.clone(), KnownAllowedKind::Original)].into_iter().collect()),
+            AuditCaptureConfig { max_callstack_observations_per_tx: 1 },
+            seeded_db(APPROVED_IMPL, 2),
+        );
+        let result = only(&run);
+        assert_eq!(
+            result.verdict,
+            Verdict::Malformed,
+            "an unidentifiable execution is never reported Allow, whichever rules were skipped"
+        );
+        assert_eq!(result.callstack_identification, Some(CallstackIdentification::NotIdentified));
+        assert_eq!(run.proxy_slot0, U256::ZERO, "a non-verdict must not commit state");
+
+        // Counter-check: the SAME request and the SAME skipped rule under a sufficient budget is
+        // adjudicated normally and committed, so the assertion above is about the unavailable
+        // observation set and not about the origin narrowing by itself.
+        let identified = run_batch(
+            &[deposit_request(&source, PROXY)],
+            vec![proxy_impl_allowlist_rule_from_origin(OTHER_ORIGIN)],
+            2,
+            &[&source],
+            Some([(source.clone(), KnownAllowedKind::Original)].into_iter().collect()),
+            generous(),
+            seeded_db(APPROVED_IMPL, 2),
+        );
+        assert_eq!(only(&identified).verdict, Verdict::Allow);
+        assert_eq!(
+            only(&identified).callstack_identification,
+            Some(CallstackIdentification::Clean)
+        );
+        assert_eq!(identified.proxy_slot0, U256::from(1u64));
+    }
+
+    /// the same for an ORDINARY entry (no `known_allowed` at all), running UNAPPROVED code: the
+    /// request declares a selector, the execution could not be identified, so it is the
+    /// non-verdict and its state stays out of the overlay.
+    #[test]
+    fn capture_failure_on_an_ordinary_entry_with_skipped_rules_is_the_non_verdict() {
+        let run = run_batch(
+            &[deposit_request(&format!("0x{}", "33".repeat(32)), PROXY)],
+            vec![proxy_impl_allowlist_rule_from_origin(OTHER_ORIGIN)],
+            2,
+            &[],
+            None,
+            AuditCaptureConfig { max_callstack_observations_per_tx: 1 },
+            seeded_db(UNAPPROVED_IMPL, 2),
+        );
+        let result = only(&run);
+        assert_eq!(result.verdict, Verdict::Malformed);
+        assert_eq!(result.callstack_identification, Some(CallstackIdentification::NotIdentified));
+        assert_eq!(
+            run.proxy_slot0,
+            U256::ZERO,
+            "unidentified execution of unapproved code must not be committed"
+        );
+    }
+
+    /// the synthetic-prefix exception is explicit and survives the request-level check: with the
+    /// same skipped rule and the same failed capture, a `SyntheticBan` still returns `Allow` and
+    /// its state IS committed, because later originals depend on that base state.
+    #[test]
+    fn synthetic_ban_prefix_keeps_allow_and_commit_when_every_rule_is_skipped_by_origin() {
+        let prefix = format!("0x{}", "55".repeat(32));
+        let run = run_batch(
+            &[deposit_request(&prefix, PROXY)],
+            vec![proxy_impl_allowlist_rule_from_origin(OTHER_ORIGIN)],
+            2,
+            &[&prefix],
+            Some([(prefix.clone(), KnownAllowedKind::SyntheticBan)].into_iter().collect()),
+            AuditCaptureConfig { max_callstack_observations_per_tx: 1 },
+            seeded_db(APPROVED_IMPL, 2),
+        );
+        let s = only(&run);
+        assert_eq!(s.verdict, Verdict::Allow, "the prefix contract is unconditional");
+        assert_eq!(s.callstack_identification, Some(CallstackIdentification::NotIdentified));
+        assert_eq!(run.proxy_slot0, U256::from(1u64), "its commit is never withheld");
+    }
+
     /// a `known_allowed` Original denied on the callstack dimension does NOT stop the
     /// batch: a later transaction still executes and is classified.
     #[test]
@@ -1391,6 +1737,68 @@ mod capture_path_tests {
         assert_eq!(s.verdict, Verdict::Allow);
         assert_eq!(s.callstack_identification, Some(CallstackIdentification::NotIdentified));
         assert_eq!(run.proxy_slot0, U256::from(2u64), "its commit is never withheld");
+    }
+
+    /// the budget-failure branch of a replay prefix REALLY reaches the reporting path when
+    /// driven through the production batch: the prefix keeps its `Allow` and its commit, and the
+    /// bounded anomaly log is emitted. Without this the classification would exist only in the
+    /// response field the consumer never reads for such a prefix.
+    #[test]
+    fn a_prefix_whose_capture_failed_reports_through_the_production_batch() {
+        let prefix = format!("0x{}", "55".repeat(32));
+        let kinds: BTreeMap<String, KnownAllowedKind> =
+            [(prefix.clone(), KnownAllowedKind::SyntheticBan)].into_iter().collect();
+        let (run, out) = super::identification_reporting_tests::capture_tracing(|| {
+            run_batch(
+                &[deposit_request(&prefix, PROXY)],
+                vec![proxy_impl_allowlist_rule()],
+                2,
+                &[&prefix],
+                Some(kinds),
+                AuditCaptureConfig { max_callstack_observations_per_tx: 1 },
+                seeded_db(UNAPPROVED_IMPL, 2),
+            )
+        });
+
+        let s = only(&run);
+        assert_eq!(s.verdict, Verdict::Allow, "the prefix contract stays unconditional");
+        assert_eq!(s.callstack_identification, Some(CallstackIdentification::NotIdentified));
+        assert_eq!(run.proxy_slot0, U256::from(2u64), "its commit is never withheld");
+        assert!(
+            out.contains("xlayer_audit_rpc::synthetic_ban_identification"),
+            "the budget-failure branch must still emit the dedicated diagnostic: {out}"
+        );
+        assert!(out.contains("outcome=\"not_identified\""), "expected the outcome token: {out}");
+        assert!(
+            !out.contains("proxy-impl-allowlist"),
+            "the diagnostic must never carry a rule id: {out}"
+        );
+    }
+
+    /// the same through the batch for an OBJECTED prefix: `Allow`, committed, and the objection
+    /// is visible in the operator-facing diagnostic rather than only in the response field.
+    #[test]
+    fn an_objected_prefix_reports_through_the_production_batch() {
+        let prefix = format!("0x{}", "55".repeat(32));
+        let kinds: BTreeMap<String, KnownAllowedKind> =
+            [(prefix.clone(), KnownAllowedKind::SyntheticBan)].into_iter().collect();
+        let (run, out) = super::identification_reporting_tests::capture_tracing(|| {
+            run_batch(
+                &[deposit_request(&prefix, PROXY)],
+                vec![proxy_impl_allowlist_rule()],
+                2,
+                &[&prefix],
+                Some(kinds),
+                generous(),
+                seeded_db(UNAPPROVED_IMPL, 1),
+            )
+        });
+
+        let s = only(&run);
+        assert_eq!(s.verdict, Verdict::Allow);
+        assert_eq!(s.callstack_identification, Some(CallstackIdentification::Objected));
+        assert_eq!(run.proxy_slot0, U256::from(2u64));
+        assert!(out.contains("outcome=\"objected\""), "expected the outcome token: {out}");
     }
 
     /// an `Original` in the SAME request still gets `Deny` priority, proving the two
@@ -1881,5 +2289,270 @@ mod capture_path_tests {
             reason.contains("callStack"),
             "the reason must name the unrecognised key: {reason}"
         );
+    }
+}
+
+/// The request-level non-verdict gate, and the synthetic-prefix reporting the consumer cannot see
+/// any other way.
+#[cfg(test)]
+mod identification_reporting_tests {
+    use super::*;
+    use alloy_primitives::{Address, B256};
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+    use rcs_filter::callstack::SnapshotStamp;
+    use rcs_filter::rules::load_rules;
+
+    /// Runs `f` with every `tracing` event captured, so a diagnostic's fields can be asserted —
+    /// including the fields it must NOT carry.
+    pub(super) fn capture_tracing<R>(f: impl FnOnce() -> R) -> (R, String) {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct BufWriter(Arc<Mutex<Vec<u8>>>);
+        impl Write for BufWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl tracing_subscriber::fmt::MakeWriter<'_> for BufWriter {
+            type Writer = BufWriter;
+            fn make_writer(&self) -> BufWriter {
+                self.clone()
+            }
+        }
+
+        let buf = BufWriter(Arc::new(Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_target(true)
+            .with_writer(buf.clone())
+            .finish();
+        let out = tracing::subscriber::with_default(subscriber, f);
+        let logged = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        (out, logged)
+    }
+
+    /// A selector-bearing rule set, compiled exactly as the handler compiles a request's own.
+    fn selector_bearing_rules() -> RuleSet {
+        let rule: RawRule = serde_json::from_value(serde_json::json!({
+            "id": "proxy-impl-allowlist",
+            "event_abis": {},
+            "callstack": { "entry": { "address": format!("{:#x}", Address::repeat_byte(0xAA)) } },
+            "condition": { "==": [ { "var": "entry.matched" }, true ] },
+            "action": "deny"
+        }))
+        .expect("the fixture rule deserializes");
+        let rules = load_rules(2, 0, vec![rule]);
+        assert!(rules.rejected.is_empty(), "the fixture rule must load clean");
+        rules
+    }
+
+    /// A v1 event rule declaring no call-frame selector.
+    fn selector_free_rules() -> RuleSet {
+        let rule: RawRule = serde_json::from_str(
+            r#"{"id":"evt","event_abis":{"transfer":{"type":"event","name":"Transfer",
+               "inputs":[{"name":"from","type":"address","indexed":true}],
+               "anonymous":false}},"condition":true,"action":"deny"}"#,
+        )
+        .expect("valid v1 rule");
+        load_rules(1, 0, vec![rule])
+    }
+
+    /// the gate refuses an observation set produced under a different rule snapshot, accepts a
+    /// genuinely empty set stamped by the evaluating one, and leaves a request that declares no
+    /// selector completely untouched.
+    #[test]
+    fn the_request_level_gate_separates_unavailable_from_empty() {
+        let rules = selector_bearing_rules();
+        let foreign = SnapshotStamp { selector_digest: B256::repeat_byte(0xEE), ..rules.stamp() };
+
+        assert_eq!(
+            unadjudicable_observations(&rules, Observations::available(foreign, &[])),
+            Some(ObservationUnavailable::SnapshotMismatch),
+            "a foreign stamp cannot be read as captured-and-empty"
+        );
+        assert_eq!(
+            unadjudicable_observations(&rules, Observations::available(rules.stamp(), &[])),
+            None,
+            "capture ran and genuinely observed nothing: adjudicable"
+        );
+        assert_eq!(
+            unadjudicable_observations(&rules, Observations::NOT_CAPTURED),
+            Some(ObservationUnavailable::NotCaptured)
+        );
+        assert_eq!(
+            unadjudicable_observations(
+                &rules,
+                Observations::Unavailable { reason: ObservationUnavailable::BudgetExceeded }
+            ),
+            Some(ObservationUnavailable::BudgetExceeded),
+            "the reason is preserved, not collapsed"
+        );
+        assert_eq!(
+            unadjudicable_observations(&selector_free_rules(), Observations::NOT_CAPTURED),
+            None,
+            "a request declaring no selector keeps its pre-existing path byte for byte"
+        );
+    }
+
+    /// every classification increments its OWN counter, read back from a recorder rather than
+    /// restated from the code.
+    #[test]
+    fn each_classification_increments_its_own_counter() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+
+        // `new_with_labels` registers fresh handles against the recorder installed above, where
+        // `default()` would hand back a cached instance bound to whichever recorder was active
+        // when some other test first built it.
+        let metrics = SyntheticBanIdentificationMetrics::new_with_labels(Vec::new());
+        for identification in [
+            CallstackIdentification::Clean,
+            CallstackIdentification::Objected,
+            CallstackIdentification::NotIdentified,
+            CallstackIdentification::NotApplicable,
+        ] {
+            report_synthetic_ban_identification(
+                &metrics,
+                B256::repeat_byte(0x7A),
+                "0xsrc",
+                identification,
+                3,
+            );
+        }
+
+        let mut counters: Vec<(String, u64)> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter_map(|(key, _, _, value)| match value {
+                DebugValue::Counter(count) => Some((key.key().name().to_string(), count)),
+                _ => None,
+            })
+            .collect();
+        counters.sort();
+        assert_eq!(
+            counters,
+            vec![
+                ("rcs_filter.synthetic_ban_identification.clean_total".to_string(), 1),
+                ("rcs_filter.synthetic_ban_identification.not_applicable_total".to_string(), 1),
+                ("rcs_filter.synthetic_ban_identification.not_identified_total".to_string(), 1),
+                ("rcs_filter.synthetic_ban_identification.objected_total".to_string(), 1),
+            ],
+            "each class lands in its own dedicated synthetic_ban series (the dotted key is the \
+             recorder's internal form; the exporter renders it with underscores)"
+        );
+    }
+
+    /// an objection on a replay prefix emits exactly the bounded fields — and none of the
+    /// content a rule id or an observation would carry.
+    #[test]
+    fn an_objected_prefix_emits_one_bounded_anomaly_log() {
+        let metrics = SyntheticBanIdentificationMetrics::new_with_labels(Vec::new());
+        let (_, out) = capture_tracing(|| {
+            report_synthetic_ban_identification(
+                &metrics,
+                B256::repeat_byte(0x7A),
+                "0xsrc",
+                CallstackIdentification::Objected,
+                3,
+            );
+        });
+
+        assert_eq!(out.lines().count(), 1, "exactly one log line: {out}");
+        assert!(out.contains("ERROR"), "expected error level: {out}");
+        assert!(
+            out.contains("xlayer_audit_rpc::synthetic_ban_identification"),
+            "expected the dedicated target: {out}"
+        );
+        assert!(out.contains("outcome=\"objected\""), "expected the outcome token: {out}");
+        assert!(out.contains("selector_bearing_rules=3"), "expected the bounded count: {out}");
+        assert!(out.contains("0xsrc"), "expected the source hash: {out}");
+        assert!(
+            !out.contains("proxy-impl-allowlist"),
+            "the diagnostic must never carry a rule id: {out}"
+        );
+        assert!(
+            !out.to_lowercase().contains("implcodehash"),
+            "the diagnostic must never carry observation content: {out}"
+        );
+        assert!(
+            !out.to_lowercase().contains(&format!("{:#x}", Address::repeat_byte(0xAA))),
+            "the diagnostic must never carry an observed address: {out}"
+        );
+    }
+
+    /// an unidentifiable replay prefix emits the same bounded log under its own outcome token.
+    #[test]
+    fn an_unidentified_prefix_emits_one_bounded_anomaly_log() {
+        let metrics = SyntheticBanIdentificationMetrics::new_with_labels(Vec::new());
+        let (_, out) = capture_tracing(|| {
+            report_synthetic_ban_identification(
+                &metrics,
+                B256::repeat_byte(0x7A),
+                "0xsrc",
+                CallstackIdentification::NotIdentified,
+                1,
+            );
+        });
+
+        assert_eq!(out.lines().count(), 1, "exactly one log line: {out}");
+        assert!(out.contains("ERROR"), "expected error level: {out}");
+        assert!(out.contains("outcome=\"not_identified\""), "expected the outcome token: {out}");
+        assert!(out.contains("selector_bearing_rules=1"), "expected the bounded count: {out}");
+    }
+
+    /// a clean (and a not-applicable) prefix is counted and stays SILENT: the log is for
+    /// anomalies, so an ordinary replay must not fill an operator's log with one line per prefix.
+    #[test]
+    fn a_clean_prefix_is_counted_without_an_anomaly_log() {
+        let metrics = SyntheticBanIdentificationMetrics::new_with_labels(Vec::new());
+        let (_, out) = capture_tracing(|| {
+            report_synthetic_ban_identification(
+                &metrics,
+                B256::repeat_byte(0x7A),
+                "0xsrc",
+                CallstackIdentification::Clean,
+                3,
+            );
+            report_synthetic_ban_identification(
+                &metrics,
+                B256::repeat_byte(0x7B),
+                "0xsrc2",
+                CallstackIdentification::NotApplicable,
+                0,
+            );
+        });
+        assert!(out.is_empty(), "no anomaly, so no log: {out}");
+    }
+
+    /// the classification → series mapping itself, asserted on the handles so it cannot drift
+    /// into reporting one class under another's counter.
+    #[test]
+    fn the_counter_mapping_is_one_series_per_class() {
+        let metrics = SyntheticBanIdentificationMetrics::new_with_labels(Vec::new());
+        assert!(std::ptr::eq(
+            metrics.counter(CallstackIdentification::Clean),
+            &metrics.clean_total
+        ));
+        assert!(std::ptr::eq(
+            metrics.counter(CallstackIdentification::Objected),
+            &metrics.objected_total
+        ));
+        assert!(std::ptr::eq(
+            metrics.counter(CallstackIdentification::NotIdentified),
+            &metrics.not_identified_total
+        ));
+        assert!(std::ptr::eq(
+            metrics.counter(CallstackIdentification::NotApplicable),
+            &metrics.not_applicable_total
+        ));
     }
 }

@@ -22,6 +22,8 @@ reth-rpc-eth-api.workspace = true
 
 reth-chain-state.workspace = true
 reth-evm.workspace = true
+reth-metrics.workspace = true
+metrics.workspace = true
 reth-optimism-evm.workspace = true
 reth-optimism-primitives.workspace = true
 reth-rpc-server-types.workspace = true
@@ -48,6 +50,11 @@ revm.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
+# Reads back the identification counters this crate registers, so the metric assertions are real
+# increments rather than a re-description of the code. Test targets only.
+metrics-util.workspace = true
+# Captures this crate's own structured diagnostics so their field boundaries are asserted.
+tracing-subscriber = "0.3"
 # Enable the shared capture crate's non-default seams for THIS crate's test targets only; the
 # feature is deliberately absent from `[dependencies]`, so a production build compiles none of it.
 xlayer-rcs-capture = { workspace = true, features = ["test-utils"] }

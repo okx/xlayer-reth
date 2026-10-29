@@ -3235,8 +3235,15 @@ mod deposit_identification_tests {
     /// The explicit non-null guard is what keeps an ordinary non-delegatecall call to the proxy
     /// from being denied, because `implCodeHash` is null for a plain call observation.
     fn proxy_impl_allowlist_rule(approved: &[B256]) -> RawRule {
+        serde_json::from_value(proxy_impl_allowlist_rule_json(approved))
+            .expect("the normative sample must deserialize")
+    }
+
+    /// The same sample as wire JSON. The audit path receives a real request rather than an
+    /// already-parsed rule, so both forms are built from THIS one source and cannot drift.
+    fn proxy_impl_allowlist_rule_json(approved: &[B256]) -> serde_json::Value {
         let approved: Vec<String> = approved.iter().map(|h| format!("{h:#x}")).collect();
-        serde_json::from_value(serde_json::json!({
+        serde_json::json!({
             "id": "proxy-impl-allowlist",
             "event_abis": {},
             "callstack": { "entry": { "address": format!("{PROXY:#x}") } },
@@ -3246,8 +3253,7 @@ mod deposit_identification_tests {
                 { "!": { "in": [ { "var": "entry.implCodeHash" }, approved ] } }
             ] },
             "action": "deny"
-        }))
-        .expect("the normative sample must deserialize")
+        })
     }
 
     /// A rule that observes nothing: no `callstack` section at all, so the snapshot declares no
@@ -3697,11 +3703,16 @@ mod deposit_identification_tests {
         use reth_payload_util::PayloadTransactionsFixed;
         use reth_transaction_pool::test_utils::testing_pool;
         use revm::database::InMemoryDB;
-        use xlayer_rpc::audit::deposit::{build_deposit_tx, DepositTxRequest};
+        // revm's `Database` trait, anonymously, so the audit path's own EVM database can be read
+        // back for the commit observation without shadowing `alloy_evm::Database`.
+        use revm::Database as _;
+        use xlayer_rpc::audit::deposit::build_deposit_tx;
+        use xlayer_rpc::audit::rpc::observation_recorder;
         use xlayer_rpc::audit::rpc::test_seams::{
-            audit_capture_inspector, audit_capture_window, observations_from,
+            audit_capture_inspector, prepare_audit_batch_plan, run_audit_batch,
         };
-        use xlayer_rpc::audit::verdict::{verdict_for, ExecutedTx, Verdict};
+        use xlayer_rpc::audit::rpc::AuditTransactionsRequest;
+        use xlayer_rpc::audit::verdict::{AuditResult, CallstackIdentification, Verdict};
         use xlayer_rpc::AuditCaptureConfig;
 
         /// The per-transaction observation budget every path is given here. Large enough that no
@@ -3838,24 +3849,49 @@ mod deposit_identification_tests {
             )
         }
 
-        /// What the audit path observed and decided. Its capture window, its outcome→observation
-        /// mapping and its verdict function are the RPC crate's own, reached through that crate's
-        /// `test-utils` feature — nothing here re-implements them, which is the only way the
-        /// comparison can mean anything.
-        fn audit_path(rules: &RuleSet, proxy_code: Vec<u8>) -> (Vec<CallObservation>, Verdict) {
-            let request = DepositTxRequest {
-                source_hash: format!("{:#x}", B256::repeat_byte(0x33)),
-                from: format!("{DEPOSITOR:#x}"),
-                to: Some(format!("{PROXY:#x}")),
-                mint: "0".to_string(),
-                value: "0".to_string(),
-                gas_limit: 1_000_000,
-                is_system_transaction: false,
-                data: "0x".to_string(),
-            };
-            let tx = build_deposit_tx(&request).expect("the fixture request builds");
+        /// What the audit path observed and decided, driven through its PRODUCTION request
+        /// pipeline: the real wire request, the real request-level validation and rule
+        /// compilation (`prepare_audit_batch_plan`), the real inspector construction and the real
+        /// batch body (`run_audit_batch`) — which is what opens the capture window, maps the
+        /// capture outcome to an observation set, adjudicates and decides the commit.
+        ///
+        /// The returned observations are the ones the production batch itself fed to screening,
+        /// recorded inside that batch rather than re-derived here. A production path that
+        /// discarded its capture, or mapped a verdict wrongly, therefore cannot satisfy this.
+        ///
+        /// The handler's own `audit_transactions` is not used only because it needs a node
+        /// backend to anchor state; everything after that anchoring is the production path.
+        fn audit_path(
+            approved: &[B256],
+            proxy_code: Vec<u8>,
+        ) -> (Vec<CallObservation>, Verdict, Option<CallstackIdentification>, u64) {
+            let source_hash = format!("{:#x}", B256::repeat_byte(0x33));
+            // A real v2 request, parsed through the strict wire schema the RPC exposes.
+            let request: AuditTransactionsRequest = serde_json::from_value(serde_json::json!({
+                "protocol_version": 2,
+                "rules": [proxy_impl_allowlist_rule_json(approved)],
+                "txs": [{
+                    "source_hash": source_hash,
+                    "from": format!("{DEPOSITOR:#x}"),
+                    "to": format!("{PROXY:#x}"),
+                    "mint": "0",
+                    "value": "0",
+                    "gas_limit": 1_000_000,
+                    "is_system_transaction": false,
+                    "data": "0x",
+                }],
+            }))
+            .expect("the fixture request satisfies the audit RPC's own wire schema");
+
+            let plan = prepare_audit_batch_plan(&request)
+                .expect("the fixture request passes every request-level check");
+            let txs: Vec<_> = request
+                .txs
+                .iter()
+                .map(|req| build_deposit_tx(req).expect("the fixture request builds"))
+                .collect();
             let inspector = audit_capture_inspector(
-                rules,
+                plan.rules(),
                 AuditCaptureConfig { max_callstack_observations_per_tx: GENEROUS_BUDGET },
             )
             .expect("the fixture rule declares a selector");
@@ -3868,25 +3904,32 @@ mod deposit_identification_tests {
                 env,
                 inspector,
             );
-            let (outcome, capture) =
-                audit_capture_window(&mut evm, &tx).expect("the fixture transaction executes");
-            let observed = match &capture {
-                CaptureOutcome::Complete { observations, .. } => observations.items.clone(),
-                other => panic!("the audit path's capture must complete: {other:?}"),
-            };
-            let result = verdict_for(
-                &request,
-                ExecutedTx {
-                    from: DEPOSITOR,
-                    to: Some(PROXY),
-                    tx_hash: tx.tx_hash(),
-                    value: U256::ZERO,
-                },
-                outcome.result.logs(),
-                rules,
-                observations_from(&capture),
-            );
-            (observed, result.verdict)
+
+            // Drop anything an earlier leg recorded, so what comes back is this batch's own.
+            let _ = observation_recorder::take();
+            let mut executed: Vec<Option<AuditResult>> = vec![None];
+            run_audit_batch(&mut evm, &plan, &txs, &request.txs, &mut executed)
+                .expect("the production batch executes the fixture transaction");
+            let recorded = observation_recorder::take();
+            assert_eq!(recorded.len(), 1, "one transaction, one recorded observation set");
+            let observed = recorded[0]
+                .clone()
+                .expect("the production batch fed screening an AVAILABLE observation set");
+            let result = executed[0].as_ref().expect("the production batch classified the tx");
+            assert_eq!(result.source_hash, source_hash, "the result belongs to this request");
+            // The production batch also decides whether to commit. The depositor's nonce is the
+            // observable: executing the deposit bumps it, so a committed batch leaves 1 and a
+            // discarded one leaves 0 — independent of what the implementation's code does, which
+            // this shared fixture deliberately keeps side-effect free. Measured, not assumed: the
+            // same fixture through the same production batch gives nonce 1 on allow and 0 on deny.
+            let (verdict, identification) = (result.verdict, result.callstack_identification);
+            let depositor_nonce = evm
+                .db_mut()
+                .basic(DEPOSITOR)
+                .expect("the depositor account is readable")
+                .expect("the fixture seeds the depositor")
+                .nonce;
+            (observed, verdict, identification, depositor_nonce)
         }
 
         /// ONE fixture — the same observed proxy, the same implementation, the same (empty)
@@ -3907,15 +3950,20 @@ mod deposit_identification_tests {
                 let objected = executed_impl == UNAPPROVED_IMPL;
                 let proxy_code = delegating_proxy_code(executed_impl, 1);
                 let raw = vec![proxy_impl_allowlist_rule(&[approved])];
-                // The audit path compiles the rules carried in its own request; content version 0
-                // is what the handler uses, since that path has no persisted snapshot.
-                let audit_rules = load_rules(2, 0, raw.clone());
-                assert!(audit_rules.rejected.is_empty(), "the fixture rule must load clean");
+                // The audit path compiles the rules carried in its own request, inside
+                // `prepare_audit_batch_plan`; this only pins that the shared rule source really
+                // is a clean v2 rule, so a silent rejection could not make the comparison
+                // vacuous on any path.
+                assert!(
+                    load_rules(2, 0, raw.clone()).rejected.is_empty(),
+                    "the fixture rule must load clean"
+                );
 
                 let (candidate_observed, screen) = candidate_path(raw.clone(), proxy_code.clone());
                 let (deposit_observed, identification) =
                     deposit_path(raw.clone(), proxy_code.clone());
-                let (audit_observed, verdict) = audit_path(&audit_rules, proxy_code.clone());
+                let (audit_observed, verdict, audit_identification, audit_depositor_nonce) =
+                    audit_path(&[approved], proxy_code.clone());
 
                 // The fixture really produced the frames the rule is about — the proxy running
                 // its own code, then its first-level delegatecall — so the equality below cannot
@@ -3958,6 +4006,15 @@ mod deposit_identification_tests {
                         "the sequencer loop reports a deny-worthy deposit"
                     );
                     assert_eq!(verdict, Verdict::Deny, "the audit path denies");
+                    assert_eq!(
+                        audit_identification,
+                        Some(CallstackIdentification::Objected),
+                        "the audit path reports the objection it acted on"
+                    );
+                    assert_eq!(
+                        audit_depositor_nonce, 0,
+                        "the audit path discards the state of the transaction it denied"
+                    );
                 } else {
                     assert_eq!(screen, Screen::Allow, "the candidate loop admits");
                     assert_eq!(
@@ -3966,6 +4023,15 @@ mod deposit_identification_tests {
                         "the sequencer loop reports an allowed deposit"
                     );
                     assert_eq!(verdict, Verdict::Allow, "the audit path allows");
+                    assert_eq!(
+                        audit_identification,
+                        Some(CallstackIdentification::Clean),
+                        "the audit path identified the frames it allowed on"
+                    );
+                    assert_eq!(
+                        audit_depositor_nonce, 1,
+                        "the audit path commits the state of the transaction it allowed"
+                    );
                 }
             }
         }
