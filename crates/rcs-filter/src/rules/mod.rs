@@ -29,5 +29,13 @@ pub use jsonlogic::{truthy, Bindings};
 pub use model::{
     AbiInput, Action, CompiledCallstackSelector, CompiledCondition, CompiledEvent, CompiledInput,
     CompiledRule, EventAbi, RawCallstackSelector, RawRule, RejectedRule, RuleSet, TimeoutAction,
+    UnknownFields,
 };
+/// The unknown-field gate. Used by the `GET /rules` response wire type so the response root is
+/// as strict as every rule level below it, and exported under the clearer name
+/// `reject_unknown_fields` for a consumer that owns its own request wire type (the audit RPC)
+/// and must be exactly as strict about a speculative or misspelled field.
+pub use validation::reject_unknown;
+pub use validation::reject_unknown as reject_unknown_fields;
+pub(crate) use validation::RULES_RESPONSE_LOCATION;
 pub use validation::{compile_rule, compile_rule_at_protocol, load_rules};

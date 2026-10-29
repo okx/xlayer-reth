@@ -30,6 +30,26 @@ pub enum Verdict {
     Malformed,
 }
 
+/// How call-frame identification affected one transaction's verdict — a **diagnostic**, never
+/// the protection mechanism.
+///
+/// The adjudication itself lands in [`Verdict`], which is the only field the real caller acts on.
+/// This field explains *why* a verdict came out as it did; no correctness property depends on a
+/// consumer reading it. It is emitted only for a v2 request, so a v1 response stays byte-identical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallstackIdentification {
+    /// Identified, and no selector-bearing rule objected.
+    Clean,
+    /// Identified, and a selector-bearing rule objected (would deny).
+    Objected,
+    /// The executed code could not be identified: capture failure, budget overflow or a
+    /// snapshot-stamp mismatch. Never reported as `Clean`.
+    NotIdentified,
+    /// The request declares no callstack selector, so there was nothing to identify.
+    NotApplicable,
+}
+
 /// One transaction's classification result, as returned to the RPC caller.
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditResult {
@@ -37,6 +57,11 @@ pub struct AuditResult {
     pub source_hash: String,
     pub verdict: Verdict,
     pub actions: Option<BTreeMap<String, Vec<ActionItem>>>,
+    /// Diagnostic only; see [`CallstackIdentification`]. Absent from the serialized response
+    /// unless the request advertised protocol version 2, so `tx_hash` / `source_hash` /
+    /// `verdict` / `actions` keep their exact previous wire shape for every existing caller.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callstack_identification: Option<CallstackIdentification>,
 }
 
 impl AuditResult {
@@ -44,24 +69,42 @@ impl AuditResult {
     /// `build_deposit_tx` failed or because matching exceeded its resource budget. The empty
     /// `tx_hash` consistently indicates that no authoritative screening verdict was produced.
     pub fn malformed(source_hash: String) -> Self {
-        Self { tx_hash: String::new(), source_hash, verdict: Verdict::Malformed, actions: None }
+        Self {
+            tx_hash: String::new(),
+            source_hash,
+            verdict: Verdict::Malformed,
+            actions: None,
+            callstack_identification: None,
+        }
+    }
+
+    /// Attaches the identification diagnostic, for a v2 request only.
+    pub fn with_identification(mut self, identification: Option<CallstackIdentification>) -> Self {
+        self.callstack_identification = identification;
+        self
     }
 
     /// Builds an `Unknown` result for a tx that was never executed because an earlier tx in the
     /// same batch stopped the loop with an `Audit` verdict (see `rpc.rs`'s `assemble_results`).
     pub fn unknown(source_hash: String) -> Self {
-        Self { tx_hash: String::new(), source_hash, verdict: Verdict::Unknown, actions: None }
+        Self {
+            tx_hash: String::new(),
+            source_hash,
+            verdict: Verdict::Unknown,
+            actions: None,
+            callstack_identification: None,
+        }
     }
 }
 
-/// The observation state of the audit RPC path.
+/// The observation state of an audit-RPC execution that ran **no** capture.
 ///
-/// The EVM built for `xlayer_auditTransactions` runs without the call-frame observation
-/// inspector, so observations are genuinely unavailable here rather than empty. Rules that
-/// declare no callstack selectors are unaffected and keep their exact previous behavior; a rule
-/// that does declare them cannot be adjudicated on this path and is surfaced as a non-verdict
-/// `Malformed` result rather than an authoritative `Allow`.
-fn observations_for_audit_path() -> Observations<'static> {
+/// No longer the normal path: the audit RPC now attaches the shared capture inspector whenever
+/// the request's own rules declare call-frame selectors, so `verdict_for` is fed a real
+/// observation set. This value remains reachable for a genuine capture failure and for a request
+/// that declares no selectors at all (where nothing can depend on it), and it continues to yield
+/// the existing non-verdict rather than an authoritative `Allow`.
+pub fn observations_not_captured() -> Observations<'static> {
     Observations::NOT_CAPTURED
 }
 
@@ -69,15 +112,31 @@ fn observations_for_audit_path() -> Observations<'static> {
 /// come from the caller's EVM execution; this function does no execution itself —
 /// zero network IO, zero side effects (unlike `FilterHandle::screen_tx`, this never touches a
 /// `BufferPool`).
+/// Identity of one already-executed transaction, as the caller's EVM reported it.
+///
+/// Grouped rather than passed field by field: the classifier needs the whole identity, and a
+/// struct keeps the call sites from drifting out of positional order as the set grows.
+#[derive(Debug, Clone, Copy)]
+pub struct ExecutedTx {
+    pub from: Address,
+    pub to: Option<Address>,
+    pub tx_hash: B256,
+    pub value: U256,
+}
+
 pub fn verdict_for(
     req: &DepositTxRequest,
-    from: Address,
-    to: Option<Address>,
-    tx_hash: B256,
-    value: U256,
+    tx: ExecutedTx,
     logs: &[Log],
     rules: &RuleSet,
+    observations: Observations<'_>,
 ) -> AuditResult {
+    let ExecutedTx { from, to, tx_hash, value } = tx;
+    // `observations` comes from the caller's real capture. An `Unavailable` value here means the
+    // capture genuinely failed (or the request declares no selectors); reporting an empty list
+    // instead would make every selector bind `matched = false`, and a rule written to reject the
+    // transaction would return `Allow` — "not captured" disguised as "captured, nothing matched".
+    let identification = identification_for(rules, observations);
     let input = ScreenInput {
         tx_hash,
         origin: from,
@@ -86,11 +145,7 @@ pub fn verdict_for(
         value,
         block_height: 0,
         logs,
-        // This path executes the EVM without the observation inspector attached, so nothing is
-        // known about its call frames. Reporting an empty list instead would make every selector
-        // bind `matched = false`, and a rule written to reject the transaction would return
-        // `Allow` — "not captured" disguised as "captured, nothing matched".
-        observations: observations_for_audit_path(),
+        observations,
     };
     // The audit RPC path holds no FilterConfig, so it uses the default binding budget. This keeps
     // its existing matcher-overflow `Malformed` semantics unchanged.
@@ -108,25 +163,44 @@ pub fn verdict_for(
                 "screening failed closed; returning malformed result"
             );
             AuditResult::malformed(req.source_hash.clone())
+                .with_identification(Some(CallstackIdentification::NotIdentified))
         }
         Ok(MatchOutcome::Allow) => AuditResult {
             tx_hash: format!("{tx_hash:#x}"),
             source_hash: req.source_hash.clone(),
             verdict: Verdict::Allow,
             actions: None,
+            callstack_identification: Some(identification),
         },
         Ok(MatchOutcome::Deny) => AuditResult {
             tx_hash: format!("{tx_hash:#x}"),
             source_hash: req.source_hash.clone(),
             verdict: Verdict::Deny,
             actions: None,
+            callstack_identification: Some(identification),
         },
         Ok(MatchOutcome::Audit { actions, .. }) => AuditResult {
             tx_hash: format!("{tx_hash:#x}"),
             source_hash: req.source_hash.clone(),
             verdict: Verdict::Audit,
             actions: Some(actions),
+            callstack_identification: Some(identification),
         },
+    }
+}
+
+/// The diagnostic for one adjudication, decided BEFORE evaluation so it describes the
+/// observation set rather than the rule outcome's shape.
+///
+/// `Objected` is attached afterwards by the caller when a selector-bearing request denies, since
+/// `MatchOutcome::Deny` carries no rule id and therefore cannot say which dimension objected.
+fn identification_for(rules: &RuleSet, observations: Observations<'_>) -> CallstackIdentification {
+    if !rules.has_callstack_rules() {
+        return CallstackIdentification::NotApplicable;
+    }
+    match observations {
+        Observations::Available { .. } => CallstackIdentification::Clean,
+        Observations::Unavailable { .. } => CallstackIdentification::NotIdentified,
     }
 }
 
@@ -162,12 +236,15 @@ mod tests {
         let req = sample_request();
         let result = verdict_for(
             &req,
-            origin(),
-            Some(recipient()),
-            B256::ZERO,
-            U256::ZERO,
+            ExecutedTx {
+                from: origin(),
+                to: Some(recipient()),
+                tx_hash: B256::ZERO,
+                value: U256::ZERO,
+            },
             &[],
             &no_rules(),
+            observations_not_captured(),
         );
         assert_eq!(result.verdict, Verdict::Allow);
         assert!(result.actions.is_none());
@@ -215,12 +292,15 @@ mod tests {
 
         let result = verdict_for(
             &req,
-            origin(),
-            Some(recipient()),
-            B256::ZERO,
-            one_token,
+            ExecutedTx {
+                from: origin(),
+                to: Some(recipient()),
+                tx_hash: B256::ZERO,
+                value: one_token,
+            },
             &[log],
             &deny_above_threshold_rule(),
+            observations_not_captured(),
         );
 
         assert_eq!(result.verdict, Verdict::Deny);
@@ -237,12 +317,15 @@ mod tests {
 
         let result = verdict_for(
             &req,
-            origin(),
-            Some(recipient()),
-            B256::ZERO,
-            below_threshold,
+            ExecutedTx {
+                from: origin(),
+                to: Some(recipient()),
+                tx_hash: B256::ZERO,
+                value: below_threshold,
+            },
             &[log],
             &deny_above_threshold_rule(),
+            observations_not_captured(),
         );
 
         assert_eq!(result.verdict, Verdict::Allow);
@@ -284,12 +367,10 @@ mod tests {
 
         let result = verdict_for(
             &req,
-            origin(),
-            Some(recipient()),
-            B256::ZERO,
-            value,
+            ExecutedTx { from: origin(), to: Some(recipient()), tx_hash: B256::ZERO, value },
             &[log],
             &audit_quota_rule(),
+            observations_not_captured(),
         );
 
         assert_eq!(result.verdict, Verdict::Audit);
@@ -314,12 +395,15 @@ mod tests {
 
         let result = verdict_for(
             &req,
-            origin(),
-            Some(recipient()),
-            B256::ZERO,
-            U256::ZERO,
+            ExecutedTx {
+                from: origin(),
+                to: Some(recipient()),
+                tx_hash: B256::ZERO,
+                value: U256::ZERO,
+            },
             &logs,
             &audit_quota_rule(),
+            observations_not_captured(),
         );
 
         assert_eq!(result.verdict, Verdict::Audit);
@@ -348,12 +432,15 @@ mod tests {
 
         let result = verdict_for(
             &sample_request(),
-            origin(),
-            Some(recipient()),
-            B256::ZERO,
-            U256::ZERO,
+            ExecutedTx {
+                from: origin(),
+                to: Some(recipient()),
+                tx_hash: B256::ZERO,
+                value: U256::ZERO,
+            },
             &logs,
             &rules,
+            observations_not_captured(),
         );
 
         assert_eq!(result.verdict, Verdict::Malformed);
@@ -376,12 +463,15 @@ mod tests {
 
         let result = verdict_for(
             &sample_request(),
-            origin(),
-            Some(recipient()),
-            B256::ZERO,
-            U256::ZERO,
+            ExecutedTx {
+                from: origin(),
+                to: Some(recipient()),
+                tx_hash: B256::ZERO,
+                value: U256::ZERO,
+            },
             &logs,
             &rules,
+            observations_not_captured(),
         );
 
         assert_eq!(result.verdict, Verdict::Audit);
@@ -419,12 +509,15 @@ mod tests {
 
         let allowed = verdict_for(
             &sample_request(),
-            origin(),
-            Some(recipient()),
-            B256::ZERO,
-            U256::ZERO,
+            ExecutedTx {
+                from: origin(),
+                to: Some(recipient()),
+                tx_hash: B256::ZERO,
+                value: U256::ZERO,
+            },
             &logs_of(70),
             &two_rules(),
+            observations_not_captured(),
         );
         assert_eq!(allowed.verdict, Verdict::Audit);
         assert!(
@@ -434,12 +527,15 @@ mod tests {
 
         let malformed = verdict_for(
             &sample_request(),
-            origin(),
-            Some(recipient()),
-            B256::ZERO,
-            U256::ZERO,
+            ExecutedTx {
+                from: origin(),
+                to: Some(recipient()),
+                tx_hash: B256::ZERO,
+                value: U256::ZERO,
+            },
             &logs_of(71),
             &two_rules(),
+            observations_not_captured(),
         );
         assert_eq!(malformed.verdict, Verdict::Malformed);
         assert!(
@@ -489,12 +585,16 @@ mod tests {
         let req = sample_request();
         let result = verdict_for(
             &req,
-            origin(),
-            Some(recipient()), // normal business target, not the TxBlacklist contract
-            B256::ZERO,
-            U256::ZERO,
+            ExecutedTx {
+                from: origin(),
+                // normal business target, not the TxBlacklist contract
+                to: Some(recipient()),
+                tx_hash: B256::ZERO,
+                value: U256::ZERO,
+            },
             &[], // no logs
             &emergency_deny_all_rule(),
+            observations_not_captured(),
         );
         assert_eq!(result.verdict, Verdict::Deny);
         assert!(result.actions.is_none());

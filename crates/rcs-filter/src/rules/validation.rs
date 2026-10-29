@@ -13,7 +13,7 @@ use tracing::warn;
 use super::jsonlogic::{compile, AddressSetInterner};
 use super::model::{
     Action, CompiledCallstackSelector, CompiledEvent, CompiledInput, CompiledRule, EventAbi,
-    RawCallstackSelector, RawRule, RejectedRule, RuleSet, TimeoutAction,
+    RawCallstackSelector, RawRule, RejectedRule, RuleSet, TimeoutAction, UnknownFields,
 };
 
 /// Fixed ERC20 `Transfer` quota shape (ordered input names).
@@ -24,6 +24,68 @@ const ERC1155_TRANSFER_SINGLE_SHAPE: &[&str] = &["operator", "from", "to", "id",
 const ERC1155_TRANSFER_BATCH_SHAPE: &[&str] = &["operator", "from", "to", "ids", "values"];
 /// The only audit type implemented today.
 const QUOTA: &str = "quota";
+
+/// At most this many offending keys are echoed in a rejection reason. A hostile or broken
+/// snapshot must not be able to inflate an operator log line.
+const MAX_UNKNOWN_KEYS_REPORTED: usize = 8;
+/// At most this many bytes of each echoed key are reproduced, for the same reason.
+const MAX_UNKNOWN_KEY_BYTES: usize = 64;
+/// Location label used when the offending keys sit at the `GET /rules` response root.
+pub(crate) const RULES_RESPONSE_LOCATION: &str = "rules response";
+
+/// Rejects a level that carries any wire key it does not declare, naming the keys.
+///
+/// The reason is bounded on both axes ([`MAX_UNKNOWN_KEYS_REPORTED`],
+/// [`MAX_UNKNOWN_KEY_BYTES`]) and keys are reported in sorted order, which a `BTreeMap`
+/// already guarantees, so the reason is stable for a given input.
+pub fn reject_unknown(location: &str, unknown: &UnknownFields) -> std::result::Result<(), String> {
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    let echoed: Vec<String> =
+        unknown.keys().take(MAX_UNKNOWN_KEYS_REPORTED).map(|key| bound_key(key)).collect();
+    let mut reason = format!("unknown field(s) in {location}: {}", echoed.join(", "));
+    if let Some(suppressed) = unknown.len().checked_sub(MAX_UNKNOWN_KEYS_REPORTED)
+        && suppressed > 0
+    {
+        reason.push_str(&format!(" (+{suppressed} more)"));
+    }
+    Err(reason)
+}
+
+/// Truncates one echoed key to [`MAX_UNKNOWN_KEY_BYTES`] bytes on a char boundary, marking
+/// that it was cut so a reader cannot mistake the prefix for the whole key.
+fn bound_key(key: &str) -> String {
+    if key.len() <= MAX_UNKNOWN_KEY_BYTES {
+        return key.to_string();
+    }
+    const MARKER: &str = "...";
+    let mut end = MAX_UNKNOWN_KEY_BYTES - MARKER.len();
+    while end > 0 && !key.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{MARKER}", &key[..end])
+}
+
+/// One dedicated traversal rejecting any unknown wire key reachable from `raw`, in a fixed
+/// order: rule, then callstack selectors by name, then events by name, then each event's inputs
+/// by index. Both maps are `BTreeMap`s, so "by name" is already sorted.
+///
+/// Running this as a single pass before every other per-rule check is what makes the reported
+/// reason independent of which unrelated validation would otherwise have failed first.
+fn reject_unknown_rule_fields(raw: &RawRule) -> std::result::Result<(), String> {
+    reject_unknown("rule", &raw.unknown)?;
+    for (var_name, selector) in &raw.callstack {
+        reject_unknown(&format!("callstack selector '{var_name}'"), &selector.unknown)?;
+    }
+    for (var_name, abi) in &raw.event_abis {
+        reject_unknown(&format!("event '{var_name}'"), &abi.unknown)?;
+        for (index, input) in abi.inputs.iter().enumerate() {
+            reject_unknown(&format!("event '{var_name}' input #{index}"), &input.unknown)?;
+        }
+    }
+    Ok(())
+}
 
 /// Loads and validates a batch of raw rules into an immutable [`RuleSet`] snapshot with a
 /// topic0 index. Rejected rules are dropped with a `warn`; the returned set contains only
@@ -115,6 +177,11 @@ pub(crate) fn compile_rule_with_interner(
     protocol_version: u32,
     interner: &mut AddressSetInterner,
 ) -> std::result::Result<CompiledRule, String> {
+    // First, and before every other per-rule check: an unknown wire key anywhere under this
+    // rule means an author-visible constraint may be silently absent, so the reason that names
+    // the offending key must win over any other rejection the same input would also trigger.
+    reject_unknown_rule_fields(&raw)?;
+
     // A rule needs at least one selector family: with neither declared events nor callstack
     // selectors it could never match. `event_abis` alone being empty is legitimate for a rule
     // that selects purely on call frames.
@@ -632,5 +699,371 @@ mod tests {
             load_rules(1, 1, vec![parse(invalid_operator), parse(valid), parse(invalid_arity)]);
         assert_eq!(set.rules.len(), 1);
         assert_eq!(set.rules[0].id, "valid");
+    }
+}
+
+/// Strict wire-schema tests: an unrecognized key anywhere in the rule wire format must reject
+/// the rule, and therefore the whole snapshot update, with a reason that names the key.
+///
+/// Before this behaviour existed serde discarded the key, every selector constraint field being
+/// `Option<String>` deserialized to `None`, and the rule installed with the protection silently
+/// removed.
+#[cfg(test)]
+mod strict_schema_tests {
+    use super::*;
+    use crate::test_support::golden;
+    use serde_json::{json, Value};
+
+    const PROXY: &str = "0x00000000000000000000000000000000000000aa";
+    const IMPL: &str = "0x00000000000000000000000000000000000000bb";
+    const CODE_HASH: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
+
+    fn transfer_event() -> Value {
+        json!({
+            "type": "event", "name": "Transfer",
+            "inputs": [
+                { "name": "from", "type": "address", "indexed": true },
+                { "name": "to", "type": "address", "indexed": true },
+                { "name": "value", "type": "uint256", "indexed": false }
+            ],
+            "anonymous": false
+        })
+    }
+
+    /// Loads one raw rule at the callstack-capable protocol version and returns the rejection
+    /// reason, asserting that exactly one rule was rejected and none installed.
+    fn rejection_reason(rule: Value) -> String {
+        let raw: RawRule = serde_json::from_value(rule).expect("rule must still deserialize");
+        let set = load_rules(crate::config::CALLSTACK_MIN_PROTOCOL_VERSION, 1, vec![raw]);
+        assert!(set.rules.is_empty(), "no rule may install: {:?}", set.rules.len());
+        assert_eq!(set.rejected.len(), 1, "exactly one rejection expected");
+        set.rejected[0].reason.clone()
+    }
+
+    fn accepts(rule: Value, protocol_version: u32) -> RuleSet {
+        let raw: RawRule = serde_json::from_value(rule).expect("rule must deserialize");
+        let set = load_rules(protocol_version, 1, vec![raw]);
+        assert!(set.rejected.is_empty(), "unexpected rejection: {:?}", set.rejected);
+        set
+    }
+
+    /// a top-level `callStack` typo on a rule that carries a valid `event_abis` (so it
+    /// survives the "declares neither" boundary) rejects the whole snapshot, naming `callStack`.
+    #[test]
+    fn top_level_callstack_typo_is_rejected_by_name() {
+        let reason = rejection_reason(json!({
+            "id": "typo-callstack",
+            "event_abis": { "transfer": transfer_event() },
+            "callStack": { "entry": { "address": PROXY } },
+            "condition": true,
+            "action": "deny"
+        }));
+        assert_eq!(reason, "unknown field(s) in rule: callStack");
+    }
+
+    /// a `codehash` typo inside a selector rejects the snapshot, naming `codehash`.
+    /// Previously the selector installed with its code-hash constraint gone, matching any
+    /// executed code.
+    #[test]
+    fn selector_codehash_typo_is_rejected_by_name() {
+        let reason = rejection_reason(json!({
+            "id": "typo-selector-codehash",
+            "callstack": { "entry": { "address": PROXY, "codehash": CODE_HASH } },
+            "condition": { "==": [ { "var": "entry.matched" }, true ] },
+            "action": "deny"
+        }));
+        assert_eq!(reason, "unknown field(s) in callstack selector 'entry': codehash");
+    }
+
+    /// both `implAddress` and `implCodeHash` misspelled. Previously the pairing check
+    /// (the implAddress/implCodeHash pairing check) saw `None != None` and passed, so the
+    /// implementation allowlist was simply gone.
+    #[test]
+    fn both_impl_fields_misspelled_are_rejected() {
+        let reason = rejection_reason(json!({
+            "id": "typo-both-impl",
+            "callstack": { "entry": {
+                "address": PROXY,
+                "impladdress": IMPL,
+                "implcodehash": CODE_HASH
+            } },
+            "condition": { "==": [ { "var": "entry.matched" }, true ] },
+            "action": "deny"
+        }));
+        assert_eq!(
+            reason,
+            "unknown field(s) in callstack selector 'entry': impladdress, implcodehash"
+        );
+    }
+
+    /// any unrecognised safety key at rule level is rejected with the key named.
+    #[test]
+    fn unrecognised_rule_level_key_is_rejected() {
+        let reason = rejection_reason(json!({
+            "id": "speculative-field",
+            "event_abis": { "transfer": transfer_event() },
+            "require_attestation": true,
+            "condition": true,
+            "action": "deny"
+        }));
+        assert_eq!(reason, "unknown field(s) in rule: require_attestation");
+    }
+
+    /// an unknown key inside `event_abis.<name>` is rejected.
+    #[test]
+    fn unknown_key_inside_event_is_rejected() {
+        let mut event = transfer_event();
+        event["Anonymous"] = json!(true);
+        let reason = rejection_reason(json!({
+            "id": "typo-event",
+            "event_abis": { "transfer": event },
+            "condition": true,
+            "action": "deny"
+        }));
+        assert_eq!(reason, "unknown field(s) in event 'transfer': Anonymous");
+    }
+
+    /// an unknown key inside an ABI input is rejected, naming the input index.
+    #[test]
+    fn unknown_key_inside_abi_input_is_rejected() {
+        let mut event = transfer_event();
+        event["inputs"][1]["Indexed"] = json!(false);
+        let reason = rejection_reason(json!({
+            "id": "typo-abi-input",
+            "event_abis": { "transfer": event },
+            "condition": true,
+            "action": "deny"
+        }));
+        assert_eq!(reason, "unknown field(s) in event 'transfer' input #1: Indexed");
+    }
+
+    /// boundary preserved: a `callStack` typo on a rule declaring **no** `event_abis` is
+    /// still rejected. The "declares neither event_abis nor callstack selectors" boundary already
+    /// caught this input; the unknown-field
+    /// traversal runs first, so the **reason** now names `callStack` instead. The rejection does
+    /// not change; only the diagnostic improves.
+    #[test]
+    fn callstack_typo_without_events_is_rejected_with_unknown_field_reason() {
+        let reason = rejection_reason(json!({
+            "id": "typo-callstack-no-events",
+            "callStack": { "entry": { "address": PROXY } },
+            "condition": true,
+            "action": "deny"
+        }));
+        assert_eq!(reason, "unknown field(s) in rule: callStack");
+    }
+
+    /// boundary preserved: a correct `implAddress` with only `implCodehash` misspelled is
+    /// still rejected (the pairing check already caught it), now with the unknown-field reason.
+    #[test]
+    fn misspelled_impl_code_hash_is_rejected_with_unknown_field_reason() {
+        let reason = rejection_reason(json!({
+            "id": "typo-impl-code-hash-only",
+            "callstack": { "entry": {
+                "address": PROXY,
+                "implAddress": IMPL,
+                "implCodehash": CODE_HASH
+            } },
+            "condition": { "==": [ { "var": "entry.matched" }, true ] },
+            "action": "deny"
+        }));
+        assert_eq!(reason, "unknown field(s) in callstack selector 'entry': implCodehash");
+    }
+
+    /// positive control: a fully correct v2 `callstack` rule, using every selector field,
+    /// loads unchanged.
+    #[test]
+    fn correct_v2_callstack_rule_loads() {
+        let set = accepts(
+            json!({
+                "id": "correct-v2",
+                "callstack": { "entry": {
+                    "address": PROXY,
+                    "codeHash": CODE_HASH,
+                    "implAddress": IMPL,
+                    "implCodeHash": CODE_HASH
+                } },
+                "condition": { "==": [ { "var": "entry.matched" }, true ] },
+                "action": "deny"
+            }),
+            crate::config::CALLSTACK_MIN_PROTOCOL_VERSION,
+        );
+        assert_eq!(set.rules.len(), 1);
+        let selector = &set.rules[0].callstack[0];
+        assert_eq!(selector.var_name, "entry");
+        assert!(selector.code_hash.is_some());
+        assert!(selector.impl_address.is_some());
+        assert!(selector.impl_code_hash.is_some());
+    }
+
+    /// positive control: a correct v1 rule with no `callstack` loads unchanged.
+    #[test]
+    fn correct_v1_event_rule_loads() {
+        let set = accepts(
+            json!({
+                "id": "correct-v1",
+                "contract_address": null,
+                "origin": null,
+                "event_abis": { "transfer": transfer_event() },
+                "condition": true,
+                "action": "deny"
+            }),
+            crate::config::MIN_PROTOCOL_VERSION,
+        );
+        assert_eq!(set.rules.len(), 1);
+        assert!(set.rules[0].callstack.is_empty());
+    }
+
+    /// positive control: the existing golden rule fixtures and the official RCS snapshot
+    /// still load with `rejected` empty.
+    #[test]
+    fn golden_fixtures_still_load_clean() {
+        let raw: Vec<RawRule> = [golden::RULE_SCENARIO_A, golden::RULE_SCENARIO_B]
+            .iter()
+            .map(|text| serde_json::from_str(text).expect("golden fixture must deserialize"))
+            .collect();
+        let set = load_rules(1, 1, raw);
+        assert!(set.rejected.is_empty(), "golden fixtures rejected: {:?}", set.rejected);
+        assert_eq!(set.rules.len(), 2);
+
+        let snapshot: Value =
+            serde_json::from_str(include_str!("../../testdata/rules-snapshot.json"))
+                .expect("official snapshot must deserialize");
+        let raw: Vec<RawRule> = snapshot["rules"]
+            .as_array()
+            .expect("rules array")
+            .iter()
+            .map(|rule| serde_json::from_value(rule.clone()).expect("snapshot rule"))
+            .collect();
+        let set = load_rules(
+            snapshot["protocol_version"].as_u64().unwrap() as u32,
+            snapshot["content_version"].as_u64().unwrap(),
+            raw,
+        );
+        assert!(set.rejected.is_empty(), "official snapshot rejected: {:?}", set.rejected);
+    }
+
+    /// the key echo is bounded on both axes: at most 8 keys are named, each at most 64
+    /// bytes, and the remainder is summarised as `(+N more)`. A hostile snapshot must not be
+    /// able to inflate an operator log line.
+    #[test]
+    fn key_echo_is_bounded() {
+        let mut rule = json!({
+            "id": "many-unknown-keys",
+            "event_abis": { "transfer": transfer_event() },
+            "condition": true,
+            "action": "deny"
+        });
+        // Sorted order is `k00..k49`, so the first 8 reported keys are deterministic. Each name
+        // is far longer than the per-key byte bound.
+        for index in 0..50 {
+            let key = format!("k{index:02}{}", "x".repeat(200));
+            rule[key] = json!(1);
+        }
+        let reason = rejection_reason(rule);
+
+        assert!(reason.starts_with("unknown field(s) in rule: "), "{reason}");
+        assert!(reason.ends_with(" (+42 more)"), "{reason}");
+        let listed =
+            reason.trim_start_matches("unknown field(s) in rule: ").trim_end_matches(" (+42 more)");
+        let keys: Vec<&str> = listed.split(", ").collect();
+        assert_eq!(keys.len(), MAX_UNKNOWN_KEYS_REPORTED);
+        for key in &keys {
+            assert!(key.len() <= MAX_UNKNOWN_KEY_BYTES, "key too long: {} bytes", key.len());
+            assert!(key.ends_with("..."), "a truncated key must be marked: {key}");
+        }
+        assert!(keys[0].starts_with("k00"), "keys are reported in sorted order: {keys:?}");
+        assert!(keys[7].starts_with("k07"), "keys are reported in sorted order: {keys:?}");
+    }
+
+    /// control: a rule genuinely declaring neither `event_abis` nor `callstack`, with no
+    /// unknown keys, is still rejected with the **original** "declares neither" reason.
+    #[test]
+    fn declares_neither_keeps_original_reason() {
+        let reason = rejection_reason(json!({
+            "id": "dead-rule",
+            "event_abis": {},
+            "condition": true,
+            "action": "deny"
+        }));
+        assert_eq!(reason, "rule declares neither event_abis nor callstack selectors");
+    }
+
+    /// control: a selector with a correct `implAddress` and `implCodeHash` genuinely
+    /// absent, with no unknown keys, is still rejected with the pairing check's **original**
+    /// reason.
+    #[test]
+    fn impl_pairing_keeps_original_reason() {
+        let reason = rejection_reason(json!({
+            "id": "unpaired-impl",
+            "callstack": { "entry": { "address": PROXY, "implAddress": IMPL } },
+            "condition": { "==": [ { "var": "entry.matched" }, true ] },
+            "action": "deny"
+        }));
+        assert_eq!(
+            reason,
+            "callstack selector 'entry' must supply implAddress and implCodeHash together or not at all"
+        );
+    }
+
+    /// The traversal order is fixed (rule → selectors → events → inputs), so an input carrying
+    /// unknown keys at several levels always reports the outermost one. Without that the reported
+    /// reason would depend on which unrelated check happened to run first.
+    #[test]
+    fn traversal_order_is_fixed_outermost_first() {
+        let mut event = transfer_event();
+        event["Anonymous"] = json!(true);
+        let reason = rejection_reason(json!({
+            "id": "unknown-at-every-level",
+            "event_abis": { "transfer": event },
+            "callstack": { "entry": { "address": PROXY, "codehash": CODE_HASH } },
+            "speculative": 1,
+            "condition": { "==": [ { "var": "entry.matched" }, true ] },
+            "action": "deny"
+        }));
+        assert_eq!(reason, "unknown field(s) in rule: speculative");
+    }
+
+    /// Unknown-field rejection is an ordinary per-rule rejection, so one typo'd rule among
+    /// valid siblings still lands in `rejected` and leaves the batch incomplete — which is what
+    /// `load_and_install` turns into "snapshot refused, last-known-good retained".
+    #[test]
+    fn one_typod_rule_among_valid_siblings_is_rejected_individually() {
+        let valid: RawRule = serde_json::from_str(golden::RULE_SCENARIO_A).unwrap();
+        let typod: RawRule = serde_json::from_value(json!({
+            "id": "typo-sibling",
+            "event_abis": { "transfer": transfer_event() },
+            "callStack": {},
+            "condition": true,
+            "action": "deny"
+        }))
+        .unwrap();
+        let set = load_rules(1, 1, vec![valid, typod]);
+        assert_eq!(set.rules.len(), 1);
+        assert_eq!(set.rejected.len(), 1);
+        assert_eq!(set.rejected[0].id, "typo-sibling");
+        assert_eq!(set.rejected[0].reason, "unknown field(s) in rule: callStack");
+    }
+
+    /// A key echoed at exactly the byte bound is reproduced whole; one byte over is truncated
+    /// and marked. Pins the boundary rather than only the obviously-too-long case.
+    #[test]
+    fn key_echo_boundary_is_exact() {
+        let exact = "e".repeat(MAX_UNKNOWN_KEY_BYTES);
+        assert_eq!(bound_key(&exact), exact);
+        let over = "o".repeat(MAX_UNKNOWN_KEY_BYTES + 1);
+        let bounded = bound_key(&over);
+        assert_eq!(bounded.len(), MAX_UNKNOWN_KEY_BYTES);
+        assert!(bounded.ends_with("..."));
+    }
+
+    /// Truncation never splits a multi-byte character.
+    #[test]
+    fn key_echo_truncation_respects_char_boundaries() {
+        let key = "ä".repeat(100);
+        let bounded = bound_key(&key);
+        assert!(bounded.len() <= MAX_UNKNOWN_KEY_BYTES);
+        assert!(bounded.ends_with("..."));
+        assert!(bounded.trim_end_matches("...").chars().all(|c| c == 'ä'));
     }
 }

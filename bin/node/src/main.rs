@@ -29,7 +29,8 @@ use xlayer_legacy_rpc::{layer::LegacyRpcRouterLayer, LegacyRpcRouterConfig};
 use xlayer_monitor::{start_monitor_handle, start_pool_admission_trace_handle, XLayerMonitor};
 use xlayer_rpc::xlayer_ext::{XlayerRpcExt, XlayerRpcExtApiServer};
 use xlayer_rpc::{
-    FlashblocksEthApiExt, FlashblocksEthApiOverrideServer, XlayerAuditApiServer, XlayerAuditRpc,
+    AuditCaptureConfig, FlashblocksEthApiExt, FlashblocksEthApiOverrideServer,
+    XlayerAuditApiServer, XlayerAuditRpc,
 };
 
 #[global_allocator]
@@ -192,8 +193,21 @@ fn main() {
                     info!(target: "reth::cli", "xlayer rpc extension enabled");
 
                     // Register the side-effect-free L1 deposit audit RPC.
-                    let xlayer_audit_rpc =
-                        XlayerAuditRpc { backend: new_op_eth_api.clone() };
+                    // The capture budget is the SAME per-transaction bound the payload builder's
+                    // candidate loop uses, read from the one args group that owns it rather than
+                    // duplicated, so the two can never drift. Only the budget comes from there:
+                    // the audit RPC adjudicates the rules carried in the request, not the node's
+                    // installed snapshot, so it keeps working with the filter disabled.
+                    let xlayer_audit_rpc = XlayerAuditRpc::new(
+                        new_op_eth_api.clone(),
+                        AuditCaptureConfig {
+                            max_callstack_observations_per_tx: args
+                                .xlayer_args
+                                .builder
+                                .rcs_filter
+                                .max_callstack_observations_per_tx,
+                        },
+                    );
                     ctx.modules.merge_configured(XlayerAuditApiServer::into_rpc(
                         xlayer_audit_rpc,
                     ))?;

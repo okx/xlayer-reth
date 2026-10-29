@@ -1168,6 +1168,146 @@ async fn load_and_install_rejects_unsupported_protocol() {
     assert_eq!(shared.rules.read().unwrap().rules.len(), 0, "rules untouched");
 }
 
+/// the strict wire schema routes a typo into the existing all-or-nothing gate.
+///
+/// One typo'd rule among valid siblings makes `load_and_install` return `Err`, leaves
+/// `install_rules` unreached, and keeps the previously installed set active; the very next poll
+/// with a corrected snapshot installs — there is no sticky "rejected version" marker.
+///
+/// Bound to the real `load_and_install` entry point on purpose; a test-only helper would not
+/// prove that the typo reaches the production gate.
+#[tokio::test]
+async fn it_unknown_field_rejects_snapshot_then_corrected_poll_recovers() {
+    let mock = Arc::new(MockRcsClient::new());
+    mock.set_rules_fixture(&[golden::RULE_SCENARIO_A]);
+    let client: Arc<dyn RcsClient> = mock.clone();
+    let shared = shared_with(Arc::new(TestClock::new(START)), RuleSet::default(), false);
+    assert!(worker::load_and_install(&shared, &client).await.unwrap());
+    let previous = shared.rules.read().unwrap().clone();
+    assert_eq!(previous.rules.len(), 1);
+    assert_eq!(previous.content_version, 1);
+
+    // A `codeHash` typo inside the selector of one rule, alongside a valid sibling.
+    mock.set_rules_response_override(json!({
+        "protocol_version": 2,
+        "content_version": 2,
+        "rules": [
+            serde_json::from_str::<serde_json::Value>(golden::RULE_SCENARIO_B).unwrap(),
+            json!({
+                "id": "proxy-impl-allowlist",
+                "callstack": { "entry": {
+                    "address": "0x00000000000000000000000000000000000000aa",
+                    "codehash": "0x1111111111111111111111111111111111111111111111111111111111111111"
+                } },
+                "condition": { "==": [ { "var": "entry.matched" }, true ] },
+                "action": "deny"
+            })
+        ]
+    }));
+    let err = worker::load_and_install(&shared, &client)
+        .await
+        .expect_err("an unknown field must refuse the entire snapshot");
+    match &err {
+        crate::FilterError::InvalidRules(1, rejected) => {
+            assert_eq!(rejected[0].id, "proxy-impl-allowlist");
+            assert_eq!(
+                rejected[0].reason,
+                "unknown field(s) in callstack selector 'entry': codehash"
+            );
+        }
+        other => panic!("expected one rejected rule, got {other:?}"),
+    }
+    let current = shared.rules.read().unwrap().clone();
+    assert!(
+        Arc::ptr_eq(&previous, &current),
+        "last-known-good must stay installed when the snapshot is refused"
+    );
+    assert_eq!(current.content_version, 1, "content_version must not advance on rejection");
+    drop(current);
+
+    // The same two rules with the typo corrected install on the next poll.
+    mock.set_rules_response_override(json!({
+        "protocol_version": 2,
+        "content_version": 3,
+        "rules": [
+            serde_json::from_str::<serde_json::Value>(golden::RULE_SCENARIO_B).unwrap(),
+            json!({
+                "id": "proxy-impl-allowlist",
+                "callstack": { "entry": {
+                    "address": "0x00000000000000000000000000000000000000aa",
+                    "codeHash": "0x1111111111111111111111111111111111111111111111111111111111111111"
+                } },
+                "condition": { "==": [ { "var": "entry.matched" }, true ] },
+                "action": "deny"
+            })
+        ]
+    }));
+    assert!(
+        worker::load_and_install(&shared, &client).await.unwrap(),
+        "a corrected snapshot must install on the next poll"
+    );
+    let current = shared.rules.read().unwrap();
+    assert_eq!(current.content_version, 3);
+    assert_eq!(current.rules.len(), 2);
+}
+
+/// Root-level variant: an unknown key at the response **root** fails on the decode path
+/// instead of the per-rule gate, and must equally leave the installed set untouched.
+#[tokio::test]
+async fn it_unknown_root_field_keeps_last_known_good() {
+    let mock = Arc::new(MockRcsClient::new());
+    mock.set_rules_fixture(&[golden::RULE_SCENARIO_A]);
+    let client: Arc<dyn RcsClient> = mock.clone();
+    let shared = shared_with(Arc::new(TestClock::new(START)), RuleSet::default(), false);
+    assert!(worker::load_and_install(&shared, &client).await.unwrap());
+    let previous = shared.rules.read().unwrap().clone();
+
+    mock.set_rules_response_override(json!({
+        "protocol_version": 1,
+        "content_version": 2,
+        "rules": [],
+        "ruleset_digest": "0xdeadbeef"
+    }));
+    let err = worker::load_and_install(&shared, &client)
+        .await
+        .expect_err("an unknown root key must refuse the snapshot");
+    match &err {
+        crate::FilterError::Decode(message) => assert!(
+            message.contains("unknown field(s) in rules response: ruleset_digest"),
+            "{message}"
+        ),
+        other => panic!("expected a decode failure, got {other:?}"),
+    }
+    let current = shared.rules.read().unwrap();
+    assert!(Arc::ptr_eq(&previous, &current));
+    assert_eq!(current.content_version, 1);
+}
+
+/// an unsupported `protocol_version` still returns `Ok(false)` with no install, even
+/// when a previously-good set is already in force. Pins that the strict schema did not turn the
+/// version gate into an error or let it install anything.
+#[tokio::test]
+async fn it_unsupported_protocol_still_returns_ok_false_with_no_install() {
+    let mock = Arc::new(MockRcsClient::new());
+    mock.set_rules_fixture(&[golden::RULE_SCENARIO_A]);
+    let client: Arc<dyn RcsClient> = mock.clone();
+    let shared = shared_with(Arc::new(TestClock::new(START)), RuleSet::default(), false);
+    assert!(worker::load_and_install(&shared, &client).await.unwrap());
+    let previous = shared.rules.read().unwrap().clone();
+
+    mock.set_rules_response_override(json!({
+        "protocol_version": UNSUPPORTED_PROTOCOL_VERSION,
+        "content_version": 2,
+        "rules": []
+    }));
+    let installed =
+        worker::load_and_install(&shared, &client).await.expect("not an error, a rejection");
+    assert!(!installed, "an unsupported protocol version installs nothing");
+    let current = shared.rules.read().unwrap();
+    assert!(Arc::ptr_eq(&previous, &current));
+    assert_eq!(current.content_version, 1);
+}
+
 /// An unreachable RCS surfaces as a transport error (the caller retries with backoff).
 #[tokio::test]
 async fn load_and_install_errors_when_unavailable() {

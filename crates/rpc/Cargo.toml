@@ -9,6 +9,11 @@ repository.workspace = true
 
 [features]
 default = []
+# Opens this crate's own capture/observation handling to a test in another crate, so the
+# equal-identification comparison across the three execution paths drives the real code rather
+# than a copy of it. Non-default and never enabled from `[dependencies]`, so it is absent from
+# every production build.
+test-utils = []
 
 [dependencies]
 reth-optimism-rpc.workspace = true
@@ -32,6 +37,7 @@ op-alloy-network.workspace = true
 op-revm.workspace = true
 
 rcs-filter.workspace = true
+xlayer-rcs-capture.workspace = true
 
 jsonrpsee.workspace = true
 serde.workspace = true
@@ -42,6 +48,9 @@ revm.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
+# Enable the shared capture crate's non-default seams for THIS crate's test targets only; the
+# feature is deliberately absent from `[dependencies]`, so a production build compiles none of it.
+xlayer-rcs-capture = { workspace = true, features = ["test-utils"] }
 
 [lints]
 workspace = true

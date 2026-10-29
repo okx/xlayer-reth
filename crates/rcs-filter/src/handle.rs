@@ -287,6 +287,13 @@ impl FilterHandle {
         self.shared.config.max_callstack_observations_per_tx
     }
 
+    /// The configured per-transaction complete-binding budget. Single source of truth for every
+    /// caller that drives the pure classifier itself (the deposit/sequencer identification path)
+    /// rather than going through `screen_tx`, so the two cannot drift.
+    pub fn max_event_bindings_per_tx(&self) -> usize {
+        self.shared.config.max_event_bindings_per_tx
+    }
+
     /// The current rule snapshot.
     ///
     /// A caller that observes call frames must acquire the snapshot **once**, configure capture

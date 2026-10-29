@@ -1,0 +1,6592 @@
+//! Shared RCS capture: the EVM inspector that observes internal native-token (OKB) balance
+//! transfers and rule-configured call frames during simulation, plus the capture-control seam and
+//! the panic-safe RAII guard that drive it.
+//!
+//! This crate exists so every execution path that must identify executed code — the payload
+//! builder's candidate loop, the deposit/sequencer path, and the audit RPC's simulation — runs
+//! the **same** inspector from **one** implementation. Two inspectors that merely behave alike
+//! would drift the moment one of them changes, which would make "equal identification" a
+//! coincidence rather than a property.
+//!
+//! The crate is deliberately EVM-**agnostic**: it owns [`RcsCaptureScope`] and [`CaptureGuard`]
+//! but names no concrete EVM type, so it needs no `alloy-op-evm` dependency. Each consuming
+//! crate supplies a local newtype adapter over its own EVM value, which is what keeps
+//! `impl RcsCaptureScope for <that crate's EVM>` legal under the orphan rule.
+//!
+//! Builder-side capture of internal native-token (OKB) balance transfers during simulation.
+//!
+//! This module adapts EVM execution to the risk-control screening input. During the real-user
+//! candidate simulation the inspector records internal native-value movements — non-zero internal
+//! `CALL` transfers, `CREATE`/`CREATE2` endowments, and `SELFDESTRUCT` beneficiary transfers — as
+//! virtual `Transfer(address,address,uint256)` logs whose address is the native-asset identifier,
+//! interleaved in execution order with the real EVM logs. The flattened stream is handed to
+//! screening only; it never reaches a receipt, RPC log, bloom, the indexer, or consensus state.
+//!
+//! The same inspector also observes **call frames of rule-configured addresses**, exposing the
+//! runtime code hash that actually executed and, for the selected address's own first-level
+//! `DELEGATECALL`, the target address and the code hash that executed there. Only frames touching
+//! the active snapshot's selector set are observed, so observation cost scales with operator
+//! configuration rather than with transaction call depth. An empty selector set makes the whole
+//! path inert.
+//!
+//! The screening crate stays free of any EVM / frame-lifecycle dependency: the inspector, its
+//! capture-control seam, and the capture outcomes are all owned by this crate. The pure
+//! observation value type is owned by the screening crate so both the builder and the RPC layer
+//! can hand screening the same type.
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use alloy_primitives::{address, keccak256, Address, Bytes, Log, LogData, B256, U256};
+use rcs_filter::callstack::{CallObservation, SnapshotStamp};
+use revm::{
+    bytecode::opcode,
+    context_interface::{ContextTr, CreateScheme, JournalTr},
+    inspector::{JournalExt, NoOpInspector},
+    interpreter::{
+        interpreter_types::{Jumps, LegacyBytecode},
+        CallInputs, CallOutcome, CallScheme, CreateInputs, CreateOutcome, Interpreter,
+        InterpreterTypes,
+    },
+    Inspector,
+};
+
+/// Hard ceiling on concurrently open observed frames.
+///
+/// The EVM's own call-depth limit is 1024, so a balanced frame stack can never legitimately grow
+/// past that plus the outermost transaction frame. A stack that does is an invariant failure, not
+/// a deep transaction, and it fails closed rather than silently dropping frames — a dropped frame
+/// would turn an unobserved call into an apparent no-match.
+pub const MAX_OPEN_FRAMES: usize = 1025;
+
+/// The native-asset identifier used as the `log.address` of every virtual native transfer.
+///
+/// This is a native-coin identifier matched by **address value** (not checksum-string case), never
+/// an ERC20 contract: the screening side never calls `decimals`/`balanceOf`/`transfer` on it.
+pub const NATIVE_ASSET_ADDRESS: Address = address!("EeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE");
+
+/// Which observation families one capture window produces.
+///
+/// The call-frame logic is the SAME code in both modes — that is what keeps identification
+/// structurally equal across paths rather than equal by coincidence. Only the native-transfer
+/// side is switched off, and only because paths that do not consume virtual native logs must not
+/// pay a native budget that could fail their capture for a reason unrelated to call frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CaptureMode {
+    /// Virtual native-transfer logs interleaved with real logs, the real-log cross-check, the
+    /// native budget, AND call-frame observations. Exactly the pre-existing behaviour; this is
+    /// what the payload builder's candidate loop uses, bit-for-bit unchanged.
+    #[default]
+    NativeAndCallstack,
+    /// Call-frame observations only. `observe_native_transfer`, `record_real_log` and
+    /// `push_checkpoint` become genuine no-ops, the queue stays empty, `observed_count` and
+    /// `overflowed` are never touched, and `finish_capture` skips both the native-budget check
+    /// and the real-log cross-check. The only live budget is the callstack observation budget.
+    ///
+    /// A consumer in this mode screens against the **raw** EVM logs of its own execution result,
+    /// never against `CaptureOutcome::Complete`'s `logs` (which is empty here by construction).
+    CallstackOnly,
+}
+
+/// Which internal EVM operation produced a native-transfer observation. All three funnel through
+/// the single [`RcsInspector::observe_native_transfer`] so counting/filtering/overflow can never
+/// diverge between them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeTransferKind {
+    /// Non-zero internal `CALL` value transfer.
+    Call,
+    /// `CREATE`/`CREATE2` endowment to the created address.
+    Create,
+    /// `SELFDESTRUCT` beneficiary transfer.
+    SelfDestruct,
+}
+
+/// Builds the virtual `Transfer(address,address,uint256)` log for a native transfer.
+///
+/// Shape: `log.address` = [`NATIVE_ASSET_ADDRESS`]; `topic0` =
+/// `keccak256("Transfer(address,address,uint256)")`; `topic1` = left-padded `from`; `topic2` =
+/// left-padded `to`; `data` = 32-byte big-endian `value` (wei).
+pub fn native_transfer_log(from: Address, to: Address, value: U256) -> Log {
+    let topics = vec![transfer_topic0(), from.into_word(), to.into_word()];
+    let data = Bytes::from(value.to_be_bytes::<32>().to_vec());
+    Log { address: NATIVE_ASSET_ADDRESS, data: LogData::new_unchecked(topics, data) }
+}
+
+/// `keccak256("Transfer(address,address,uint256)")` — the canonical ERC20/ERC1155 `Transfer`
+/// event signature topic.
+fn transfer_topic0() -> B256 {
+    keccak256("Transfer(address,address,uint256)")
+}
+
+/// A specific observation invariant that failed during capture. Carries only indices/counts —
+/// never log or transfer content — so error logging can never leak transaction data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureInvariantError {
+    /// The captured real-log subsequence did not match `result.logs()` for content/count/order.
+    RealLogMismatch { first_bad_index: usize, observed: usize, expected: usize },
+    /// A successful CREATE returned an address that differed from the pre-derived address stored
+    /// in the CREATE frame's `create_recipients` entry. `create_index` is the 0-based depth of
+    /// open CREATE frames at the point the mismatch was detected.
+    CreateAddressMismatch { create_index: usize },
+    /// The observed-frame stack exceeded [`MAX_OPEN_FRAMES`], so frame parentage — and therefore
+    /// direct-delegatecall discrimination — can no longer be established. `depth` is the open
+    /// frame count at detection.
+    FrameStackOverflow { depth: usize },
+    /// The observed-frame stack was unbalanced at the end of the capture window: a frame entry
+    /// was never matched by its exit, so the set may be missing or misattributing observations.
+    FrameStackUnbalanced { remaining: usize },
+}
+
+/// The outcome of finishing a capture window. Never an `Option`: an enabled filter can never
+/// silently fall back to raw `result.logs()`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaptureOutcome {
+    /// Emitted only by the no-op inspector (filter disabled); the caller uses raw `result.logs()`.
+    Passthrough,
+    /// A validated, flattened ordered stream of real + virtual logs plus the ordered call-frame
+    /// observations; the RealLog cross-check passed and both observation sets are complete.
+    ///
+    /// `observations` may legitimately be empty: that means capture ran and genuinely saw no
+    /// frame touching the selector set, which is the ordinary no-match case. It is never used to
+    /// represent "capture did not run".
+    Complete { logs: Vec<Log>, observations: CapturedObservations },
+    /// A per-transaction observation budget was exceeded. Fail closed.
+    LimitExceeded { attempted: usize, limit: usize, budget: ObservationBudget },
+    /// An observation invariant failed. Fail closed.
+    InvariantViolation { reason: CaptureInvariantError },
+}
+
+/// Which per-transaction observation budget overflowed. A fixed, low-cardinality enum used for
+/// bounded diagnostics, so the two capture budgets are never conflated in an operator's view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservationBudget {
+    /// Internal native-token transfer observations.
+    NativeTransfer,
+    /// Call-frame observations.
+    Callstack,
+}
+
+impl ObservationBudget {
+    /// Stable lowercase token for bounded diagnostics.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ObservationBudget::NativeTransfer => "native_transfer",
+            ObservationBudget::Callstack => "callstack",
+        }
+    }
+}
+
+/// A complete call-frame observation set together with the identity of the rule snapshot whose
+/// selector set configured its capture.
+///
+/// Screening compares the stamp against its own snapshot and fails closed on a mismatch: an
+/// observation set captured under a different selector set cannot distinguish "this frame did not
+/// happen" from "this frame was never observed".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedObservations {
+    pub stamp: SnapshotStamp,
+    pub items: Vec<CallObservation>,
+}
+
+impl CapturedObservations {
+    pub fn new(stamp: SnapshotStamp, items: Vec<CallObservation>) -> Self {
+        Self { stamp, items }
+    }
+}
+
+/// The capture selector set plus the identity of the snapshot it came from, built once per rule
+/// snapshot and handed to the inspector.
+///
+/// Carrying both together is what makes the same-snapshot requirement structural: an inspector
+/// cannot be configured with one snapshot's addresses and then stamp its output with another's.
+#[derive(Debug, Clone, Default)]
+pub struct CallstackCaptureConfig {
+    stamp: Option<SnapshotStamp>,
+    addresses: Arc<HashSet<Address>>,
+}
+
+impl CallstackCaptureConfig {
+    /// Builds a configuration from a snapshot's selector addresses and its stamp.
+    pub fn new(stamp: SnapshotStamp, addresses: impl IntoIterator<Item = Address>) -> Self {
+        Self { stamp: Some(stamp), addresses: Arc::new(addresses.into_iter().collect()) }
+    }
+
+    /// Whether any address is observed. `false` short-circuits every observation hook.
+    pub fn is_inert(&self) -> bool {
+        self.addresses.is_empty()
+    }
+
+    fn observes(&self, address: &Address) -> bool {
+        self.addresses.contains(address)
+    }
+
+    /// The stamp this configuration will attach to its observations. Test accessor: production
+    /// code never needs to read it back, because the inspector stamps its own output.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn stamp_for_test(&self) -> Option<SnapshotStamp> {
+        self.stamp
+    }
+}
+
+/// Builder-internal capture-control seam. These methods are **not** part of revm's `Inspector`
+/// trait, so a generic execution loop bounds its inspector on `Inspector + RcsCaptureControl` to
+/// drive capture without a runtime downcast. The `rcs-filter` crate gains no revm dependency.
+pub trait RcsCaptureControl {
+    /// Installs the capture configuration the NEXT capture window will use.
+    ///
+    /// Called once per candidate, before the window opens, because the snapshot a candidate is
+    /// screened against is a property of the candidate and not of the block: a fresh candidate
+    /// uses the snapshot pinned for the block, while a buffered one keeps the snapshot saved on
+    /// its pool entry. Configuring per candidate is what keeps capture and screening on the same
+    /// snapshot without ever relaxing the stamp check.
+    fn configure_callstack_capture(&mut self, config: CallstackCaptureConfig);
+    /// Resets all capture state and arms the inspector for one real-user candidate simulation.
+    fn start_capture(&mut self);
+    /// Ends the capture window, cross-checks the real-log subsequence against `result_logs`
+    /// (the execution result's logs), and returns the outcome. Disarms the inspector.
+    fn finish_capture(&mut self, result_logs: &[Log]) -> CaptureOutcome;
+    /// Aborts capture (e.g. the transaction returned an error), clearing state and disarming.
+    fn abort_capture(&mut self);
+}
+
+/// The filter-disabled inspector performs no capture: `start`/`abort` are no-ops and `finish`
+/// always returns [`CaptureOutcome::Passthrough`], so the loop falls back to raw `result.logs()`.
+impl RcsCaptureControl for NoOpInspector {
+    fn configure_callstack_capture(&mut self, _config: CallstackCaptureConfig) {}
+
+    fn start_capture(&mut self) {}
+
+    fn finish_capture(&mut self, _result_logs: &[Log]) -> CaptureOutcome {
+        CaptureOutcome::Passthrough
+    }
+
+    fn abort_capture(&mut self) {}
+}
+
+/// The capture lifecycle, expressed without naming an EVM.
+///
+/// Moved here from the builder so the audit-RPC path can reuse the **same** guard discipline.
+/// This crate owns the trait but not any EVM type, so it deliberately provides **no**
+/// implementation: `impl RcsCaptureScope for SomeEvm` here would require depending on
+/// `alloy-op-evm` and pinning one concrete EVM type. Each consuming crate instead wraps its own
+/// EVM value in a newtype it owns — `impl ForeignTrait for LocalType` is permitted, so that is
+/// what keeps both call sites legal under the orphan rule.
+pub trait RcsCaptureScope {
+    fn scope_configure_callstack_capture(&mut self, config: CallstackCaptureConfig);
+    fn scope_start_capture(&mut self);
+    fn scope_finish_capture(&mut self, result_logs: &[Log]) -> CaptureOutcome;
+    fn scope_abort_capture(&mut self);
+}
+
+/// Panic-safe RAII capture guard. Constructing it calls `start_capture`; on `Drop` it calls
+/// `abort_capture` UNLESS it was explicitly disarmed by a successful [`CaptureGuard::finish`].
+/// This makes cleanup impossible to forget on any early return or unwind — a panic caught
+/// upstream still aborts exactly once — so correctness does not rest on caller discipline, and
+/// the guard never aborts twice (`finish` disarms before returning; the `Err`/panic path aborts
+/// once via `Drop`).
+#[derive(Debug)]
+pub struct CaptureGuard<'a, S: RcsCaptureScope> {
+    scope: &'a mut S,
+    armed: bool,
+}
+
+impl<'a, S: RcsCaptureScope> CaptureGuard<'a, S> {
+    /// Arms capture: calls `start_capture` on construction.
+    pub fn new(scope: &'a mut S) -> Self {
+        scope.scope_start_capture();
+        Self { scope, armed: true }
+    }
+
+    /// The armed scope, for driving the real `transact` through the adapter.
+    pub fn scope_mut(&mut self) -> &mut S {
+        self.scope
+    }
+
+    /// Closes the capture window normally and disarms the guard so its `Drop` is a no-op —
+    /// exactly one lifecycle-ending call (this `finish`), never a `finish` followed by a `Drop`
+    /// abort.
+    pub fn finish(mut self, result_logs: &[Log]) -> CaptureOutcome {
+        let outcome = self.scope.scope_finish_capture(result_logs);
+        self.armed = false;
+        outcome
+    }
+}
+
+impl<S: RcsCaptureScope> Drop for CaptureGuard<'_, S> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.scope.scope_abort_capture();
+        }
+    }
+}
+
+/// One entry in the unified, ordered observation stream.
+#[derive(Debug, Clone)]
+enum QueuedLog {
+    /// A real EVM log captured via the `log`/`log_full` hook.
+    Real(Log),
+    /// A synthesized virtual native `Transfer` log.
+    Virtual(Log),
+}
+
+impl QueuedLog {
+    fn into_log(self) -> Log {
+        match self {
+            QueuedLog::Real(log) | QueuedLog::Virtual(log) => log,
+        }
+    }
+}
+
+// Test-only "controlled inspector outcome" seam (spec §5.10.2 / §8 test 35). When set, the next
+// `finish_capture` on an active inspector injects one extra real-log entry so the REAL RealLog
+// cross-check diverges from `result.logs()` and returns a genuine
+// `CaptureOutcome::InvariantViolation { RealLogMismatch }`. This lets the loop-level builder-path
+// test drive a real runtime mismatch through the actual `execute_best_transactions` candidate loop
+// (the loop's own inspector honors it) instead of hand-constructing a `CaptureOutcome`. One-shot:
+// the flag is cleared as it is consumed so only the armed candidate is affected. Kept as `//` (not
+// `///`) so the RcsInspector doc comment below is not orphaned onto this macro invocation.
+#[cfg(any(test, feature = "test-utils"))]
+thread_local! {
+    pub static FORCE_REALLOG_MISMATCH: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+// Test-only "forced CREATE address mismatch" seam (D7b). When set, the next `create` hook on an
+// active inspector pushes `Address::repeat_byte(0xFE)` as the expected recipient instead of the
+// real derived address, so `create_end` sees `e != a` on a genuinely successful CREATE. One-shot:
+// the flag is consumed (replaced with `false`) by the `create` hook so only the armed frame is
+// affected. Kept as `//` so the struct doc below is not orphaned onto the macro.
+#[cfg(any(test, feature = "test-utils"))]
+thread_local! {
+    pub static FORCE_CREATE_ADDRESS_MISMATCH: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+// Test-only create-hook gate snapshot. The `create` hook writes here at the exact point where it
+// returns — before `create_end` has a chance to fire — so tests can assert that neither
+// `create_recipients` nor `checkpoints` were mutated while the inspector was unarmed.
+//
+// Tuple layout: `(create_recipients_len, checkpoints_len, capture_body_ran, derivation_ran)`.
+// - `capture_body_ran` — the hook reached the capture-relevant body (i.e. the inspector was armed).
+// - `derivation_ran` — the journal read that the CREATE-scheme created-address derivation needs
+//   actually executed. This is the COMPUTED value written by the hook, not a literal: `false`
+//   alone would be ambiguous between "the hook never ran" and "it ran but no journal read was
+//   needed", so the two are reported separately and a reader can always tell them apart.
+// Never set in production (the whole seam is `#[cfg(any(test, feature = "test-utils"))]`).
+#[cfg(any(test, feature = "test-utils"))]
+thread_local! {
+    pub(crate) static CREATE_GATE_SNAPSHOT: std::cell::Cell<(usize, usize, bool, bool)> =
+        const { std::cell::Cell::new((0, 0, false, false)) };
+}
+
+// Test-only CREATE-completion outcome seam. The `create_end` hook records the REAL `CreateOutcome`
+// it was handed, so tests can assert the actual completion validity instead of inferring it from the
+// flattened capture stream. Tuple layout:
+// `(is_ok, address_is_none, observed_count, address)`. `address` is the exact deployed address the
+// EVM reported, which the CREATE-recipient assertions compare against. Never set in production.
+#[cfg(any(test, feature = "test-utils"))]
+thread_local! {
+    pub(crate) static CREATE_END_OUTCOME: std::cell::Cell<(bool, bool, usize, Option<Address>)> =
+        const { std::cell::Cell::new((false, false, 0, None)) };
+}
+
+// Test-only push/pop balance seam (T1-BALANCE). The `create_end` hook writes here after every
+// `pop` and `pop_checkpoint` call, before `finish_capture` can run. Tuple layout:
+// `(create_recipients_len, checkpoints_len)`. Proves that each `create` push is balanced by
+// a `create_end` pop within the same EVM frame, not deferred to `finish_capture`. Never set
+// in production.
+#[cfg(any(test, feature = "test-utils"))]
+thread_local! {
+    pub(crate) static CREATE_END_BALANCE: std::cell::Cell<(usize, usize)> =
+        const { std::cell::Cell::new((0, 0)) };
+}
+
+// Test-only create-hook invocation counter. Incremented as the FIRST statement
+// of the `create` hook, before the `!self.active` gate, so `0` means the hook was never invoked at
+// all for this transaction — distinguishable from `CREATE_GATE_SNAPSHOT`'s `derivation_ran == false`,
+// which is ambiguous between "never hit" and "hit while inactive" without this counter. Never set
+// in production (the whole seam is `#[cfg(any(test, feature = "test-utils"))]`).
+#[cfg(any(test, feature = "test-utils"))]
+thread_local! {
+    pub(crate) static CREATE_HOOK_HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Test-only reset for the create-hook gate seams. Clears [`CREATE_HOOK_HITS`]
+/// and [`CREATE_GATE_SNAPSHOT`] so a stale tuple left by an earlier test on the same thread (`cargo
+/// test` reuses threads across tests, unlike `nextest`'s process-per-test) cannot make a later
+/// assertion pass for the wrong reason.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn reset_create_gate_seams() {
+    CREATE_HOOK_HITS.with(|c| c.set(0));
+    CREATE_GATE_SNAPSHOT.with(|s| s.set((0, 0, false, false)));
+}
+
+// Test-only counter of call-frame bytecode hash computations. Incremented in `initialize_interp`
+// immediately before the `keccak256` over the frame's bytecode, i.e. only once the gate has decided
+// the hash is actually wanted. `0` therefore means no hashing work was done at all — which is what
+// the "inert selector set / inactive inspector does no callstack work" regressions assert, instead
+// of trying to measure elapsed time. Never set in production (the whole seam is `#[cfg(any(test, feature = "test-utils"))]`).
+#[cfg(any(test, feature = "test-utils"))]
+thread_local! {
+    pub static CALLSTACK_HASH_COMPUTATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Test-only reset for [`CALLSTACK_HASH_COMPUTATIONS`], for the same reason
+/// [`reset_create_gate_seams`] exists: `cargo test` reuses threads across tests, so a stale count
+/// from an earlier test could make a later `== 0` assertion pass for the wrong reason.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn reset_callstack_hash_counter() {
+    CALLSTACK_HASH_COMPUTATIONS.with(|c| c.set(0));
+}
+
+/// Test-only count of call-frame hash computations since the last reset.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn callstack_hash_computations() -> usize {
+    CALLSTACK_HASH_COMPUTATIONS.with(|c| c.get())
+}
+
+// Test-only SELFDESTRUCT-watermark gate snapshot, in the same style as `CREATE_GATE_SNAPSHOT` /
+// `CREATE_HOOK_HITS`. Tuple layout: `(hook_hits, active_branch_ran, journal_read_ran)`.
+// - `hook_hits` — incremented in `step`, as the FIRST thing done once the about-to-execute opcode
+//   is recognized as `SELFDESTRUCT`, before the `!self.active` gate. `0` means "a SELFDESTRUCT
+//   opcode's `step` was never reached"; distinguishable from "reached while inactive".
+// - `active_branch_ran` — set once the `!self.active` gate has been passed for that opcode.
+// - `journal_read_ran` — set immediately before the watermark journal read itself.
+// Never set in production (the whole seam is `#[cfg(any(test, feature = "test-utils"))]`).
+#[cfg(any(test, feature = "test-utils"))]
+thread_local! {
+    pub(crate) static SELFDESTRUCT_GATE_SNAPSHOT: std::cell::Cell<(usize, bool, bool)> =
+        const { std::cell::Cell::new((0, false, false)) };
+}
+
+/// Test-only reset for [`SELFDESTRUCT_GATE_SNAPSHOT`], for the same reason
+/// [`reset_create_gate_seams`] exists: `cargo test` reuses threads across tests.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn reset_selfdestruct_gate_seams() {
+    SELFDESTRUCT_GATE_SNAPSHOT.with(|s| s.set((0, false, false)));
+    SELFDESTRUCT_CALLBACK_HITS.with(|c| c.set(0));
+    SELFDESTRUCT_STEP_OBSERVATIONS.with(|o| o.borrow_mut().clear());
+}
+
+// Test-only direct evidence that the `selfdestruct` hook itself was entered. Needed because the
+// absence of a `SelfDestruct`-kind observation in the final stream is NOT proof the callback never
+// fired: a reverted frame can remove logs on its own. Incremented as the FIRST statement of the
+// hook, before the `active` gate, so `0` means "never entered" -- distinguishable from "entered
+// while inactive". Never set in production (the whole seam is `#[cfg(any(test, feature = "test-utils"))]`).
+#[cfg(any(test, feature = "test-utils"))]
+thread_local! {
+    pub(crate) static SELFDESTRUCT_CALLBACK_HITS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+// Test-only direct observation of the victim SELFDESTRUCT's actual `InstructionResult`, recorded
+// from inside the production `step` / `step_end` hooks rather than inferred from
+// `SELFDESTRUCT_CALLBACK_HITS`: that counter is 0 for every result other than `SelfDestruct`,
+// including the aborted paths this observation exists to distinguish from the measured OutOfGas
+// halt. `RefCell`, not `Cell` like the two seams above, because a `Vec` is not `Copy`.
+#[cfg(any(test, feature = "test-utils"))]
+use revm::interpreter::{interpreter_types::LoopControl, InstructionResult};
+
+/// One `step`-side record, completed by `step_end` once the halting instruction's result is known.
+/// `end: None` until `step_end` completes it; distinguishable from "completed with no result" by
+/// construction, so a loop that breaks before `step_end` runs leaves a record that is detectably
+/// incomplete rather than silently matching a bare length check.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SelfdestructStepObservation {
+    pub(crate) opcode: u8,
+    pub(crate) gas_remaining_before: u64,
+    pub(crate) end: Option<SelfdestructStepEnd>,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SelfdestructStepEnd {
+    pub(crate) depth: usize,
+    pub(crate) instruction_result: Option<InstructionResult>,
+    pub(crate) gas_remaining_after: u64,
+    pub(crate) journal_delta: usize,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+thread_local! {
+    pub(crate) static SELFDESTRUCT_STEP_OBSERVATIONS: std::cell::RefCell<Vec<SelfdestructStepObservation>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Pushes a new partial record from `step`'s existing gated region. Test-only.
+#[cfg(any(test, feature = "test-utils"))]
+fn record_selfdestruct_step(opcode: u8, gas_remaining_before: u64) {
+    SELFDESTRUCT_STEP_OBSERVATIONS.with(|o| {
+        o.borrow_mut().push(SelfdestructStepObservation {
+            opcode,
+            gas_remaining_before,
+            end: None,
+        });
+    });
+}
+
+/// Completes the most recently pushed record from inside `step_end`'s existing
+/// `if let Some(pre) = self.selfdestruct_journal_mark.take()` branch. Test-only.
+#[cfg(any(test, feature = "test-utils"))]
+fn record_selfdestruct_step_end(
+    depth: usize,
+    instruction_result: Option<InstructionResult>,
+    gas_remaining_after: u64,
+    journal_delta: usize,
+) {
+    SELFDESTRUCT_STEP_OBSERVATIONS.with(|o| {
+        if let Some(last) = o.borrow_mut().last_mut() {
+            last.end = Some(SelfdestructStepEnd {
+                depth,
+                instruction_result,
+                gas_remaining_after,
+                journal_delta,
+            });
+        }
+    });
+}
+
+/// The RCS capture inspector: the **inner** inspector of `alloy_op_evm::OpEvm`'s composite
+/// wrapper. It maintains one ordered queue of real + virtual logs with per-frame checkpoints and a
+/// single, non-rolling-back native-transfer counter with a sticky budget overflow.
+///
+/// All hooks are strict no-ops until an explicit [`RcsCaptureControl::start_capture`]; correctness
+/// rests on this gate, not on caller discipline, and every window begins with a full reset so no
+/// state can leak across transactions.
+#[derive(Debug)]
+pub struct RcsInspector {
+    /// Armed only across the real candidate `evm.transact`; false during gasless pre-checks etc.
+    active: bool,
+    /// Ordered real + virtual logs for the current transaction.
+    queue: Vec<QueuedLog>,
+    /// Per-frame checkpoints: queue length at each frame's entry, for revert/halt truncation.
+    checkpoints: Vec<usize>,
+    /// Cumulative count of qualifying native-transfer candidates; never rolls back on revert.
+    observed_count: usize,
+    /// Set once `observed_count` exceeds `limit`; stops appending new virtual events (sticky).
+    overflowed: bool,
+    /// The configured per-transaction native-transfer budget.
+    limit: usize,
+    /// Per-CREATE-frame pre-derived recipient stack. `Some(addr)` when the CREATE carries a
+    /// non-zero endowment; `None` otherwise. Balanced with `checkpoints`: one entry per
+    /// `create` hook, popped on each `create_end`. Used to assert consistency between the
+    /// pre-derived address and the real `CreateOutcome.address` on success.
+    create_recipients: Vec<Option<Address>>,
+    /// Sticky flag set in `create_end` when a successful CREATE returns an address that differs
+    /// from the pre-derived expected address. Surfaced by `finish_capture` as
+    /// `InvariantViolation { CreateAddressMismatch }` — never silently truncated. Cleared on
+    /// every `start_capture`, `abort_capture`, and `finish_capture` exit.
+    address_mismatch_create_index: Option<usize>,
+    /// Journal length captured in `step` when the opcode about to execute is `SELFDESTRUCT`.
+    /// `None` outside that one-opcode window. Only ever written while `active`.
+    selfdestruct_journal_mark: Option<usize>,
+    /// `true` when the last measured `SELFDESTRUCT` actually appended a journal entry, i.e. when
+    /// the `selfdestruct` callback's payload describes THIS opcode rather than a previous entry.
+    /// Consumed with `mem::take` by the callback. Only ever written while `active`.
+    selfdestruct_wrote_journal: bool,
+    /// Selector addresses plus the identity of the snapshot they came from.
+    callstack: CallstackCaptureConfig,
+    /// Open call/create frames, innermost last. Every entered frame is tracked — not just
+    /// observed ones — because direct-delegatecall discrimination needs the *parent* frame's
+    /// execution identity, and a parent is frequently an unobserved address.
+    frames: Vec<FrameRecord>,
+    /// Committed call-frame observations in execution order. Deliberately never truncated on
+    /// revert: code that executed and then reverted still executed, and its execution identity
+    /// is exactly what a risk rule needs to see.
+    observations: Vec<CallObservation>,
+    /// Cumulative count of committed call-frame observations; never rolls back.
+    callstack_observed_count: usize,
+    /// Sticky flag set once `callstack_observed_count` exceeds `callstack_limit`.
+    callstack_overflowed: bool,
+    /// The configured per-transaction call-frame observation budget.
+    callstack_limit: usize,
+    /// Sticky frame-stack invariant failure, surfaced by `finish_capture`.
+    frame_invariant: Option<CaptureInvariantError>,
+    /// Which observation families this inspector produces. Fixed at construction: switching it
+    /// inside a window could leave a half-built queue that the real-log cross-check would then
+    /// reject for the wrong reason.
+    mode: CaptureMode,
+}
+
+/// One open call or create frame.
+///
+/// `target` is the frame's execution identity and `bytecode` is whose code it runs; a
+/// `DELEGATECALL` preserves the delegating context's `target` while changing `bytecode`, which is
+/// precisely what distinguishes a proxy's own direct delegatecall from one made inside the
+/// implementation's business logic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FrameRecord {
+    target: Address,
+    bytecode: Address,
+    /// `true` for a `CREATE`/`CREATE2` frame. A create frame executes init code, not the
+    /// deployed runtime code, so it neither produces an observation nor acts as the parent of a
+    /// direct-delegatecall observation: the only code hash available for it would be creation
+    /// bytecode, which must never be reported as a runtime code hash.
+    is_create: bool,
+    /// Hash of the bytecode this frame actually loaded and ran. `None` until the frame is
+    /// confirmed to execute.
+    code_hash: Option<B256>,
+    /// Observation staged at frame entry, promoted only once the frame really executes.
+    pending: Option<PendingObservation>,
+}
+
+/// An observation staged when a frame is entered but not yet confirmed to execute.
+///
+/// The `call` hook fires *before* the frame is initialized, and the frame can still fail to
+/// execute afterwards — a depth limit, a failed value transfer, a precompile, or empty code all
+/// return without ever creating an interpreter. Emitting at hook arrival would therefore report
+/// calls that never ran. Each variant carries everything known at entry; the code hash that is
+/// only knowable from the executing frame is filled in at commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingObservation {
+    /// The selected address is about to run its own code.
+    Call { address: Address },
+    /// The selected address's own code is about to delegatecall `impl_address`.
+    DirectDelegatecall { address: Address, code_hash: B256, impl_address: Address },
+}
+
+impl RcsInspector {
+    /// Creates an inactive inspector with the given native-transfer budget and no call-frame
+    /// selectors, leaving the callstack path inert.
+    ///
+    /// Test-only: production always builds the inspector from a pinned rule snapshot through
+    /// [`Self::with_callstack`], so that the selector set and the stamp it will be screened
+    /// against can never come from two different snapshots.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn new(max_native_transfers: usize) -> Self {
+        Self::with_callstack(max_native_transfers, usize::MAX, CallstackCaptureConfig::default())
+    }
+
+    /// Creates an inactive inspector with both observation budgets and a capture selector set.
+    ///
+    /// The selector set and the snapshot stamp travel together in `callstack`, so the inspector
+    /// cannot stamp its output with a snapshot other than the one that configured it.
+    pub fn with_callstack(
+        max_native_transfers: usize,
+        max_callstack_observations: usize,
+        callstack: CallstackCaptureConfig,
+    ) -> Self {
+        Self::with_mode(
+            max_native_transfers,
+            max_callstack_observations,
+            callstack,
+            CaptureMode::NativeAndCallstack,
+        )
+    }
+
+    /// Creates an inactive inspector that observes **only** call frames.
+    ///
+    /// The native-transfer budget is deliberately not a parameter: in this mode it is neither
+    /// applicable nor consulted, so accepting one would invite a caller to believe it does
+    /// something. `usize::MAX` is stored purely so the field has a value.
+    pub fn callstack_only(
+        max_callstack_observations: usize,
+        callstack: CallstackCaptureConfig,
+    ) -> Self {
+        Self::with_mode(
+            usize::MAX,
+            max_callstack_observations,
+            callstack,
+            CaptureMode::CallstackOnly,
+        )
+    }
+
+    /// The one real constructor. Both budgets plus the selector set, the snapshot stamp it
+    /// travels with, and the capture mode.
+    pub fn with_mode(
+        max_native_transfers: usize,
+        max_callstack_observations: usize,
+        callstack: CallstackCaptureConfig,
+        mode: CaptureMode,
+    ) -> Self {
+        Self {
+            active: false,
+            queue: Vec::new(),
+            checkpoints: Vec::new(),
+            observed_count: 0,
+            overflowed: false,
+            limit: max_native_transfers,
+            create_recipients: Vec::new(),
+            address_mismatch_create_index: None,
+            selfdestruct_journal_mark: None,
+            selfdestruct_wrote_journal: false,
+            callstack,
+            frames: Vec::new(),
+            observations: Vec::new(),
+            callstack_observed_count: 0,
+            callstack_overflowed: false,
+            callstack_limit: max_callstack_observations,
+            frame_invariant: None,
+            mode,
+        }
+    }
+
+    /// Whether the native-transfer family is captured at all in this window.
+    ///
+    /// Verified against the pre-existing code: `callstack_capture_armed()` gated only the
+    /// callstack work, while `observe_native_transfer`, `record_real_log` and `push_checkpoint`
+    /// gated on `self.active` alone, `start_capture` set `active` unconditionally, and
+    /// `finish_capture` reported a `NativeTransfer` budget overflow. So attaching the inspector
+    /// to a path that does not consume virtual native logs would have built a mixed queue,
+    /// consumed the native budget, and could have failed the capture for a reason unrelated to
+    /// call-frame selectors. This gate is what prevents that.
+    fn native_capture_armed(&self) -> bool {
+        self.active && matches!(self.mode, CaptureMode::NativeAndCallstack)
+    }
+
+    /// The mode this inspector was constructed with.
+    pub fn mode(&self) -> CaptureMode {
+        self.mode
+    }
+
+    /// Mode-only form of [`Self::native_capture_armed`], for `finish_capture`, which must decide
+    /// which checks apply independently of the `active` flag it is about to clear.
+    fn native_capture_armed_at_finish(&self) -> bool {
+        matches!(self.mode, CaptureMode::NativeAndCallstack)
+    }
+
+    /// Whether call-frame observation is doing any work at all for the current window.
+    ///
+    /// `false` for an inactive inspector and for an inert selector set, and it is the single gate
+    /// every frame-state operation checks first, so "no selector" and "not armed" are structurally
+    /// equivalent to the callstack path being absent.
+    fn callstack_capture_armed(&self) -> bool {
+        self.active && !self.callstack.is_inert()
+    }
+
+    /// Whether the innermost open frame's executed bytecode hash is needed at all.
+    ///
+    /// Only a frame carrying a staged candidate needs one. A staged `Call` is the selected address
+    /// running its own code — which is also the only frame that can be the parent of a direct
+    /// delegatecall, so recording its hash is exactly what keeps that attribution available — and a
+    /// staged `DirectDelegatecall` needs the implementation's executed hash. No other frame's hash
+    /// is ever read, so it is never computed: hashing whole bytecode is the one genuinely costly
+    /// step in the hot `initialize_interp` hook.
+    fn needs_executed_code_hash(&self) -> bool {
+        self.callstack_capture_armed()
+            && self.frames.last().is_some_and(|frame| frame.pending.is_some())
+    }
+
+    /// Enters a frame: records its execution identity and stages an observation candidate if the
+    /// selector predicate matches. Staging allocates no observation and consumes no budget.
+    ///
+    /// `scheme` is `None` for a `CREATE`/`CREATE2` frame.
+    ///
+    /// Both gates come BEFORE any frame-state work: while the inspector is inactive (a gasless
+    /// pre-check or any non-candidate simulation) and while the selector set is inert (no active
+    /// rule asks about call frames) not even a [`FrameRecord`] is pushed, so a deployment with no
+    /// callstack rule pays one branch per frame and nothing else. [`Self::exit_frame`] applies the
+    /// same gate, and the configuration cannot change inside a window, so the stack stays balanced.
+    fn enter_frame(&mut self, target: Address, bytecode: Address, scheme: Option<CallScheme>) {
+        if !self.callstack_capture_armed() {
+            return;
+        }
+        let is_create = scheme.is_none();
+        let pending = self.stage(target, bytecode, scheme);
+        if self.frames.len() >= MAX_OPEN_FRAMES {
+            // Parentage can no longer be tracked: fail closed instead of dropping the frame,
+            // which would make an unobserved call indistinguishable from an absent one.
+            self.frame_invariant.get_or_insert(CaptureInvariantError::FrameStackOverflow {
+                depth: self.frames.len(),
+            });
+            return;
+        }
+        self.frames.push(FrameRecord { target, bytecode, is_create, code_hash: None, pending });
+    }
+
+    /// Decides which observation, if any, a frame being entered should stage.
+    fn stage(
+        &self,
+        target: Address,
+        bytecode: Address,
+        scheme: Option<CallScheme>,
+    ) -> Option<PendingObservation> {
+        // A create frame runs init code; see `FrameRecord::is_create`.
+        let scheme = scheme?;
+        // The selected address running its own code.
+        if bytecode == target && self.callstack.observes(&target) {
+            return Some(PendingObservation::Call { address: target });
+        }
+        // The selected address's own code delegatecalling out. `CALLCODE` is excluded: it sets
+        // `target_address == caller`, so it is not a proxy-implementation relationship.
+        if scheme == CallScheme::DelegateCall {
+            let parent = self.frames.last()?;
+            // The parent must be running the selected address's OWN code. When the parent is
+            // running implementation code its `bytecode` differs from its `target`, which is what
+            // excludes implementation-internal business delegatecalls.
+            if !parent.is_create
+                && parent.bytecode == parent.target
+                && self.callstack.observes(&parent.target)
+            {
+                // The parent issued this DELEGATECALL, so it is executing and its executed code
+                // hash is known. Without it there is nothing truthful to report, so nothing is.
+                let code_hash = parent.code_hash?;
+                return Some(PendingObservation::DirectDelegatecall {
+                    address: parent.target,
+                    code_hash,
+                    impl_address: bytecode,
+                });
+            }
+        }
+        None
+    }
+
+    /// Confirms that the innermost frame really executes and commits its staged observation.
+    ///
+    /// Called once an interpreter has been created for the frame, which is the first moment the
+    /// frame is known to execute and the first moment the bytecode it actually loaded is
+    /// available. The hash is taken from that bytecode — not from an account-state lookup, which
+    /// under EIP-7702 names the delegation designator rather than the delegate code that runs.
+    fn confirm_frame_execution(&mut self, executed_code_hash: B256) {
+        if !self.callstack_capture_armed() {
+            return;
+        }
+        let Some(frame) = self.frames.last_mut() else {
+            return;
+        };
+        frame.code_hash = Some(executed_code_hash);
+        let Some(pending) = frame.pending.take() else {
+            return;
+        };
+        let observation = match pending {
+            PendingObservation::Call { address } => {
+                CallObservation::call(address, executed_code_hash)
+            }
+            PendingObservation::DirectDelegatecall { address, code_hash, impl_address } => {
+                CallObservation::direct_delegatecall(
+                    address,
+                    code_hash,
+                    impl_address,
+                    executed_code_hash,
+                )
+            }
+        };
+        self.commit_observation(observation);
+    }
+
+    /// The single funnel where a confirmed call-frame observation is counted and appended, so
+    /// counting and overflow can never drift between the call and create paths.
+    ///
+    /// Mirrors the native-transfer budget: the count never rolls back, the `limit`-th observation
+    /// is accepted, the `(limit + 1)`-th sets a sticky overflow and is not appended, and the EVM
+    /// keeps executing normally — only new appends stop.
+    fn commit_observation(&mut self, observation: CallObservation) {
+        self.callstack_observed_count += 1;
+        if self.callstack_observed_count > self.callstack_limit {
+            self.callstack_overflowed = true;
+            return;
+        }
+        self.observations.push(observation);
+    }
+
+    /// Leaves a frame, discarding any still-staged candidate.
+    ///
+    /// A candidate that is still staged at exit never reached an interpreter, so the call never
+    /// executed and must not appear as an observation. Already-committed observations are
+    /// untouched: this is deliberately NOT the log checkpoint/truncate path, because a log
+    /// describes an effect while an observation describes execution identity.
+    fn exit_frame(&mut self) {
+        if !self.callstack_capture_armed() {
+            return;
+        }
+        if self.frames.pop().is_none() {
+            self.frame_invariant
+                .get_or_insert(CaptureInvariantError::FrameStackUnbalanced { remaining: 0 });
+        }
+    }
+
+    /// The single funnel where a native-transfer candidate is counted and (if within budget and a
+    /// non-self, non-zero transfer) appended. Shared by the CALL, CREATE/CREATE2, and SELFDESTRUCT
+    /// hooks so counting/filtering/overflow can never drift.
+    ///
+    /// Rules (spec §5.6): a qualifying candidate increments `observed_count` the moment it reaches
+    /// its hook; the count never rolls back; the `limit`-th candidate is allowed; the
+    /// `(limit + 1)`-th sets a sticky overflow and is not appended; after overflow the EVM keeps
+    /// executing normally (semantics unaltered), only new virtual appends stop.
+    pub fn observe_native_transfer(
+        &mut self,
+        from: Address,
+        to: Address,
+        value: U256,
+        _kind: NativeTransferKind,
+    ) {
+        if !self.native_capture_armed() {
+            return;
+        }
+        // Zero-amount and self-transfers never qualify (defensive; hooks pre-filter too).
+        if value.is_zero() || from == to {
+            return;
+        }
+        self.observed_count += 1;
+        if self.observed_count > self.limit {
+            self.overflowed = true;
+            return;
+        }
+        self.queue.push(QueuedLog::Virtual(native_transfer_log(from, to, value)));
+    }
+
+    /// CALL-frame native-transfer decision, split out from the `call` hook so it is testable
+    /// without a full EVM context. `transfer_value` is `CallInputs::transfer_value()`
+    /// — `Some` only for a real `CallValue::Transfer` (so DELEGATECALL/STATICCALL, whose value is
+    /// *apparent*, never reach here); zero-value and self-transfers (e.g. CALLCODE, whose caller and
+    /// target are the same) are filtered by [`Self::observe_native_transfer`].
+    fn record_call_observation(
+        &mut self,
+        transfer_value: Option<U256>,
+        from: Address,
+        to: Address,
+    ) {
+        if let Some(value) = transfer_value {
+            self.observe_native_transfer(from, to, value, NativeTransferKind::Call);
+        }
+    }
+
+    /// CREATE/CREATE2-frame native-transfer decision, split out from the `create` hook for
+    /// testability. Zero endowments generate no event; the recipient is the created address.
+    fn record_create_observation(
+        &mut self,
+        value: U256,
+        caller: Address,
+        created_address: Address,
+    ) {
+        self.observe_native_transfer(caller, created_address, value, NativeTransferKind::Create);
+    }
+
+    /// Records a real EVM log into the unified ordered queue. No-op while inactive, and in
+    /// [`CaptureMode::CallstackOnly`], where the consumer screens against the raw execution logs
+    /// and no log channel is synthesized at all.
+    pub fn record_real_log(&mut self, log: Log) {
+        if !self.native_capture_armed() {
+            return;
+        }
+        self.queue.push(QueuedLog::Real(log));
+    }
+
+    /// Pushes a checkpoint at the current queue position on frame entry. No-op while inactive,
+    /// and in [`CaptureMode::CallstackOnly`], where there is no queue to roll back. Observations
+    /// deliberately do not roll back on revert — code that executed and then reverted still
+    /// executed — so a callstack-only window needs no checkpoint at all.
+    pub fn push_checkpoint(&mut self) {
+        if !self.native_capture_armed() {
+            return;
+        }
+        self.checkpoints.push(self.queue.len());
+    }
+
+    /// Frame exit: on success keep the frame's events; on revert/halt/early-failure truncate the
+    /// queue back to that frame's checkpoint. `observed_count` never rolls back. No-op while
+    /// inactive.
+    pub fn pop_checkpoint(&mut self, reverted: bool) {
+        // Gated on the same predicate as `push_checkpoint` so the two stay balanced in every
+        // mode. (`pop` is already a no-op on an empty stack, so this is symmetry, not a fix.)
+        if !self.native_capture_armed() {
+            return;
+        }
+        // `pop()` always runs (balancing every `push_checkpoint`); the queue is only truncated
+        // when the frame reverted/halted.
+        if let Some(checkpoint) = self.checkpoints.pop()
+            && reverted
+        {
+            self.queue.truncate(checkpoint);
+        }
+    }
+
+    /// Extracts the real-log subsequence of the current queue (order preserved).
+    fn real_log_subsequence(&self) -> Vec<&Log> {
+        self.queue
+            .iter()
+            .filter_map(|entry| match entry {
+                QueuedLog::Real(log) => Some(log),
+                QueuedLog::Virtual(_) => None,
+            })
+            .collect()
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl RcsInspector {
+    /// Number of open frames the inspector is currently tracking. Test-only: an inert selector set
+    /// must leave this at `0` for every frame of the transaction, which is direct evidence that no
+    /// frame-state work happened rather than an inference from the observation list being empty.
+    pub fn open_frame_count(&self) -> usize {
+        self.frames.len()
+    }
+}
+
+impl RcsInspector {
+    /// Clears every piece of per-transaction capture state. Used by all three lifecycle
+    /// transitions so no state can leak from one capture window into the next.
+    fn reset_state(&mut self) {
+        self.queue.clear();
+        self.checkpoints.clear();
+        self.create_recipients.clear();
+        self.observed_count = 0;
+        self.overflowed = false;
+        self.address_mismatch_create_index = None;
+        self.selfdestruct_journal_mark = None;
+        self.selfdestruct_wrote_journal = false;
+        self.frames.clear();
+        self.observations.clear();
+        self.callstack_observed_count = 0;
+        self.callstack_overflowed = false;
+        self.frame_invariant = None;
+    }
+}
+
+impl RcsCaptureControl for RcsInspector {
+    fn configure_callstack_capture(&mut self, config: CallstackCaptureConfig) {
+        // Only ever called between windows. Swapping the selector set mid-window would let one
+        // transaction's frames be entered under one configuration and exited under another, which
+        // would unbalance the frame stack; the assertion states that contract where it is relied
+        // on rather than leaving it to the caller.
+        debug_assert!(
+            !self.active,
+            "the capture configuration must be installed while the inspector is inactive"
+        );
+        self.callstack = config;
+    }
+
+    fn start_capture(&mut self) {
+        self.reset_state();
+        self.active = true;
+    }
+
+    fn finish_capture(&mut self, result_logs: &[Log]) -> CaptureOutcome {
+        // Test-only controlled-outcome seam (spec §5.10.2): when armed, inject a real-log divergence
+        // so the REAL cross-check below yields a genuine `RealLogMismatch` on the live candidate-loop
+        // path (used by the loop-level test 35 driving `execute_best_transactions`). No effect in
+        // production builds — the whole block is feature-gated.
+        #[cfg(any(test, feature = "test-utils"))]
+        if self.active && FORCE_REALLOG_MISMATCH.with(|f| f.replace(false)) {
+            self.queue.push(QueuedLog::Real(Log {
+                address: NATIVE_ASSET_ADDRESS,
+                data: LogData::new_unchecked(Vec::new(), Bytes::new()),
+            }));
+        }
+        // Compute the outcome first — copying every count the outcome needs into locals — so the
+        // uniform state clear below can run on EVERY return path (spec §5.2, R9 item 4). The earlier
+        // implementation returned on the `LimitExceeded` / `InvariantViolation` paths *before*
+        // clearing `queue`/`checkpoints`/`observed_count`/`overflowed`, leaking state into the next
+        // capture window; cleanliness is now guaranteed immediately at finish, not only at reset.
+        // Every observed frame must have been exited by the time the window closes. A leftover
+        // entry means a frame entry was not matched by its exit, so parentage — and therefore the
+        // direct-delegatecall discrimination — cannot be trusted for this transaction.
+        if self.frame_invariant.is_none() && !self.frames.is_empty() {
+            self.frame_invariant =
+                Some(CaptureInvariantError::FrameStackUnbalanced { remaining: self.frames.len() });
+        }
+        let outcome = if let Some(create_index) = self.address_mismatch_create_index {
+            // D7b: a successful CREATE returned an address that differed from the pre-derived
+            // expected address. Fail closed — never silently truncate with Complete.
+            CaptureOutcome::InvariantViolation {
+                reason: CaptureInvariantError::CreateAddressMismatch { create_index },
+            }
+        } else if let Some(reason) = self.frame_invariant {
+            CaptureOutcome::InvariantViolation { reason }
+        } else if self.native_capture_armed_at_finish() && self.overflowed {
+            CaptureOutcome::LimitExceeded {
+                attempted: self.observed_count,
+                limit: self.limit,
+                budget: ObservationBudget::NativeTransfer,
+            }
+        } else if self.callstack_overflowed {
+            // A truncated observation set cannot be adjudicated: a frame missing because of the
+            // budget is indistinguishable from a frame that never happened.
+            CaptureOutcome::LimitExceeded {
+                attempted: self.callstack_observed_count,
+                limit: self.callstack_limit,
+                budget: ObservationBudget::Callstack,
+            }
+        } else if !self.native_capture_armed_at_finish() {
+            // `CaptureMode::CallstackOnly`: nothing was queued, so there is no real-log
+            // subsequence to cross-check against `result_logs` and no native budget to report.
+            // Reporting `logs: []` here is NOT "capture saw no logs" — this mode produces no log
+            // channel at all, and its consumer screens against its own raw execution logs.
+            let stamp = self.callstack.stamp.unwrap_or(INERT_SNAPSHOT_STAMP);
+            CaptureOutcome::Complete {
+                logs: Vec::new(),
+                observations: CapturedObservations::new(
+                    stamp,
+                    std::mem::take(&mut self.observations),
+                ),
+            }
+        } else {
+            // Cross-check: the RealLog subsequence must equal `result.logs()` for count, content,
+            // and order. Any mismatch fails closed. Only indices/counts are surfaced, never content.
+            // `real` borrows `self.queue`, so it is scoped to this block and dropped before the
+            // `mem::take` below can move the queue out.
+            let mismatch = {
+                let real = self.real_log_subsequence();
+                let first_divergence = real.iter().zip(result_logs).position(|(a, b)| *a != b);
+                if real.len() != result_logs.len() {
+                    // Count differs: report the first differing index, or the shorter length when
+                    // the shared prefix matches (one is a prefix of the other).
+                    let first_bad_index =
+                        first_divergence.unwrap_or_else(|| real.len().min(result_logs.len()));
+                    Some((first_bad_index, real.len(), result_logs.len()))
+                } else {
+                    // Equal length: a mismatch exists only if some element differs.
+                    first_divergence
+                        .map(|first_bad_index| (first_bad_index, real.len(), result_logs.len()))
+                }
+            };
+            match mismatch {
+                Some((first_bad_index, observed, expected)) => CaptureOutcome::InvariantViolation {
+                    reason: CaptureInvariantError::RealLogMismatch {
+                        first_bad_index,
+                        observed,
+                        expected,
+                    },
+                },
+                None => {
+                    let logs = std::mem::take(&mut self.queue)
+                        .into_iter()
+                        .map(QueuedLog::into_log)
+                        .collect();
+                    // `stamp` is `None` only for an inspector built without a snapshot (the
+                    // native-transfer-only constructor). Such an inspector observes no frames, so
+                    // there is no snapshot identity to assert and an inert stamp is reported.
+                    let stamp = self.callstack.stamp.unwrap_or(INERT_SNAPSHOT_STAMP);
+                    let observations =
+                        CapturedObservations::new(stamp, std::mem::take(&mut self.observations));
+                    CaptureOutcome::Complete { logs, observations }
+                }
+            }
+        };
+        // Uniform every-exit cleanup (R9 item 4): leave the inspector inactive and fully reset so
+        // nothing — queue, checkpoints, either observation counter, a sticky overflow flag, the
+        // sticky address-mismatch flag, the frame stack, or a frame invariant — can leak into the
+        // next `start_capture`.
+        self.reset_state();
+        self.active = false;
+        outcome
+    }
+
+    fn abort_capture(&mut self) {
+        self.reset_state();
+        self.active = false;
+    }
+}
+
+/// The stamp reported by an inspector constructed without a rule snapshot.
+///
+/// Such an inspector observes no call frames, so its observation list is always empty and there is
+/// no snapshot identity to assert. Screening only ever compares stamps for rules that declare
+/// selectors, and no such rule can exist under a snapshot that produced no selector set, so this
+/// value can never be mistaken for a real one.
+const INERT_SNAPSHOT_STAMP: SnapshotStamp =
+    SnapshotStamp { protocol_version: 0, content_version: 0, selector_digest: B256::ZERO };
+
+/// revm `Inspector` hooks (spec §5.3/§5.5). All hooks no-op while inactive via the helper methods,
+/// so the gasless pre-check and any non-real-user simulation never capture. Every CALL/CREATE frame
+/// (of any type) gets a checkpoint so real logs inside a later-reverted frame roll back; only
+/// qualifying native-transfer candidates append a virtual event.
+impl<CTX, INTR> Inspector<CTX, INTR> for RcsInspector
+where
+    CTX: ContextTr<Journal: JournalExt>,
+    INTR: InterpreterTypes,
+{
+    fn log(&mut self, _context: &mut CTX, log: Log) {
+        self.record_real_log(log);
+    }
+
+    fn initialize_interp(&mut self, interp: &mut Interpreter<INTR>, _context: &mut CTX) {
+        // The gate comes first and the hash second. Every frame of every simulation reaches this
+        // hook, so hashing before deciding whether the hash is wanted would charge the whole node
+        // — including deployments with no callstack rule and the inactive gasless pre-check — for
+        // a value nothing reads.
+        if !self.needs_executed_code_hash() {
+            return;
+        }
+        // The first point at which this frame is known to execute: an interpreter exists for it.
+        // The hash is of the bytecode the EVM actually loaded for the frame, so an EIP-7702
+        // delegated call reports the delegate code that really ran rather than the designator
+        // stored on the account.
+        #[cfg(any(test, feature = "test-utils"))]
+        CALLSTACK_HASH_COMPUTATIONS.with(|c| c.set(c.get() + 1));
+        let executed_code_hash = keccak256(interp.bytecode.bytecode_slice());
+        self.confirm_frame_execution(executed_code_hash);
+    }
+
+    fn call(&mut self, _context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
+        // Every CALL-type frame (incl. zero-value / DELEGATECALL / STATICCALL / CALLCODE) gets a
+        // checkpoint so real logs it captured roll back if it reverts.
+        self.push_checkpoint();
+        // Frame entry stages an observation candidate; nothing is emitted until the frame is
+        // confirmed to execute in `initialize_interp`.
+        self.enter_frame(inputs.target_address, inputs.bytecode_address, Some(inputs.scheme));
+        // `transfer_value()` is `Some` only for a real `CallValue::Transfer`; DELEGATECALL and
+        // STATICCALL carry an *apparent* value (`None`) and never generate an event. CALLCODE does
+        // report a transfer value, but its caller and target are the same account, so it is filtered
+        // as a self-transfer inside `observe_native_transfer`.
+        self.record_call_observation(
+            inputs.transfer_value(),
+            inputs.transfer_from(),
+            inputs.transfer_to(),
+        );
+        None
+    }
+
+    fn call_end(&mut self, _context: &mut CTX, _inputs: &CallInputs, outcome: &mut CallOutcome) {
+        self.pop_checkpoint(!outcome.result.is_ok());
+        // Discards a candidate that never reached an interpreter; a frame that executed and then
+        // reverted keeps its already-committed observation.
+        self.exit_frame();
+    }
+
+    fn create(&mut self, context: &mut CTX, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
+        // Record that the hook was invoked at all, before anything else — including
+        // the active gate — so a reader can tell "never hit" (count stays 0) from "hit while
+        // inactive" (count > 0, capture_body_ran == false).
+        #[cfg(any(test, feature = "test-utils"))]
+        CREATE_HOOK_HITS.with(|c| c.set(c.get() + 1));
+        self.push_checkpoint();
+        if !self.active {
+            // Not armed: no capture body ran, and therefore no address derivation ran either.
+            #[cfg(any(test, feature = "test-utils"))]
+            CREATE_GATE_SNAPSHOT.with(|s| {
+                s.set((self.create_recipients.len(), self.checkpoints.len(), false, false))
+            });
+            return None;
+        }
+        // Capture the expected recipient for every CREATE/CREATE2 frame. The created-address
+        // derivation needs the context, so it is computed here and stored for `create_end` to
+        // verify against the actual outcome address (release-safe consistency guard).
+        let value = inputs.value();
+        let caller = inputs.caller();
+        // Whether this frame's created-address derivation read journal state. A `CREATE` derives
+        // its address from the caller's account nonce, which lives in the journal, so this branch
+        // performs a journal read; a `CREATE2` derives its address from the salt and init-code hash
+        // and reads no journal state. The flag is produced by the derivation itself rather than
+        // assumed, so the test-only gate snapshot can report "the derivation ran" distinctly from
+        // "the hook never ran" instead of collapsing both into one uninformative `false`.
+        let (created_address, derivation_ran) = match inputs.scheme() {
+            CreateScheme::Create => {
+                let nonce = context
+                    .journal_ref()
+                    .evm_state()
+                    .get(&caller)
+                    .map(|account| account.info.nonce)
+                    .unwrap_or_default();
+                (inputs.created_address(nonce), true)
+            }
+            _ => (inputs.created_address(0), false),
+        };
+        // A create frame is tracked for frame balance and parentage only: it runs init code, so it
+        // produces no observation and never acts as a direct-delegatecall parent (see
+        // `FrameRecord::is_create`).
+        self.enter_frame(created_address, created_address, None);
+        // Test-only: when armed, push a WRONG expected address so `create_end` detects `e != a`
+        // on a real successful CREATE and exercises the D7b fail-closed branch. One-shot: the flag
+        // is consumed here so only the armed frame is affected. No effect in production builds.
+        #[cfg(any(test, feature = "test-utils"))]
+        if !value.is_zero() && FORCE_CREATE_ADDRESS_MISMATCH.with(|f| f.replace(false)) {
+            self.create_recipients.push(Some(Address::repeat_byte(0xFE)));
+            self.record_create_observation(value, caller, created_address);
+            CREATE_GATE_SNAPSHOT.with(|s| {
+                s.set((self.create_recipients.len(), self.checkpoints.len(), true, derivation_ran))
+            });
+            return None;
+        }
+        self.create_recipients.push(if !value.is_zero() { Some(created_address) } else { None });
+        self.record_create_observation(value, caller, created_address);
+        #[cfg(any(test, feature = "test-utils"))]
+        CREATE_GATE_SNAPSHOT.with(|s| {
+            s.set((self.create_recipients.len(), self.checkpoints.len(), true, derivation_ran))
+        });
+        // A production build has no gate snapshot to consume the flag, and the derivation's
+        // observable effect is the returned address, so the flag is deliberately inert there.
+        #[cfg(not(test))]
+        let _ = derivation_ran;
+        None
+    }
+
+    fn create_end(
+        &mut self,
+        _context: &mut CTX,
+        _inputs: &CreateInputs,
+        outcome: &mut CreateOutcome,
+    ) {
+        if !self.active {
+            return;
+        }
+        // Balances the `create`-hook entry and discards any still-staged candidate.
+        self.exit_frame();
+        let expected = self.create_recipients.pop();
+        if !outcome.result.is_ok() {
+            // (a) CREATE reverted — revoke the checkpoint
+            self.pop_checkpoint(true);
+        } else if outcome.address.is_none() {
+            // (b) nonce overflow: is_ok() but no address — revoke
+            self.pop_checkpoint(true);
+        } else if let (Some(Some(e)), Some(a)) = (expected, outcome.address) {
+            if e != a {
+                // (c) Successful CREATE but pre-derived address differs from actual — fail closed.
+                // Record the depth at which the mismatch was detected so finish_capture can surface
+                // InvariantViolation { CreateAddressMismatch } instead of silently truncating.
+                let create_index = self.create_recipients.len();
+                self.address_mismatch_create_index = Some(create_index);
+                self.pop_checkpoint(true);
+            } else {
+                self.pop_checkpoint(false);
+            }
+        } else {
+            // No endowment was recorded for this frame (expected was None) — commit
+            self.pop_checkpoint(false);
+        }
+        #[cfg(any(test, feature = "test-utils"))]
+        CREATE_END_BALANCE.with(|s| s.set((self.create_recipients.len(), self.checkpoints.len())));
+        // Record the REAL completion the EVM handed us (plus the sticky observation count at this
+        // instant, which must never have been decremented by the revocation above) so tests assert
+        // completion validity directly rather than inferring it from the flattened stream.
+        #[cfg(any(test, feature = "test-utils"))]
+        CREATE_END_OUTCOME.with(|s| {
+            s.set((
+                outcome.result.is_ok(),
+                outcome.address.is_none(),
+                self.observed_count,
+                outcome.address,
+            ))
+        });
+    }
+
+    fn step(&mut self, interp: &mut Interpreter<INTR>, context: &mut CTX) {
+        if interp.bytecode.opcode() != opcode::SELFDESTRUCT {
+            return;
+        }
+        // Record that this opcode's `step` was reached at all, before the active gate, so a
+        // reader can tell "never hit" (count stays 0) from "hit while inactive" (count > 0,
+        // active_branch_ran == false). No effect in production builds (the seam is feature-gated).
+        #[cfg(any(test, feature = "test-utils"))]
+        SELFDESTRUCT_GATE_SNAPSHOT.with(|s| {
+            let (hits, active_ran, journal_ran) = s.get();
+            s.set((hits + 1, active_ran, journal_ran));
+        });
+        // Inactive windows are strict no-ops: no journal read, no field write (gasless pre-checks
+        // and other non-capturing simulations must never pay for or observe this).
+        if !self.active {
+            return;
+        }
+        #[cfg(any(test, feature = "test-utils"))]
+        SELFDESTRUCT_GATE_SNAPSHOT.with(|s| {
+            let (hits, _, journal_ran) = s.get();
+            s.set((hits, true, journal_ran));
+        });
+        #[cfg(any(test, feature = "test-utils"))]
+        SELFDESTRUCT_GATE_SNAPSHOT.with(|s| {
+            let (hits, active_ran, _) = s.get();
+            s.set((hits, active_ran, true));
+        });
+        #[cfg(any(test, feature = "test-utils"))]
+        record_selfdestruct_step(interp.bytecode.opcode(), interp.gas.remaining());
+        self.selfdestruct_journal_mark = Some(context.journal_ref().journal().len());
+    }
+
+    fn step_end(&mut self, _interp: &mut Interpreter<INTR>, context: &mut CTX) {
+        if !self.active {
+            return;
+        }
+        if let Some(pre) = self.selfdestruct_journal_mark.take() {
+            self.selfdestruct_wrote_journal = context.journal_ref().journal().len() > pre;
+            #[cfg(any(test, feature = "test-utils"))]
+            record_selfdestruct_step_end(
+                context.journal_ref().depth(),
+                _interp.bytecode.instruction_result(),
+                _interp.gas.remaining(),
+                context.journal_ref().journal().len().saturating_sub(pre),
+            );
+        }
+    }
+
+    fn selfdestruct(&mut self, contract: Address, target: Address, value: U256) {
+        // Record that the callback was entered at all, before anything else -- including the
+        // active gate -- so direct evidence distinguishes "never entered" from "entered while
+        // inactive". No effect in production builds (the seam is feature-gated).
+        #[cfg(any(test, feature = "test-utils"))]
+        SELFDESTRUCT_CALLBACK_HITS.with(|c| c.set(c.get() + 1));
+        // Inactive windows are strict no-ops: do not even consume the flag, or a stale flag could
+        // be silently absorbed here and lost to the next armed window.
+        if !self.active {
+            return;
+        }
+        // Pinned revm populates this callback from `journal().last()`, keyed only on the
+        // interpreter result. A Cancun existing-contract SELFDESTRUCT-to-self writes NO journal
+        // entry, so `last()` is then a previous, unrelated entry — e.g. the enclosing CALL's own
+        // balance transfer — which this callback would replay as a second native transfer. Accept
+        // the payload only when THIS opcode actually appended an entry. Structural, not
+        // content-based: two legitimate identical transfers each push their own entry and are both
+        // still observed.
+        if !core::mem::take(&mut self.selfdestruct_wrote_journal) {
+            return;
+        }
+        // SELFDESTRUCT is an opcode-level internal transfer, counted even in the root frame (not
+        // journal-depth-excluded). `observe_native_transfer` filters zero-value and self-transfers.
+        self.observe_native_transfer(contract, target, value, NativeTransferKind::SelfDestruct);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn addr(byte: u8) -> Address {
+        Address::repeat_byte(byte)
+    }
+
+    fn real_log(byte: u8) -> Log {
+        Log {
+            address: Address::repeat_byte(byte),
+            data: LogData::new_unchecked(vec![B256::repeat_byte(byte)], Bytes::new()),
+        }
+    }
+
+    // ---- Task 4: native asset address + virtual Transfer encoder --------------------------------
+
+    #[test]
+    fn native_asset_address_matches_identifier() {
+        assert_eq!(
+            NATIVE_ASSET_ADDRESS,
+            "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE".parse::<Address>().unwrap()
+        );
+    }
+
+    #[test]
+    fn native_transfer_log_has_exact_shape() {
+        let log = native_transfer_log(addr(0xAA), addr(0xBB), U256::from(123u64));
+        assert_eq!(log.address, NATIVE_ASSET_ADDRESS);
+        assert_eq!(log.topics()[0], keccak256("Transfer(address,address,uint256)"));
+        assert_eq!(log.topics()[1], addr(0xAA).into_word());
+        assert_eq!(log.topics()[2], addr(0xBB).into_word());
+        assert_eq!(log.data.data.as_ref(), &U256::from(123u64).to_be_bytes::<32>());
+    }
+
+    // ---- Task 5: NoOpInspector capture-control seam ---------------------------------------------
+
+    #[test]
+    fn noop_inspector_finish_is_passthrough() {
+        let mut inspector = NoOpInspector;
+        inspector.start_capture();
+        assert_eq!(inspector.finish_capture(&[]), CaptureOutcome::Passthrough);
+        inspector.abort_capture();
+    }
+
+    // ---- Task 6: lifecycle, unified counter, sticky overflow ------------------------------------
+
+    #[test]
+    fn inactive_inspector_ignores_all_observations() {
+        let mut inspector = RcsInspector::new(10);
+        // Observations before start_capture are dropped by the inactive gate.
+        inspector.observe_native_transfer(
+            addr(1),
+            addr(2),
+            U256::from(1u64),
+            NativeTransferKind::Call,
+        );
+        inspector.record_real_log(real_log(3));
+        inspector.start_capture();
+        assert_eq!(inspector.observed_count, 0);
+        assert!(
+            matches!(inspector.finish_capture(&[]), CaptureOutcome::Complete { logs: v, .. } if v.is_empty())
+        );
+    }
+
+    #[test]
+    fn inactive_inspector_push_pop_checkpoint_and_create_recipients_stay_clean() {
+        // push_checkpoint / pop_checkpoint / create_recipients.push are all gated on self.active.
+        // An inspector that was never started must leave all internal state untouched.
+        let mut inspector = RcsInspector::new(10);
+        inspector.push_checkpoint();
+        inspector.push_checkpoint();
+        inspector.push_checkpoint();
+        assert!(inspector.checkpoints.is_empty(), "inactive push_checkpoint must not add entries");
+        inspector.pop_checkpoint(false);
+        inspector.pop_checkpoint(true);
+        assert!(
+            inspector.checkpoints.is_empty(),
+            "inactive pop_checkpoint must not modify anything"
+        );
+        assert!(
+            inspector.create_recipients.is_empty(),
+            "inactive inspector must leave create_recipients untouched"
+        );
+        assert!(inspector.queue.is_empty(), "inactive inspector must leave queue untouched");
+        assert_eq!(
+            inspector.observed_count, 0,
+            "inactive inspector must leave observed_count at 0"
+        );
+    }
+
+    #[test]
+    fn observed_count_increments_and_does_not_roll_back() {
+        let mut inspector = RcsInspector::new(10);
+        inspector.start_capture();
+        inspector.push_checkpoint(); // root frame checkpoint at 0
+        inspector.observe_native_transfer(
+            addr(1),
+            addr(2),
+            U256::from(1u64),
+            NativeTransferKind::Call,
+        );
+        inspector.observe_native_transfer(
+            addr(1),
+            addr(2),
+            U256::from(1u64),
+            NativeTransferKind::Call,
+        );
+        inspector.observe_native_transfer(
+            addr(1),
+            addr(2),
+            U256::from(1u64),
+            NativeTransferKind::Call,
+        );
+        assert_eq!(inspector.observed_count, 3);
+        // Roll the frame back: virtual events truncated, but the count stays.
+        inspector.pop_checkpoint(true);
+        assert!(inspector.queue.is_empty());
+        assert_eq!(inspector.observed_count, 3);
+    }
+
+    #[test]
+    fn limit_th_allowed_limit_plus_one_overflows_sticky() {
+        let mut inspector = RcsInspector::new(2);
+        inspector.start_capture();
+        inspector.observe_native_transfer(
+            addr(1),
+            addr(2),
+            U256::from(1u64),
+            NativeTransferKind::Call,
+        );
+        inspector.observe_native_transfer(
+            addr(1),
+            addr(2),
+            U256::from(1u64),
+            NativeTransferKind::Call,
+        );
+        inspector.observe_native_transfer(
+            addr(1),
+            addr(2),
+            U256::from(1u64),
+            NativeTransferKind::Call,
+        );
+        assert!(matches!(
+            inspector.finish_capture(&[]),
+            CaptureOutcome::LimitExceeded {
+                attempted: 3,
+                limit: 2,
+                budget: ObservationBudget::NativeTransfer,
+            }
+        ));
+    }
+
+    #[test]
+    fn identical_from_to_value_not_deduplicated() {
+        let mut inspector = RcsInspector::new(10);
+        inspector.start_capture();
+        inspector.observe_native_transfer(
+            addr(1),
+            addr(2),
+            U256::from(5u64),
+            NativeTransferKind::Call,
+        );
+        inspector.observe_native_transfer(
+            addr(1),
+            addr(2),
+            U256::from(5u64),
+            NativeTransferKind::Call,
+        );
+        match inspector.finish_capture(&[]) {
+            CaptureOutcome::Complete { logs, .. } => assert_eq!(logs.len(), 2),
+            other => panic!("expected Complete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zero_and_self_transfers_are_ignored() {
+        let mut inspector = RcsInspector::new(10);
+        inspector.start_capture();
+        inspector.observe_native_transfer(addr(1), addr(2), U256::ZERO, NativeTransferKind::Call);
+        inspector.observe_native_transfer(
+            addr(1),
+            addr(1),
+            U256::from(9u64),
+            NativeTransferKind::Call,
+        );
+        assert_eq!(inspector.observed_count, 0);
+        assert!(
+            matches!(inspector.finish_capture(&[]), CaptureOutcome::Complete { logs: v, .. } if v.is_empty())
+        );
+    }
+
+    #[test]
+    fn start_capture_resets_state_between_txs() {
+        let mut inspector = RcsInspector::new(10);
+        inspector.start_capture();
+        inspector.observe_native_transfer(
+            addr(1),
+            addr(2),
+            U256::from(1u64),
+            NativeTransferKind::Call,
+        );
+        inspector.record_real_log(real_log(3));
+        // A fresh window wipes everything.
+        inspector.start_capture();
+        assert!(inspector.queue.is_empty());
+        assert_eq!(inspector.observed_count, 0);
+        assert!(!inspector.overflowed);
+    }
+
+    // ---- Task 8: finish_capture RealLog cross-check ---------------------------------------------
+
+    #[test]
+    fn matching_real_logs_yield_complete() {
+        let mut inspector = RcsInspector::new(10);
+        inspector.start_capture();
+        inspector.record_real_log(real_log(1));
+        inspector.observe_native_transfer(
+            addr(4),
+            addr(5),
+            U256::from(7u64),
+            NativeTransferKind::Call,
+        );
+        inspector.record_real_log(real_log(2));
+        match inspector.finish_capture(&[real_log(1), real_log(2)]) {
+            // real subsequence [1,2] == result.logs() [1,2]; virtual native log interleaves.
+            CaptureOutcome::Complete { logs: stream, .. } => assert_eq!(stream.len(), 3),
+            other => panic!("expected Complete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn real_log_count_mismatch_fails_closed() {
+        let mut inspector = RcsInspector::new(10);
+        inspector.start_capture();
+        inspector.record_real_log(real_log(1));
+        assert!(matches!(
+            inspector.finish_capture(&[real_log(1), real_log(2)]),
+            CaptureOutcome::InvariantViolation {
+                reason: CaptureInvariantError::RealLogMismatch { observed: 1, expected: 2, .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn real_log_order_mismatch_fails_closed() {
+        let mut inspector = RcsInspector::new(10);
+        inspector.start_capture();
+        inspector.record_real_log(real_log(1));
+        inspector.record_real_log(real_log(2));
+        assert!(matches!(
+            inspector.finish_capture(&[real_log(2), real_log(1)]),
+            CaptureOutcome::InvariantViolation {
+                reason: CaptureInvariantError::RealLogMismatch { first_bad_index: 0, .. }
+            }
+        ));
+    }
+
+    /// Asserts the inspector is fully reset the instant a budget-overflow finish returns — not only
+    /// after the next `start_capture`.
+    fn assert_capture_state_is_clean(inspector: &RcsInspector) {
+        assert!(!inspector.active, "inspector must be inactive after finish");
+        assert!(inspector.queue.is_empty(), "queue must be cleared on the failing exit");
+        assert!(
+            inspector.checkpoints.is_empty(),
+            "checkpoints must be cleared on the failing exit"
+        );
+        assert_eq!(inspector.observed_count, 0, "observed_count must be reset on the failing exit");
+        assert!(!inspector.overflowed, "overflow flag must be reset on the failing exit");
+        assert!(
+            inspector.create_recipients.is_empty(),
+            "create_recipients must be cleared on the failing exit"
+        );
+        assert_eq!(
+            inspector.selfdestruct_journal_mark, None,
+            "selfdestruct_journal_mark must be cleared on the failing exit"
+        );
+        assert!(
+            !inspector.selfdestruct_wrote_journal,
+            "selfdestruct_wrote_journal must be cleared on the failing exit"
+        );
+    }
+
+    // ── T1a: finish_capture resets all state (includes create_recipients) on LimitExceeded ──────────
+    #[test]
+    fn finish_capture_clears_state_on_limit_exceeded_exit() {
+        // A `LimitExceeded` finish must leave the inspector fully reset IMMEDIATELY (spec §5.2, R9
+        // item 4): the earlier implementation returned on this path before draining the queue.
+        let mut inspector = RcsInspector::new(1);
+        inspector.start_capture();
+        inspector.push_checkpoint();
+        observe_n(&mut inspector, NativeTransferKind::Call, 2);
+        // Drive the SELFDESTRUCT-watermark fields to a non-initial state first, so the clearing
+        // assertion below is not vacuous.
+        inspector.selfdestruct_journal_mark = Some(7);
+        inspector.selfdestruct_wrote_journal = true;
+        assert!(matches!(
+            inspector.finish_capture(&[]),
+            CaptureOutcome::LimitExceeded {
+                attempted: 2,
+                limit: 1,
+                budget: ObservationBudget::NativeTransfer,
+            }
+        ));
+        assert_capture_state_is_clean(&inspector);
+    }
+
+    #[test]
+    fn finish_capture_clears_state_on_invariant_exit() {
+        // An `InvariantViolation` (RealLog mismatch) finish must ALSO leave the inspector fully reset
+        // immediately, never leaking the captured queue into the next transaction (R9 item 4).
+        let mut inspector = RcsInspector::new(10);
+        inspector.start_capture();
+        inspector.push_checkpoint();
+        inspector.record_real_log(real_log(1));
+        // Drive the SELFDESTRUCT-watermark fields to a non-initial state first, so the clearing
+        // assertion below is not vacuous.
+        inspector.selfdestruct_journal_mark = Some(7);
+        inspector.selfdestruct_wrote_journal = true;
+        // `result.logs()` is empty while one real log was captured → RealLogMismatch.
+        assert!(matches!(
+            inspector.finish_capture(&[]),
+            CaptureOutcome::InvariantViolation {
+                reason: CaptureInvariantError::RealLogMismatch { observed: 1, expected: 0, .. }
+            }
+        ));
+        assert_capture_state_is_clean(&inspector);
+    }
+
+    #[test]
+    fn new_selfdestruct_state_cleared_on_every_finish_exit_and_abort() {
+        // Both new fields are driven to a NON-initial state first (so the clearing
+        // assertion is not vacuous), then cleared on every exit: Complete, LimitExceeded,
+        // InvariantViolation, and abort_capture.
+
+        // Complete.
+        let mut inspector = RcsInspector::new(10);
+        inspector.start_capture();
+        inspector.selfdestruct_journal_mark = Some(7);
+        inspector.selfdestruct_wrote_journal = true;
+        assert_eq!(inspector.selfdestruct_journal_mark, Some(7));
+        assert!(inspector.selfdestruct_wrote_journal);
+        assert!(matches!(inspector.finish_capture(&[]), CaptureOutcome::Complete { .. }));
+        assert_capture_state_is_clean(&inspector);
+
+        // LimitExceeded.
+        let mut inspector = RcsInspector::new(1);
+        inspector.start_capture();
+        inspector.push_checkpoint();
+        observe_n(&mut inspector, NativeTransferKind::Call, 2);
+        inspector.selfdestruct_journal_mark = Some(7);
+        inspector.selfdestruct_wrote_journal = true;
+        assert_eq!(inspector.selfdestruct_journal_mark, Some(7));
+        assert!(inspector.selfdestruct_wrote_journal);
+        assert!(matches!(
+            inspector.finish_capture(&[]),
+            CaptureOutcome::LimitExceeded {
+                attempted: 2,
+                limit: 1,
+                budget: ObservationBudget::NativeTransfer,
+            }
+        ));
+        assert_capture_state_is_clean(&inspector);
+
+        // InvariantViolation.
+        let mut inspector = RcsInspector::new(10);
+        inspector.start_capture();
+        inspector.push_checkpoint();
+        inspector.record_real_log(real_log(1));
+        inspector.selfdestruct_journal_mark = Some(7);
+        inspector.selfdestruct_wrote_journal = true;
+        assert_eq!(inspector.selfdestruct_journal_mark, Some(7));
+        assert!(inspector.selfdestruct_wrote_journal);
+        assert!(matches!(inspector.finish_capture(&[]), CaptureOutcome::InvariantViolation { .. }));
+        assert_capture_state_is_clean(&inspector);
+
+        // abort_capture.
+        let mut inspector = RcsInspector::new(10);
+        inspector.start_capture();
+        inspector.selfdestruct_journal_mark = Some(7);
+        inspector.selfdestruct_wrote_journal = true;
+        assert_eq!(inspector.selfdestruct_journal_mark, Some(7));
+        assert!(inspector.selfdestruct_wrote_journal);
+        inspector.abort_capture();
+        assert_capture_state_is_clean(&inspector);
+    }
+
+    #[test]
+    fn unconsumed_selfdestruct_flag_does_not_cross_windows() {
+        // A SELFDESTRUCT that exits abnormally so the `selfdestruct` callback never fires
+        // leaves `selfdestruct_wrote_journal` set; the NEXT window must not inherit it, and a
+        // following ordinary (non-SELFDESTRUCT) transfer in that window must not be mis-attributed
+        // or doubled.
+        let mut inspector = RcsInspector::new(10);
+        inspector.start_capture();
+        inspector.selfdestruct_wrote_journal = true; // simulates the abnormal-exit leak
+        let _ = inspector.finish_capture(&[]);
+        assert_capture_state_is_clean(&inspector);
+
+        inspector.start_capture();
+        assert!(!inspector.selfdestruct_wrote_journal, "the next window must start clean");
+        inspector.observe_native_transfer(
+            addr(1),
+            addr(2),
+            U256::from(1u64),
+            NativeTransferKind::Call,
+        );
+        match inspector.finish_capture(&[]) {
+            CaptureOutcome::Complete { logs, .. } => {
+                assert_eq!(
+                    logs.len(),
+                    1,
+                    "the ordinary transfer must not be mis-attributed or doubled"
+                )
+            }
+            other => panic!("expected Complete with one transfer, got {other:?}"),
+        }
+    }
+
+    // ---- Task 11: budget boundaries + unified SELFDESTRUCT budget -------------------------------
+
+    fn observe_n(inspector: &mut RcsInspector, kind: NativeTransferKind, n: usize) {
+        for _ in 0..n {
+            inspector.observe_native_transfer(addr(1), addr(2), U256::from(1u64), kind);
+        }
+    }
+
+    #[test]
+    fn native_budget_boundary_10000_allowed_10001_overflows() {
+        let mut ok = RcsInspector::new(10_000);
+        ok.start_capture();
+        observe_n(&mut ok, NativeTransferKind::Call, 10_000);
+        match ok.finish_capture(&[]) {
+            CaptureOutcome::Complete { logs, .. } => assert_eq!(logs.len(), 10_000),
+            other => panic!("expected Complete at limit, got {other:?}"),
+        }
+
+        let mut over = RcsInspector::new(10_000);
+        over.start_capture();
+        observe_n(&mut over, NativeTransferKind::Call, 10_001);
+        assert!(matches!(
+            over.finish_capture(&[]),
+            CaptureOutcome::LimitExceeded {
+                attempted: 10_001,
+                limit: 10_000,
+                budget: ObservationBudget::NativeTransfer,
+            }
+        ));
+    }
+
+    /// `CallstackOnly` leaves `observed_count` at zero and never reports a
+    /// `NativeTransfer` budget outcome, even when the transaction performs far more native
+    /// transfers than `max_native_transfers`. Without the mode gate, attaching the inspector to
+    /// the deposit or audit-RPC path would consume the native budget and could fail a capture
+    /// for a reason that has nothing to do with call-frame selectors.
+    #[test]
+    fn callstack_only_never_reports_a_native_budget_outcome() {
+        let mut inspector = RcsInspector::callstack_only(usize::MAX, selector_config());
+        assert_eq!(inspector.mode(), CaptureMode::CallstackOnly);
+        inspector.start_capture();
+        // 5 native transfers under a native budget that `NativeAndCallstack` would overflow at 1
+        // (the mode does not even store a meaningful native limit — it is never consulted).
+        observe_n(&mut inspector, NativeTransferKind::Call, 5);
+        inspector.record_real_log(real_log(0x11));
+        inspector.push_checkpoint();
+        inspector.pop_checkpoint(false);
+
+        // The real-log cross-check is skipped too: a NON-empty `result_logs` slice would make the
+        // `NativeAndCallstack` cross-check report a mismatch here.
+        match inspector.finish_capture(&[real_log(0x11), real_log(0x12)]) {
+            CaptureOutcome::Complete { logs, observations } => {
+                assert!(logs.is_empty(), "CallstackOnly produces no log channel at all");
+                assert!(observations.items.is_empty());
+            }
+            other => panic!("expected Complete, got {other:?}"),
+        }
+    }
+
+    /// the SAME sequence under `NativeAndCallstack` does overflow the
+    /// native budget. Without this the previous test could pass for the wrong reason (e.g. the
+    /// transfers never reaching the inspector at all).
+    #[test]
+    fn native_and_callstack_still_overflows_on_the_same_sequence() {
+        let mut inspector = RcsInspector::with_callstack(1, usize::MAX, selector_config());
+        assert_eq!(inspector.mode(), CaptureMode::NativeAndCallstack);
+        inspector.start_capture();
+        observe_n(&mut inspector, NativeTransferKind::Call, 5);
+        assert!(matches!(
+            inspector.finish_capture(&[]),
+            CaptureOutcome::LimitExceeded {
+                attempted: 5,
+                limit: 1,
+                budget: ObservationBudget::NativeTransfer,
+            }
+        ));
+    }
+
+    /// `NativeAndCallstack` is the default, so every pre-existing construction path keeps
+    /// exactly today's behaviour. The native-budget overflow boundary above
+    /// (`native_budget_boundary_10000_allowed_10001_overflows`) is the behavioural assertion;
+    /// this pins the mode itself so a future constructor cannot silently change it.
+    #[test]
+    fn default_mode_is_native_and_callstack() {
+        assert_eq!(CaptureMode::default(), CaptureMode::NativeAndCallstack);
+        assert_eq!(RcsInspector::new(10).mode(), CaptureMode::NativeAndCallstack);
+        assert_eq!(
+            RcsInspector::with_callstack(10, 10, CallstackCaptureConfig::default()).mode(),
+            CaptureMode::NativeAndCallstack
+        );
+    }
+
+    /// The callstack budget is the ONLY live budget in `CallstackOnly`, and it still fails closed:
+    /// a truncated observation set is not adjudicable.
+    #[test]
+    fn callstack_only_still_enforces_the_callstack_budget() {
+        let mut inspector = RcsInspector::callstack_only(0, selector_config());
+        inspector.start_capture();
+        inspector.commit_observation(CallObservation::call(addr(0xAA), B256::repeat_byte(0xCC)));
+        assert!(matches!(
+            inspector.finish_capture(&[]),
+            CaptureOutcome::LimitExceeded { budget: ObservationBudget::Callstack, .. }
+        ));
+    }
+
+    /// A `CallstackOnly` window still produces real call-frame observations, stamped with the
+    /// snapshot that configured it — i.e. the mode switches off the native family only.
+    #[test]
+    fn callstack_only_still_produces_stamped_observations() {
+        let config = selector_config();
+        let stamp = config.stamp_for_test().expect("a configured selector set carries a stamp");
+        let mut inspector = RcsInspector::callstack_only(usize::MAX, config);
+        inspector.start_capture();
+        let observation = CallObservation::call(addr(0xAA), B256::repeat_byte(0xCC));
+        inspector.commit_observation(observation);
+        match inspector.finish_capture(&[]) {
+            CaptureOutcome::Complete { logs, observations } => {
+                assert!(logs.is_empty());
+                assert_eq!(observations.stamp, stamp);
+                assert_eq!(observations.items, vec![observation]);
+            }
+            other => panic!("expected Complete, got {other:?}"),
+        }
+    }
+
+    /// A selector-bearing configuration with a real stamp, for the mode tests above.
+    fn selector_config() -> CallstackCaptureConfig {
+        CallstackCaptureConfig::new(
+            SnapshotStamp {
+                protocol_version: 2,
+                content_version: 7,
+                selector_digest: B256::repeat_byte(0x5A),
+            },
+            [addr(0xAA)],
+        )
+    }
+
+    #[test]
+    fn selfdestruct_shares_unified_budget_with_call() {
+        // limit 1: one qualifying CALL then one qualifying SELFDESTRUCT ⇒ the second overflows.
+        let mut inspector = RcsInspector::new(1);
+        inspector.start_capture();
+        inspector.observe_native_transfer(
+            addr(1),
+            addr(2),
+            U256::from(1u64),
+            NativeTransferKind::Call,
+        );
+        inspector.observe_native_transfer(
+            addr(3),
+            addr(4),
+            U256::from(1u64),
+            NativeTransferKind::SelfDestruct,
+        );
+        assert!(matches!(
+            inspector.finish_capture(&[]),
+            CaptureOutcome::LimitExceeded {
+                attempted: 2,
+                limit: 1,
+                budget: ObservationBudget::NativeTransfer,
+            }
+        ));
+    }
+
+    #[test]
+    fn selfdestruct_then_parent_revert_removes_event_but_count_stays() {
+        let mut inspector = RcsInspector::new(10);
+        inspector.start_capture();
+        inspector.push_checkpoint(); // parent frame
+        inspector.observe_native_transfer(
+            addr(3),
+            addr(4),
+            U256::from(9u64),
+            NativeTransferKind::SelfDestruct,
+        );
+        assert_eq!(inspector.observed_count, 1);
+        inspector.pop_checkpoint(true); // parent reverts
+        assert!(inspector.queue.is_empty());
+        assert_eq!(inspector.observed_count, 1); // count does not roll back
+    }
+
+    #[test]
+    fn selfdestruct_zero_or_self_target_consumes_no_budget() {
+        let mut inspector = RcsInspector::new(10);
+        inspector.start_capture();
+        inspector.observe_native_transfer(
+            addr(3),
+            addr(4),
+            U256::ZERO,
+            NativeTransferKind::SelfDestruct,
+        );
+        inspector.observe_native_transfer(
+            addr(3),
+            addr(3),
+            U256::from(9u64),
+            NativeTransferKind::SelfDestruct,
+        );
+        assert_eq!(inspector.observed_count, 0);
+        assert!(
+            matches!(inspector.finish_capture(&[]), CaptureOutcome::Complete { logs: v, .. } if v.is_empty())
+        );
+    }
+
+    // ---- Task 7: context-free CALL/CREATE hook decision logic ------------------------------------
+    // Exercise the field/depth decisions the revm hooks delegate to (the hooks themselves only
+    // extract depth/inputs from the EVM context). Runtime execution through OpEvm is the follow-up.
+
+    fn armed(limit: usize) -> RcsInspector {
+        let mut inspector = RcsInspector::new(limit);
+        inspector.start_capture();
+        inspector
+    }
+
+    #[test]
+    fn call_top_level_generates_no_event() {
+        // transfer_value=None (DELEGATECALL/STATICCALL apparent value) generates no event.
+        let mut i = armed(10);
+        i.record_call_observation(None, addr(1), addr(2));
+        assert_eq!(i.observed_count, 0);
+    }
+
+    #[test]
+    fn call_internal_nonzero_transfer_is_observed() {
+        let mut i = armed(10);
+        i.record_call_observation(Some(U256::from(5u64)), addr(1), addr(2));
+        assert_eq!(i.observed_count, 1);
+        match i.finish_capture(&[]) {
+            CaptureOutcome::Complete { logs, .. } => {
+                assert_eq!(logs.len(), 1);
+                assert_eq!(logs[0].address, NATIVE_ASSET_ADDRESS);
+                assert_eq!(logs[0].topics()[1], addr(1).into_word());
+                assert_eq!(logs[0].topics()[2], addr(2).into_word());
+            }
+            other => panic!("expected Complete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn call_apparent_value_generates_no_event() {
+        // DELEGATECALL / STATICCALL: transfer_value() is None.
+        let mut i = armed(10);
+        i.record_call_observation(None, addr(1), addr(2));
+        assert_eq!(i.observed_count, 0);
+    }
+
+    #[test]
+    fn call_self_transfer_generates_no_event() {
+        // CALLCODE reports a transfer value but caller == target, so it is a self-transfer.
+        let mut i = armed(10);
+        i.record_call_observation(Some(U256::from(5u64)), addr(1), addr(1));
+        assert_eq!(i.observed_count, 0);
+    }
+
+    #[test]
+    fn create_top_level_generates_no_event() {
+        // Zero endowment generates no event regardless of depth.
+        let mut i = armed(10);
+        i.record_create_observation(U256::ZERO, addr(1), addr(2));
+        assert_eq!(i.observed_count, 0);
+    }
+
+    #[test]
+    fn create_internal_endowment_is_observed_to_created_address() {
+        let mut i = armed(10);
+        let created = addr(9);
+        i.record_create_observation(U256::from(7u64), addr(1), created);
+        match i.finish_capture(&[]) {
+            CaptureOutcome::Complete { logs, .. } => {
+                assert_eq!(logs.len(), 1);
+                assert_eq!(logs[0].topics()[2], created.into_word()); // recipient = created address
+            }
+            other => panic!("expected Complete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_zero_endowment_generates_no_event() {
+        let mut i = armed(10);
+        i.record_create_observation(U256::ZERO, addr(1), addr(2));
+        assert_eq!(i.observed_count, 0);
+    }
+
+    // ---- R8: per-operation, never netted -------------------------------------------------------
+
+    #[test]
+    fn reverse_transfers_are_two_ordered_events_not_netted() {
+        // A→B: v then B→A: v (account net zero) must yield TWO ordered virtual Transfers, in order,
+        // never offset/netted/deduped.
+        let mut i = armed(10);
+        i.observe_native_transfer(addr(0xA), addr(0xB), U256::from(1u64), NativeTransferKind::Call);
+        i.observe_native_transfer(addr(0xB), addr(0xA), U256::from(1u64), NativeTransferKind::Call);
+        match i.finish_capture(&[]) {
+            CaptureOutcome::Complete { logs, .. } => {
+                assert_eq!(logs.len(), 2, "net-zero pair must not be offset/deduped");
+                // Execution order preserved: first A→B, then B→A.
+                assert_eq!(logs[0].topics()[1], addr(0xA).into_word());
+                assert_eq!(logs[0].topics()[2], addr(0xB).into_word());
+                assert_eq!(logs[1].topics()[1], addr(0xB).into_word());
+                assert_eq!(logs[1].topics()[2], addr(0xA).into_word());
+            }
+            other => panic!("expected Complete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reverse_transfers_parent_revert_removes_both_count_stays() {
+        let mut i = armed(10);
+        i.push_checkpoint(); // parent frame
+        i.observe_native_transfer(addr(0xA), addr(0xB), U256::from(1u64), NativeTransferKind::Call);
+        i.observe_native_transfer(addr(0xB), addr(0xA), U256::from(1u64), NativeTransferKind::Call);
+        assert_eq!(i.observed_count, 2);
+        i.pop_checkpoint(true); // parent reverts → both dropped from the stream
+        assert!(i.queue.is_empty());
+        assert_eq!(i.observed_count, 2, "observed_count must not roll back on revert");
+    }
+}
+
+/// Runtime test fixture for the builder capture path. Kept `pub(crate)` so test 33 (spec §8, in this
+/// file) asserts a REAL `evm.transact`-driven `RealLogMismatch` outcome — one runtime source, not a
+/// re-implementation. NOTE: the loop-level fail-closed test 35 in `context.rs` does NOT consume this
+/// fixture; it drives the real candidate loop and forces the mismatch inside the loop's own
+/// `RcsInspector::finish_capture` via the `FORCE_REALLOG_MISMATCH` seam.
+#[cfg(test)]
+pub(crate) mod test_fixtures {
+    use super::*;
+    use alloy_consensus::{SignableTransaction, TxLegacy};
+    use alloy_evm::{Evm, EvmEnv, EvmFactory, FromRecoveredTx};
+    use alloy_op_evm::{OpEvmFactory, OpTx};
+    use alloy_primitives::{Signature, TxKind};
+    use op_revm::OpSpecId;
+    use revm::context::{BlockEnv, CfgEnv};
+    use revm::database::InMemoryDB;
+    use revm::state::{AccountInfo, Bytecode};
+
+    /// Produces a REAL [`CaptureOutcome::InvariantViolation`] carrying a
+    /// [`CaptureInvariantError::RealLogMismatch`] from a production `evm.transact` on an
+    /// `OpEvm<_, RcsInspector, _>` — NOT a hand-constructed outcome. A contract emits one real `LOG0`
+    /// (captured through the composite-forwarded `log` hook), then `finish_capture` runs against a
+    /// deliberately tampered `result.logs()` slice so the RealLog cross-check diverges (observed 1 vs
+    /// expected 2). This is the runtime source asserted by test 33 (the runtime `InvariantViolation`
+    /// outcome). The loop-level test 35 in `context.rs` does NOT consume this fixture — it forces the
+    /// mismatch through the real candidate loop's own inspector via `FORCE_REALLOG_MISMATCH`.
+    pub(crate) fn real_runtime_reallogmismatch_outcome() -> CaptureOutcome {
+        let caller = Address::from([0xAA; 20]);
+        let contract = Address::from([0xC7; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            caller,
+            AccountInfo { balance: U256::from(1_000_000_000u64), ..Default::default() },
+        );
+        // Runtime bytecode: `LOG0(0, 0); STOP` — emits one real (empty) log then returns successfully.
+        db.insert_account_info(
+            contract,
+            AccountInfo {
+                code: Some(Bytecode::new_raw(Bytes::from(vec![
+                    0x60, 0x00, 0x60, 0x00, 0xa0, 0x00,
+                ]))),
+                ..Default::default()
+            },
+        );
+        let tx = TxLegacy {
+            nonce: 0,
+            gas_limit: 2_000_000,
+            to: TxKind::Call(contract),
+            value: U256::ZERO,
+            ..Default::default()
+        }
+        .into_signed(Signature::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
+        let op_tx = OpTx::from_recovered_tx(&tx, caller);
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        evm.components_mut().1.start_capture();
+        let result = evm.transact(op_tx).expect("tx executes");
+        assert!(result.result.is_success(), "the emitting tx itself succeeds");
+        assert_eq!(result.result.logs().len(), 1, "one real log persisted");
+        // Force divergence at runtime: append a fabricated log so the captured RealLog subsequence
+        // (1) no longer matches the claimed `result.logs()` (2).
+        let mut tampered = result.result.logs().to_vec();
+        tampered.push(native_transfer_log(caller, NATIVE_ASSET_ADDRESS, U256::from(1u64)));
+        evm.components_mut().1.finish_capture(&tampered)
+    }
+}
+
+/// Production-shaped GATING runtime integration test (design §8, R9 item 2). Builds a real
+/// `alloy_op_evm::OpEvm<_, RcsInspector, _>` — the `RcsInspector` is the inner inspector of the
+/// baked-in `PostExecCompositeInspector` — via the same factory the flashblocks path uses, and
+/// executes every candidate through the production entry point **`evm.transact`** (matching
+/// `context.rs`'s candidate simulation) — no `transact_raw` is used; the runtime-forced-mismatch case
+/// drives a real `evm.transact` and then compares against a deliberately tampered `result.logs()`
+/// slice. It asserts capture happens THROUGH the composite wrapper at runtime — the "inner implements
+/// the hook, the wrapper must forward it" property (§4/§5.3) that a helper-level unit test cannot
+/// prove — plus CREATE2 endowment, parent-frame revert rollback, a runtime-forced real-log mismatch,
+/// and that the composite's own SDM/post-exec warming is preserved. A green CI pipeline does NOT
+/// replace this gate.
+#[cfg(test)]
+mod gating_integration_tests {
+    use super::ObservationBudget;
+    use rcs_filter::callstack::Observations;
+
+    use super::*;
+    use alloy_consensus::{SignableTransaction, TxEip7702, TxLegacy};
+    use alloy_eips::eip7702::Authorization;
+    use alloy_evm::{Evm, EvmEnv, EvmFactory, FromRecoveredTx};
+    use alloy_op_evm::{post_exec, OpEvmFactory, OpTx};
+    use alloy_primitives::{Signature, TxKind};
+    use op_revm::OpSpecId;
+    use revm::context::{BlockEnv, CfgEnv};
+    use revm::database::InMemoryDB;
+    use revm::state::{AccountInfo, Bytecode};
+
+    fn caller() -> Address {
+        Address::from([0xAA; 20])
+    }
+
+    fn account(balance: u64, code: Option<Vec<u8>>) -> AccountInfo {
+        AccountInfo {
+            balance: U256::from(balance),
+            code: code.map(|c| Bytecode::new_raw(alloy_primitives::Bytes::from(c))),
+            ..Default::default()
+        }
+    }
+
+    /// The shared prologue for a `CALL(gas, dst, value, 0, 0, 0, 0)`: pushes the four zero
+    /// ret/args words, the `value`, and `PUSH20 dst`, leaving the stack ready for `GAS; CALL`.
+    /// Extracted so the hand-written CALL fixtures below don't each repeat the opcode prefix.
+    fn call_prefix(value: u8, dst: Address) -> Vec<u8> {
+        // PUSH1 0 (retSize) PUSH1 0 (retOffset) PUSH1 0 (argsSize) PUSH1 0 (argsOffset)
+        // PUSH1 value       PUSH20 dst
+        let mut code = vec![0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, value, 0x73];
+        code.extend_from_slice(dst.as_slice());
+        code
+    }
+
+    fn call_tx(target: Address) -> OpTx {
+        call_tx_from(caller(), target)
+    }
+
+    /// Same as [`call_tx`] but from an explicit sender. Two candidate txs in one test can then share
+    /// a single EVM/inspector without a nonce-ordering dependency: each distinct sender uses nonce 0.
+    fn call_tx_from(from: Address, target: Address) -> OpTx {
+        let tx = TxLegacy {
+            nonce: 0,
+            gas_limit: 2_000_000,
+            to: TxKind::Call(target),
+            value: U256::ZERO,
+            ..Default::default()
+        }
+        .into_signed(Signature::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
+        OpTx::from_recovered_tx(&tx, from)
+    }
+
+    /// Executes one candidate tx through a real composite-wrapped `OpEvm` and returns the capture
+    /// outcome plus whether the top-level tx succeeded. The capture seam (`start_capture` →
+    /// production `evm.transact` → `finish_capture(result.logs())`) mirrors the builder's real path;
+    /// `transact` is the same entry point `context.rs` uses (R9 decision), so the gate exercises the
+    /// production `PostExecCompositeInspector` forwarding and gasless/base-fee handling.
+    /// `OpSpecId::JOVIAN` maps through op-revm to `SpecId::PRAGUE`, enabling EIP-7702 authority-tuple
+    /// resolution. Tests that exercise DELEGATECALL attribution with delegated code depend on the
+    /// JOVIAN→PRAGUE mapping being in effect for the OpEvm spec selection.
+    fn run_capturing_tx(db: InMemoryDB, target: Address, budget: usize) -> (CaptureOutcome, bool) {
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(budget),
+        );
+        evm.components_mut().1.start_capture();
+        let result = evm.transact(call_tx(target)).expect("tx executes");
+        let success = result.result.is_success();
+        let outcome = evm.components_mut().1.finish_capture(result.result.logs());
+        (outcome, success)
+    }
+
+    /// Runtime bytecode: `CALL(gas, dst, value=1, 0, 0, 0, 0); STOP` — one internal 1-wei transfer.
+    fn call_value_1_to(dst: Address) -> Vec<u8> {
+        let mut code = call_prefix(0x01, dst);
+        code.extend_from_slice(&[0x5a, 0xf1, 0x00]); // GAS CALL STOP
+        code
+    }
+
+    /// Runtime bytecode: `CALL(stipend, dst, value=1, 0, 0, 0, 0); STOP` — a value-bearing
+    /// internal transfer with a FIXED gas immediate (`PUSH2 stipend`) instead of `GAS`, so the
+    /// callee frame's gas can be shaped to run out mid-execution. The idiom mirrors
+    /// `delegatecall_to_then_stop`'s `PUSH3 500000` in place of `GAS`. The callee's actual gas is
+    /// `stipend + 2300`, because a value-bearing `CALL` adds the 2,300-gas call stipend on top of
+    /// whatever is explicitly requested; a small `stipend` keeps the EIP-150 63/64-forwarding cap
+    /// irrelevant.
+    fn call_fixed_gas_value_1_to(stipend: u16, dst: Address) -> Vec<u8> {
+        let mut code = call_prefix(0x01, dst);
+        code.extend_from_slice(&[0x61, (stipend >> 8) as u8, (stipend & 0xff) as u8]); // PUSH2 stipend
+        code.extend_from_slice(&[0xf1, 0x00]); // CALL STOP
+        code
+    }
+
+    /// Runtime bytecode: `DELEGATECALL(gas, dst, 0, 0, 0, 0); POP; STOP`.
+    /// The caller delegates execution to `dst`; any CALL/CREATE inside `dst`'s code
+    /// runs with the delegating address as the execution context.
+    fn delegatecall_to_then_stop(dst: Address) -> Vec<u8> {
+        // Stack order for DELEGATECALL (top first): gas, addr, argsOff, argsSize, retOff, retSize
+        // Push in reverse: retSize, retOff, argsSize, argsOff, addr, gas
+        let mut code = vec![
+            0x60, 0x00, // PUSH1 0  (retSize)
+            0x60, 0x00, // PUSH1 0  (retOffset)
+            0x60, 0x00, // PUSH1 0  (argsSize)
+            0x60, 0x00, // PUSH1 0  (argsOffset)
+            0x73, // PUSH20
+        ];
+        code.extend_from_slice(dst.as_slice());
+        code.extend_from_slice(&[
+            0x62, 0x07, 0xA1, 0x20, // PUSH3 500000 (gas)
+            0xF4, // DELEGATECALL
+            0x50, // POP
+            0x00, // STOP
+        ]);
+        code
+    }
+
+    /// Runtime bytecode intended to run inside a DELEGATECALL context.
+    /// When invoked, this code:
+    ///   1. CALL `call_dst` with 1 wei
+    ///   2. CREATE with 1 wei and empty init code
+    ///   3. STOP
+    ///
+    /// Both operations attribute to the delegating address (execution context).
+    fn delegated_call_and_create(call_dst: Address) -> Vec<u8> {
+        // CALL: retSize=0, retOffset=0, argsSize=0, argsOffset=0, value=1, addr=call_dst, gas
+        let mut code = call_prefix(1, call_dst);
+        // GAS; CALL; POP
+        code.extend_from_slice(&[0x5A, 0xF1, 0x50]);
+        // CREATE(value=1, offset=0, size=0): PUSH1 0 (size) PUSH1 0 (offset) PUSH1 1 (value) CREATE
+        code.extend_from_slice(&[0x60, 0x00, 0x60, 0x00, 0x60, 0x01, 0xF0]);
+        // POP; STOP
+        code.extend_from_slice(&[0x50, 0x00]);
+        code
+    }
+
+    #[test]
+    fn internal_call_transfer_captured_through_composite() {
+        // caller → contract (value 0); contract makes an internal CALL transferring 1 wei to dst.
+        // Proves the composite forwards `call` to the inner RcsInspector at runtime, and that
+        // `transfer_value`/`transfer_from`/`transfer_to` are read correctly. The top-level
+        // caller→contract call carries zero transfer value so it generates no event.
+        let contract = Address::from([0xCC; 20]);
+        let dst = Address::from([0xDD; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(contract, account(1_000, Some(call_value_1_to(dst))));
+
+        let (outcome, success) = run_capturing_tx(db, contract, 16);
+        assert!(success, "top-level tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert_eq!(stream.len(), 1, "exactly one internal native transfer expected");
+                assert_eq!(stream[0].address, NATIVE_ASSET_ADDRESS);
+                assert_eq!(stream[0].topics()[1], contract.into_word());
+                assert_eq!(stream[0].topics()[2], dst.into_word());
+                assert_eq!(stream[0].data.data.as_ref(), &U256::from(1u64).to_be_bytes::<32>());
+            }
+            other => panic!("expected Complete with one native transfer, got {other:?}"),
+        }
+    }
+
+    /// Runtime bytecode: `CREATE(value=7, offset=0, size=0); STOP` — one CREATE with a 7-wei endowment
+    /// and empty init code.
+    fn create_endowment_7() -> Vec<u8> {
+        // PUSH1 0 (size) PUSH1 0 (offset) PUSH1 7 (value) CREATE STOP
+        vec![0x60, 0x00, 0x60, 0x00, 0x60, 0x07, 0xf0, 0x00]
+    }
+
+    #[test]
+    fn internal_create_endowment_captured_through_composite() {
+        // A CREATE with a non-zero endowment yields one native Transfer from the creator to
+        // the created address (recipient derivation runs through the composite-forwarded `create`).
+        // The factory is pre-inserted with nonce=0; CREATE at nonce=0 produces a deterministic addr.
+        let factory = Address::from([0xF1; 20]);
+        let expected_created = factory.create(0);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(factory, account(1_000, Some(create_endowment_7())));
+
+        let (outcome, success) = run_capturing_tx(db, factory, 16);
+        assert!(success, "top-level tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert_eq!(stream.len(), 1, "one CREATE endowment transfer expected");
+                assert_eq!(stream[0].address, NATIVE_ASSET_ADDRESS);
+                assert_eq!(stream[0].topics()[1], factory.into_word());
+                assert_eq!(stream[0].data.data.as_ref(), &U256::from(7u64).to_be_bytes::<32>());
+                // Recipient (topic2) must be the exact CREATE-derived address.
+                assert_eq!(
+                    stream[0].topics()[2],
+                    expected_created.into_word(),
+                    "recipient must be the exact nonce-derived CREATE address"
+                );
+            }
+            other => panic!("expected Complete with one CREATE transfer, got {other:?}"),
+        }
+    }
+
+    /// Runtime bytecode: `PUSH20 beneficiary; SELFDESTRUCT`.
+    fn selfdestruct_to(beneficiary: Address) -> Vec<u8> {
+        let mut code = vec![0x73];
+        code.extend_from_slice(beneficiary.as_slice());
+        code.push(0xff);
+        code
+    }
+
+    #[test]
+    fn selfdestruct_transfer_captured_through_composite() {
+        // SELFDESTRUCT (value != 0, contract != beneficiary) is a qualifying native transfer even in
+        // the root frame — proves the composite forwards `selfdestruct` to the inner inspector.
+        let victim = Address::from([0xE1; 20]);
+        let beneficiary = Address::from([0xB1; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(victim, account(500, Some(selfdestruct_to(beneficiary))));
+
+        let (outcome, success) = run_capturing_tx(db, victim, 16);
+        assert!(success, "top-level tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert_eq!(stream.len(), 1, "one SELFDESTRUCT transfer expected");
+                assert_eq!(stream[0].address, NATIVE_ASSET_ADDRESS);
+                assert_eq!(stream[0].topics()[1], victim.into_word());
+                assert_eq!(stream[0].topics()[2], beneficiary.into_word());
+                assert_eq!(stream[0].data.data.as_ref(), &U256::from(500u64).to_be_bytes::<32>());
+            }
+            other => panic!("expected Complete with one SELFDESTRUCT transfer, got {other:?}"),
+        }
+    }
+
+    /// Runtime bytecode: `ADDRESS; SELFDESTRUCT` — a Cancun existing-contract SELFDESTRUCT whose
+    /// beneficiary is itself. On the pinned Cancun-or-later branch this writes NO journal entry.
+    fn address_then_selfdestruct() -> Vec<u8> {
+        vec![0x30, 0xff] // ADDRESS SELFDESTRUCT
+    }
+
+    /// Runtime bytecode: `STOP` — the control body for the SELFDESTRUCT-to-self fixtures.
+    fn stop_only() -> Vec<u8> {
+        vec![0x00] // STOP
+    }
+
+    /// Runtime bytecode: two sequential `CALL(gas, dst, value=1, 0,0,0,0)` to the same `dst`,
+    /// each with its own `GAS; CALL; POP` so the second call's args sit above the first's leftover
+    /// return value. Used to prove the fix is not content-based: two legitimate identical transfers.
+    fn call_value_1_twice_to(dst: Address) -> Vec<u8> {
+        let mut code = call_prefix(0x01, dst);
+        code.extend_from_slice(&[0x5a, 0xf1, 0x50]); // GAS CALL POP
+        code.extend_from_slice(&call_prefix(0x01, dst));
+        code.extend_from_slice(&[0x5a, 0xf1, 0x00]); // GAS CALL STOP
+        code
+    }
+
+    /// Runtime bytecode: `PUSH1 1; PUSH1 0; SSTORE` prologue, then `CALL(gas, dst, value=1, …); STOP`
+    /// — an unrelated journal-writing opcode immediately before a value-bearing internal CALL.
+    fn sstore_then_call_value_1_to(dst: Address) -> Vec<u8> {
+        let mut code = vec![0x60, 0x01, 0x60, 0x00, 0x55]; // PUSH1 1; PUSH1 0; SSTORE
+        code.extend_from_slice(&call_value_1_to(dst));
+        code
+    }
+
+    /// Runtime bytecode: `CALL(value=1, victim)`, then `SSTORE`, then `CALL(value=0, victim2); STOP`.
+    /// Used to prove a journal-writing opcode earlier in the SAME window does not arm a later,
+    /// unrelated, no-write `SELFDESTRUCT`.
+    fn call_1_then_sstore_then_call_0_to(victim: Address, victim2: Address) -> Vec<u8> {
+        let mut code = call_prefix(0x01, victim);
+        code.extend_from_slice(&[0x5a, 0xf1, 0x50]); // GAS CALL POP
+        code.extend_from_slice(&[0x60, 0x01, 0x60, 0x00, 0x55]); // PUSH1 1; PUSH1 0; SSTORE
+        code.extend_from_slice(&call_prefix(0x00, victim2));
+        code.extend_from_slice(&[0x5a, 0xf1, 0x00]); // GAS CALL STOP
+        code
+    }
+
+    #[test]
+    fn existing_contract_selfdestruct_to_self_is_not_captured() {
+        // Cancun existing-contract SELFDESTRUCT-to-self writes NO journal entry. A stale-callback
+        // replay bug would double-count the enclosing CALL's own transfer here.
+        let entry = Address::from([0x51; 20]);
+        let victim = Address::from([0x52; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(entry, account(10, Some(call_value_1_to(victim))));
+        db.insert_account_info(victim, account(0, Some(address_then_selfdestruct())));
+
+        let (outcome, success) = run_capturing_tx(db, entry, 16);
+        assert!(success, "top-level tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert_eq!(
+                    stream.len(),
+                    1,
+                    "expected exactly the enclosing CALL's transfer, no replay from SELFDESTRUCT"
+                );
+                assert_eq!(stream[0].topics()[1], entry.into_word());
+                assert_eq!(stream[0].topics()[2], victim.into_word());
+                assert_eq!(stream[0].data.data.as_ref(), &U256::from(1u64).to_be_bytes::<32>());
+            }
+            other => panic!("expected Complete with exactly one transfer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stop_control_matches_selfdestruct_to_self_capture_count() {
+        // Control for the test above: the victim just STOPs instead of self-destructing. The
+        // identical single-transfer count isolates SELFDESTRUCT-to-self as the only variable.
+        let entry = Address::from([0x51; 20]);
+        let victim = Address::from([0x52; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(entry, account(10, Some(call_value_1_to(victim))));
+        db.insert_account_info(victim, account(0, Some(stop_only())));
+
+        let (outcome, success) = run_capturing_tx(db, entry, 16);
+        assert!(success, "top-level tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert_eq!(stream.len(), 1);
+                assert_eq!(stream[0].topics()[1], entry.into_word());
+                assert_eq!(stream[0].topics()[2], victim.into_word());
+                assert_eq!(stream[0].data.data.as_ref(), &U256::from(1u64).to_be_bytes::<32>());
+            }
+            other => panic!("expected Complete with exactly one transfer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn selfdestruct_to_self_consumes_no_native_budget() {
+        // Sharpest discriminator: at budget 1, a stale replay would double-count and overflow to
+        // LimitExceeded instead of completing.
+        let entry = Address::from([0x51; 20]);
+        let victim = Address::from([0x52; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(entry, account(10, Some(call_value_1_to(victim))));
+        db.insert_account_info(victim, account(0, Some(address_then_selfdestruct())));
+
+        let (outcome, success) = run_capturing_tx(db, entry, 1);
+        assert!(success, "top-level tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => assert_eq!(stream.len(), 1),
+            other => panic!("expected Complete (budget 1 is not exceeded), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stop_control_at_budget_1_completes() {
+        // Control for the test above: proves budget 1 is genuinely at the limit, so the previous
+        // test's pass is not slack from an oversized budget.
+        let entry = Address::from([0x51; 20]);
+        let victim = Address::from([0x52; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(entry, account(10, Some(call_value_1_to(victim))));
+        db.insert_account_info(victim, account(0, Some(stop_only())));
+
+        let (outcome, success) = run_capturing_tx(db, entry, 1);
+        assert!(success, "top-level tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => assert_eq!(stream.len(), 1),
+            other => panic!("expected Complete at budget 1, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn existing_contract_selfdestruct_to_beneficiary_still_captured() {
+        // Regression guard: an existing contract that SELFDESTRUCTs to a DIFFERENT, non-zero-balance
+        // beneficiary must still be observed exactly once — guards against over-suppression.
+        let victim = Address::from([0x55; 20]);
+        let beneficiary = Address::from([0x56; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(victim, account(500, Some(selfdestruct_to(beneficiary))));
+
+        let (outcome, success) = run_capturing_tx(db, victim, 16);
+        assert!(success, "top-level tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert_eq!(stream.len(), 1, "genuine SELFDESTRUCT transfer must still be captured");
+                assert_eq!(stream[0].topics()[1], victim.into_word());
+                assert_eq!(stream[0].topics()[2], beneficiary.into_word());
+                assert_eq!(stream[0].data.data.as_ref(), &U256::from(500u64).to_be_bytes::<32>());
+            }
+            other => panic!("expected Complete with one SELFDESTRUCT transfer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn two_identical_native_transfers_are_both_observed() {
+        // The fix must be structural, not content-based. Two legitimate identical transfers in
+        // one transaction must both still be observed.
+        let entry = Address::from([0x57; 20]);
+        let dst = Address::from([0x58; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(entry, account(10, Some(call_value_1_twice_to(dst))));
+
+        let (outcome, success) = run_capturing_tx(db, entry, 16);
+        assert!(success, "top-level tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert_eq!(stream.len(), 2, "two identical transfers must both be observed");
+                assert_eq!(stream[0].topics(), stream[1].topics());
+                assert_eq!(stream[0].data.data, stream[1].data.data);
+            }
+            other => panic!("expected Complete with two transfers, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_selfdestruct_to_self_after_unrelated_journal_entry_is_not_captured() {
+        // The stale entry can come from anywhere earlier in the (flat, transaction-wide) journal,
+        // not just the immediately enclosing frame. A shape two frames deep with an intervening
+        // SSTORE between the value-bearing CALL and the SELFDESTRUCT.
+        let entry = Address::from([0x61; 20]);
+        let mid = Address::from([0x62; 20]);
+        let victim = Address::from([0x63; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(entry, account(10, Some(call_value_1_to(mid))));
+        db.insert_account_info(mid, account(10, Some(sstore_then_call_value_1_to(victim))));
+        db.insert_account_info(victim, account(0, Some(address_then_selfdestruct())));
+
+        let (outcome, success) = run_capturing_tx(db, entry, 16);
+        assert!(success, "top-level tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert_eq!(
+                    stream.len(),
+                    2,
+                    "expected only the two real value-bearing CALLs, no SELFDESTRUCT replay"
+                );
+            }
+            other => panic!("expected Complete with exactly two transfers, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn journal_writing_opcode_does_not_arm_a_later_selfdestruct() {
+        // An earlier journal-writing opcode (SSTORE) in the SAME window must not leak into a
+        // later, unrelated, no-write SELFDESTRUCT. The watermark is taken per-opcode, not merely
+        // "did the journal grow at some point in this window".
+        let entry = Address::from([0x64; 20]);
+        let victim = Address::from([0x65; 20]);
+        let victim2 = Address::from([0x66; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(
+            entry,
+            account(10, Some(call_1_then_sstore_then_call_0_to(victim, victim2))),
+        );
+        db.insert_account_info(victim2, account(0, Some(address_then_selfdestruct())));
+
+        let (outcome, success) = run_capturing_tx(db, entry, 16);
+        assert!(success, "top-level tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert_eq!(
+                    stream.len(),
+                    1,
+                    "only the real value-bearing CALL should be observed; the SSTORE must not \
+                     arm the later no-write SELFDESTRUCT"
+                );
+            }
+            other => panic!("expected Complete with exactly one transfer, got {other:?}"),
+        }
+    }
+
+    /// Runtime bytecode: two sequential `CALL(gas, dst, value=1, 0,0,0,0)` to two DIFFERENT
+    /// destinations, each with its own `GAS; CALL; POP`.
+    fn call_value_1_to_two(a: Address, b: Address) -> Vec<u8> {
+        let mut code = call_prefix(0x01, a);
+        code.extend_from_slice(&[0x5a, 0xf1, 0x50]); // GAS CALL POP
+        code.extend_from_slice(&call_prefix(0x01, b));
+        code.extend_from_slice(&[0x5a, 0xf1, 0x00]); // GAS CALL STOP
+        code
+    }
+
+    /// A `quota` audit rule matching `Transfer(address,address,uint256)` on
+    /// [`NATIVE_ASSET_ADDRESS`], for driving a real capture stream through `rcs-filter` screening.
+    fn quota_native_transfer_rule() -> rcs_filter::rules::RuleSet {
+        let json = format!(
+            r#"{{
+              "id": "quota-native-transfer",
+              "event_abis": {{
+                "transfer": {{
+                  "type": "event", "name": "Transfer",
+                  "inputs": [
+                    {{ "name": "from", "type": "address", "indexed": true }},
+                    {{ "name": "to", "type": "address", "indexed": true }},
+                    {{ "name": "value", "type": "uint256", "indexed": false }}
+                  ],
+                  "anonymous": false
+                }}
+              }},
+              "audit_types": ["quota"],
+              "condition": {{ "==": [{{ "var": "transfer.address" }}, "{native:#x}"] }},
+              "action": "audit",
+              "audit_timeout_action": "allow"
+            }}"#,
+            native = NATIVE_ASSET_ADDRESS
+        );
+        let raw: rcs_filter::rules::RawRule = serde_json::from_str(&json).expect("valid rule json");
+        rcs_filter::rules::load_rules(1, 0, vec![raw])
+    }
+
+    #[test]
+    fn selfdestruct_to_self_quota_actions_report_one_transfer() {
+        // Third control dimension: drive the real capture stream through rcs-filter screening and
+        // assert exactly one quota ActionItem, not two.
+        let entry = Address::from([0x51; 20]);
+        let victim = Address::from([0x52; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(entry, account(10, Some(call_value_1_to(victim))));
+        db.insert_account_info(victim, account(0, Some(address_then_selfdestruct())));
+
+        let (outcome, success) = run_capturing_tx(db, entry, 16);
+        assert!(success, "top-level tx should succeed");
+        let stream = match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => stream,
+            other => panic!("expected Complete, got {other:?}"),
+        };
+
+        let rules = quota_native_transfer_rule();
+        let input = rcs_filter::handle::ScreenInput {
+            tx_hash: B256::ZERO,
+            origin: entry,
+            tx_to: Some(victim),
+            nonce: 0,
+            value: U256::ZERO,
+            block_height: 0,
+            logs: &stream,
+            observations: Observations::NOT_CAPTURED,
+        };
+        match rcs_filter::matching::evaluate(&rules, &input) {
+            rcs_filter::matching::MatchOutcome::Audit { actions, .. } => {
+                let quota = actions.get("quota").expect("quota audit_type key present");
+                assert_eq!(quota.len(), 1, "expected exactly one quota action, not a replay");
+                assert_eq!(quota[0].params.get("value").and_then(|v| v.as_str()), Some("1"));
+            }
+            other => panic!("expected Audit with quota actions, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stop_control_quota_actions_report_one_transfer() {
+        // Control for the test above: identical single ActionItem.
+        let entry = Address::from([0x51; 20]);
+        let victim = Address::from([0x52; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(entry, account(10, Some(call_value_1_to(victim))));
+        db.insert_account_info(victim, account(0, Some(stop_only())));
+
+        let (outcome, success) = run_capturing_tx(db, entry, 16);
+        assert!(success, "top-level tx should succeed");
+        let stream = match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => stream,
+            other => panic!("expected Complete, got {other:?}"),
+        };
+
+        let rules = quota_native_transfer_rule();
+        let input = rcs_filter::handle::ScreenInput {
+            tx_hash: B256::ZERO,
+            origin: entry,
+            tx_to: Some(victim),
+            nonce: 0,
+            value: U256::ZERO,
+            block_height: 0,
+            logs: &stream,
+            observations: Observations::NOT_CAPTURED,
+        };
+        match rcs_filter::matching::evaluate(&rules, &input) {
+            rcs_filter::matching::MatchOutcome::Audit { actions, .. } => {
+                let quota = actions.get("quota").expect("quota audit_type key present");
+                assert_eq!(quota.len(), 1);
+                assert_eq!(quota[0].params.get("value").and_then(|v| v.as_str()), Some("1"));
+            }
+            other => panic!("expected Audit with quota actions, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn genuine_and_self_targeted_selfdestructs_in_one_tx_report_only_the_genuine() {
+        // A genuine SELFDESTRUCT and a to-self SELFDESTRUCT in the same transaction, in both call
+        // orders. An over-broad guard that suppressed the genuine one, or a flag that carried from
+        // the first SELFDESTRUCT to the second, would under- or over-report here.
+        let entry = Address::from([0x71; 20]);
+        let victim_a = Address::from([0x72; 20]); // genuine: selfdestructs to `beneficiary`
+        let victim_b = Address::from([0x73; 20]); // to-self: contributes nothing
+        let beneficiary = Address::from([0x74; 20]);
+
+        let run = |first: Address, second: Address| -> Vec<Log> {
+            let mut db = InMemoryDB::default();
+            db.insert_account_info(caller(), account(1_000_000_000, None));
+            db.insert_account_info(entry, account(10, Some(call_value_1_to_two(first, second))));
+            db.insert_account_info(victim_a, account(0, Some(selfdestruct_to(beneficiary))));
+            db.insert_account_info(victim_b, account(0, Some(address_then_selfdestruct())));
+
+            let (outcome, success) = run_capturing_tx(db, entry, 16);
+            assert!(success, "top-level tx should succeed");
+            match outcome {
+                CaptureOutcome::Complete { logs: stream, .. } => stream,
+                other => panic!("expected Complete, got {other:?}"),
+            }
+        };
+
+        for (first, second, label) in
+            [(victim_a, victim_b, "genuine-then-self"), (victim_b, victim_a, "self-then-genuine")]
+        {
+            let stream = run(first, second);
+            assert_eq!(
+                stream.len(),
+                3,
+                "{label}: expected the two CALL transfers plus the one genuine SELFDESTRUCT transfer"
+            );
+            let genuine =
+                stream.iter().filter(|log| log.topics()[2] == beneficiary.into_word()).count();
+            assert_eq!(genuine, 1, "{label}: exactly one transfer must reach the beneficiary");
+        }
+    }
+
+    #[test]
+    fn inactive_inspector_selfdestruct_leaves_new_state_untouched() {
+        // A real, NON-capturing OpEvm run (never armed) executing a SELFDESTRUCT-to-self
+        // must leave the new watermark fields at their initial values and must never read the
+        // journal for the watermark — the seam proves the hook was reached but the active branch
+        // never ran, distinguishing "never hit" from "hit while inactive".
+        reset_selfdestruct_gate_seams();
+        let entry = Address::from([0x51; 20]);
+        let victim = Address::from([0x52; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(entry, account(10, Some(call_value_1_to(victim))));
+        db.insert_account_info(victim, account(0, Some(address_then_selfdestruct())));
+
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        // Deliberately never call start_capture.
+        let result = evm.transact(call_tx(entry)).expect("tx executes");
+        assert!(result.result.is_success());
+
+        let inspector = evm.components_mut().1;
+        assert_eq!(inspector.selfdestruct_journal_mark, None);
+        assert!(!inspector.selfdestruct_wrote_journal);
+
+        let (hits, active_ran, journal_ran) = SELFDESTRUCT_GATE_SNAPSHOT.with(|s| s.get());
+        assert!(hits > 0, "the step hook must still be reached for the SELFDESTRUCT opcode");
+        assert!(!active_ran, "the active branch must not run while inactive");
+        assert!(!journal_ran, "the watermark journal read must never execute while inactive");
+    }
+
+    #[test]
+    fn inactive_inspector_selfdestruct_normal_transfer_leaves_new_state_untouched() {
+        // The to-self shape above writes NO journal entry, so on field values alone it would
+        // pass equally against an implementation whose step/step_end gates were removed (an
+        // ungated step/step_end would measure a zero delta either way). This is the
+        // discriminating shape: a normal transfer (existing contract, beneficiary != victim,
+        // balance > 0) DOES write a journal entry, so an ungated step/step_end would leave
+        // `selfdestruct_wrote_journal == true` here -- which is exactly what this test rules
+        // out. This pins the specific regression where step/step_end lose their inactive gate
+        // while the selfdestruct hook's own gate is retained; it is not a claim that any gate
+        // failure in general leaves the flag true.
+        reset_selfdestruct_gate_seams();
+        let victim = Address::from([0x81; 20]);
+        let beneficiary = Address::from([0x82; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(victim, account(500, Some(selfdestruct_to(beneficiary))));
+
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        // Deliberately never call start_capture.
+        let result = evm.transact(call_tx(victim)).expect("tx executes");
+        assert!(result.result.is_success());
+
+        let inspector = evm.components_mut().1;
+        // Read BEFORE any start_capture/finish_capture, so a reset cannot stand in for the gate.
+        assert_eq!(inspector.selfdestruct_journal_mark, None);
+        assert!(!inspector.selfdestruct_wrote_journal);
+
+        let (hits, active_ran, journal_ran) = SELFDESTRUCT_GATE_SNAPSHOT.with(|s| s.get());
+        assert!(hits > 0, "the step hook must still be reached for the SELFDESTRUCT opcode");
+        assert!(!active_ran, "the active branch must not run while inactive");
+        assert!(!journal_ran, "the watermark journal read must never execute while inactive");
+    }
+
+    #[test]
+    fn inactive_then_armed_inspector_still_captures() {
+        // The SAME inspector instance that just ran inactive must still capture correctly
+        // once armed — proves the inactive gate does not poison a later window.
+        let entry = Address::from([0x51; 20]);
+        let victim = Address::from([0x52; 20]);
+        let second_caller = Address::from([0xBB; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(second_caller, account(1_000_000_000, None));
+        db.insert_account_info(entry, account(10, Some(call_value_1_to(victim))));
+        db.insert_account_info(victim, account(0, Some(address_then_selfdestruct())));
+
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        // First: run inactive (never start_capture).
+        let result = evm.transact(call_tx_from(caller(), entry)).expect("tx executes");
+        assert!(result.result.is_success());
+
+        // Now arm the SAME inspector instance and run a second, independent tx from a different
+        // sender (so nonce 0 is valid for both, per `call_tx_from`'s doc comment).
+        evm.components_mut().1.start_capture();
+        let result2 = evm.transact(call_tx_from(second_caller, entry)).expect("tx executes");
+        assert!(result2.result.is_success());
+        let outcome = evm.components_mut().1.finish_capture(result2.result.logs());
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert_eq!(stream.len(), 1, "exactly one virtual log for the value-bearing CALL");
+                assert_eq!(stream[0].topics()[1], entry.into_word());
+                assert_eq!(stream[0].topics()[2], victim.into_word());
+            }
+            other => panic!("expected Complete with one transfer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn selfdestruct_oog_after_journal_write_leaks_flag_but_not_across_windows() {
+        // The real abnormal path, not a hand-set simulation: a value-bearing SELFDESTRUCT writes
+        // its journal entry (JournalInner::selfdestruct's BalanceTransfer/AccountTouched branch)
+        // BEFORE the dynamic gas charge for a new-account + cold-access beneficiary runs. If that
+        // charge fails, the opcode halts with OutOfGas; step_end still measures the (already
+        // grown) journal and sets the flag, but the selfdestruct callback is dispatched only for
+        // InstructionResult::SelfDestruct, so it never fires to consume it.
+        //
+        // Measured (not computed from the gas table): the victim's beneficiary is NOT
+        // pre-inserted (cold, non-existent, so the dynamic charge includes the new-account cost)
+        // and the victim is called with a fixed 10_000-gas stipend. The victim frame's actual gas
+        // at CALL entry is 10_000 + 2_300 (the value-bearing CALL's own stipend) = 12_300, which
+        // sits inside the measured window where the opcode's static dispatch succeeds (so the
+        // journal write runs) but the dynamic charge does not (so it halts after writing).
+        const STIPEND: u16 = 10_000;
+
+        let third = Address::from([0x95; 20]);
+        let victim = Address::from([0x96; 20]);
+        let beneficiary = Address::from([0x97; 20]);
+        let entry = Address::from([0x98; 20]);
+        let entry2 = Address::from([0x99; 20]);
+        let dst2 = Address::from([0x9A; 20]);
+        let second_caller = Address::from([0xBC; 20]);
+
+        // The GREEN control's fixture (same shape as `entry`/`victim`, differing only in the
+        // stipend) is pre-inserted here, alongside the RED fixture, because `db` is moved into
+        // `evm` below and the GREEN half runs on the same inspector after the next-window check.
+        const STIPEND_OK: u16 = 40_000;
+        let third_green = Address::from([0x9B; 20]);
+        let victim_green = Address::from([0x9C; 20]);
+        let beneficiary_green = Address::from([0x9D; 20]);
+        let entry_green = Address::from([0x9E; 20]);
+        let third_caller = Address::from([0xBD; 20]);
+
+        reset_selfdestruct_gate_seams();
+        assert!(
+            SELFDESTRUCT_STEP_OBSERVATIONS.with(|o| o.borrow().is_empty()),
+            "the observation seam must start empty; cargo test reuses threads across tests"
+        );
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(second_caller, account(1_000_000_000, None));
+        db.insert_account_info(third_caller, account(1_000_000_000, None));
+        db.insert_account_info(victim, account(500, Some(selfdestruct_to(beneficiary))));
+        // entry: a separate, successful ordinary transfer to `third` first (full gas), THEN the
+        // fixed-gas call into `victim` whose frame will run out of gas on the dynamic charge. The
+        // out-of-gas victim frame reverts its OWN incoming value transfer along with everything
+        // else in that frame, so the surviving stream is the `third` transfer, not an empty one.
+        let mut entry_code = call_prefix(0x01, third);
+        entry_code.extend_from_slice(&[0x5a, 0xf1, 0x50]); // GAS CALL POP
+        entry_code.extend_from_slice(&call_fixed_gas_value_1_to(STIPEND, victim));
+        db.insert_account_info(entry, account(10, Some(entry_code)));
+        db.insert_account_info(entry2, account(10, Some(call_value_1_to(dst2))));
+        db.insert_account_info(
+            victim_green,
+            account(500, Some(selfdestruct_to(beneficiary_green))),
+        );
+        let mut entry_green_code = call_prefix(0x01, third_green);
+        entry_green_code.extend_from_slice(&[0x5a, 0xf1, 0x50]); // GAS CALL POP
+        entry_green_code.extend_from_slice(&call_fixed_gas_value_1_to(STIPEND_OK, victim_green));
+        db.insert_account_info(entry_green, account(10, Some(entry_green_code)));
+
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        evm.components_mut().1.start_capture();
+        let result = evm.transact(call_tx_from(caller(), entry)).expect("tx executes");
+        assert!(result.result.is_success(), "the top-level tx succeeds; only the inner CALL fails");
+
+        // 1. the opcode was reached and measured in an ARMED window.
+        let (hits, active_ran, journal_ran) = SELFDESTRUCT_GATE_SNAPSHOT.with(|s| s.get());
+        assert!(hits > 0, "the step hook must be reached for the SELFDESTRUCT opcode");
+        assert!(active_ran, "the window must be armed");
+        assert!(journal_ran, "the watermark must have read the journal for THIS opcode");
+
+        // 2. the callback never fired -- proven DIRECTLY via a dedicated entry counter, not via
+        // the absence of a SelfDestruct-kind log (a revert can remove logs on its own). The
+        // callback fires if and only if the opcode's result is InstructionResult::SelfDestruct,
+        // so hits == 0 here, together with journal_ran/flag below, is direct evidence the result
+        // was something else (the measured OutOfGas halt).
+        assert_eq!(
+            SELFDESTRUCT_CALLBACK_HITS.with(|c| c.get()),
+            0,
+            "the selfdestruct callback must never have been entered"
+        );
+
+        // 2a. THE ITEM: the victim SELFDESTRUCT's ACTUAL result, observed at that opcode's own
+        // step_end and bound to that opcode and frame -- not inferred from callback_hits.
+        let red = SELFDESTRUCT_STEP_OBSERVATIONS.with(|o| o.borrow().clone());
+        assert_eq!(red.len(), 1, "exactly one observation in this measured run");
+        let red = red[0];
+        assert_eq!(
+            red.opcode,
+            opcode::SELFDESTRUCT,
+            "the record is bound to the SELFDESTRUCT opcode"
+        );
+        let red_end = red.end.expect("step_end completed the record for this opcode");
+        assert_eq!(
+            red_end.instruction_result,
+            Some(InstructionResult::OutOfGas),
+            "THE OBSERVATION: the victim SELFDESTRUCT halted with OutOfGas"
+        );
+        assert!(red_end.journal_delta >= 1, "the journal write preceded the failed charge");
+
+        // 3. the measured leak, read LIVE before the window ends. A read taken after
+        // finish_capture would always see `false` (every window boundary resets it) and would
+        // silently hide the leak -- which is exactly why this must be read here, not later.
+        let inspector = evm.components_mut().1;
+        assert_eq!(inspector.selfdestruct_journal_mark, None, "step_end took the mark");
+        assert!(inspector.selfdestruct_wrote_journal, "THE LEAK: the flag is set with no consumer");
+
+        let outcome = inspector.finish_capture(result.result.logs());
+        match &outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert_eq!(stream.len(), 1, "only the separate successful transfer survives");
+                assert_eq!(stream[0].topics()[1], entry.into_word());
+                assert_eq!(stream[0].topics()[2], third.into_word());
+            }
+            other => panic!("expected Complete with the one surviving transfer, got {other:?}"),
+        }
+        // Immediately after finish: the flag is cleared. This documents WHY assertion 3 above had
+        // to be read live.
+        assert!(!evm.components_mut().1.selfdestruct_wrote_journal);
+
+        // 4. the next window on the SAME inspector is clean and correct.
+        evm.components_mut().1.start_capture();
+        assert!(
+            !evm.components_mut().1.selfdestruct_wrote_journal,
+            "the next window must not inherit the leaked flag"
+        );
+        let result2 = evm.transact(call_tx_from(second_caller, entry2)).expect("tx executes");
+        assert!(result2.result.is_success());
+        match evm.components_mut().1.finish_capture(result2.result.logs()) {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert_eq!(stream.len(), 1, "the next window's ordinary transfer is observed once");
+                assert_eq!(stream[0].topics()[1], entry2.into_word());
+                assert_eq!(stream[0].topics()[2], dst2.into_word());
+            }
+            other => {
+                panic!("expected Complete with one transfer in the next window, got {other:?}")
+            }
+        }
+
+        // The GREEN control: same fixture, same initial state and coldness, differing ONLY in the
+        // stipend. It brackets the charge that failed in the RED half and proves RED is not vacuous.
+        // A full reset between halves keeps each half independently falsifiable: a regression in
+        // one half can't be masked by state left over from the other. The fixture's accounts were
+        // pre-inserted into `db` above, alongside the RED fixture, because `db` was moved into
+        // `evm` before this half runs.
+        reset_selfdestruct_gate_seams();
+        evm.components_mut().1.start_capture();
+        let result3 = evm.transact(call_tx_from(third_caller, entry_green)).expect("tx executes");
+        assert!(result3.result.is_success());
+
+        let green = SELFDESTRUCT_STEP_OBSERVATIONS.with(|o| o.borrow().clone());
+        assert_eq!(green.len(), 1, "exactly one observation in this measured run");
+        let green = green[0];
+        assert_eq!(green.opcode, opcode::SELFDESTRUCT);
+        let green_end = green.end.expect("step_end completed the record for this opcode");
+        assert_eq!(
+            green_end.instruction_result,
+            Some(InstructionResult::SelfDestruct),
+            "the GREEN control reaches the only path that returns SelfDestruct"
+        );
+        assert_eq!(
+            SELFDESTRUCT_CALLBACK_HITS.with(|c| c.get()),
+            1,
+            "the callback fires exactly once when the result IS SelfDestruct"
+        );
+        assert!(
+            !evm.components_mut().1.selfdestruct_wrote_journal,
+            "the callback consumed the flag via mem::take"
+        );
+
+        // The record belongs to the victim frame: identical call shape => identical victim depth.
+        // Asserted against the measured control, never against a hard-coded literal that was
+        // never actually measured on this stack.
+        assert_eq!(red_end.depth, green_end.depth, "both records are at the victim frame's depth");
+
+        // A passing assertion prints nothing, so the records are printed explicitly here to make
+        // them visible when the suite is run with --nocapture / --show-output.
+        println!("T14b RED  observation: {red:?}");
+        println!("T14b GREEN observation: {green:?}");
+
+        match evm.components_mut().1.finish_capture(result3.result.logs()) {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                // Unlike RED (where the victim frame's OutOfGas reverts its own incoming
+                // transfer), GREEN's victim CALL now succeeds, so its value-1 transfer survives
+                // alongside the entry's separate transfer to `third_green` and the SELFDESTRUCT
+                // transfer itself -- three distinct native transfers, measured, not assumed.
+                assert_eq!(stream.len(), 3, "all three native transfers in the GREEN run survive");
+                assert_eq!(stream[0].topics()[1], entry_green.into_word());
+                assert_eq!(stream[0].topics()[2], third_green.into_word());
+                assert_eq!(stream[1].topics()[1], entry_green.into_word());
+                assert_eq!(stream[1].topics()[2], victim_green.into_word());
+                assert_eq!(stream[2].topics()[1], victim_green.into_word());
+                assert_eq!(stream[2].topics()[2], beneficiary_green.into_word());
+            }
+            other => panic!("expected Complete with the three surviving transfers, got {other:?}"),
+        }
+    }
+
+    /// Runtime bytecode: `CREATE(value, 0, len)` where the appended init code (copied into memory
+    /// via `CODECOPY`) deploys a contract whose runtime body is [`address_then_selfdestruct`]
+    /// (`PUSH2 0x30FF; PUSH1 0; MSTORE; PUSH1 2; PUSH1 30; RETURN`), then `CALL`s the precomputed
+    /// deployment address with zero value to run that child's SELFDESTRUCT within the SAME
+    /// transaction that created it.
+    fn create_endowment_then_call_child(value: u8, child_addr: Address) -> Vec<u8> {
+        let init_code: Vec<u8> =
+            vec![0x61, 0x30, 0xff, 0x60, 0x00, 0x52, 0x60, 0x02, 0x60, 0x1e, 0xf3];
+        let init_len = init_code.len() as u8;
+        let mut head = vec![
+            0x60, init_len, // PUSH1 init_len   (CODECOPY size)
+            0x60, 0x00, // PUSH1 <codeoffset> -- patched below (CODECOPY offset)
+            0x60, 0x00, // PUSH1 0          (CODECOPY destOffset)
+            0x39, // CODECOPY
+            0x60, init_len, // PUSH1 init_len   (CREATE size)
+            0x60, 0x00, // PUSH1 0          (CREATE offset)
+            0x60, value, // PUSH1 value      (CREATE value)
+            0xf0,  // CREATE
+            0x50,  // POP (discard the dynamic created address; we call a precomputed one)
+        ];
+        head.extend_from_slice(&call_prefix(0x00, child_addr)); // CALL(gas, child_addr, 0, 0,0,0,0)
+        head.extend_from_slice(&[0x5a, 0xf1, 0x00]); // GAS CALL STOP
+        let codeoffset = head.len() as u8;
+        head[3] = codeoffset; // patch the PUSH1 <codeoffset> immediate
+        head.extend_from_slice(&init_code);
+        head
+    }
+
+    #[test]
+    fn created_in_tx_selfdestruct_to_self_is_still_filtered_not_double_suppressed() {
+        // A SELFDESTRUCT-to-self by a contract CREATED in this same transaction writes a REAL
+        // AccountDestroyed journal entry (the flag is true), and the observation is dropped by
+        // the pre-existing from==to filter -- not by the new guard.
+        // Pins that the new guard did not become a second, over-broad suppression mechanism.
+        let factory = Address::from([0x75; 20]);
+        let value = 7u8;
+        let child = factory.create(0);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(
+            factory,
+            account(10, Some(create_endowment_then_call_child(value, child))),
+        );
+
+        let (outcome, success) = run_capturing_tx(db, factory, 16);
+        assert!(success, "top-level tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert_eq!(
+                    stream.len(),
+                    1,
+                    "only the CREATE endowment transfer; the created-in-tx self-destruct \
+                     contributes nothing"
+                );
+                assert_eq!(stream[0].topics()[1], factory.into_word());
+                assert_eq!(
+                    stream[0].data.data.as_ref(),
+                    &U256::from(value as u64).to_be_bytes::<32>()
+                );
+            }
+            other => panic!(
+                "expected Complete with exactly the CREATE endowment transfer, got {other:?}"
+            ),
+        }
+    }
+
+    /// Runtime bytecode: `CALL(gas, dst, value=0, 0,0,0,0); STOP` — a zero-value child call whose
+    /// failure is ignored.
+    fn call_value_0_to(dst: Address) -> Vec<u8> {
+        let mut code = call_prefix(0x00, dst);
+        code.extend_from_slice(&[0x5a, 0xf1, 0x00]); // GAS CALL STOP
+        code
+    }
+
+    /// Runtime bytecode: `LOG0(offset=0, size=0); REVERT(0, 0)` — emits one real (empty) log, then
+    /// reverts the frame.
+    fn log_then_revert() -> Vec<u8> {
+        vec![0x60, 0x00, 0x60, 0x00, 0xa0, 0x60, 0x00, 0x60, 0x00, 0xfd]
+    }
+
+    #[test]
+    fn reverted_child_frame_rolls_back_real_log_and_cross_check_passes() {
+        // A zero-value child CALL emits a real log then REVERTs. The captured real log must be
+        // truncated on the sub-frame revert, and the finish_capture RealLog cross-check against
+        // `result.logs()` (which excludes reverted logs) must still pass → Complete(empty).
+        let parent = Address::from([0xA1; 20]);
+        let child = Address::from([0xA2; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(parent, account(0, Some(call_value_0_to(child))));
+        db.insert_account_info(child, account(0, Some(log_then_revert())));
+
+        let (outcome, success) = run_capturing_tx(db, parent, 16);
+        assert!(success, "parent tx ignores the child revert and succeeds");
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert!(
+                    stream.is_empty(),
+                    "reverted child frame's real log must be rolled back, got {stream:?}"
+                );
+            }
+            other => panic!("expected Complete(empty) after child revert, got {other:?}"),
+        }
+    }
+
+    /// Runtime bytecode: `CALL(gas, dst, value=1, 0,0,0,0); POP; LOG0(0, 0); STOP` — one internal
+    /// 1-wei transfer followed by a persisted real `LOG0` in the same (successful) frame.
+    fn call_value_1_then_log0(dst: Address) -> Vec<u8> {
+        let mut code = call_prefix(0x01, dst);
+        // GAS CALL POP  PUSH1 0 (size) PUSH1 0 (offset) LOG0  STOP
+        code.extend_from_slice(&[0x5a, 0xf1, 0x50, 0x60, 0x00, 0x60, 0x00, 0xa0, 0x00]);
+        code
+    }
+
+    #[test]
+    fn internal_transfer_then_real_log_interleaved_captured_through_composite() {
+        // A successful contract makes an internal value CALL and then emits a real LOG0. The stream
+        // must contain BOTH the virtual native `Transfer` and the persisted real log, interleaved in
+        // execution order [virtual, real]. This is the non-tautological real-log proof: if the
+        // composite stopped forwarding `log`/`log_full` to the inner inspector, the RealLog
+        // subsequence would be empty while `result.logs()` has one entry, so `finish_capture` would
+        // fail closed with `InvariantViolation` instead of `Complete` — the assert below would fail.
+        let contract = Address::from([0xC5; 20]);
+        let dst = Address::from([0xD5; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(contract, account(1_000, Some(call_value_1_then_log0(dst))));
+
+        let (outcome, success) = run_capturing_tx(db, contract, 16);
+        assert!(success, "top-level tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert_eq!(
+                    stream.len(),
+                    2,
+                    "one virtual transfer + one real log expected, in order"
+                );
+                // [0] virtual native transfer (contract -> dst, value 1).
+                assert_eq!(stream[0].address, NATIVE_ASSET_ADDRESS);
+                assert_eq!(stream[0].topics()[1], contract.into_word());
+                assert_eq!(stream[0].topics()[2], dst.into_word());
+                assert_eq!(stream[0].data.data.as_ref(), &U256::from(1u64).to_be_bytes::<32>());
+                // [1] the persisted real LOG0 — proves real-log forwarding + the cross-check passed.
+                assert_ne!(
+                    stream[1].address, NATIVE_ASSET_ADDRESS,
+                    "second entry must be the real log, not another virtual transfer"
+                );
+                assert_eq!(
+                    stream[1].address, contract,
+                    "real log carries the emitting contract addr"
+                );
+            }
+            other => panic!("expected Complete([virtual, real]) interleaved, got {other:?}"),
+        }
+    }
+
+    /// Runtime bytecode: two internal 1-wei CALLs (to `a` then `b`), each result popped, then STOP.
+    fn call_value_1_twice(a: Address, b: Address) -> Vec<u8> {
+        let mut code = Vec::new();
+        for dst in [a, b] {
+            code.extend_from_slice(&call_prefix(0x01, dst)); // ret/args, value 1, PUSH20 dst
+            code.extend_from_slice(&[0x5a, 0xf1, 0x50]); // GAS CALL POP
+        }
+        code.push(0x00); // STOP
+        code
+    }
+
+    #[test]
+    fn inspector_state_does_not_cross_transactions_through_real_evm() {
+        // Two candidate txs share ONE inspector (as in the real per-block loop), distinct senders so
+        // neither depends on the other committing. tx1 makes TWO internal transfers against a budget
+        // of 1, so it overflows. R10 item 6 / R9 item 4: `finish_capture` clears ALL capture state on
+        // EVERY exit — including the `LimitExceeded` path — so the inspector is left clean IMMEDIATELY
+        // when tx1 finishes; nothing residual is carried to the next `start_capture` for it to wipe.
+        // tx2 therefore starts from an already-clean inspector regardless (start_capture's reset is
+        // belt-and-suspenders). If the every-exit cleanup regressed, tx2 would inherit tx1's transfers
+        // or be born overflowed and the asserts below would fail.
+        let sender_a = Address::from([0xA5; 20]);
+        let sender_b = Address::from([0xB5; 20]);
+        let c1 = Address::from([0xC1; 20]);
+        let d1a = Address::from([0xD1; 20]);
+        let d1b = Address::from([0xD3; 20]);
+        let c2 = Address::from([0xC2; 20]);
+        let d2 = Address::from([0xD2; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(sender_a, account(1_000_000_000, None));
+        db.insert_account_info(sender_b, account(1_000_000_000, None));
+        db.insert_account_info(c1, account(1_000, Some(call_value_1_twice(d1a, d1b))));
+        db.insert_account_info(c2, account(1_000, Some(call_value_1_to(d2))));
+
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(1),
+        );
+
+        // tx1 -> c1: two transfers over a budget of 1 ⇒ overflow (LimitExceeded).
+        evm.components_mut().1.start_capture();
+        let r1 = evm.transact(call_tx_from(sender_a, c1)).expect("tx1 executes");
+        let o1 = evm.components_mut().1.finish_capture(r1.result.logs());
+        assert!(
+            matches!(o1, CaptureOutcome::LimitExceeded { .. }),
+            "tx1 must overflow the native-transfer budget, got {o1:?}"
+        );
+        // R10 item 6: the `LimitExceeded` exit cleared ALL state IMMEDIATELY — assert the inspector is
+        // clean right now, BEFORE tx2's `start_capture`, so cross-tx isolation does not depend on the
+        // next reset. (Fields are visible: this test module is a descendant of `rcs_capture`.)
+        {
+            let insp = evm.components_mut().1;
+            assert!(insp.queue.is_empty(), "queue cleared immediately on the LimitExceeded exit");
+            assert!(insp.checkpoints.is_empty(), "checkpoints cleared immediately");
+            assert_eq!(insp.observed_count, 0, "observed_count reset immediately");
+            assert!(!insp.overflowed, "overflow flag reset immediately");
+            assert!(!insp.active, "inspector inactive immediately after finish");
+            assert!(
+                insp.create_recipients.is_empty(),
+                "create_recipients cleared immediately on the LimitExceeded exit"
+            );
+        }
+
+        // tx2 -> c2 on the SAME (already-clean) inspector.
+        evm.components_mut().1.start_capture();
+        let r2 = evm.transact(call_tx_from(sender_b, c2)).expect("tx2 executes");
+        let o2 = evm.components_mut().1.finish_capture(r2.result.logs());
+        match o2 {
+            CaptureOutcome::Complete { logs: s, .. } => {
+                assert_eq!(
+                    s.len(),
+                    1,
+                    "tx2 sees only its own transfer (state cleared on every exit)"
+                );
+                assert_eq!(s[0].topics()[2], d2.into_word(), "tx2's transfer targets d2 only");
+            }
+            other => {
+                panic!("tx2 expected clean Complete(1) from an already-clean tx1, got {other:?}")
+            }
+        }
+    }
+
+    /// Runtime bytecode: `CREATE2(value=7, offset=0, size=0, salt=0); STOP` — a 7-wei endowment with
+    /// empty init code. CREATE2 pops value(top), offset, size, salt, so the pushes are salt, size,
+    /// offset, value.
+    fn create2_endowment_7() -> Vec<u8> {
+        // PUSH1 0 (salt) PUSH1 0 (size) PUSH1 0 (offset) PUSH1 7 (value) CREATE2 STOP
+        vec![0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x07, 0xf5, 0x00]
+    }
+
+    #[test]
+    fn internal_create2_endowment_captured_through_composite() {
+        // A CREATE2 with a non-zero endowment yields one native Transfer from the creator to the
+        // CREATE2-derived address, through the composite-forwarded `create` hook on the production
+        // `evm.transact` path (distinct from the plain-CREATE case).
+        // The bytecode uses salt=0 and empty init code; the expected address is deterministic.
+        let factory = Address::from([0xF2; 20]);
+        let expected_created = factory.create2(B256::ZERO, keccak256(b""));
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(factory, account(1_000, Some(create2_endowment_7())));
+
+        let (outcome, success) = run_capturing_tx(db, factory, 16);
+        assert!(success, "top-level tx should succeed");
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert_eq!(stream.len(), 1, "one CREATE2 endowment transfer expected");
+                assert_eq!(stream[0].address, NATIVE_ASSET_ADDRESS);
+                assert_eq!(stream[0].topics()[1], factory.into_word());
+                assert_eq!(stream[0].data.data.as_ref(), &U256::from(7u64).to_be_bytes::<32>());
+                // Recipient (topic2) must be the exact CREATE2-derived address.
+                assert_eq!(
+                    stream[0].topics()[2],
+                    expected_created.into_word(),
+                    "recipient must be the exact salt+init_code_hash CREATE2 address"
+                );
+            }
+            other => panic!("expected Complete with one CREATE2 transfer, got {other:?}"),
+        }
+    }
+
+    /// Runtime bytecode: `LOG0(0, 0); STOP` — emits one real (empty) log then returns successfully.
+    fn log_then_stop() -> Vec<u8> {
+        vec![0x60, 0x00, 0x60, 0x00, 0xa0, 0x00]
+    }
+
+    /// Runtime bytecode: `CALL(gas, child, value=1, 0,0,0,0); POP; REVERT(0, 0)` — a successful child
+    /// value-call (which emits a real log) followed by the PARENT frame reverting.
+    fn call_child_then_revert(child: Address) -> Vec<u8> {
+        let mut code = call_prefix(0x01, child);
+        // GAS CALL POP  PUSH1 0 (size) PUSH1 0 (offset) REVERT
+        code.extend_from_slice(&[0x5a, 0xf1, 0x50, 0x60, 0x00, 0x60, 0x00, 0xfd]);
+        code
+    }
+
+    #[test]
+    fn parent_frame_revert_rolls_back_child_transfer_and_real_log_through_composite() {
+        // R9 item 2b / spec §8 test 32. A grandchild frame receives a qualifying native transfer and
+        // emits a real log; its PARENT frame then reverts (while the top-level tx survives, ignoring
+        // the failed sub-call). Through `evm.transact`, both the virtual transfer and the real log
+        // must truncate at the parent checkpoint, and `result.logs()` (the reverted subtree's logs are
+        // discarded) must match the now-empty RealLog subsequence → Complete(empty): the tx screens as
+        // if the events never happened.
+        let root = Address::from([0xA0; 20]); // calls parent (value 0), ignores its revert, succeeds
+        let parent = Address::from([0xA1; 20]); // calls child (value 1) then REVERTs
+        let child = Address::from([0xA2; 20]); // receives value + emits a real log, returns ok
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(root, account(0, Some(call_value_0_to(parent))));
+        db.insert_account_info(parent, account(1_000, Some(call_child_then_revert(child))));
+        db.insert_account_info(child, account(0, Some(log_then_stop())));
+
+        let (outcome, success) = run_capturing_tx(db, root, 16);
+        assert!(success, "the top-level tx ignores the parent frame's revert and succeeds");
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => assert!(
+                stream.is_empty(),
+                "a parent-frame revert must truncate the child transfer AND its real log, got {stream:?}"
+            ),
+            other => panic!("expected Complete(empty) after a parent-frame revert, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_forced_real_log_mismatch_fails_closed_through_composite() {
+        // R9 item 2c / spec §8 test 33 (R10: the shared runtime SOURCE for test 35). A real tx emits a
+        // real log (captured through the composite-forwarded `log` hook), then `finish_capture` runs
+        // against a `result.logs()` forced to DIVERGE from the captured subsequence, so the cross-check
+        // fails closed with `InvariantViolation { RealLogMismatch }`. Test 33 asserts the RUNTIME
+        // OUTCOME; the builder `Screen::Deny` + no-pending-buffer + no-partial-action guarantees are
+        // proven together on the real screening path by test 35 (context.rs), which consumes this same
+        // fixture. Stopping at `InvariantViolation` does NOT close the fail-closed loop — that is test
+        // 35's job.
+        let outcome = super::test_fixtures::real_runtime_reallogmismatch_outcome();
+        assert!(
+            matches!(
+                outcome,
+                CaptureOutcome::InvariantViolation {
+                    reason: CaptureInvariantError::RealLogMismatch { observed: 1, expected: 2, .. }
+                }
+            ),
+            "a runtime real-log divergence must fail closed with RealLogMismatch, got {outcome:?}"
+        );
+    }
+
+    /// Runtime bytecode: `PUSH1 0; SLOAD; POP; STOP` — reads (warms) storage slot 0.
+    const WARMING_CONTRACT_CODE: [u8; 5] = [0x60, 0x00, 0x54, 0x50, 0x00];
+
+    #[test]
+    fn composite_post_exec_warming_preserved_with_rcs_inspector_inner() {
+        // R9 item 2d / spec §8 item 9. Making `RcsInspector` the composite's INNER inspector must NOT
+        // replace the composite's own SDM/post-exec warming. Drive two warming txs through the
+        // production `evm.transact` on an `OpEvm<_, RcsInspector, _>` with post-exec tracking active:
+        // the second tx re-touches a block-warmed slot and MUST still earn a warming refund, exactly
+        // as it does with no capture inspector, while capture runs alongside (a clean empty Complete
+        // each time — an SLOAD moves no native value).
+        let target = Address::from([0x2C; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(target, account(0, Some(WARMING_CONTRACT_CODE.to_vec())));
+
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+
+        // `transact` does not commit here, so nonce 0 is reused across both txs (as in the upstream
+        // OpEvm post-exec test); block-scoped warming is carried on the composite across the two txs.
+        let mut warm_once = |tx_index: u64| {
+            evm.begin_post_exec_tx(post_exec::PostExecTxContext {
+                tx_index,
+                kind: post_exec::PostExecTxKind::Normal,
+            });
+            evm.components_mut().1.start_capture();
+            let result = evm.transact(call_tx(target)).expect("warming tx executes");
+            let outcome = evm.components_mut().1.finish_capture(result.result.logs());
+            assert!(
+                matches!(outcome, CaptureOutcome::Complete { logs: ref s, .. } if s.is_empty()),
+                "capture must run alongside warming (no native transfer from an SLOAD), got {outcome:?}"
+            );
+            evm.take_last_post_exec_tx_result().refund_total
+        };
+
+        assert_eq!(warm_once(0), 0, "the first tx warms the slot but earns no refund");
+        assert!(
+            warm_once(1) > 0,
+            "the composite's SDM warming must still credit a refund on the second tx — making \
+             RcsInspector the inner inspector did not replace the composite's post-exec behavior"
+        );
+    }
+
+    // ── helpers for CREATE / DELEGATECALL tests ───────────────────────────────
+
+    fn create_tx_with_value(from: Address, value: U256) -> OpTx {
+        let tx = TxLegacy {
+            nonce: 0,
+            gas_limit: 2_000_000,
+            to: TxKind::Create,
+            value,
+            ..Default::default()
+        }
+        .into_signed(Signature::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
+        OpTx::from_recovered_tx(&tx, from)
+    }
+
+    /// Runs a top-level CREATE tx (no bytecode body — empty init-code) through the real
+    /// composite-wrapped OpEvm and returns the capture outcome and success flag.
+    fn run_capturing_create_tx(
+        db: InMemoryDB,
+        from: Address,
+        value: U256,
+        budget: usize,
+    ) -> (CaptureOutcome, bool) {
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(budget),
+        );
+        evm.components_mut().1.start_capture();
+        let result = evm.transact(create_tx_with_value(from, value)).expect("tx executes");
+        let success = result.result.is_success();
+        let outcome = evm.components_mut().1.finish_capture(result.result.logs());
+        (outcome, success)
+    }
+
+    // ── T1b: inactive inspector — CREATE tx ──────────────────────────────────
+
+    #[test]
+    fn inactive_create_tx_mutates_no_capture_state() {
+        // A CREATE tx runs through the production EVM path without ever calling start_capture.
+        // The inspector must leave create_recipients, checkpoints, and queue empty throughout.
+        let deployer = Address::from([0xDE; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(deployer, account(1_000_000_000, None));
+
+        let (outcome, _) = run_capturing_create_tx(db, deployer, U256::ZERO, 10);
+        assert!(
+            matches!(outcome, CaptureOutcome::Complete { logs: ref s, .. } if s.is_empty()),
+            "inactive inspector must produce an empty Complete on a CREATE tx"
+        );
+    }
+
+    // ── T1c: D-ISO — inactive inspector on value-bearing CREATE tx ───────────
+
+    #[test]
+    fn inactive_inspector_diso_create_tx_no_mutation() {
+        // When start_capture() is never called, the create hook's inactive-gate returns
+        // immediately without pushing to create_recipients. This is the D-ISO invariant
+        // for the CREATE hook: a value-bearing CREATE must not mutate capture-private state.
+        let deployer = Address::from([0xDF; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(deployer, account(1_000_000_000, None));
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        // Deliberately do NOT call start_capture() — inspector stays inactive.
+        evm.transact(create_tx_with_value(deployer, U256::from(5u64))).expect("tx executes");
+        let inspector = evm.components_mut().1;
+        assert!(
+            inspector.create_recipients.is_empty(),
+            "inactive create hook must not push to create_recipients"
+        );
+        assert!(inspector.checkpoints.is_empty(), "inactive push_checkpoint must not add entries");
+    }
+
+    // ── T1d: create_recipients balanced push/pop ─────────────────────────────
+
+    #[test]
+    fn create_recipients_push_pop_balanced() {
+        // A CREATE followed by a reverted inner CALL means:
+        //   create hook  → push_checkpoint + create_recipients.push(Some(addr))
+        //   create_end (success) → pop(false) does NOT revert; create_recipients.pop()
+        // After finish_capture the create_recipients vec must be drained to zero.
+        let factory = Address::from([0xF2; 20]);
+        let expected_created = factory.create2(B256::ZERO, keccak256(b""));
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(factory, account(1_000, Some(create2_endowment_7())));
+
+        // After the tx the inspector has been reset by finish_capture.
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        evm.components_mut().1.start_capture();
+        let result = evm.transact(call_tx(factory)).expect("tx executes");
+        let logs = result.result.logs();
+        let _outcome = evm.components_mut().1.finish_capture(logs);
+
+        let inspector = evm.components_mut().1;
+        assert!(
+            inspector.create_recipients.is_empty(),
+            "create_recipients must be empty after finish_capture; addr={expected_created:?}"
+        );
+        assert!(inspector.checkpoints.is_empty(), "checkpoints must be empty after finish_capture");
+    }
+
+    // ── DELEGATECALL attribution baseline ────────────────────────────────────
+
+    #[test]
+    fn delegatecall_carries_no_transfer_event() {
+        // A plain DELEGATECALL with no value transfer must not generate a native Transfer.
+        let delegator = Address::from([0xD0; 20]);
+        let implementation = Address::from([0xD1; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        // delegator has balance but its code only does a DELEGATECALL with zero value
+        db.insert_account_info(
+            delegator,
+            account(1_000, Some(delegatecall_to_then_stop(implementation))),
+        );
+        // implementation: just STOP (no further transfer)
+        db.insert_account_info(implementation, account(0, Some(vec![0x00])));
+
+        let (outcome, success) = run_capturing_tx(db, delegator, 10);
+        assert!(success);
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => assert!(
+                stream.is_empty(),
+                "a DELEGATECALL with no value must not produce a native Transfer"
+            ),
+            other => panic!("expected Complete(empty), got {other:?}"),
+        }
+    }
+
+    // ── T2c: DELEGATECALL simulation — CALL+CREATE attributed to delegating context ──
+
+    #[test]
+    fn delegatecall_nested_call_and_create_attributed_to_delegator() {
+        // delegator holds balance and has code that DELEGATECALLs to `implementation`.
+        // `implementation`'s code does CALL(1 wei, call_recipient) and CREATE(1 wei, empty).
+        // Both operations run in `delegator`'s context → attributed to `delegator`.
+        let delegator = Address::from([0xE0; 20]);
+        let implementation = Address::from([0xE1; 20]);
+        let call_recipient = Address::from([0xE2; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(
+            delegator,
+            account(1_000_000, Some(delegatecall_to_then_stop(implementation))),
+        );
+        db.insert_account_info(
+            implementation,
+            account(0, Some(delegated_call_and_create(call_recipient))),
+        );
+        db.insert_account_info(call_recipient, account(0, Some(vec![0x00])));
+
+        let (outcome, success) = run_capturing_tx(db, delegator, 16);
+        assert!(success, "top-level tx must succeed");
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert_eq!(stream.len(), 2, "expected two transfers: CALL(1) + CREATE(1)");
+                for log in &stream {
+                    assert_eq!(log.address, NATIVE_ASSET_ADDRESS);
+                    // Both transfers originate from delegator (execution context for DELEGATECALL)
+                    assert_eq!(
+                        log.topics()[1],
+                        delegator.into_word(),
+                        "transfer.from must be the delegating address, not the implementation"
+                    );
+                }
+            }
+            other => panic!("expected Complete with 2 transfers, got {other:?}"),
+        }
+    }
+
+    // ── T2a: EIP-7702 type-4 tx — transfers attributed to the authority address ──────────────
+
+    #[test]
+    fn eip7702_type4_delegated_transfers_attributed_to_authority() {
+        // A genuine EIP-7702 type-4 transaction (TxEip7702) sets the delegation designation for
+        // `authority` to `delegate_impl`. When the tx executes, the EVM runs `delegate_impl`'s
+        // code in the context of `authority`. CALL(1 wei) + CREATE(1 wei) inside `delegate_impl`
+        // must both be attributed to `authority` (the effective sender of those transfers).
+        let delegate_impl = Address::from([0xE1; 20]);
+        let call_recipient = Address::from([0xE2; 20]);
+        let auth = Authorization { chain_id: U256::ZERO, address: delegate_impl, nonce: 0 }
+            .into_signed(Signature::test_signature());
+        let authority =
+            auth.recover_authority().expect("deterministic authority from test_signature");
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(authority, account(1_000_000, None));
+        db.insert_account_info(
+            delegate_impl,
+            account(0, Some(delegated_call_and_create(call_recipient))),
+        );
+        db.insert_account_info(call_recipient, account(0, None));
+        let tx = TxEip7702 {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 2_000_000,
+            max_fee_per_gas: 0,
+            max_priority_fee_per_gas: 0,
+            to: authority,
+            value: U256::ZERO,
+            authorization_list: vec![auth],
+            input: Default::default(),
+            access_list: Default::default(),
+        }
+        .into_signed(Signature::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
+        let op_tx = OpTx::from_recovered_tx(&tx, caller());
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        evm.components_mut().1.start_capture();
+        let result = evm.transact(op_tx).expect("tx executes");
+        let outcome = evm.components_mut().1.finish_capture(result.result.logs());
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert_eq!(
+                    stream.len(),
+                    2,
+                    "EIP-7702 delegated code must capture CALL(1) + CREATE(1)"
+                );
+                for log in &stream {
+                    assert_eq!(log.address, NATIVE_ASSET_ADDRESS);
+                    assert_eq!(
+                        log.topics()[1],
+                        authority.into_word(),
+                        "transfer.from must be authority (EIP-7702 execution context)"
+                    );
+                }
+            }
+            other => panic!("expected Complete with 2 transfers, got {other:?}"),
+        }
+    }
+
+    // ── T2b: 2-hop DELEGATECALL chain attribution ────────────────────────────
+
+    #[test]
+    fn delegatecall_chain_inner_call_and_create_captured() {
+        // root → DELEGATECALL → relay → DELEGATECALL → implementation
+        // `implementation`'s CALL and CREATE run in `root`'s context throughout the 2-hop chain.
+        let root = Address::from([0xC0; 20]);
+        let relay = Address::from([0xC1; 20]);
+        let implementation = Address::from([0xC2; 20]);
+        let call_recipient = Address::from([0xC3; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(root, account(1_000_000, Some(delegatecall_to_then_stop(relay))));
+        db.insert_account_info(relay, account(0, Some(delegatecall_to_then_stop(implementation))));
+        db.insert_account_info(
+            implementation,
+            account(0, Some(delegated_call_and_create(call_recipient))),
+        );
+        db.insert_account_info(call_recipient, account(0, Some(vec![0x00])));
+
+        let (outcome, success) = run_capturing_tx(db, root, 16);
+        assert!(success, "2-hop DELEGATECALL chain tx must succeed");
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert_eq!(stream.len(), 2, "expected two transfers through 2-hop chain");
+                for log in &stream {
+                    assert_eq!(
+                        log.topics()[1],
+                        root.into_word(),
+                        "both transfers must be attributed to root (outermost delegating context)"
+                    );
+                }
+            }
+            other => panic!("expected Complete with 2 transfers, got {other:?}"),
+        }
+    }
+
+    // ── T4a: CREATE2 EIP-684 collision revokes endowment ─────────────────────
+
+    #[test]
+    fn internal_create2_eip684_collision_endowment_revoked() {
+        // When a CREATE2 target already has nonce > 0 (EIP-684 collision), the deployment
+        // fails: outcome.result.is_ok() == false. The `create_end` hook must detect this and
+        // call pop_checkpoint(true), rolling back the 7-wei endowment from the queue.
+        let factory = Address::from([0xF3; 20]);
+        let collision_target = factory.create2(B256::ZERO, keccak256(b""));
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(factory, account(1_000, Some(create2_endowment_7())));
+        // Pre-populate the CREATE2 target with nonce=1 to trigger EIP-684 collision.
+        db.insert_account_info(collision_target, AccountInfo { nonce: 1, ..Default::default() });
+
+        let (outcome, success) = run_capturing_tx(db, factory, 16);
+        assert!(success, "top-level CALL to factory must succeed even if inner CREATE2 fails");
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => assert!(
+                stream.is_empty(),
+                "EIP-684 collision must revoke the CREATE2 endowment; stream must be empty"
+            ),
+            other => panic!("expected Complete(empty) after CREATE2 collision, got {other:?}"),
+        }
+    }
+
+    // ── T4b: revoked CREATE still consumes observed_count budget ─────────────
+
+    #[test]
+    fn revoked_create_still_consumes_native_budget() {
+        // observed_count increments in observe_native_transfer regardless of later revocation.
+        // With budget=1, after a CREATE2 collision (revoked), observed_count == 1 before
+        // finish_capture; after finish_capture it resets to 0 and the stream is empty.
+        let factory = Address::from([0xF4; 20]);
+        let collision_target = factory.create2(B256::ZERO, keccak256(b""));
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(factory, account(1_000, Some(create2_endowment_7())));
+        db.insert_account_info(collision_target, AccountInfo { nonce: 1, ..Default::default() });
+
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(1),
+        );
+        evm.components_mut().1.start_capture();
+        let result = evm.transact(call_tx(factory)).expect("tx executes");
+        // After transact, before finish_capture: observed_count is sticky (== 1).
+        assert_eq!(
+            evm.components_mut().1.observed_count,
+            1,
+            "observed_count must be 1 after revoked CREATE2 (sticky counter, not rolled back)"
+        );
+        let outcome = evm.components_mut().1.finish_capture(result.result.logs());
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert!(stream.is_empty(), "revoked endowment must not appear in the final stream")
+            }
+            other => panic!("expected Complete(empty), got {other:?}"),
+        }
+    }
+
+    /// Runtime bytecode: CALL(gas, call_dst, 1 wei, 0, 0, 0, 0); POP; CREATE2(7 wei, salt=0, empty)
+    fn call_value_1_then_create2_endowment(call_dst: Address) -> Vec<u8> {
+        let mut code = call_prefix(0x01, call_dst);
+        // GAS CALL POP
+        code.extend_from_slice(&[0x5a, 0xf1, 0x50]);
+        // PUSH1 0 (salt) PUSH1 0 (size) PUSH1 0 (offset) PUSH1 7 (value) CREATE2
+        code.extend_from_slice(&[0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x07, 0xf5]);
+        code
+    }
+
+    // ── T4b-ext: budget=N, then N+1 colliding CREATE → LimitExceeded ──────────────────────────
+
+    #[test]
+    fn revoked_create_with_prior_transfer_exceeds_budget_limit() {
+        // Proves that observed_count from a revoked CREATE is real budget consumption:
+        // with limit=1, one CALL (fills the budget) plus a revoked CREATE2 collision
+        // (one more observation) must produce LimitExceeded{attempted:2, limit:1}.
+        let factory = Address::from([0xF5; 20]);
+        let call_recipient = Address::from([0xF6; 20]);
+        let collision_target = factory.create2(B256::ZERO, keccak256(b""));
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(
+            factory,
+            account(1_000, Some(call_value_1_then_create2_endowment(call_recipient))),
+        );
+        db.insert_account_info(call_recipient, account(0, None));
+        db.insert_account_info(collision_target, AccountInfo { nonce: 1, ..Default::default() });
+
+        let (outcome, success) = run_capturing_tx(db, factory, 1);
+        assert!(success, "top-level CALL to factory must succeed even on budget overflow");
+        assert!(
+            matches!(
+                outcome,
+                CaptureOutcome::LimitExceeded {
+                    attempted: 2,
+                    limit: 1,
+                    budget: ObservationBudget::NativeTransfer,
+                }
+            ),
+            "one CALL + one revoked CREATE2 must exceed budget=1; got {outcome:?}"
+        );
+    }
+
+    // ── top_level_create_with_value_emits_transfer ───────────────────────────
+
+    #[test]
+    fn top_level_create_with_value_emits_transfer() {
+        // A top-level CREATE tx with non-zero value sends the endowment from the deployer
+        // to the derived contract address. The inspector must capture that as one Transfer.
+        let deployer = Address::from([0xDE; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(deployer, account(1_000_000_000, None));
+
+        let (outcome, _) = run_capturing_create_tx(db, deployer, U256::from(5u64), 10);
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert_eq!(stream.len(), 1, "one Transfer expected for top-level CREATE endowment");
+                assert_eq!(stream[0].address, NATIVE_ASSET_ADDRESS);
+                assert_eq!(
+                    stream[0].topics()[1],
+                    deployer.into_word(),
+                    "transfer.from must be the deployer"
+                );
+                assert_eq!(
+                    stream[0].topics()[2],
+                    deployer.create(0).into_word(),
+                    "transfer.to must be the contract address derived from deployer + nonce 0"
+                );
+            }
+            other => panic!("expected Complete with one Transfer, got {other:?}"),
+        }
+    }
+
+    // ── D7b: successful-CREATE address mismatch fails closed (InvariantViolation) ────────────────
+    #[test]
+    fn create_address_mismatch_through_real_create_end_fails_closed() {
+        // D7b: a successful CREATE whose actual deployed address differs from the pre-derived
+        // expected address stored in `create_recipients` must produce
+        // `InvariantViolation { CreateAddressMismatch }`, NEVER `Complete`. The
+        // `FORCE_CREATE_ADDRESS_MISMATCH` seam pushes `Address::repeat_byte(0xFE)` as the expected
+        // recipient in the real `create` hook, so `create_end` sees a genuine `e != a` on an
+        // actually-successful, value-bearing CREATE (is_ok=true, address=Some(real)).
+        // Falsifiable: deleting the D7b branch in `create_end` causes this test to fail
+        // (`Complete(empty)` instead of `InvariantViolation`); deleting the variant causes a
+        // compile error in this `matches!`.
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        FORCE_CREATE_ADDRESS_MISMATCH.with(|f| f.set(true));
+        let (outcome, success) = run_capturing_create_tx(db, caller(), U256::from(1), 16);
+        assert!(success, "the CREATE must succeed (is_ok=true) for D7b to be reachable");
+        assert!(
+            matches!(
+                outcome,
+                CaptureOutcome::InvariantViolation {
+                    reason: CaptureInvariantError::CreateAddressMismatch { .. }
+                }
+            ),
+            "successful CREATE with mismatched pre-derived/actual address must fail closed with \
+             CreateAddressMismatch, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn address_mismatch_flag_cleared_by_both_finish_and_abort() {
+        // The sticky mismatch flag must not survive either exit path: `finish_capture` reports it
+        // exactly once and clears it, and `abort_capture` clears it without reporting. A flag left
+        // set would make the NEXT capture window fail closed on a stale mismatch.
+        //
+        // (a) armed flag → finish_capture surfaces it AND clears it.
+        let mut inspector = RcsInspector::new(10);
+        inspector.start_capture();
+        inspector.address_mismatch_create_index = Some(3);
+        let outcome = inspector.finish_capture(&[]);
+        assert_eq!(
+            outcome,
+            CaptureOutcome::InvariantViolation {
+                reason: CaptureInvariantError::CreateAddressMismatch { create_index: 3 }
+            },
+            "an armed mismatch flag must surface as InvariantViolation on finish_capture"
+        );
+        assert!(
+            inspector.address_mismatch_create_index.is_none(),
+            "finish_capture must clear the sticky mismatch flag on its exit path"
+        );
+
+        // (b) armed flag → abort_capture clears it.
+        inspector.start_capture();
+        inspector.address_mismatch_create_index = Some(7);
+        inspector.abort_capture();
+        assert!(
+            inspector.address_mismatch_create_index.is_none(),
+            "abort_capture must clear the sticky mismatch flag on its exit path"
+        );
+        assert!(!inspector.active, "abort_capture must leave the inspector disarmed");
+    }
+
+    // ── screen_tx integration tests ───────────────────────────────────────────
+    // These tests run a real OpEvm transaction, capture the native transfer
+    // stream, then feed it directly into FilterHandle::screen_tx, proving
+    // the full pipeline from EVM execution through the rule engine.
+
+    use rcs_filter::rules::{load_rules, RawRule};
+    use rcs_filter::test_support::TestClock;
+    use rcs_filter::{BufferStatus, FilterConfig, FilterHandle, Screen, ScreenInput};
+    use std::sync::Arc;
+
+    const DENY_NATIVE_RULE: &str = r#"{
+        "id": "deny-native",
+        "event_abis": {
+            "transfer": {
+                "type": "event", "name": "Transfer",
+                "inputs": [
+                    {"name": "from", "type": "address", "indexed": true},
+                    {"name": "to",   "type": "address", "indexed": true},
+                    {"name": "value","type": "uint256",  "indexed": false}
+                ],
+                "anonymous": false
+            }
+        },
+        "condition": {"==":[{"var":"transfer.address"},"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"]},
+        "action": "deny"
+    }"#;
+
+    const AUDIT_NATIVE_RULE: &str = r#"{
+        "id": "audit-1",
+        "event_abis": {
+            "transfer": {
+                "type": "event", "name": "Transfer",
+                "inputs": [
+                    {"name": "from", "type": "address", "indexed": true},
+                    {"name": "to",   "type": "address", "indexed": true},
+                    {"name": "value","type": "uint256",  "indexed": false}
+                ],
+                "anonymous": false
+            }
+        },
+        "condition": {"==":[{"var":"transfer.address"},"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"]},
+        "audit_types": ["type_a"],
+        "action": "audit"
+    }"#;
+
+    const AUDIT_NATIVE_RULE_2: &str = r#"{
+        "id": "audit-2",
+        "event_abis": {
+            "transfer": {
+                "type": "event", "name": "Transfer",
+                "inputs": [
+                    {"name": "from", "type": "address", "indexed": true},
+                    {"name": "to",   "type": "address", "indexed": true},
+                    {"name": "value","type": "uint256",  "indexed": false}
+                ],
+                "anonymous": false
+            }
+        },
+        "condition": {"==":[{"var":"transfer.address"},"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"]},
+        "audit_types": ["type_b"],
+        "action": "audit"
+    }"#;
+
+    const DUAL_ALIAS_DENY_NATIVE_RULE: &str = r#"{
+        "id": "dual-alias-deny",
+        "event_abis": {
+            "t1": {
+                "type": "event", "name": "Transfer",
+                "inputs": [
+                    {"name": "from", "type": "address", "indexed": true},
+                    {"name": "to",   "type": "address", "indexed": true},
+                    {"name": "value","type": "uint256",  "indexed": false}
+                ],
+                "anonymous": false
+            },
+            "t2": {
+                "type": "event", "name": "Transfer",
+                "inputs": [
+                    {"name": "from", "type": "address", "indexed": true},
+                    {"name": "to",   "type": "address", "indexed": true},
+                    {"name": "value","type": "uint256",  "indexed": false}
+                ],
+                "anonymous": false
+            }
+        },
+        "condition": {"==":[{"var":"t1.address"},"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"]},
+        "action": "deny"
+    }"#;
+
+    /// Same Transfer ABI as the rule above, but the condition is on the transaction-level `value`
+    /// binding rather than on any event field. Deployed rules may still be written against that
+    /// legacy binding, so it must keep working now that a virtual `transfer.*` log set exists
+    /// alongside it.
+    const LEGACY_VALUE_DENY_RULE: &str = r#"{
+        "id": "legacy-value-deny",
+        "event_abis": {
+            "transfer": {
+                "type": "event", "name": "Transfer",
+                "inputs": [
+                    {"name": "from", "type": "address", "indexed": true},
+                    {"name": "to",   "type": "address", "indexed": true},
+                    {"name": "value","type": "uint256",  "indexed": false}
+                ],
+                "anonymous": false
+            }
+        },
+        "condition": {"==":[{"var":"value"},"1"]},
+        "action": "deny"
+    }"#;
+
+    /// A second audit rule carrying the SAME `audit_type` as [`AUDIT_NATIVE_RULE`]. Two same-type
+    /// rules matching the same physical log must collapse to one action, which is what distinguishes
+    /// a genuine `(audit_type, log_index)` dedup from an implicit "one rule, one action" placement.
+    const AUDIT_NATIVE_RULE_SAME_TYPE: &str = r#"{
+        "id": "audit-same-type",
+        "event_abis": {
+            "transfer": {
+                "type": "event", "name": "Transfer",
+                "inputs": [
+                    {"name": "from", "type": "address", "indexed": true},
+                    {"name": "to",   "type": "address", "indexed": true},
+                    {"name": "value","type": "uint256",  "indexed": false}
+                ],
+                "anonymous": false
+            }
+        },
+        "condition": {"==":[{"var":"transfer.address"},"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"]},
+        "audit_types": ["type_a"],
+        "action": "audit"
+    }"#;
+
+    /// An audit rule whose condition is satisfied by transaction-level data alone, so it also holds
+    /// when the declared event matches NO physical log. That is the all-null binding case: the rule
+    /// is satisfied, yet no Audit action may be emitted because there is no physical event behind it.
+    const AUDIT_NULL_BINDING_RULE: &str = r#"{
+        "id": "audit-null-binding",
+        "event_abis": {
+            "transfer": {
+                "type": "event", "name": "Transfer",
+                "inputs": [
+                    {"name": "from", "type": "address", "indexed": true},
+                    {"name": "to",   "type": "address", "indexed": true},
+                    {"name": "value","type": "uint256",  "indexed": false}
+                ],
+                "anonymous": false
+            }
+        },
+        "condition": {"==":[{"var":"value"},"0"]},
+        "audit_types": ["type_null"],
+        "action": "audit"
+    }"#;
+
+    /// Dual-alias rule over two aliases of the SAME Transfer ABI, whose condition never fires. It
+    /// isolates the matcher-binding budget from the rule's own verdict: any Deny on the larger
+    /// stream can then only come from the binding counter, never from the rule matching.
+    const DUAL_ALIAS_BUDGET_RULE: &str = r#"{
+        "id": "dual-alias-budget",
+        "event_abis": {
+            "t1": {
+                "type": "event", "name": "Transfer",
+                "inputs": [
+                    {"name": "from", "type": "address", "indexed": true},
+                    {"name": "to",   "type": "address", "indexed": true},
+                    {"name": "value","type": "uint256",  "indexed": false}
+                ],
+                "anonymous": false
+            },
+            "t2": {
+                "type": "event", "name": "Transfer",
+                "inputs": [
+                    {"name": "from", "type": "address", "indexed": true},
+                    {"name": "to",   "type": "address", "indexed": true},
+                    {"name": "value","type": "uint256",  "indexed": false}
+                ],
+                "anonymous": false
+            }
+        },
+        "condition": {"==":[{"var":"t1.address"},"0x000000000000000000000000000000000000dead"]},
+        "action": "deny"
+    }"#;
+
+    fn deny_native_handle() -> FilterHandle {
+        let raw: RawRule = serde_json::from_str(DENY_NATIVE_RULE).unwrap();
+        let rules = load_rules(1, 1, vec![raw]);
+        assert_eq!(rules.rules.len(), 1, "deny-native rule must compile cleanly");
+        FilterHandle::for_test(
+            FilterConfig::default(),
+            rules,
+            Arc::new(TestClock::new(1_751_000_000)),
+        )
+    }
+
+    fn audit_native_handle() -> FilterHandle {
+        let raw: RawRule = serde_json::from_str(AUDIT_NATIVE_RULE).unwrap();
+        let rules = load_rules(1, 1, vec![raw]);
+        assert_eq!(rules.rules.len(), 1, "audit-1 rule must compile cleanly");
+        FilterHandle::for_test(
+            FilterConfig::default(),
+            rules,
+            Arc::new(TestClock::new(1_751_000_000)),
+        )
+    }
+
+    fn run_capturing_call_tx_with_value(
+        db: InMemoryDB,
+        from: Address,
+        target: Address,
+        value: U256,
+        budget: usize,
+    ) -> (CaptureOutcome, bool) {
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(budget),
+        );
+        evm.components_mut().1.start_capture();
+        let tx = TxLegacy {
+            nonce: 0,
+            gas_limit: 2_000_000,
+            to: TxKind::Call(target),
+            value,
+            ..Default::default()
+        }
+        .into_signed(Signature::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
+        let op_tx = OpTx::from_recovered_tx(&tx, from);
+        let result = evm.transact(op_tx).expect("tx executes");
+        let success = result.result.is_success();
+        let outcome = evm.components_mut().1.finish_capture(result.result.logs());
+        (outcome, success)
+    }
+
+    /// Internal CREATE with 7-wei endowment produces a native transfer captured in the real
+    /// stream; the deny-native rule fires on that log through the full screen_tx path.
+    #[test]
+    fn original_nt2_internal_create_denied_through_real_screen_tx() {
+        let factory = Address::from([0xF3; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(factory, account(1_000, Some(create_endowment_7())));
+
+        let (outcome, success) = run_capturing_tx(db, factory, 16);
+        assert!(success, "internal-CREATE tx must succeed");
+        let stream = match outcome {
+            CaptureOutcome::Complete { logs: s, .. } => s,
+            other => panic!("expected Complete, got {other:?}"),
+        };
+        assert!(!stream.is_empty(), "CREATE endowment must produce a native transfer");
+
+        let handle = deny_native_handle();
+        let input = ScreenInput {
+            tx_hash: B256::from([0x11; 32]),
+            origin: caller(),
+            tx_to: Some(factory),
+            nonce: 0,
+            value: U256::ZERO,
+            block_height: 0,
+            logs: &stream,
+            observations: Observations::NOT_CAPTURED,
+        };
+        assert_eq!(handle.screen_tx(&input), Screen::Deny);
+    }
+
+    /// A top-level value CALL (tx.value = 1) produces a single native Transfer as the root
+    /// frame hook fires; the deny-native rule fires on that real synthetic log.
+    #[test]
+    fn top_level_native_denied_through_real_screen_tx() {
+        let target = Address::from([0xBB; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+
+        let (outcome, success) =
+            run_capturing_call_tx_with_value(db, caller(), target, U256::from(1u64), 16);
+        assert!(success, "top-level value CALL must succeed");
+        let stream = match outcome {
+            CaptureOutcome::Complete { logs: s, .. } => s,
+            other => panic!("expected Complete, got {other:?}"),
+        };
+        assert_eq!(stream.len(), 1, "exactly one top-level native transfer expected");
+        assert_eq!(stream[0].address, NATIVE_ASSET_ADDRESS);
+
+        let handle = deny_native_handle();
+        let input = ScreenInput {
+            tx_hash: B256::from([0x22; 32]),
+            origin: caller(),
+            tx_to: Some(target),
+            nonce: 0,
+            value: U256::from(1u64),
+            block_height: 0,
+            logs: &stream,
+            observations: Observations::NOT_CAPTURED,
+        };
+        assert_eq!(handle.screen_tx(&input), Screen::Deny);
+    }
+
+    /// A top-level value CALL to a contract that itself does an internal value CALL produces
+    /// two native Transfers (one per frame); a single deny-native rule fires on the first
+    /// match, proving the rule works across a mixed root+nested stream.
+    #[test]
+    fn one_transfer_rule_denies_both_toplevel_and_internal_real_stream() {
+        let inner_dst = Address::from([0xDD; 20]);
+        let contract = Address::from([0xCC; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(contract, account(1_000, Some(call_value_1_to(inner_dst))));
+
+        let (outcome, success) =
+            run_capturing_call_tx_with_value(db, caller(), contract, U256::from(1u64), 16);
+        assert!(success, "tx must succeed");
+        let stream = match outcome {
+            CaptureOutcome::Complete { logs: s, .. } => s,
+            other => panic!("expected Complete, got {other:?}"),
+        };
+        assert_eq!(stream.len(), 2, "root-frame + internal-frame native transfers expected");
+
+        let handle = deny_native_handle();
+        let input = ScreenInput {
+            tx_hash: B256::from([0x33; 32]),
+            origin: caller(),
+            tx_to: Some(contract),
+            nonce: 0,
+            value: U256::from(1u64),
+            block_height: 0,
+            logs: &stream,
+            observations: Observations::NOT_CAPTURED,
+        };
+        assert_eq!(handle.screen_tx(&input), Screen::Deny);
+    }
+
+    /// The capture budget is enforced at the EVM level: budget=2 fits two native transfers
+    /// (Complete), while budget=1 causes LimitExceeded at the second transfer.
+    /// Falsifiable: reducing call count or raising budget would change the outcome.
+    #[test]
+    fn real_stream_native_budget_limit_plus_one_denies() {
+        let a = Address::from([0xE1; 20]);
+        let b = Address::from([0xE2; 20]);
+        let contract = Address::from([0xE3; 20]);
+
+        // budget=2: both transfers captured → Complete(2)
+        let mut db1 = InMemoryDB::default();
+        db1.insert_account_info(caller(), account(1_000_000_000, None));
+        db1.insert_account_info(contract, account(1_000, Some(call_value_1_twice(a, b))));
+        let (outcome1, _) = run_capturing_tx(db1, contract, 2);
+        assert!(
+            matches!(&outcome1, CaptureOutcome::Complete { logs: s, .. } if s.len() == 2),
+            "budget=2 with 2 transfers must produce Complete(2), got {outcome1:?}"
+        );
+
+        // budget=1: second transfer overflows → LimitExceeded{attempted:2, limit:1}
+        let mut db2 = InMemoryDB::default();
+        db2.insert_account_info(caller(), account(1_000_000_000, None));
+        db2.insert_account_info(contract, account(1_000, Some(call_value_1_twice(a, b))));
+        let (outcome2, _) = run_capturing_tx(db2, contract, 1);
+        assert!(
+            matches!(
+                outcome2,
+                CaptureOutcome::LimitExceeded {
+                    attempted: 2,
+                    limit: 1,
+                    budget: ObservationBudget::NativeTransfer,
+                }
+            ),
+            "budget=1 with 2 transfers must produce LimitExceeded{{2,1}}, got {outcome2:?}"
+        );
+    }
+
+    /// AuditPending → advance to Approved → AuditApproved (same logs); then empty-log
+    /// re-screen → inconsistent → Drop.  Exercises the full audit lifecycle end-to-end.
+    #[test]
+    fn real_stream_screen_tx_and_screen_existing_consistent() {
+        let dst = Address::from([0xF4; 20]);
+        let contract = Address::from([0xF5; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(contract, account(1_000, Some(call_value_1_to(dst))));
+
+        let (outcome, success) = run_capturing_tx(db, contract, 16);
+        assert!(success);
+        let stream = match outcome {
+            CaptureOutcome::Complete { logs: s, .. } => s,
+            other => panic!("expected Complete, got {other:?}"),
+        };
+        assert_eq!(stream.len(), 1, "one native transfer expected");
+
+        let handle = audit_native_handle();
+        let tx_hash = B256::from([0x55; 32]);
+
+        let input = ScreenInput {
+            tx_hash,
+            origin: caller(),
+            tx_to: Some(contract),
+            nonce: 0,
+            value: U256::ZERO,
+            block_height: 0,
+            logs: &stream,
+            observations: Observations::NOT_CAPTURED,
+        };
+        assert_eq!(handle.screen_tx(&input), Screen::AuditPending);
+
+        handle.advance_to_approved_for_test(&tx_hash);
+
+        assert_eq!(handle.screen_tx(&input), Screen::AuditApproved, "same logs → consistent");
+
+        let empty_input = ScreenInput {
+            tx_hash,
+            origin: caller(),
+            tx_to: Some(contract),
+            nonce: 0,
+            value: U256::ZERO,
+            block_height: 0,
+            logs: &[],
+            observations: Observations::NOT_CAPTURED,
+        };
+        assert_eq!(
+            handle.screen_tx(&empty_input),
+            Screen::Drop,
+            "empty logs → inconsistent → Drop"
+        );
+    }
+
+    /// A real stream containing one native Transfer + one real LOG0 (superset of the rule's
+    /// expected shape), screened by a rule whose condition reads the LEGACY transaction-level
+    /// `value` binding rather than any event field. That binding must keep working unchanged now
+    /// that the virtual `transfer.*` log set exists alongside it.
+    #[test]
+    fn legacy_value_rule_still_fires_on_real_capture_superset_stream() {
+        let dst = Address::from([0xC6; 20]);
+        let contract = Address::from([0xB6; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(contract, account(1_000, Some(call_value_1_then_log0(dst))));
+
+        let (outcome, success) = run_capturing_tx(db, contract, 16);
+        assert!(success);
+        let stream = match outcome {
+            CaptureOutcome::Complete { logs: s, .. } => s,
+            other => panic!("expected Complete, got {other:?}"),
+        };
+        assert_eq!(stream.len(), 2, "one native transfer + one real log expected");
+        assert_eq!(stream[0].address, NATIVE_ASSET_ADDRESS, "first log must be native transfer");
+        assert_ne!(stream[1].address, NATIVE_ASSET_ADDRESS, "second log must be the real log");
+
+        let raw: RawRule = serde_json::from_str(LEGACY_VALUE_DENY_RULE).unwrap();
+        let rules = load_rules(1, 1, vec![raw]);
+        assert_eq!(rules.rules.len(), 1, "legacy-value-deny rule must compile cleanly");
+
+        // Fires: the rule's condition is on the transaction-level `value` binding, which is `1`.
+        let firing = FilterHandle::for_test(
+            FilterConfig::default(),
+            rules.clone(),
+            Arc::new(TestClock::new(1_751_000_000)),
+        );
+        let firing_input = ScreenInput {
+            tx_hash: B256::from([0x66; 32]),
+            origin: caller(),
+            tx_to: Some(contract),
+            nonce: 0,
+            value: U256::from(1u64),
+            block_height: 0,
+            logs: &stream,
+            observations: Observations::NOT_CAPTURED,
+        };
+        assert_eq!(firing.screen_tx(&firing_input), Screen::Deny);
+
+        // Negative control: the SAME rules and the SAME captured stream, with only the
+        // transaction-level `value` changed to zero, must NOT fire. This proves the rule matched on
+        // the legacy tx-level binding — not on the event's own `transfer.value` (which is 1 wei in
+        // the captured log and is untouched by this change).
+        let controlled = FilterHandle::for_test(
+            FilterConfig::default(),
+            rules,
+            Arc::new(TestClock::new(1_751_000_000)),
+        );
+        let controlled_input = ScreenInput { value: U256::ZERO, ..firing_input };
+        assert_eq!(
+            controlled.screen_tx(&controlled_input),
+            Screen::Allow,
+            "with tx-level value 0 the legacy rule must not fire, so the Deny above is the \
+             transaction-level `value` binding and not the event's transfer.value"
+        );
+    }
+
+    /// Two real streams of different widths compared under one dual-alias rule (t1 × t2 over the
+    /// SAME Transfer ABI), so the binding count grows quadratically while the rule's own verdict
+    /// stays fixed. The within-budget stream and the over-budget stream are then distinguishable
+    /// controls rather than a single Deny that a rule which denies by itself could also produce.
+    ///
+    /// `dual_alias_budget_handle` admits `max_event_bindings_per_tx` so the same stream can be
+    /// screened either side of the boundary.
+    fn dual_alias_budget_handle(max_event_bindings_per_tx: usize) -> FilterHandle {
+        let raw: RawRule = serde_json::from_str(DUAL_ALIAS_BUDGET_RULE).unwrap();
+        let rules = load_rules(1, 1, vec![raw]);
+        assert_eq!(rules.rules.len(), 1, "dual-alias-budget rule must compile cleanly");
+        FilterHandle::for_test(
+            FilterConfig { max_event_bindings_per_tx, ..Default::default() },
+            rules,
+            Arc::new(TestClock::new(1_751_000_000)),
+        )
+    }
+
+    #[test]
+    fn dual_alias_binding_growth_and_matcher_limit_plus_one_denies_on_real_stream() {
+        let a = Address::from([0xE4; 20]);
+        let b = Address::from([0xE5; 20]);
+        let contract = Address::from([0xE6; 20]);
+
+        // Stream-A: ONE native transfer → t1 × t2 = 1 × 1 = 1 binding.
+        let mut db_a = InMemoryDB::default();
+        db_a.insert_account_info(caller(), account(1_000_000_000, None));
+        let (outcome_a, _) = run_capturing_call_tx_with_value(
+            db_a,
+            caller(),
+            Address::from([0xE7; 20]),
+            U256::from(1u64),
+            16,
+        );
+        let stream_a = match outcome_a {
+            CaptureOutcome::Complete { logs: s, .. } => s,
+            other => panic!("expected Complete for stream-A, got {other:?}"),
+        };
+        assert_eq!(stream_a.len(), 1, "stream-A must carry exactly one native transfer");
+
+        // Stream-B: TWO native transfers → t1 × t2 = 2 × 2 = 4 bindings.
+        let mut db_b = InMemoryDB::default();
+        db_b.insert_account_info(caller(), account(1_000_000_000, None));
+        db_b.insert_account_info(contract, account(1_000, Some(call_value_1_twice(a, b))));
+        let (outcome_b, _) = run_capturing_tx(db_b, contract, 16);
+        let stream_b = match outcome_b {
+            CaptureOutcome::Complete { logs: s, .. } => s,
+            other => panic!("expected Complete for stream-B, got {other:?}"),
+        };
+        assert_eq!(stream_b.len(), 2, "stream-B must carry exactly two native transfers");
+
+        let input_a = ScreenInput {
+            tx_hash: B256::from([0x77; 32]),
+            origin: caller(),
+            tx_to: Some(contract),
+            nonce: 0,
+            value: U256::ZERO,
+            block_height: 0,
+            logs: &stream_a,
+            observations: Observations::NOT_CAPTURED,
+        };
+        let input_b = ScreenInput {
+            tx_hash: B256::from([0x78; 32]),
+            origin: caller(),
+            tx_to: Some(contract),
+            nonce: 0,
+            value: U256::ZERO,
+            block_height: 0,
+            logs: &stream_b,
+            observations: Observations::NOT_CAPTURED,
+        };
+
+        // Within budget: 1 binding, and the rule's condition is false → Allow. This is the
+        // budget-not-exceeded side of the comparison.
+        assert_eq!(
+            dual_alias_budget_handle(3).screen_tx(&input_a),
+            Screen::Allow,
+            "stream-A stays within the binding budget and must not be denied"
+        );
+
+        // limit-th binding count (4) with budget 3 → the (limit+1)-th binding is refused, so the
+        // rule never even completes and the transaction fails closed with Deny.
+        assert_eq!(
+            dual_alias_budget_handle(3).screen_tx(&input_b),
+            Screen::Deny,
+            "stream-B exceeds the binding budget and must fail closed"
+        );
+
+        // Boundary control: raise the budget to exactly stream-B's binding count. The SAME stream
+        // and the SAME rule now complete and, since the condition is false, Allow — proving the
+        // Deny above came from the binding counter at the boundary, not from the rule's verdict.
+        assert_eq!(
+            dual_alias_budget_handle(4).screen_tx(&input_b),
+            Screen::Allow,
+            "at the exact binding count the same stream is admitted, so the Deny was the budget"
+        );
+
+        // The rule itself still denies when it genuinely matches, so the Allow/Deny split above is
+        // attributable to the budget and not to a rule that can never deny.
+        let deny_raw: RawRule = serde_json::from_str(DUAL_ALIAS_DENY_NATIVE_RULE).unwrap();
+        let deny_rules = load_rules(1, 1, vec![deny_raw]);
+        assert_eq!(deny_rules.rules.len(), 1, "dual-alias-deny rule must compile cleanly");
+        let deny_handle = FilterHandle::for_test(
+            FilterConfig { max_event_bindings_per_tx: 4, ..Default::default() },
+            deny_rules,
+            Arc::new(TestClock::new(1_751_000_000)),
+        );
+        assert_eq!(
+            deny_handle.screen_tx(&input_b),
+            Screen::Deny,
+            "the same two-alias shape denies on its own verdict once the budget admits it"
+        );
+    }
+
+    /// `log.address` in the lower-cased hex form the action payload carries.
+    fn lower_hex(a: Address) -> String {
+        format!("{a:#x}")
+    }
+
+    /// Audit-rule merging on a real captured stream, asserted on the CONTENT that reaches the buffer
+    /// rather than on the screen verdict alone. Three properties are pinned, each with its own
+    /// control:
+    /// - (a) two rules declaring the SAME `audit_type` and matching the SAME physical log collapse
+    ///   to ONE action, keyed by `(audit_type, log_index)`, carrying the decoded `transfer` inputs;
+    /// - (b) a rule declaring a DIFFERENT `audit_type` is retained as its own action — the
+    ///   `audit_type` is the key of the `actions` map, not a field of the action item;
+    /// - (c) an all-null binding (a satisfied audit rule with no physical event behind it) produces
+    ///   NO action at all, proven against the same rule firing when a physical event does back it.
+    #[test]
+    fn audit_type_action_merge_action_content_no_empty_audit_on_real_stream() {
+        let target = Address::from([0xB8; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        let (outcome, success) =
+            run_capturing_call_tx_with_value(db, caller(), target, U256::from(1u64), 16);
+        assert!(success, "top-level value CALL must succeed");
+        let stream = match outcome {
+            CaptureOutcome::Complete { logs: s, .. } => s,
+            other => panic!("expected Complete, got {other:?}"),
+        };
+        assert_eq!(stream.len(), 1, "exactly one native transfer expected");
+        assert_eq!(stream[0].address, NATIVE_ASSET_ADDRESS);
+
+        // ---- (a) + (b): same-type dedup, different-type retention, action content ----------------
+        let raw1: RawRule = serde_json::from_str(AUDIT_NATIVE_RULE).unwrap(); // audit_type "type_a"
+        let raw2: RawRule = serde_json::from_str(AUDIT_NATIVE_RULE_SAME_TYPE).unwrap(); // "type_a"
+        let raw3: RawRule = serde_json::from_str(AUDIT_NATIVE_RULE_2).unwrap(); // audit_type "type_b"
+        let rules = load_rules(1, 1, vec![raw1, raw2, raw3]);
+        assert_eq!(rules.rules.len(), 3, "all three audit rules must compile cleanly");
+        let handle = FilterHandle::for_test(
+            FilterConfig::default(),
+            rules,
+            Arc::new(TestClock::new(1_751_000_000)),
+        );
+        let merged_tx = B256::from([0x88; 32]);
+        let merged_input = ScreenInput {
+            tx_hash: merged_tx,
+            origin: caller(),
+            tx_to: Some(target),
+            nonce: 0,
+            value: U256::ZERO,
+            block_height: 0,
+            logs: &stream,
+            observations: Observations::NOT_CAPTURED,
+        };
+        assert_eq!(
+            handle.screen_tx(&merged_input),
+            Screen::AuditPending,
+            "merged audit rules → AuditPending"
+        );
+        assert_eq!(
+            handle.buffer_status(&merged_tx),
+            Some(BufferStatus::NotSubmitted),
+            "pool entry must be NotSubmitted after first screen"
+        );
+
+        let actions = handle
+            .with_pool(|pool| pool.get(&merged_tx).map(|entry| entry.actions.clone()))
+            .expect("the audited transaction must have a buffered entry");
+        // (b) `audit_type` is the KEY of the actions map, so the two distinct types are two keys.
+        let keys: Vec<&str> = actions.keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["type_a", "type_b"], "audit_type is the actions-map key");
+
+        // (a) Two rules with the same audit_type matching the same log dedup to ONE action.
+        let type_a = actions.get("type_a").expect("type_a must be present");
+        assert_eq!(
+            type_a.len(),
+            1,
+            "same (audit_type, log_index) must collapse to a single action, got {type_a:?}"
+        );
+        let type_b = actions.get("type_b").expect("type_b must be present");
+        assert_eq!(type_b.len(), 1, "the distinct audit_type keeps its own single action");
+
+        // ...and the retained action carries the decoded transfer content, not an empty shell.
+        let item = &type_a[0];
+        assert_eq!(item.name, "transfer", "the action names the rule-local event alias");
+        assert_eq!(
+            item.address,
+            lower_hex(NATIVE_ASSET_ADDRESS),
+            "the action address is the triggering log's address"
+        );
+        let expected_from = lower_hex(caller());
+        let expected_to = lower_hex(target);
+        assert_eq!(item.params.get("from").and_then(|v| v.as_str()), Some(expected_from.as_str()));
+        assert_eq!(item.params.get("to").and_then(|v| v.as_str()), Some(expected_to.as_str()));
+        assert_eq!(item.params.get("value").and_then(|v| v.as_str()), Some("1"));
+
+        // ---- (c) negative control: a satisfied audit rule with NO physical event ---------------
+        // The condition is on the transaction-level `value`, so it holds whether or not the event
+        // matched; what must differ is the presence of a physical log behind the binding.
+        let null_raw: RawRule = serde_json::from_str(AUDIT_NULL_BINDING_RULE).unwrap();
+        let null_rules = load_rules(1, 1, vec![null_raw]);
+        assert_eq!(null_rules.rules.len(), 1, "audit-null-binding rule must compile cleanly");
+        let null_handle = FilterHandle::for_test(
+            FilterConfig::default(),
+            null_rules,
+            Arc::new(TestClock::new(1_751_000_000)),
+        );
+
+        let empty_tx = B256::from([0x89; 32]);
+        let empty_input = ScreenInput {
+            tx_hash: empty_tx,
+            origin: caller(),
+            tx_to: Some(target),
+            nonce: 0,
+            value: U256::ZERO,
+            block_height: 0,
+            logs: &[],
+            observations: Observations::NOT_CAPTURED,
+        };
+        assert_eq!(
+            null_handle.screen_tx(&empty_input),
+            Screen::Allow,
+            "an all-null binding must not produce an Audit action"
+        );
+        assert_eq!(
+            null_handle.buffer_status(&empty_tx),
+            None,
+            "no buffered entry may exist for an all-null binding (no empty Audit submitted)"
+        );
+        assert_eq!(null_handle.buffered_len(), 0, "the buffer must stay empty");
+        assert!(
+            null_handle.with_pool(|pool| pool.get(&empty_tx).is_none()),
+            "no action payload may be stored for an all-null binding"
+        );
+
+        // Positive counterpart on the SAME rule: with the real stream the event binds physically,
+        // so the very same satisfied condition now yields the action. This is what makes the
+        // Allow above evidence about the physical-event guard rather than about the condition.
+        let backed_tx = B256::from([0x8A; 32]);
+        let backed_input = ScreenInput {
+            tx_hash: backed_tx,
+            origin: caller(),
+            tx_to: Some(target),
+            nonce: 0,
+            value: U256::ZERO,
+            block_height: 0,
+            logs: &stream,
+            observations: Observations::NOT_CAPTURED,
+        };
+        assert_eq!(
+            null_handle.screen_tx(&backed_input),
+            Screen::AuditPending,
+            "the same rule must audit once a physical event backs the binding"
+        );
+        let backed_actions = null_handle
+            .with_pool(|pool| pool.get(&backed_tx).map(|entry| entry.actions.clone()))
+            .expect("the backed transaction must have a buffered entry");
+        assert_eq!(
+            backed_actions.get("type_null").map(Vec::len),
+            Some(1),
+            "the backed binding produces exactly one type_null action"
+        );
+    }
+
+    // ── Regression: root CALL value transfer ─────────────────────────────────────────────────────
+
+    fn always_revert_code() -> Vec<u8> {
+        // PUSH1 0 PUSH1 0 REVERT
+        vec![0x60, 0x00, 0x60, 0x00, 0xfd]
+    }
+
+    fn call_with_value_to(value: u8, dst: Address) -> Vec<u8> {
+        let mut code = call_prefix(value, dst);
+        code.extend_from_slice(&[0x5a, 0xf1, 0x00]); // GAS CALL STOP
+        code
+    }
+
+    #[test]
+    fn top_level_call_with_value_emits_transfer() {
+        // A top-level CALL tx with non-zero tx.value fires the call hook at journal depth=0.
+        // The non-zero value must produce exactly one native Transfer event from the caller to
+        // the target contract.
+        let contract = Address::from([0xCC; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(contract, account(0, None));
+
+        let tx = TxLegacy {
+            nonce: 0,
+            gas_limit: 2_000_000,
+            to: TxKind::Call(contract),
+            value: U256::from(3u64),
+            ..Default::default()
+        }
+        .into_signed(Signature::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
+        let op_tx = OpTx::from_recovered_tx(&tx, caller());
+
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        evm.components_mut().1.start_capture();
+        let result = evm.transact(op_tx).expect("tx executes");
+        assert!(result.result.is_success(), "top-level CALL with value should succeed");
+        let outcome = evm.components_mut().1.finish_capture(result.result.logs());
+
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert_eq!(
+                    stream.len(),
+                    1,
+                    "one native transfer expected from top-level call value"
+                );
+                assert_eq!(stream[0].topics()[1], caller().into_word(), "from = caller");
+                assert_eq!(stream[0].topics()[2], contract.into_word(), "to = contract");
+                assert_eq!(stream[0].data.data.as_ref(), &U256::from(3u64).to_be_bytes::<32>());
+            }
+            other => panic!("expected Complete with one transfer, got {other:?}"),
+        }
+    }
+
+    // ── Regression: D7a nonce-overflow endowment revocation (is_ok=true, address=None) ──────────
+
+    #[test]
+    fn create_is_ok_early_return_no_endowment_leak() {
+        // D7a: when a factory account's nonce = u64::MAX the internal CREATE returns
+        // CreateOutcome { address: None, is_ok: true } (revm nonce-overflow path). The
+        // pre-pushed endowment event must be revoked even though is_ok is true.
+        // The top-level CALL endowment (value=5) is the only Transfer that must survive.
+        let factory = Address::from([0xFA; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(
+            factory,
+            AccountInfo {
+                balance: U256::from(1_000u64),
+                nonce: u64::MAX,
+                code: Some(Bytecode::new_raw(Bytes::from(create_endowment_7()))),
+                ..Default::default()
+            },
+        );
+
+        let tx = TxLegacy {
+            nonce: 0,
+            gas_limit: 2_000_000,
+            to: TxKind::Call(factory),
+            value: U256::from(5u64),
+            ..Default::default()
+        }
+        .into_signed(Signature::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
+        let op_tx = OpTx::from_recovered_tx(&tx, caller());
+
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        evm.components_mut().1.start_capture();
+        let result = evm.transact(op_tx).expect("tx executes");
+        let outcome = evm.components_mut().1.finish_capture(result.result.logs());
+
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert_eq!(
+                    stream.len(),
+                    1,
+                    "only the top-level transfer survives; nonce-overflow endowment must be revoked"
+                );
+                assert_eq!(stream[0].topics()[1], caller().into_word(), "from = caller");
+                assert_eq!(stream[0].topics()[2], factory.into_word(), "to = factory");
+                assert_eq!(stream[0].data.data.as_ref(), &U256::from(5u64).to_be_bytes::<32>());
+            }
+            other => panic!("expected Complete with one transfer, got {other:?}"),
+        }
+    }
+
+    // ── Regression: child-frame revert rollback ───────────────────────────────────────────────────
+
+    #[test]
+    fn root_success_child_revert_keeps_root_drops_child() {
+        // Root CALL (value=5) succeeds; the contract makes an internal CALL (value=3) that
+        // reverts. The root Transfer survives; the reverted child Transfer is removed.
+        let contract = Address::from([0xC2; 20]);
+        let revert_target = Address::from([0xED; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(
+            contract,
+            account(1_000, Some(call_with_value_to(0x03, revert_target))),
+        );
+        db.insert_account_info(revert_target, account(0, Some(always_revert_code())));
+
+        let tx = TxLegacy {
+            nonce: 0,
+            gas_limit: 2_000_000,
+            to: TxKind::Call(contract),
+            value: U256::from(5u64),
+            ..Default::default()
+        }
+        .into_signed(Signature::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
+        let op_tx = OpTx::from_recovered_tx(&tx, caller());
+
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        evm.components_mut().1.start_capture();
+        let result = evm.transact(op_tx).expect("tx executes");
+        assert!(result.result.is_success(), "root tx should succeed");
+        let outcome = evm.components_mut().1.finish_capture(result.result.logs());
+
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert_eq!(stream.len(), 1, "only root Transfer survives; child dropped");
+                assert_eq!(stream[0].topics()[1], caller().into_word(), "from = caller");
+                assert_eq!(stream[0].topics()[2], contract.into_word(), "to = contract");
+                assert_eq!(stream[0].data.data.as_ref(), &U256::from(5u64).to_be_bytes::<32>());
+            }
+            other => panic!("expected Complete with one transfer, got {other:?}"),
+        }
+    }
+
+    // ── Regression: root failure drops all transfers ──────────────────────────────────────────────
+
+    #[test]
+    fn whole_tx_root_failure_drops_all() {
+        // Root tx reverts. No Transfer event should survive.
+        let revert_target = Address::from([0xEC; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(revert_target, account(0, Some(always_revert_code())));
+
+        let tx = TxLegacy {
+            nonce: 0,
+            gas_limit: 2_000_000,
+            to: TxKind::Call(revert_target),
+            value: U256::from(5u64),
+            ..Default::default()
+        }
+        .into_signed(Signature::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
+        let op_tx = OpTx::from_recovered_tx(&tx, caller());
+
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        evm.components_mut().1.start_capture();
+        let result = evm.transact(op_tx).expect("tx executes");
+        assert!(!result.result.is_success(), "root tx should revert");
+        let outcome = evm.components_mut().1.finish_capture(result.result.logs());
+
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert!(stream.is_empty(), "root revert must drop all transfers");
+            }
+            other => panic!("expected Complete(empty), got {other:?}"),
+        }
+    }
+
+    // ── Regression: early CREATE failure produces no event or address leak ────────────────────────
+
+    #[test]
+    fn create_early_failure_no_address_or_event_leak() {
+        // A factory issues CREATE with value=7 but has zero balance; the CREATE fails
+        // (insufficient balance). The pre-pushed endowment event must not survive.
+        let factory = Address::from([0xFB; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(factory, account(0, Some(create_endowment_7())));
+
+        let (outcome, success) = run_capturing_tx(db, factory, 16);
+        assert!(success, "top-level zero-value tx should succeed even if inner CREATE fails");
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert!(
+                    stream.is_empty(),
+                    "failed CREATE with zero-value top-level must leave an empty stream"
+                );
+            }
+            other => panic!("expected Complete(empty), got {other:?}"),
+        }
+    }
+
+    // ── Regression: second start_capture resets all inspector state ───────────────────────────────
+
+    #[test]
+    fn next_capture_starts_clean() {
+        // After a completed capture, start_capture on the same inspector starts clean.
+        // Two distinct senders (both nonce=0) share one inspector so neither depends on
+        // the other committing state changes.
+        let sender_a = Address::from([0xA2; 20]);
+        let sender_b = Address::from([0xA3; 20]);
+        let contract = Address::from([0xC3; 20]);
+        let revert_target = Address::from([0xEB; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(sender_a, account(1_000_000_000, None));
+        db.insert_account_info(sender_b, account(1_000_000_000, None));
+        db.insert_account_info(
+            contract,
+            account(1_000, Some(call_with_value_to(0x03, revert_target))),
+        );
+        db.insert_account_info(revert_target, account(0, Some(always_revert_code())));
+
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+
+        // First tx (sender_a): root value=5, internal CALL (value=3) reverts.
+        let tx1 = TxLegacy {
+            nonce: 0,
+            gas_limit: 2_000_000,
+            to: TxKind::Call(contract),
+            value: U256::from(5u64),
+            ..Default::default()
+        }
+        .into_signed(Signature::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
+        evm.components_mut().1.start_capture();
+        let result1 = evm.transact(OpTx::from_recovered_tx(&tx1, sender_a)).expect("tx1");
+        let _outcome1 = evm.components_mut().1.finish_capture(result1.result.logs());
+
+        // Second tx (sender_b): zero value — must produce an independent, empty stream.
+        let tx2 = TxLegacy {
+            nonce: 0,
+            gas_limit: 2_000_000,
+            to: TxKind::Call(contract),
+            value: U256::ZERO,
+            ..Default::default()
+        }
+        .into_signed(Signature::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
+        evm.components_mut().1.start_capture();
+        let result2 = evm.transact(OpTx::from_recovered_tx(&tx2, sender_b)).expect("tx2");
+        let outcome2 = evm.components_mut().1.finish_capture(result2.result.logs());
+
+        match outcome2 {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert!(stream.is_empty(), "second tx (zero value) must produce an empty stream");
+            }
+            other => panic!("expected Complete(empty) for second tx, got {other:?}"),
+        }
+    }
+
+    // ── True nonce-overflow: is_ok=true, address=None (distinct from EIP-684 collision) ──────────
+
+    #[test]
+    fn create_nonce_overflow_is_ok_true_address_none_revoked() {
+        // When a factory's nonce = u64::MAX, a CREATE with endowment returns
+        // is_ok=true, address=None (nonce-overflow, not EIP-684 collision where is_ok=false).
+        // The D7a path revokes the endowment; with a zero-value outer call, the stream is empty.
+        let factory = Address::from([0xF6; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(
+            factory,
+            AccountInfo {
+                balance: U256::from(1_000u64),
+                nonce: u64::MAX,
+                code: Some(Bytecode::new_raw(Bytes::from(create_endowment_7()))),
+                ..Default::default()
+            },
+        );
+
+        let (outcome, success) = run_capturing_tx(db, factory, 16);
+        assert!(success, "outer zero-value call to factory must succeed");
+        // Completion validity is asserted on the REAL `CreateOutcome` the EVM handed `create_end`,
+        // not inferred from the flattened stream: the nonce-overflow completion is
+        // `is_ok() == true` with `address == None`. The sticky observation count is also read at
+        // that same instant — the revocation above must NOT have decremented it, so it still
+        // carries the one phantom CREATE observation.
+        let (is_ok, address_is_none, observed_at_create_end, address) =
+            CREATE_END_OUTCOME.with(|s| s.get());
+        assert!(is_ok, "nonce-overflow CREATE completion is is_ok() == true");
+        assert!(address_is_none, "nonce-overflow CREATE completion carries address == None");
+        assert!(address.is_none(), "the recorded completion address must be None");
+        assert_eq!(
+            observed_at_create_end, 1,
+            "the revoked CREATE observation must stay counted (sticky observed_count)"
+        );
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert!(
+                    stream.is_empty(),
+                    "nonce-overflow CREATE endowment must be revoked; stream must be empty"
+                );
+            }
+            other => panic!("expected Complete(empty) for nonce-overflow CREATE, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create2_nonce_overflow_is_ok_true_address_none_revoked() {
+        // When a factory's nonce = u64::MAX, a CREATE2 with endowment returns
+        // is_ok=true, address=None (nonce-overflow, not EIP-684 collision where is_ok=false).
+        // The D7a path revokes the endowment; with a zero-value outer call, the stream is empty.
+        let factory = Address::from([0xF7; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(
+            factory,
+            AccountInfo {
+                balance: U256::from(1_000u64),
+                nonce: u64::MAX,
+                code: Some(Bytecode::new_raw(Bytes::from(create2_endowment_7()))),
+                ..Default::default()
+            },
+        );
+
+        let (outcome, success) = run_capturing_tx(db, factory, 16);
+        assert!(success, "outer zero-value call to factory must succeed");
+        // Same real-completion assertions as the CREATE case, on the CREATE2 path: `is_ok() == true`
+        // with `address == None` (nonce overflow, NOT the contract-creation collision case, which
+        // reports `is_ok() == false`), and a sticky observation count that survived the revocation.
+        let (is_ok, address_is_none, observed_at_create_end, address) =
+            CREATE_END_OUTCOME.with(|s| s.get());
+        assert!(is_ok, "nonce-overflow CREATE2 completion is is_ok() == true");
+        assert!(address_is_none, "nonce-overflow CREATE2 completion carries address == None");
+        assert!(address.is_none(), "the recorded completion address must be None");
+        assert_eq!(
+            observed_at_create_end, 1,
+            "the revoked CREATE2 observation must stay counted (sticky observed_count)"
+        );
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert!(
+                    stream.is_empty(),
+                    "nonce-overflow CREATE2 endowment must be revoked; stream must be empty"
+                );
+            }
+            other => panic!("expected Complete(empty) for nonce-overflow CREATE2, got {other:?}"),
+        }
+    }
+
+    // ── T1 proof-boundary: inactive gate at create-return ────────────────────────────────────────
+
+    #[test]
+    fn inactive_create_no_mutation_and_no_derivation_at_create_return() {
+        // Inspector is never activated. The `create` hook must push_checkpoint then immediately
+        // gate-return without touching `create_recipients` or running address derivation.
+        // The CREATE_GATE_SNAPSHOT seam records the state at the exact return point so we can
+        // assert cleanliness BEFORE `create_end` fires.
+        reset_create_gate_seams();
+        let deployer = Address::from([0xDA; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(deployer, account(1_000_000_000, None));
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        // Deliberately do NOT call start_capture().
+        evm.transact(create_tx_with_value(deployer, U256::from(5u64))).expect("tx executes");
+        let inspector = evm.components_mut().1;
+        assert!(!inspector.active);
+        assert!(inspector.create_recipients.is_empty());
+        assert!(inspector.checkpoints.is_empty());
+        let (cr_len, cp_len, capture_body_ran, derivation_ran) =
+            CREATE_GATE_SNAPSHOT.with(|s| s.get());
+        assert_eq!(cr_len, 0, "create_recipients must be untouched at create hook return");
+        assert_eq!(cp_len, 0, "checkpoints must be untouched at create hook return");
+        assert!(!capture_body_ran, "the capture body must not run while inactive");
+        assert!(!derivation_ran, "address derivation must not run while inactive");
+    }
+
+    // ── CREATE address derivation: a computed value, distinguishable from "never ran" ────────────
+
+    #[test]
+    fn derivation_ran_true_when_journal_read_for_address_derivation() {
+        // An armed inspector running a real CREATE-scheme deployment with a non-zero endowment: the
+        // `create` hook must report that the created-address derivation actually ran — i.e. that the
+        // journal read supplying the deployer nonce executed. The assertion is on the value the hook
+        // COMPUTED, so replacing the computation with a literal `false` fails this test.
+        reset_create_gate_seams();
+        let deployer = Address::from([0xDC; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(deployer, account(1_000_000_000, None));
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        evm.components_mut().1.start_capture();
+        let _ =
+            evm.transact(create_tx_with_value(deployer, U256::from(5u64))).expect("tx executes");
+
+        let (_, _, capture_body_ran, derivation_ran) = CREATE_GATE_SNAPSHOT.with(|s| s.get());
+        assert!(capture_body_ran, "the capture body must have run for an armed inspector");
+        assert!(
+            derivation_ran,
+            "the CREATE-scheme created-address derivation reads the caller nonce from the journal; \
+             the hook must report that the derivation ran"
+        );
+    }
+
+    #[test]
+    fn derivation_ran_false_when_create_hook_not_hit() {
+        // The not-hit sentinel: an inspector that was never armed leaves BOTH the capture-body flag
+        // and the derivation flag clear, so `derivation_ran == false` here cannot be confused with
+        // the "ran, but no journal read was needed" state (which reports capture_body_ran == true).
+        reset_create_gate_seams();
+        let deployer = Address::from([0xDD; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(deployer, account(1_000_000_000, None));
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        // Deliberately do NOT call start_capture().
+        let _ =
+            evm.transact(create_tx_with_value(deployer, U256::from(5u64))).expect("tx executes");
+
+        let (_, _, capture_body_ran, derivation_ran) = CREATE_GATE_SNAPSHOT.with(|s| s.get());
+        assert!(!capture_body_ran, "the capture body must not run while inactive");
+        assert!(!derivation_ran, "the not-hit sentinel must report that no derivation ran");
+    }
+
+    // ── distinguish "create hook never invoked" from "invoked while inactive" ──────────────────
+
+    #[test]
+    fn non_create_control_leaves_create_hook_hits_zero() {
+        // A real transaction with NO `CREATE` at any depth (pure `CALL` only) must leave the
+        // create-hook hit counter at zero, which is what makes `derivation_ran == false` in
+        // `derivation_ran_false_when_create_hook_not_hit` a statement about a hook that DID run
+        // (because the create hook was never entered) rather than one that never fired.
+        reset_create_gate_seams();
+        let contract = Address::from([0xC3; 20]);
+        let dst = Address::from([0xD4; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(contract, account(1_000, Some(call_value_1_to(dst))));
+
+        let (outcome, success) = run_capturing_tx(db, contract, 16);
+        assert!(success, "pure-CALL tx must succeed");
+        assert_eq!(
+            CREATE_HOOK_HITS.with(|c| c.get()),
+            0,
+            "a transaction with no CREATE at any depth must never invoke the create hook"
+        );
+        assert!(
+            matches!(outcome, CaptureOutcome::Complete { logs: ref s, .. } if s.len() == 1),
+            "the internal CALL transfer really ran: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn inactive_create_hook_hit_is_nonzero_with_derivation_false() {
+        // The other side of the control above: an UNARMED inspector that really does execute a
+        // CREATE records a hook hit while reporting neither a capture body nor a derivation —
+        // proving `derivation_ran_false_when_create_hook_not_hit`'s `false` comes from a hook that
+        // DID run, not one that never fired.
+        reset_create_gate_seams();
+        let deployer = Address::from([0xD6; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(deployer, account(1_000_000_000, None));
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        // Deliberately do NOT call start_capture().
+        evm.transact(create_tx_with_value(deployer, U256::from(5u64))).expect("tx executes");
+
+        assert!(
+            CREATE_HOOK_HITS.with(|c| c.get()) > 0,
+            "the create hook must have been invoked for a real CREATE, even while unarmed"
+        );
+        let (_, _, capture_body_ran, derivation_ran) = CREATE_GATE_SNAPSHOT.with(|s| s.get());
+        assert!(!capture_body_ran, "the capture body must not run while inactive");
+        assert!(!derivation_ran, "no address derivation runs while inactive");
+    }
+
+    #[test]
+    fn derivation_ran_false_but_capture_body_ran_for_create2() {
+        // The third state, and the reason the sentinel is not a bare bool: CREATE2 derives its
+        // address from salt + init-code hash and reads no journal state, so the capture body runs
+        // while the derivation flag stays clear. A reader can therefore always distinguish
+        // "hook never ran" (both false) from "ran, no journal read needed" (body true, derive false)
+        // from "derived" (both true).
+        reset_create_gate_seams();
+        let factory = Address::from([0xDE; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(factory, account(1_000, Some(create2_endowment_7())));
+
+        let (outcome, success) = run_capturing_tx(db, factory, 16);
+        assert!(success, "CREATE2 endowment tx must succeed");
+        assert!(
+            matches!(outcome, CaptureOutcome::Complete { .. }),
+            "CREATE2 endowment must complete, got {outcome:?}"
+        );
+
+        let (_, _, capture_body_ran, derivation_ran) = CREATE_GATE_SNAPSHOT.with(|s| s.get());
+        assert!(capture_body_ran, "the capture body must have run for an armed inspector");
+        assert!(
+            !derivation_ran,
+            "CREATE2 needs no journal read for the created address, so the derivation flag is clear"
+        );
+        // The hook was genuinely hit, so this `false` can never be misread as
+        // "the hook never ran" — only as "ran, no journal read needed".
+        assert!(
+            CREATE_HOOK_HITS.with(|c| c.get()) > 0,
+            "the create hook must have been invoked for a real CREATE2 endowment"
+        );
+    }
+
+    // ── T1 proof-boundary: create_recipients balanced inside create_end ──────────────────────────
+
+    #[test]
+    fn create_recipients_balanced_before_finish_capture() {
+        // Each `create` hook push must be balanced by `create_end`'s pop, not deferred to
+        // `finish_capture`. The CREATE_END_BALANCE seam captures the lengths immediately after
+        // the last pop inside `create_end` — before the test calls `finish_capture` — so the
+        // assertion is on the boundary that matters: within the EVM frame, not at cleanup.
+        let deployer = Address::from([0xDB; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(deployer, account(1_000_000_000, None));
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        evm.components_mut().1.start_capture();
+        let result =
+            evm.transact(create_tx_with_value(deployer, U256::from(7u64))).expect("tx executes");
+        // Read seam BEFORE finish_capture — proves push/pop balanced in create_end itself.
+        let (cr_len, cp_len) = CREATE_END_BALANCE.with(|s| s.get());
+        assert_eq!(
+            cr_len, 0,
+            "create_recipients must be empty after create_end — push/pop balanced"
+        );
+        assert_eq!(cp_len, 0, "checkpoints must be empty after create_end — push/pop balanced");
+        let logs = result.result.logs();
+        let _outcome = evm.components_mut().1.finish_capture(logs);
+    }
+
+    // ── T1 proof-boundary: abort_capture clears mid-window state ─────────────────────────────────
+
+    #[test]
+    fn abort_capture_mid_window_leaves_state_clean() {
+        // abort_capture must reset all inspector state even when called with entries mid-flight:
+        // a partially-filled queue, an open checkpoint, and an in-progress create_recipients entry.
+        let mut inspector = RcsInspector::new(10);
+        inspector.start_capture();
+        inspector.push_checkpoint();
+        inspector.observe_native_transfer(
+            Address::from([0x01u8; 20]),
+            Address::from([0x02u8; 20]),
+            U256::from(5u64),
+            NativeTransferKind::Call,
+        );
+        inspector.create_recipients.push(Some(Address::from([0x03u8; 20])));
+        inspector.abort_capture();
+        assert!(!inspector.active, "must be inactive after abort");
+        assert!(inspector.queue.is_empty(), "queue must be cleared by abort");
+        assert!(inspector.checkpoints.is_empty(), "checkpoints must be cleared by abort");
+        assert_eq!(inspector.observed_count, 0, "observed_count must be reset by abort");
+        assert!(!inspector.overflowed, "overflow flag must be reset by abort");
+        assert!(
+            inspector.create_recipients.is_empty(),
+            "create_recipients must be cleared by abort"
+        );
+    }
+
+    // ── T1 proof-boundary: two consecutive captures are independent ───────────────────────────────
+
+    #[test]
+    fn two_consecutive_txs_capture_independently() {
+        // State from one capture window must not carry over into the next. tx1 captures one
+        // internal transfer; tx2 hits an empty contract (no code, no value) and must produce an
+        // empty stream — not the leftovers from tx1.
+        let sender1 = Address::from([0xA4; 20]);
+        let sender2 = Address::from([0xA5; 20]);
+        let target = Address::from([0xC4; 20]);
+        let recv = Address::from([0xC5; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(sender1, account(1_000_000_000, None));
+        db.insert_account_info(sender2, account(1_000_000_000, None));
+        db.insert_account_info(target, account(1_000, Some(call_with_value_to(5, recv))));
+        db.insert_account_info(recv, account(0, None));
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        evm.components_mut().1.start_capture();
+        let result1 = evm.transact(call_tx_from(sender1, target)).expect("tx1 executes");
+        let outcome1 = evm.components_mut().1.finish_capture(result1.result.logs());
+        match outcome1 {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert_eq!(stream.len(), 1, "tx1 must produce 1 transfer")
+            }
+            other => panic!("expected Complete with 1 transfer for tx1, got {other:?}"),
+        }
+        evm.components_mut().1.start_capture();
+        let result2 = evm.transact(call_tx_from(sender2, recv)).expect("tx2 executes");
+        let outcome2 = evm.components_mut().1.finish_capture(result2.result.logs());
+        match outcome2 {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert!(stream.is_empty(), "tx2 must produce 0 transfers — no carry-over from tx1")
+            }
+            other => panic!("expected Complete(empty) for tx2, got {other:?}"),
+        }
+    }
+
+    // ── T2 proof-boundary: EIP-7702 origin-is-delegated path ─────────────────────────────────────
+
+    #[test]
+    fn eip7702_origin_itself_delegated_runs_inner_call_and_create() {
+        // EIP-7702 case where the tx origin (signer) IS the delegation authority. The tx target is
+        // also the origin, so the delegated code runs in the origin's context. The delegated code
+        // (delegated_call_and_create) issues CALL(1 wei) + CREATE(1 wei), both attributed to the
+        // origin. Two synthetic logs must be captured with from==origin on both.
+        //
+        // Hardfork basis: OpSpecId::JOVIAN maps through op-revm to SpecId::PRAGUE, enabling
+        // EIP-7702 authority-tuple resolution.
+        let delegate_impl = Address::from([0xE3; 20]);
+        let call_recipient = Address::from([0xE4; 20]);
+        // When origin == authority == tx sender, the EVM increments the sender's nonce from 0
+        // to 1 before processing the authorization list. auth.nonce must therefore be 1 so that
+        // the nonce check inside authorization processing succeeds (auth.nonce == 1 == origin.nonce
+        // after increment). With nonce 0, the check would fail (0 != 1) and no delegation code
+        // would be installed, causing the call to origin to be a no-op.
+        let auth = Authorization { chain_id: U256::ZERO, address: delegate_impl, nonce: 1 }
+            .into_signed(Signature::test_signature());
+        let origin = auth.recover_authority().expect("deterministic authority from test_signature");
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(origin, account(1_000_000, None));
+        db.insert_account_info(
+            delegate_impl,
+            account(0, Some(delegated_call_and_create(call_recipient))),
+        );
+        db.insert_account_info(call_recipient, account(0, None));
+        let tx = TxEip7702 {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 2_000_000,
+            max_fee_per_gas: 0,
+            max_priority_fee_per_gas: 0,
+            to: origin, // origin calls itself — delegation applies
+            value: U256::ZERO,
+            authorization_list: vec![auth],
+            input: Default::default(),
+            access_list: Default::default(),
+        }
+        .into_signed(Signature::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
+        let op_tx = OpTx::from_recovered_tx(&tx, origin);
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::new(16),
+        );
+        evm.components_mut().1.start_capture();
+        let result = evm.transact(op_tx).expect("tx executes");
+        assert!(result.result.is_success(), "the delegated execution must succeed");
+        // The EXACT deployed address the EVM reported for the inner CREATE, captured from the real
+        // `CreateOutcome` handed to `create_end`. Asserting against this rules out every "any
+        // plausible address" relaxation: a fourth address that is not the real one fails here.
+        let (create_is_ok, _, _, deployed_address) = CREATE_END_OUTCOME.with(|s| s.get());
+        assert!(create_is_ok, "the inner CREATE must report a successful completion");
+        let deployed = deployed_address.expect("a successful CREATE reports its deployed address");
+        let outcome = evm.components_mut().1.finish_capture(result.result.logs());
+        match outcome {
+            CaptureOutcome::Complete { logs: stream, .. } => {
+                assert_eq!(
+                    stream.len(),
+                    2,
+                    "origin-delegated code must capture CALL(1) + CREATE(1)"
+                );
+                for log in &stream {
+                    assert_eq!(log.address, NATIVE_ASSET_ADDRESS);
+                    assert_eq!(
+                        log.topics()[1],
+                        origin.into_word(),
+                        "transfer.from must be origin (signer itself carries the delegation)"
+                    );
+                    assert_eq!(
+                        log.data.data.as_ref(),
+                        &U256::from(1u64).to_be_bytes::<32>(),
+                        "each delegated native movement carries exactly 1 wei"
+                    );
+                }
+                // Per-transfer recipients: the CALL log pays the call recipient, and the CREATE log
+                // pays the deployed contract — the exact address, not merely "some other address".
+                assert_eq!(
+                    stream[0].topics()[2],
+                    call_recipient.into_word(),
+                    "CALL transfer.to must be the call recipient"
+                );
+                assert_eq!(
+                    stream[1].topics()[2],
+                    deployed.into_word(),
+                    "CREATE transfer.to must be the exact deployed address"
+                );
+                assert_ne!(
+                    stream[1].topics()[2],
+                    Address::ZERO.into_word(),
+                    "CREATE transfer.to must not be the zero address"
+                );
+                assert_ne!(
+                    stream[1].topics()[2],
+                    origin.into_word(),
+                    "CREATE transfer.to must not be the caller"
+                );
+                assert_ne!(
+                    stream[1].topics()[2],
+                    call_recipient.into_word(),
+                    "CREATE transfer.to must not be the CALL recipient"
+                );
+            }
+            other => panic!("expected Complete with 2 transfers, got {other:?}"),
+        }
+    }
+}
+
+/// Call-frame observation behavior, driven through a real EVM.
+///
+/// These tests pin what distinguishes a proxy's own direct delegatecall from a delegatecall made
+/// inside implementation business logic, that the reported hash is of the code that actually
+/// executed, and that a frame which never executed never becomes an observation.
+#[cfg(test)]
+mod callstack_observation_tests {
+    use super::*;
+    use alloy_consensus::{SignableTransaction, TxEip7702, TxLegacy};
+    use alloy_eips::eip7702::Authorization;
+    use alloy_evm::{Evm, EvmEnv, EvmFactory, FromRecoveredTx};
+    use alloy_op_evm::{OpEvmFactory, OpTx};
+    use alloy_primitives::{Signature, TxKind};
+    use op_revm::OpSpecId;
+    use rcs_filter::callstack::{CallObservation, CallObservationKind};
+    use revm::context::{BlockEnv, CfgEnv};
+    use revm::database::InMemoryDB;
+    use revm::state::{AccountInfo, Bytecode};
+
+    fn caller() -> Address {
+        Address::from([0xAA; 20])
+    }
+
+    fn account(balance: u64, code: Option<Vec<u8>>) -> AccountInfo {
+        AccountInfo {
+            balance: U256::from(balance),
+            code: code.map(|c| Bytecode::new_raw(alloy_primitives::Bytes::from(c))),
+            ..Default::default()
+        }
+    }
+
+    /// The runtime code hash an observation must report for `code`: keccak256 of the bytecode the
+    /// EVM loads, which is also what the account's `code_hash` holds for a non-delegated account.
+    fn code_hash(code: &[u8]) -> B256 {
+        keccak256(code)
+    }
+
+    fn stamp() -> SnapshotStamp {
+        SnapshotStamp {
+            protocol_version: 2,
+            content_version: 42,
+            selector_digest: B256::repeat_byte(0x5e),
+        }
+    }
+
+    fn call_tx(target: Address) -> OpTx {
+        let tx = TxLegacy {
+            nonce: 0,
+            gas_limit: 3_000_000,
+            to: TxKind::Call(target),
+            value: U256::ZERO,
+            ..Default::default()
+        }
+        .into_signed(Signature::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
+        OpTx::from_recovered_tx(&tx, caller())
+    }
+
+    /// Executes one candidate transaction with the given capture selector set and observation
+    /// budget, through the same seam the builder uses.
+    fn run_observing_tx(
+        db: InMemoryDB,
+        target: Address,
+        selectors: &[Address],
+        observation_budget: usize,
+    ) -> (CaptureOutcome, bool) {
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::with_callstack(
+                1_000,
+                observation_budget,
+                CallstackCaptureConfig::new(stamp(), selectors.to_vec()),
+            ),
+        );
+        evm.components_mut().1.start_capture();
+        let result = evm.transact(call_tx(target)).expect("tx executes");
+        let success = result.result.is_success();
+        let outcome = evm.components_mut().1.finish_capture(result.result.logs());
+        (outcome, success)
+    }
+
+    /// Unwraps a completed capture, asserting the stamp travelled with the observations.
+    fn observations(outcome: CaptureOutcome) -> Vec<CallObservation> {
+        match outcome {
+            CaptureOutcome::Complete { observations, .. } => {
+                assert_eq!(observations.stamp, stamp(), "the capture must carry its own stamp");
+                observations.items
+            }
+            other => panic!("expected a completed capture, got {other:?}"),
+        }
+    }
+
+    // ── bytecode builders ────────────────────────────────────────────────────────────────────
+
+    /// `DELEGATECALL(500000, dst, 0, 0, 0, 0); POP; STOP`.
+    fn delegatecall_to(dst: Address) -> Vec<u8> {
+        let mut code = vec![
+            0x60, 0x00, // PUSH1 0  retSize
+            0x60, 0x00, // PUSH1 0  retOffset
+            0x60, 0x00, // PUSH1 0  argsSize
+            0x60, 0x00, // PUSH1 0  argsOffset
+            0x73, // PUSH20 dst
+        ];
+        code.extend_from_slice(dst.as_slice());
+        code.extend_from_slice(&[0x62, 0x07, 0xA1, 0x20, 0xF4, 0x50, 0x00]);
+        code
+    }
+
+    /// `CALLCODE(500000, dst, value=0, 0, 0, 0, 0); POP; STOP`.
+    ///
+    /// `CALLCODE` runs `dst`'s code but keeps the caller as BOTH the target and the executing
+    /// account, so it is not a proxy-implementation relationship.
+    fn callcode_to(dst: Address) -> Vec<u8> {
+        let mut code = vec![
+            0x60, 0x00, // PUSH1 0  retSize
+            0x60, 0x00, // PUSH1 0  retOffset
+            0x60, 0x00, // PUSH1 0  argsSize
+            0x60, 0x00, // PUSH1 0  argsOffset
+            0x60, 0x00, // PUSH1 0  value
+            0x73, // PUSH20 dst
+        ];
+        code.extend_from_slice(dst.as_slice());
+        code.extend_from_slice(&[0x62, 0x07, 0xA1, 0x20, 0xF2, 0x50, 0x00]);
+        code
+    }
+
+    /// `CALL(500000, dst, value=0, 0, 0, 0, 0); POP; STOP`.
+    fn call_to(dst: Address) -> Vec<u8> {
+        let mut code = vec![
+            0x60, 0x00, // PUSH1 0  retSize
+            0x60, 0x00, // PUSH1 0  retOffset
+            0x60, 0x00, // PUSH1 0  argsSize
+            0x60, 0x00, // PUSH1 0  argsOffset
+            0x60, 0x00, // PUSH1 0  value
+            0x73, // PUSH20 dst
+        ];
+        code.extend_from_slice(dst.as_slice());
+        code.extend_from_slice(&[0x62, 0x07, 0xA1, 0x20, 0xF1, 0x50, 0x00]);
+        code
+    }
+
+    /// `CALL` twice to the same destination, then STOP.
+    fn call_twice_to(dst: Address) -> Vec<u8> {
+        let mut code = call_to(dst);
+        code.pop(); // drop the trailing STOP
+        code.extend_from_slice(&call_to(dst));
+        code
+    }
+
+    /// `DELEGATECALL` twice from the same frame, to two destinations, then STOP.
+    fn delegatecall_twice(first: Address, second: Address) -> Vec<u8> {
+        let mut code = delegatecall_to(first);
+        code.pop();
+        code.extend_from_slice(&delegatecall_to(second));
+        code
+    }
+
+    /// `STOP` only.
+    fn stop_only() -> Vec<u8> {
+        vec![0x00]
+    }
+
+    /// `PUSH1 0; PUSH1 0; REVERT` — executes, then reverts the frame.
+    fn revert_after_executing() -> Vec<u8> {
+        vec![0x60, 0x00, 0x60, 0x00, 0xFD]
+    }
+
+    /// Proxy code that upgrades its own implementation pointer, delegatecalls through it, then
+    /// restores the pointer — all in one transaction:
+    /// `SSTORE(0, rogue); DELEGATECALL(SLOAD(0)); SSTORE(0, approved); STOP`.
+    ///
+    /// Pre-state and post-state storage both name `approved`, so any value derived from storage
+    /// rather than from execution would report the wrong implementation.
+    fn upgrade_execute_rollback(rogue: Address, approved: Address) -> Vec<u8> {
+        let mut code = vec![0x73];
+        code.extend_from_slice(rogue.as_slice());
+        code.extend_from_slice(&[0x60, 0x00, 0x55]); // PUSH1 0; SSTORE
+        code.extend_from_slice(&[
+            0x60, 0x00, // PUSH1 0  retSize
+            0x60, 0x00, // PUSH1 0  retOffset
+            0x60, 0x00, // PUSH1 0  argsSize
+            0x60, 0x00, // PUSH1 0  argsOffset
+            0x60, 0x00, 0x54, // PUSH1 0; SLOAD -> implementation address
+            0x62, 0x07, 0xA1, 0x20, // PUSH3 500000 gas
+            0xF4, // DELEGATECALL
+            0x50, // POP
+        ]);
+        code.push(0x73);
+        code.extend_from_slice(approved.as_slice());
+        code.extend_from_slice(&[0x60, 0x00, 0x55, 0x00]); // PUSH1 0; SSTORE; STOP
+        code
+    }
+
+    /// `CREATE(0, 0, 0)` with empty init code, twice, then STOP. Used to check that create frames
+    /// keep the frame stack balanced without producing observations.
+    fn create_twice() -> Vec<u8> {
+        let mut code = Vec::new();
+        for _ in 0..2 {
+            code.extend_from_slice(&[0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0xF0, 0x50]);
+        }
+        code.push(0x00);
+        code
+    }
+
+    // ── no selector / not armed: the callstack path must be fully inert ───────────────────────
+
+    /// Executes one candidate like [`run_observing_tx`], but WITHOUT arming capture — the exact
+    /// state the inspector is in during the gasless pre-check and any other non-candidate
+    /// simulation. Returns the open-frame count observed after execution, read before any
+    /// lifecycle call could have cleared it.
+    fn run_unarmed_tx(db: InMemoryDB, target: Address, selectors: &[Address]) -> usize {
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::with_callstack(
+                1_000,
+                16,
+                CallstackCaptureConfig::new(stamp(), selectors.to_vec()),
+            ),
+        );
+        let result = evm.transact(call_tx(target)).expect("tx executes");
+        assert!(result.result.is_success(), "the unarmed control transaction still executes");
+        evm.components_mut().1.open_frame_count()
+    }
+
+    /// Proxy → DELEGATECALL → implementation, with the proxy selected: the positive control for the
+    /// two tests below. Exactly the two frames whose hash is actually reported get hashed.
+    #[test]
+    fn a_selected_proxy_hashes_exactly_the_two_frames_it_reports() {
+        reset_callstack_hash_counter();
+        let proxy = Address::from([0xD1; 20]);
+        let implementation = Address::from([0xD2; 20]);
+        let proxy_code = delegatecall_to(implementation);
+        let impl_code = stop_only();
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(proxy, account(0, Some(proxy_code.clone())));
+        db.insert_account_info(implementation, account(0, Some(impl_code.clone())));
+
+        let (outcome, success) = run_observing_tx(db, proxy, &[proxy], 16);
+        assert!(success);
+        assert_eq!(
+            observations(outcome),
+            vec![
+                CallObservation::call(proxy, code_hash(&proxy_code)),
+                CallObservation::direct_delegatecall(
+                    proxy,
+                    code_hash(&proxy_code),
+                    implementation,
+                    code_hash(&impl_code),
+                ),
+            ]
+        );
+        assert_eq!(
+            callstack_hash_computations(),
+            2,
+            "exactly the proxy frame and its direct delegatecall are hashed"
+        );
+    }
+
+    /// An unselected frame is never hashed, even when it executes and even when a selected frame
+    /// runs inside it.
+    ///
+    /// helper → CALL → selected: two frames execute, one of them is an execution identity some
+    /// selector asked about, so exactly one hash is computed. A hook that hashed every frame it
+    /// initialized would report 2 here.
+    #[test]
+    fn only_the_frames_whose_identity_is_reported_are_hashed() {
+        reset_callstack_hash_counter();
+        let helper = Address::from([0xD3; 20]);
+        let selected = Address::from([0xD4; 20]);
+        let selected_code = stop_only();
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(helper, account(0, Some(call_to(selected))));
+        db.insert_account_info(selected, account(0, Some(selected_code.clone())));
+
+        let (outcome, success) = run_observing_tx(db, helper, &[selected], 16);
+        assert!(success);
+        assert_eq!(
+            observations(outcome),
+            vec![CallObservation::call(selected, code_hash(&selected_code))],
+            "the selected address is still observed through the helper"
+        );
+        assert_eq!(
+            callstack_hash_computations(),
+            1,
+            "the unselected helper frame executed but was never hashed"
+        );
+    }
+
+    /// An empty selector set must cost nothing: no bytecode hash and no frame-state work, for a
+    /// transaction whose frames would otherwise all qualify.
+    ///
+    /// This is the shape every deployment without a callstack rule runs in, so "inert" has to mean
+    /// genuinely no work rather than merely no observation.
+    #[test]
+    fn an_empty_selector_set_computes_no_hash_and_tracks_no_frame() {
+        reset_callstack_hash_counter();
+        let proxy = Address::from([0xD5; 20]);
+        let implementation = Address::from([0xD6; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(proxy, account(0, Some(delegatecall_to(implementation))));
+        db.insert_account_info(implementation, account(0, Some(stop_only())));
+
+        let (outcome, success) = run_observing_tx(db, proxy, &[], 16);
+        assert!(success);
+        assert!(observations(outcome).is_empty());
+        assert_eq!(
+            callstack_hash_computations(),
+            0,
+            "an empty selector set must not hash any frame's bytecode"
+        );
+    }
+
+    /// The same inertness, asserted on frame state rather than on hashing: with an empty selector
+    /// set no [`FrameRecord`] is pushed at all, and the window still closes as `Complete` — an
+    /// `enter_frame` that pushed while `exit_frame` did not pop (or the reverse) would surface
+    /// `FrameStackUnbalanced` instead.
+    #[test]
+    fn an_empty_selector_set_pushes_no_frame_record() {
+        let any = Address::from([0xD7; 20]);
+        let mut inspector =
+            RcsInspector::with_callstack(1_000, 16, CallstackCaptureConfig::default());
+        inspector.start_capture();
+        inspector.enter_frame(any, any, Some(CallScheme::Call));
+        assert_eq!(
+            inspector.open_frame_count(),
+            0,
+            "no frame is tracked for an inert selector set"
+        );
+        inspector.exit_frame();
+        assert_eq!(inspector.open_frame_count(), 0);
+        match inspector.finish_capture(&[]) {
+            CaptureOutcome::Complete { observations, .. } => assert!(observations.items.is_empty()),
+            other => panic!("an inert window must close cleanly, got {other:?}"),
+        }
+    }
+
+    /// An inspector that was never armed does no callstack work either — the state the gasless
+    /// pre-check and every other non-candidate simulation run in. The selector set is deliberately
+    /// NON-empty here, so only the `active` gate can be what suppresses the work.
+    #[test]
+    fn an_unarmed_inspector_computes_no_hash_and_tracks_no_frame() {
+        reset_callstack_hash_counter();
+        let proxy = Address::from([0xD8; 20]);
+        let implementation = Address::from([0xD9; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(proxy, account(0, Some(delegatecall_to(implementation))));
+        db.insert_account_info(implementation, account(0, Some(stop_only())));
+
+        let open_frames = run_unarmed_tx(db, proxy, &[proxy]);
+        assert_eq!(open_frames, 0, "an unarmed inspector tracks no frame");
+        assert_eq!(
+            callstack_hash_computations(),
+            0,
+            "an unarmed inspector must not hash any frame's bytecode"
+        );
+    }
+
+    // ── direct call vs. direct delegatecall ──────────────────────────────────────────────────
+
+    #[test]
+    fn a_selected_address_running_its_own_code_is_a_call_observation() {
+        let selected = Address::from([0xC1; 20]);
+        let code = stop_only();
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(selected, account(0, Some(code.clone())));
+
+        let (outcome, success) = run_observing_tx(db, selected, &[selected], 16);
+        assert!(success);
+        let items = observations(outcome);
+        assert_eq!(items, vec![CallObservation::call(selected, code_hash(&code))]);
+    }
+
+    #[test]
+    fn an_unselected_address_produces_no_observation() {
+        let other = Address::from([0xC2; 20]);
+        let selected = Address::from([0xC1; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(other, account(0, Some(stop_only())));
+
+        // Capture ran and genuinely saw nothing for the selector: an empty available set.
+        let (outcome, success) = run_observing_tx(db, other, &[selected], 16);
+        assert!(success);
+        assert!(observations(outcome).is_empty());
+    }
+
+    #[test]
+    fn an_inert_selector_set_observes_nothing() {
+        let target = Address::from([0xC3; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(target, account(0, Some(stop_only())));
+
+        let (outcome, success) = run_observing_tx(db, target, &[], 16);
+        assert!(success);
+        assert!(observations(outcome).is_empty());
+    }
+
+    #[test]
+    fn a_selected_proxy_reports_its_own_code_and_its_direct_delegatecall() {
+        // A standard proxy invocation legitimately yields BOTH observations.
+        let proxy = Address::from([0xB1; 20]);
+        let implementation = Address::from([0xB2; 20]);
+        let proxy_code = delegatecall_to(implementation);
+        let impl_code = stop_only();
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(proxy, account(0, Some(proxy_code.clone())));
+        db.insert_account_info(implementation, account(0, Some(impl_code.clone())));
+
+        let (outcome, success) = run_observing_tx(db, proxy, &[proxy], 16);
+        assert!(success);
+        let items = observations(outcome);
+        assert_eq!(
+            items,
+            vec![
+                CallObservation::call(proxy, code_hash(&proxy_code)),
+                CallObservation::direct_delegatecall(
+                    proxy,
+                    code_hash(&proxy_code),
+                    implementation,
+                    code_hash(&impl_code),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_implementation_internal_delegatecall_is_not_the_proxys_direct_delegatecall() {
+        // proxy -> DELEGATECALL -> relay -> DELEGATECALL -> library.
+        //
+        // Both inner frames keep `proxy` as their execution identity, so a predicate based on the
+        // frame's own target would report `library` as the proxy's implementation. Exactly one
+        // direct delegatecall exists, and its implementation is `relay`: the second hop is made
+        // by implementation business logic, which is explicitly out of scope.
+        let proxy = Address::from([0xB1; 20]);
+        let relay = Address::from([0xB2; 20]);
+        let library = Address::from([0xB3; 20]);
+        let proxy_code = delegatecall_to(relay);
+        let relay_code = delegatecall_to(library);
+        let library_code = stop_only();
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(proxy, account(0, Some(proxy_code.clone())));
+        db.insert_account_info(relay, account(0, Some(relay_code.clone())));
+        db.insert_account_info(library, account(0, Some(library_code)));
+
+        let (outcome, success) = run_observing_tx(db, proxy, &[proxy], 16);
+        assert!(success);
+        let items = observations(outcome);
+        let delegate: Vec<&CallObservation> =
+            items.iter().filter(|o| o.kind == CallObservationKind::DirectDelegatecall).collect();
+        assert_eq!(delegate.len(), 1, "exactly one direct delegatecall: {items:?}");
+        assert_eq!(delegate[0].impl_address, Some(relay));
+        assert_eq!(delegate[0].impl_code_hash, Some(code_hash(&relay_code)));
+        // `library` must appear nowhere.
+        assert!(
+            !items.iter().any(|o| o.impl_address == Some(library)),
+            "an implementation-internal delegatecall must not be reported: {items:?}"
+        );
+    }
+
+    #[test]
+    fn an_indirect_call_through_a_helper_still_observes_the_selected_address() {
+        let helper = Address::from([0xD1; 20]);
+        let selected = Address::from([0xD2; 20]);
+        let selected_code = stop_only();
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(helper, account(0, Some(call_to(selected))));
+        db.insert_account_info(selected, account(0, Some(selected_code.clone())));
+
+        let (outcome, success) = run_observing_tx(db, helper, &[selected], 16);
+        assert!(success);
+        assert_eq!(
+            observations(outcome),
+            vec![CallObservation::call(selected, code_hash(&selected_code))]
+        );
+    }
+
+    #[test]
+    fn repeated_calls_to_the_same_address_are_independent_observations() {
+        let helper = Address::from([0xD1; 20]);
+        let selected = Address::from([0xD2; 20]);
+        let selected_code = stop_only();
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(helper, account(0, Some(call_twice_to(selected))));
+        db.insert_account_info(selected, account(0, Some(selected_code.clone())));
+
+        let (outcome, success) = run_observing_tx(db, helper, &[selected], 16);
+        assert!(success);
+        let items = observations(outcome);
+        assert_eq!(items.len(), 2, "each frame is its own observation: {items:?}");
+        assert!(items
+            .iter()
+            .all(|o| *o == CallObservation::call(selected, code_hash(&selected_code))));
+    }
+
+    #[test]
+    fn two_direct_delegatecalls_from_one_frame_each_emit_an_observation() {
+        let proxy = Address::from([0xB1; 20]);
+        let first = Address::from([0xB2; 20]);
+        let second = Address::from([0xB3; 20]);
+        let proxy_code = delegatecall_twice(first, second);
+        let first_code = stop_only();
+        let second_code = revert_after_executing();
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(proxy, account(0, Some(proxy_code.clone())));
+        db.insert_account_info(first, account(0, Some(first_code.clone())));
+        db.insert_account_info(second, account(0, Some(second_code.clone())));
+
+        let (outcome, _) = run_observing_tx(db, proxy, &[proxy], 16);
+        let items = observations(outcome);
+        let impls: Vec<Option<Address>> = items
+            .iter()
+            .filter(|o| o.kind == CallObservationKind::DirectDelegatecall)
+            .map(|o| o.impl_address)
+            .collect();
+        assert_eq!(impls, vec![Some(first), Some(second)], "both hops observed: {items:?}");
+    }
+
+    #[test]
+    fn callcode_is_not_a_direct_delegatecall() {
+        // `CALLCODE` runs another account's code but leaves the caller as its own target, so it
+        // describes no proxy-implementation relationship and must not be reported as one.
+        let selected = Address::from([0xB1; 20]);
+        let other = Address::from([0xB2; 20]);
+        let selected_code = callcode_to(other);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(selected, account(0, Some(selected_code.clone())));
+        db.insert_account_info(other, account(0, Some(stop_only())));
+
+        let (outcome, success) = run_observing_tx(db, selected, &[selected], 16);
+        assert!(success);
+        let items = observations(outcome);
+        assert!(
+            items.iter().all(|o| o.kind == CallObservationKind::Call),
+            "CALLCODE must not produce a direct_delegatecall: {items:?}"
+        );
+        assert!(items.iter().all(|o| o.impl_address.is_none()));
+    }
+
+    // ── the hash must be of the code that actually executed ──────────────────────────────────
+
+    #[test]
+    fn an_upgrade_executed_and_rolled_back_in_one_transaction_reports_what_ran() {
+        // The proxy points at `approved` before and after the transaction, but delegatecalls
+        // through `rogue` in between. Reading the pointer from storage — before or after — would
+        // report `approved`; only the execution-time observation reports what really ran.
+        let proxy = Address::from([0xB1; 20]);
+        let rogue = Address::from([0xEE; 20]);
+        let approved = Address::from([0xB3; 20]);
+        let proxy_code = upgrade_execute_rollback(rogue, approved);
+        let rogue_code = vec![0x60, 0x01, 0x50, 0x00]; // PUSH1 1; POP; STOP — distinct bytecode
+        let approved_code = stop_only();
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(proxy, account(0, Some(proxy_code.clone())));
+        db.insert_account_info(rogue, account(0, Some(rogue_code.clone())));
+        db.insert_account_info(approved, account(0, Some(approved_code.clone())));
+
+        let (outcome, success) = run_observing_tx(db, proxy, &[proxy], 16);
+        assert!(success, "the upgrade/execute/rollback transaction itself succeeds");
+        let items = observations(outcome);
+        let delegate: Vec<&CallObservation> =
+            items.iter().filter(|o| o.kind == CallObservationKind::DirectDelegatecall).collect();
+        assert_eq!(delegate.len(), 1, "{items:?}");
+        assert_eq!(
+            delegate[0].impl_address,
+            Some(rogue),
+            "the executed implementation, not the pointer"
+        );
+        assert_eq!(delegate[0].impl_code_hash, Some(code_hash(&rogue_code)));
+        assert_ne!(
+            delegate[0].impl_code_hash,
+            Some(code_hash(&approved_code)),
+            "the restored pointer's code must not be what is reported"
+        );
+    }
+
+    #[test]
+    fn an_executed_then_reverted_frame_remains_observable() {
+        // A revert undoes effects, not the fact that the code ran. A malicious call that executed
+        // and was then reverted is exactly what a risk rule needs to still see.
+        let helper = Address::from([0xD1; 20]);
+        let selected = Address::from([0xD2; 20]);
+        let selected_code = revert_after_executing();
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(helper, account(0, Some(call_to(selected))));
+        db.insert_account_info(selected, account(0, Some(selected_code.clone())));
+
+        let (outcome, success) = run_observing_tx(db, helper, &[selected], 16);
+        assert!(success, "the helper swallows the inner revert");
+        assert_eq!(
+            observations(outcome),
+            vec![CallObservation::call(selected, code_hash(&selected_code))],
+            "the reverted frame's execution identity survives"
+        );
+    }
+
+    #[test]
+    fn a_frame_that_never_executed_produces_no_observation() {
+        // The `call` hook fires before the frame is initialized, and a call into an account with
+        // no code returns without ever creating an interpreter. Emitting at hook arrival would
+        // have reported this call as if it had run.
+        let helper = Address::from([0xD1; 20]);
+        let empty = Address::from([0xD3; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(helper, account(0, Some(call_to(empty))));
+        db.insert_account_info(empty, account(0, None));
+
+        let (outcome, success) = run_observing_tx(db, helper, &[empty], 16);
+        assert!(success);
+        assert!(
+            observations(outcome).is_empty(),
+            "a call whose frame never executed must not appear as an observation"
+        );
+    }
+
+    #[test]
+    fn a_precompile_frame_produces_no_observation() {
+        // A precompile is answered without an interpreter, so it never reaches the confirmed-
+        // execution point even though its `call` hook fires.
+        let helper = Address::from([0xD1; 20]);
+        let identity_precompile =
+            Address::from([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(helper, account(0, Some(call_to(identity_precompile))));
+
+        let (outcome, success) = run_observing_tx(db, helper, &[identity_precompile], 16);
+        assert!(success);
+        assert!(observations(outcome).is_empty(), "a precompile frame runs no bytecode");
+    }
+
+    #[test]
+    fn eip7702_delegation_is_a_call_observation_with_the_executed_delegate_code() {
+        // Under EIP-7702 the account's own `code_hash` names the delegation designator while the
+        // code that runs is the delegate's. The observation must report the delegate's executed
+        // code hash — and must NOT describe this as a direct delegatecall, which would
+        // misrepresent the relationship as a proxy implementation.
+        let delegate = Address::from([0xE1; 20]);
+        let delegate_code = stop_only();
+        let auth = Authorization { chain_id: U256::ZERO, address: delegate, nonce: 0 }
+            .into_signed(Signature::test_signature());
+        let authority = auth.recover_authority().expect("deterministic test authority");
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(authority, account(1_000_000, None));
+        db.insert_account_info(delegate, account(0, Some(delegate_code.clone())));
+        let tx = TxEip7702 {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 2_000_000,
+            max_fee_per_gas: 0,
+            max_priority_fee_per_gas: 0,
+            to: authority,
+            value: U256::ZERO,
+            authorization_list: vec![auth],
+            input: Default::default(),
+            access_list: Default::default(),
+        }
+        .into_signed(Signature::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ));
+        let op_tx = OpTx::from_recovered_tx(&tx, caller());
+        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+            db,
+            EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            ),
+            RcsInspector::with_callstack(
+                1_000,
+                16,
+                CallstackCaptureConfig::new(stamp(), vec![authority]),
+            ),
+        );
+        evm.components_mut().1.start_capture();
+        let result = evm.transact(op_tx).expect("tx executes");
+        assert!(result.result.is_success());
+        let outcome = evm.components_mut().1.finish_capture(result.result.logs());
+        let items = observations(outcome);
+        assert_eq!(
+            items,
+            vec![CallObservation::call(authority, code_hash(&delegate_code))],
+            "a 7702-delegated call is a call observation carrying the delegate's executed hash"
+        );
+        assert!(items[0].impl_address.is_none(), "7702 delegation is not a direct delegatecall");
+        assert!(items[0].impl_code_hash.is_none());
+    }
+
+    // ── budgets and frame-stack invariants ───────────────────────────────────────────────────
+
+    #[test]
+    fn the_observation_budget_accepts_the_limit_th_and_fails_closed_on_the_next() {
+        let helper = Address::from([0xD1; 20]);
+        let selected = Address::from([0xD2; 20]);
+        let build = || {
+            let mut db = InMemoryDB::default();
+            db.insert_account_info(caller(), account(1_000_000_000, None));
+            db.insert_account_info(helper, account(0, Some(call_twice_to(selected))));
+            db.insert_account_info(selected, account(0, Some(stop_only())));
+            db
+        };
+
+        // Two observations with a budget of two: the limit-th is accepted.
+        let (outcome, _) = run_observing_tx(build(), helper, &[selected], 2);
+        assert_eq!(observations(outcome).len(), 2);
+
+        // The (limit+1)-th overflows, and a truncated set must never be screened as complete.
+        let (outcome, success) = run_observing_tx(build(), helper, &[selected], 1);
+        assert!(success, "the EVM keeps executing normally after an observation overflow");
+        match outcome {
+            CaptureOutcome::LimitExceeded { attempted, limit, budget } => {
+                assert_eq!(attempted, 2);
+                assert_eq!(limit, 1);
+                assert_eq!(budget, ObservationBudget::Callstack);
+                assert_eq!(budget.as_str(), "callstack");
+            }
+            other => panic!("expected a callstack budget overflow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_frames_keep_the_frame_stack_balanced_and_emit_no_observation() {
+        // A create frame runs init code, not deployed runtime code, so the only hash available
+        // for it would be creation bytecode. It is tracked purely for frame balance.
+        let factory = Address::from([0xF1; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(caller(), account(1_000_000_000, None));
+        db.insert_account_info(factory, account(1_000, Some(create_twice())));
+
+        let (outcome, success) = run_observing_tx(db, factory, &[factory, factory.create(0)], 16);
+        assert!(success);
+        let items = observations(outcome);
+        // The factory's own top-level frame is a call observation; neither CREATE frame is.
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].address, factory);
+        assert_eq!(items[0].kind, CallObservationKind::Call);
+        assert!(
+            !items.iter().any(|o| o.address == factory.create(0)),
+            "a created address's init-code frame is not an observation: {items:?}"
+        );
+    }
+
+    #[test]
+    fn an_unbalanced_frame_stack_fails_closed() {
+        // Driven directly, because a real EVM always balances its frames. A leftover entry means
+        // parentage cannot be trusted, so the capture must not be reported as complete.
+        let mut inspector = RcsInspector::with_callstack(
+            1_000,
+            16,
+            CallstackCaptureConfig::new(stamp(), vec![Address::repeat_byte(0x11)]),
+        );
+        inspector.start_capture();
+        inspector.enter_frame(
+            Address::repeat_byte(0x11),
+            Address::repeat_byte(0x11),
+            Some(CallScheme::Call),
+        );
+        match inspector.finish_capture(&[]) {
+            CaptureOutcome::InvariantViolation {
+                reason: CaptureInvariantError::FrameStackUnbalanced { remaining },
+            } => assert_eq!(remaining, 1),
+            other => panic!("expected an unbalanced frame stack, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exhausting_the_frame_stack_bound_fails_closed() {
+        let selected = Address::repeat_byte(0x11);
+        let mut inspector = RcsInspector::with_callstack(
+            1_000,
+            usize::MAX,
+            CallstackCaptureConfig::new(stamp(), vec![selected]),
+        );
+        inspector.start_capture();
+        for _ in 0..=MAX_OPEN_FRAMES {
+            inspector.enter_frame(selected, selected, Some(CallScheme::Call));
+        }
+        match inspector.finish_capture(&[]) {
+            CaptureOutcome::InvariantViolation {
+                reason: CaptureInvariantError::FrameStackOverflow { depth },
+            } => assert_eq!(depth, MAX_OPEN_FRAMES),
+            other => panic!("expected a frame-stack overflow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_staged_candidate_is_discarded_when_its_frame_never_executes() {
+        // The stage/commit/discard discipline, exercised directly: entering a frame allocates no
+        // observation, and leaving it without a confirmed execution leaves none behind.
+        let selected = Address::repeat_byte(0x11);
+        let mut inspector = RcsInspector::with_callstack(
+            1_000,
+            16,
+            CallstackCaptureConfig::new(stamp(), vec![selected]),
+        );
+        inspector.start_capture();
+        inspector.enter_frame(selected, selected, Some(CallScheme::Call));
+        assert!(inspector.observations.is_empty(), "staging allocates no observation");
+        assert_eq!(inspector.callstack_observed_count, 0, "staging consumes no budget");
+        inspector.exit_frame();
+        assert!(observations(inspector.finish_capture(&[])).is_empty());
+
+        // Whereas a confirmed execution commits exactly one.
+        inspector.start_capture();
+        inspector.enter_frame(selected, selected, Some(CallScheme::Call));
+        inspector.confirm_frame_execution(B256::repeat_byte(0xaa));
+        inspector.exit_frame();
+        assert_eq!(
+            observations(inspector.finish_capture(&[])),
+            vec![CallObservation::call(selected, B256::repeat_byte(0xaa))]
+        );
+    }
+
+    #[test]
+    fn capture_state_does_not_leak_between_transactions() {
+        let selected = Address::repeat_byte(0x11);
+        let mut inspector = RcsInspector::with_callstack(
+            1_000,
+            1,
+            CallstackCaptureConfig::new(stamp(), vec![selected]),
+        );
+        // First window overflows its observation budget.
+        inspector.start_capture();
+        for _ in 0..2 {
+            inspector.enter_frame(selected, selected, Some(CallScheme::Call));
+            inspector.confirm_frame_execution(B256::repeat_byte(0xaa));
+            inspector.exit_frame();
+        }
+        assert!(matches!(
+            inspector.finish_capture(&[]),
+            CaptureOutcome::LimitExceeded { budget: ObservationBudget::Callstack, .. }
+        ));
+        // The next window starts clean: the sticky overflow and the counter are both reset.
+        inspector.start_capture();
+        inspector.enter_frame(selected, selected, Some(CallScheme::Call));
+        inspector.confirm_frame_execution(B256::repeat_byte(0xbb));
+        inspector.exit_frame();
+        assert_eq!(
+            observations(inspector.finish_capture(&[])),
+            vec![CallObservation::call(selected, B256::repeat_byte(0xbb))]
+        );
+    }
+
+    #[test]
+    fn hooks_are_inert_until_capture_is_armed() {
+        let selected = Address::repeat_byte(0x11);
+        let mut inspector = RcsInspector::with_callstack(
+            1_000,
+            16,
+            CallstackCaptureConfig::new(stamp(), vec![selected]),
+        );
+        // Not armed: a gasless pre-check or any non-candidate simulation must capture nothing.
+        inspector.enter_frame(selected, selected, Some(CallScheme::Call));
+        inspector.confirm_frame_execution(B256::repeat_byte(0xaa));
+        inspector.exit_frame();
+        assert!(inspector.frames.is_empty());
+        assert!(inspector.observations.is_empty());
+        assert_eq!(inspector.callstack_observed_count, 0);
+    }
+
+    #[test]
+    fn aborting_a_capture_clears_the_observation_state() {
+        let selected = Address::repeat_byte(0x11);
+        let mut inspector = RcsInspector::with_callstack(
+            1_000,
+            16,
+            CallstackCaptureConfig::new(stamp(), vec![selected]),
+        );
+        inspector.start_capture();
+        inspector.enter_frame(selected, selected, Some(CallScheme::Call));
+        inspector.confirm_frame_execution(B256::repeat_byte(0xaa));
+        inspector.abort_capture();
+        assert!(inspector.observations.is_empty());
+        assert!(inspector.frames.is_empty());
+        assert_eq!(inspector.callstack_observed_count, 0);
+    }
+}

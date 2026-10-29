@@ -16,11 +16,42 @@ use crate::error::{FilterError, Result};
 const MAX_RESPONSE_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 /// `GET /rules` response. `rules` may be an empty array.
+///
+/// Deserialized through [`RulesResponseWire`] so an unknown key at the response **root** is
+/// rejected too. Adding `#[serde(flatten)]` here alone would not reject anything: this type
+/// never reaches `compile_rule`, so there is no per-rule gate to carry the failure. Instead the
+/// conversion fails, `get_rules()` surfaces it as a decode [`FilterError`], and
+/// `load_and_install` never reaches `install_rules` — last-known-good is retained.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(try_from = "RulesResponseWire")]
 pub struct RulesResponse {
     pub protocol_version: u32,
     pub content_version: u64,
     pub rules: Vec<crate::rules::RawRule>,
+}
+
+/// Wire shape of [`RulesResponse`]: the three real fields plus every key the root does not
+/// declare. `protocol_version` and `content_version` stay **required**, exactly as before.
+#[derive(Debug, Deserialize)]
+struct RulesResponseWire {
+    protocol_version: u32,
+    content_version: u64,
+    rules: Vec<crate::rules::RawRule>,
+    #[serde(flatten)]
+    unknown: crate::rules::UnknownFields,
+}
+
+impl TryFrom<RulesResponseWire> for RulesResponse {
+    type Error = String;
+
+    fn try_from(wire: RulesResponseWire) -> std::result::Result<Self, String> {
+        crate::rules::reject_unknown(crate::rules::RULES_RESPONSE_LOCATION, &wire.unknown)?;
+        Ok(Self {
+            protocol_version: wire.protocol_version,
+            content_version: wire.content_version,
+            rules: wire.rules,
+        })
+    }
 }
 
 /// `GET /rules/version` response — no `rules`.
@@ -308,6 +339,41 @@ mod wire_tests {
         }))
         .is_err());
         assert!(serde_json::from_value::<QueryResponse>(json!({})).is_err());
+    }
+
+    /// an unknown key at the `GET /rules` response **root** rejects the whole response.
+    /// `RulesResponse` never reaches `compile_rule`, so there is no per-rule gate to carry this
+    /// failure: the conversion itself must fail, which surfaces on the existing decode path and
+    /// leaves `install_rules` unreached.
+    #[test]
+    fn unknown_root_level_field_rejects_the_whole_response() {
+        let error = serde_json::from_value::<RulesResponse>(json!({
+            "protocol_version": 1,
+            "content_version": 1,
+            "rules": [],
+            "contentVersion": 2
+        }))
+        .expect_err("an unknown root key must reject the response");
+        assert!(
+            error.to_string().contains("unknown field(s) in rules response: contentVersion"),
+            "{error}"
+        );
+    }
+
+    /// Control: a correct response root still decodes, and the required fields stay
+    /// required (covered for the missing-field direction by
+    /// `required_response_fields_fail_decoding_when_missing` above).
+    #[test]
+    fn correct_response_root_still_decodes() {
+        let response = serde_json::from_value::<RulesResponse>(json!({
+            "protocol_version": 2,
+            "content_version": 9,
+            "rules": []
+        }))
+        .expect("a correct response root must still decode");
+        assert_eq!(response.protocol_version, 2);
+        assert_eq!(response.content_version, 9);
+        assert!(response.rules.is_empty());
     }
 
     #[tokio::test]

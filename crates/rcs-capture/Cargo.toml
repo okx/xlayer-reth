@@ -1,0 +1,45 @@
+[package]
+name = "xlayer-rcs-capture"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+# Deliberately a LEAF crate: screening primitives + revm, and no concrete EVM type. That is what
+# lets both `xlayer-builder` and `xlayer-rpc` depend on it without a cycle, and what keeps
+# `impl RcsCaptureScope for <an EVM>` out of this crate (it would force an `alloy-op-evm`
+# dependency and name one concrete EVM type, which the RPC path's EVM may not be).
+[dependencies]
+rcs-filter.workspace = true
+alloy-primitives.workspace = true
+revm.workspace = true
+
+# Test-only. The moved runtime tests drive the production inspector through a real
+# `alloy_op_evm::OpEvm` built by the same factory the flashblocks path uses, so they need the
+# concrete EVM here — as a DEV dependency only, so the normal dependency graph stays EVM-agnostic.
+[dev-dependencies]
+alloy-consensus.workspace = true
+serde_json.workspace = true
+# Enable `rcs-filter`'s non-default in-process helpers for THIS crate's test targets only, the
+# same way `xlayer-builder` does; the feature is deliberately absent from `[dependencies]`.
+rcs-filter = { workspace = true, features = ["test-utils"] }
+alloy-eips.workspace = true
+alloy-evm.workspace = true
+alloy-op-evm.workspace = true
+op-revm.workspace = true
+
+[features]
+default = []
+
+# Non-default. Exposes this crate's in-process capture seams to a *dependent* crate's test code
+# without compiling them into a production build: a dependency's `cfg(test)` is inactive when this
+# crate is compiled as a dependency, and `pub(crate)` does not cross a crate boundary, so
+# `#[cfg(test)]` alone cannot reach consumers' tests. Downstream crates enable it from
+# `[dev-dependencies]`, so the seams exist for their test targets only — never in a release
+# artifact of this crate or of its consumers.
+test-utils = []
+
+[lints]
+workspace = true

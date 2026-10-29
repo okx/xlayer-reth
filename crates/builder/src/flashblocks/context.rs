@@ -15,13 +15,16 @@ use alloy_eips::eip2718::WithEncoded;
 use alloy_eips::{Encodable2718, Typed2718};
 use alloy_evm::Database;
 use alloy_op_evm::{block::receipt_builder::OpReceiptBuilder, block::OpTxEnv, OpEvm, OpEvmContext};
-use alloy_primitives::{BlockHash, Bytes, Log, B256, U256};
+use alloy_primitives::{Address, BlockHash, Bytes, Log, B256, U256};
 use alloy_rpc_types_eth::Withdrawals;
 use core::fmt::Debug;
 use op_alloy_consensus::{OpDepositReceipt, OpTxType};
 use op_revm::{L1BlockInfo, OpSpecId};
 
+#[cfg(test)]
+use rcs_filter::callstack::{CallObservation, CallObservationKind};
 use rcs_filter::callstack::{Observations, SnapshotStamp};
+use rcs_filter::matching::{MatchErrorKind, MatchOutcome};
 use rcs_filter::rules::RuleSet;
 use rcs_filter::{FilterHandle, LocalDenyReason, PreScreen, Screen, ScreenInput};
 use reth_basic_payload_builder::PayloadConfig;
@@ -54,9 +57,10 @@ use revm::{
 };
 
 use super::rcs_capture::{
-    CallstackCaptureConfig, CaptureInvariantError, CaptureOutcome, ObservationBudget,
-    RcsCaptureControl, RcsInspector,
+    CallstackCaptureConfig, CaptureGuard, CaptureInvariantError, CaptureOutcome, ObservationBudget,
+    RcsCaptureControl, RcsCaptureScope, RcsInspector,
 };
+use crate::metrics::DepositIdentificationMetrics;
 
 /// Container type that holds all necessities to build a new payload.
 #[derive(Debug)]
@@ -114,6 +118,237 @@ pub(super) struct TransactionLimits {
     pub block_gas: u64,
     pub block_da: Option<u64>,
     pub block_da_footprint: Option<u64>,
+}
+
+// Test-only construction-site observable for the deposit path's inspector.
+// Incremented at the exact construction site, so `0` means no inspector was built — which a
+// derived counter could never distinguish from an inspector that observed nothing. Kept as `//`
+// (not `///`) because `thread_local!` is a macro invocation and carries no documentation.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static DEPOSIT_INSPECTOR_CONSTRUCTIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+// Test-only record of the LAST deposit identification this path produced, so a test asserts the
+// real classification directly instead of inferring it from a metric or a log line.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static LAST_DEPOSIT_IDENTIFICATION: std::cell::Cell<Option<DepositIdentification>> =
+        const { std::cell::Cell::new(None) };
+}
+
+// Test-only record of the call-frame observation set each capturing path produced for the LAST
+// transaction it screened. A test comparing two paths needs the observed frames themselves: two
+// verdicts can agree while resting on different observations, so verdict equality alone would not
+// establish equal identification. Kept as `//` (not `///`) because `thread_local!` is a macro
+// invocation and carries no documentation; `#[cfg(test)]` compiles both out of production builds.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static LAST_CANDIDATE_OBSERVATIONS: std::cell::RefCell<Option<Vec<CallObservation>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static LAST_DEPOSIT_OBSERVATIONS: std::cell::RefCell<Option<Vec<CallObservation>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Why a deposit's executed code could not be identified.
+///
+/// A fixed, low-cardinality enum: it is a metric/log label, never a dynamic string, and it never
+/// carries observation content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DepositNotIdentified {
+    /// Capture did not run at all on this execution (an enabled filter seeing `Passthrough`).
+    NotCaptured,
+    /// Capture ran but an invariant failed, so the observation set may be missing frames.
+    Incomplete,
+    /// Capture exceeded its per-transaction call-frame observation budget.
+    BudgetExceeded,
+    /// Observations were captured under a different rule snapshot than the one evaluating them.
+    SnapshotMismatch,
+    /// The match-side complete-binding budget was exceeded, so classification never completed.
+    MatchBudget,
+}
+
+impl DepositNotIdentified {
+    /// Stable lowercase token for bounded diagnostics.
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            DepositNotIdentified::NotCaptured => "not_captured",
+            DepositNotIdentified::Incomplete => "incomplete",
+            DepositNotIdentified::BudgetExceeded => "budget_exceeded",
+            DepositNotIdentified::SnapshotMismatch => "snapshot_mismatch",
+            DepositNotIdentified::MatchBudget => "match_budget",
+        }
+    }
+}
+
+/// What the deposit/sequencer path concluded about one transaction's executed code.
+///
+/// This is an **identification** result, not an enforcement decision. A deposit is
+/// consensus-mandated: every node must include and execute it identically, so "fail closed" here
+/// means *refuse to assert that the code was identified* — never refuse the transaction. The pool
+/// path's `fail_closed_screen` mapping to `Screen::Deny` is deliberately NOT reused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DepositIdentification {
+    /// Identified; no rule objected.
+    Allow,
+    /// Identified; a rule would deny. Reported, never acted on locally.
+    DenyWorthy,
+    /// Identified; a rule asks for adjudication. Reported, never acted on locally.
+    AuditWorthy,
+    /// Not identifiable. Explicit, and never collapsed into `Allow`.
+    NotIdentified(DepositNotIdentified),
+}
+
+impl DepositIdentification {
+    /// Stable lowercase outcome-class token for bounded diagnostics.
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            DepositIdentification::Allow => "allow",
+            DepositIdentification::DenyWorthy => "deny_worthy",
+            DepositIdentification::AuditWorthy => "audit_worthy",
+            DepositIdentification::NotIdentified(_) => "not_identified",
+        }
+    }
+}
+
+/// Everything [`identify_deposit`] needs about one already-executed sequencer transaction.
+///
+/// Grouped rather than passed field by field: the classifier needs the whole identity, and a
+/// struct keeps the call site from drifting out of positional order as the set grows.
+pub(super) struct DepositUnderIdentification<'a> {
+    pub(super) snapshot: &'a RuleSet,
+    pub(super) outcome: &'a CaptureOutcome,
+    pub(super) tx_hash: B256,
+    pub(super) origin: Address,
+    pub(super) tx_to: Option<Address>,
+    pub(super) nonce: u64,
+    pub(super) value: U256,
+    pub(super) block_height: u64,
+    /// The transaction's own RAW execution logs.
+    pub(super) result_logs: &'a [Log],
+    pub(super) max_event_bindings: usize,
+}
+
+/// Classifies one already-executed sequencer transaction's call-frame observations against the
+/// block-pinned snapshot, using the **same** pure classifier (`matching::try_evaluate`) the pool
+/// path and the audit RPC use.
+///
+/// `result_logs` are the transaction's own RAW execution logs. The capture mode on this path is
+/// `CallstackOnly`, so no virtual native-transfer log is produced and no log channel changes —
+/// an event-only rule therefore cannot have its verdict changed by anything this path added.
+pub(super) fn identify_deposit(input: DepositUnderIdentification<'_>) -> DepositIdentification {
+    let DepositUnderIdentification {
+        snapshot,
+        outcome,
+        tx_hash,
+        origin,
+        tx_to,
+        nonce,
+        value,
+        block_height,
+        result_logs,
+        max_event_bindings,
+    } = input;
+    let observations = match outcome {
+        CaptureOutcome::Complete { observations, .. } => {
+            // Capture completed, so the set is authoritative: an empty list genuinely means no
+            // observed frame rather than an absence of capture.
+            Observations::available(observations.stamp, &observations.items)
+        }
+        // Every other outcome is an explicit "cannot identify" — never `Available { items: [] }`.
+        CaptureOutcome::LimitExceeded { budget: ObservationBudget::Callstack, .. } => {
+            return DepositIdentification::NotIdentified(DepositNotIdentified::BudgetExceeded);
+        }
+        // The native budget is not applicable in `CallstackOnly` mode and is never consulted, so
+        // reaching it would itself be a capture-state bug. Treat it as unidentifiable rather than
+        // silently continuing.
+        CaptureOutcome::LimitExceeded { budget: ObservationBudget::NativeTransfer, .. } => {
+            return DepositIdentification::NotIdentified(DepositNotIdentified::Incomplete);
+        }
+        CaptureOutcome::InvariantViolation { .. } => {
+            return DepositIdentification::NotIdentified(DepositNotIdentified::Incomplete);
+        }
+        CaptureOutcome::Passthrough => {
+            return DepositIdentification::NotIdentified(DepositNotIdentified::NotCaptured);
+        }
+    };
+
+    let input = ScreenInput {
+        tx_hash,
+        origin,
+        tx_to,
+        nonce,
+        value,
+        block_height,
+        logs: result_logs,
+        observations,
+    };
+    match rcs_filter::matching::try_evaluate(snapshot, &input, max_event_bindings) {
+        Ok(MatchOutcome::Allow) => DepositIdentification::Allow,
+        Ok(MatchOutcome::Deny) => DepositIdentification::DenyWorthy,
+        Ok(MatchOutcome::Audit { .. }) => DepositIdentification::AuditWorthy,
+        Err(error) => DepositIdentification::NotIdentified(match error.kind() {
+            MatchErrorKind::BindingBudget => DepositNotIdentified::MatchBudget,
+            MatchErrorKind::ObservationsUnavailable => DepositNotIdentified::Incomplete,
+            MatchErrorKind::ObservationSnapshotMismatch => DepositNotIdentified::SnapshotMismatch,
+        }),
+    }
+}
+
+/// Emits the bounded diagnostic and the per-class metric for one deposit identification.
+///
+/// Bounded exactly like `fail_closed_screen`: `tx_hash`, the outcome class, the unavailable
+/// reason when applicable, and the COUNT of selector-bearing rules in the active snapshot. No
+/// transfer list, no `from`/`to`/`value` tuple, no observation queue — and **no rule id**:
+/// `MatchOutcome::Deny` carries none, and `MatchError`'s `Display` does carry one, which is
+/// exactly why the error is reported by `kind()` and never formatted.
+pub(super) fn report_deposit_identification(
+    metrics: &DepositIdentificationMetrics,
+    tx_hash: B256,
+    identification: DepositIdentification,
+    selector_bearing_rules: usize,
+) {
+    match identification {
+        DepositIdentification::Allow => {
+            metrics.allow_total.increment(1);
+        }
+        DepositIdentification::DenyWorthy => {
+            metrics.deny_worthy_total.increment(1);
+            error!(
+                target: "rcs_filter::deposit_identification",
+                %tx_hash,
+                outcome = identification.as_str(),
+                selector_bearing_rules,
+                "deposit executed code matched a deny-worthy rule; reported, inclusion unchanged"
+            );
+        }
+        DepositIdentification::AuditWorthy => {
+            metrics.audit_worthy_total.increment(1);
+            warn!(
+                target: "rcs_filter::deposit_identification",
+                %tx_hash,
+                outcome = identification.as_str(),
+                selector_bearing_rules,
+                "deposit executed code matched an audit-worthy rule; reported, inclusion unchanged"
+            );
+        }
+        DepositIdentification::NotIdentified(reason) => {
+            metrics.not_identified_total.increment(1);
+            error!(
+                target: "rcs_filter::deposit_identification",
+                %tx_hash,
+                outcome = identification.as_str(),
+                reason = reason.as_str(),
+                selector_bearing_rules,
+                "deposit executed code could not be identified; inclusion unchanged"
+            );
+        }
+    }
 }
 
 /// Maps a non-`Complete` [`CaptureOutcome`] to a fail-closed screening decision, emitting a
@@ -236,36 +471,47 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-/// Builder-internal seam letting the panic-safe [`CaptureGuard`] drive the capture lifecycle on the
-/// EVM without knowing the concrete inner inspector type. Implemented for the flashblocks `OpEvm`
-/// (delegating to the composite's inner inspector via `components_mut`) and, in tests, for a
-/// lifecycle-counting double.
-trait RcsCaptureScope {
-    fn scope_configure_callstack_capture(&mut self, config: CallstackCaptureConfig);
-    fn scope_start_capture(&mut self);
-    fn scope_finish_capture(&mut self, result_logs: &[Log]) -> CaptureOutcome;
-    fn scope_abort_capture(&mut self);
+/// The builder's EVM adapter for the shared [`RcsCaptureScope`].
+///
+/// [`RcsCaptureScope`] is owned by `xlayer-rcs-capture` and `OpEvm` by `alloy-op-evm`, so
+/// `impl RcsCaptureScope for OpEvm<..>` cannot be written in either of those crates nor here —
+/// that is an orphan-rule violation. `impl ForeignTrait for LocalType` is permitted, so this
+/// crate wraps the EVM in a type it owns. The borrow goes through the adapter, which keeps the
+/// EVM usable while the guard is armed.
+///
+/// The delegation target is the genuine accessor the capture path has always used,
+/// `components_mut().1` — the composite wrapper's inner inspector. Only the receiver changed
+/// (`self` → `self.0`); no new EVM API is required.
+pub(super) struct BuilderCaptureScope<'e, DB: Database, I>(
+    pub(super) &'e mut OpEvm<DB, I, PrecompilesMap>,
+);
+
+impl<DB: Database, I> BuilderCaptureScope<'_, DB, I> {
+    /// The wrapped EVM, for driving the real `transact` inside the capture window.
+    pub(super) fn evm_mut(&mut self) -> &mut OpEvm<DB, I, PrecompilesMap> {
+        self.0
+    }
 }
 
-impl<DB, I> RcsCaptureScope for OpEvm<DB, I, PrecompilesMap>
+impl<DB, I> RcsCaptureScope for BuilderCaptureScope<'_, DB, I>
 where
     DB: Database,
     I: Inspector<OpEvmContext<DB>> + RcsCaptureControl,
 {
     fn scope_configure_callstack_capture(&mut self, config: CallstackCaptureConfig) {
-        self.components_mut().1.configure_callstack_capture(config);
+        self.0.components_mut().1.configure_callstack_capture(config);
     }
 
     fn scope_start_capture(&mut self) {
-        self.components_mut().1.start_capture();
+        self.0.components_mut().1.start_capture();
     }
 
     fn scope_finish_capture(&mut self, result_logs: &[Log]) -> CaptureOutcome {
-        self.components_mut().1.finish_capture(result_logs)
+        self.0.components_mut().1.finish_capture(result_logs)
     }
 
     fn scope_abort_capture(&mut self) {
-        self.components_mut().1.abort_capture();
+        self.0.components_mut().1.abort_capture();
     }
 }
 
@@ -295,46 +541,6 @@ impl CaptureConfigMemo {
         let config = CallstackCaptureConfig::new(stamp, rules.callstack_selectors().to_vec());
         self.entries.push((stamp, config.clone()));
         config
-    }
-}
-
-/// Panic-safe RAII capture guard (spec §5.2, R9 item 3). Constructing it calls `start_capture` on
-/// the inner inspector; on `Drop` it calls `abort_capture` UNLESS it was explicitly disarmed by a
-/// successful [`CaptureGuard::finish`]. This makes cleanup impossible to forget on any early return
-/// or unwind — a panic caught upstream still aborts exactly once — so correctness does not rest on
-/// caller discipline, and the guard never aborts twice (`finish` disarms before returning; the
-/// `Err`/panic path aborts once via `Drop`).
-struct CaptureGuard<'a, E: RcsCaptureScope> {
-    scope: &'a mut E,
-    armed: bool,
-}
-
-impl<'a, E: RcsCaptureScope> CaptureGuard<'a, E> {
-    /// Arms capture: calls `start_capture` on construction.
-    fn new(scope: &'a mut E) -> Self {
-        scope.scope_start_capture();
-        Self { scope, armed: true }
-    }
-
-    /// The armed scope, for driving the real candidate `evm.transact`.
-    fn scope_mut(&mut self) -> &mut E {
-        self.scope
-    }
-
-    /// Closes the capture window normally and disarms the guard so its `Drop` is a no-op — exactly
-    /// one lifecycle-ending call (this `finish`), never a `finish` followed by a `Drop` abort.
-    fn finish(mut self, result_logs: &[Log]) -> CaptureOutcome {
-        let outcome = self.scope.scope_finish_capture(result_logs);
-        self.armed = false;
-        outcome
-    }
-}
-
-impl<E: RcsCaptureScope> Drop for CaptureGuard<'_, E> {
-    fn drop(&mut self) {
-        if self.armed {
-            self.scope.scope_abort_capture();
-        }
     }
 }
 
@@ -553,10 +759,11 @@ impl FlashblocksBuilderCtx {
         // successful `finish`. Every early return / unwind below therefore leaves the inspector
         // inactive without relying on manual cleanup, and abort runs exactly once (spec §5.2, R9
         // item 3). So every early exit downstream sees an inactive inspector.
-        let mut guard = CaptureGuard::new(evm);
+        let mut scope = BuilderCaptureScope(evm);
+        let mut guard = CaptureGuard::new(&mut scope);
         // On the `Err` path `?` early-returns while the guard is still armed, so its `Drop` runs a
         // single `abort_capture`; on `Ok`, `guard.finish` disarms it (no double-abort).
-        let result = guard.scope_mut().transact(tx_env)?;
+        let result = guard.scope_mut().evm_mut().transact(tx_env)?;
         let capture = guard.finish(result.result.logs());
         Ok((result, is_gasless, capture))
     }
@@ -587,13 +794,83 @@ impl FlashblocksBuilderCtx {
     /// Executes the sequencer-provided txs (`attributes().transactions`) via `transact_maybe_gasless`,
     /// so gasless txs get `is_gasless` set (a plain `evm.transact` would skip them at the base-fee
     /// check). Does NOT apply the per-block gasless gas budget — same reason as `execute_cached_transactions`.
-    pub(super) fn execute_sequencer_transactions(
+    pub(super) fn execute_sequencer_transactions<DB: Database>(
         &self,
-        db: &mut State<impl Database>,
+        db: &mut State<DB>,
     ) -> Result<ExecutionInfo, PayloadBuilderError> {
-        let mut info = ExecutionInfo::with_capacity(self.attributes().transactions.len());
+        // Two typed EVM-construction branches feed one generic body, exactly as
+        // `execute_best_transactions` already does.
+        //
+        // The inspector is attached ONLY when screening is enabled AND the block-pinned snapshot
+        // actually declares call-frame selectors. With nothing to observe this path takes its
+        // pre-existing plain `evm_with_env` branch: "inert" is a branch that skips inspector
+        // construction, not an inspector that happens to be cheap.
+        //
+        // The ordering this relies on is a verified property, not an assumption:
+        // `rcs_rule_snapshot` is populated when the context is constructed, and `build_payload`
+        // only reaches `execute_pre_steps` afterwards, so the snapshot is already pinned here and
+        // this path gets the same block-pinned rules as the candidate loop.
+        match self.deposit_identification_setup() {
+            Some((filter, snapshot)) => {
+                let inspector = RcsInspector::callstack_only(
+                    filter.max_callstack_observations_per_tx(),
+                    CallstackCaptureConfig::new(
+                        snapshot.stamp(),
+                        snapshot.callstack_selectors().to_vec(),
+                    ),
+                );
+                // Construction-site observable: asserted directly, so "no
+                // inspector was built" is evidence rather than an inference from a counter that
+                // could also be zero for an inspector that simply observed nothing.
+                #[cfg(test)]
+                DEPOSIT_INSPECTOR_CONSTRUCTIONS.with(|c| c.set(c.get() + 1));
+                let mut evm = self.evm_config.evm_with_env_and_inspector(
+                    &mut *db,
+                    self.evm_env.clone(),
+                    inspector,
+                );
+                self.run_sequencer_tx_loop(&mut evm, Some((&filter, &snapshot)))
+            }
+            None => {
+                let mut evm = self.evm_config.evm_with_env(&mut *db, self.evm_env.clone());
+                self.run_sequencer_tx_loop(&mut evm, None)
+            }
+        }
+    }
 
-        let mut evm = self.evm_config.evm_with_env(&mut *db, self.evm_env.clone());
+    /// Screening handle plus the block-pinned snapshot, but only when this path has call-frame
+    /// work to do. `None` — screening disabled, no snapshot pinned, or a snapshot declaring no
+    /// selectors — keeps the path on its pre-existing code.
+    fn deposit_identification_setup(&self) -> Option<(Arc<FilterHandle>, Arc<RuleSet>)> {
+        let filter = self.filter.clone()?;
+        let snapshot = self.rcs_rule_snapshot.clone()?;
+        snapshot.has_callstack_rules().then_some((filter, snapshot))
+    }
+
+    /// The sequencer-transaction execution body, generic over the inner inspector so the
+    /// identification-enabled and the inert EVM share ONE implementation.
+    ///
+    /// `identification` is `Some` exactly when an [`RcsInspector`] is attached. Nothing in here
+    /// may change which transactions are included, their order, their gas, their receipts or the
+    /// resulting state: a deposit is consensus-mandated, so the identification result is emitted
+    /// as a metric and a bounded log and nothing else.
+    fn run_sequencer_tx_loop<'db, DB, I>(
+        &self,
+        evm: &mut OpEvm<&'db mut State<DB>, I, PrecompilesMap>,
+        identification: Option<(&FilterHandle, &Arc<RuleSet>)>,
+    ) -> Result<ExecutionInfo, PayloadBuilderError>
+    where
+        DB: Database,
+        I: Inspector<OpEvmContext<&'db mut State<DB>>> + RcsCaptureControl,
+    {
+        let mut info = ExecutionInfo::with_capacity(self.attributes().transactions.len());
+        // The count is a property of the snapshot, so it is derived once rather than per tx.
+        let selector_bearing_rules = identification.map_or(0, |(_, snapshot)| {
+            snapshot.rules.iter().filter(|rule| !rule.callstack.is_empty()).count()
+        });
+        // Built once per block, not per transaction, and only on the identifying branch.
+        let identification_metrics =
+            identification.is_some().then(DepositIdentificationMetrics::default);
 
         for sequencer_tx in &self.attributes().transactions {
             // A sequencer's block should never contain blob transactions.
@@ -629,8 +906,8 @@ impl FlashblocksBuilderCtx {
                     ))
                 })?;
 
-            let (ResultAndState { result, state }, _is_gasless, _capture) =
-                match self.transact_maybe_gasless(&mut evm, &sequencer_tx) {
+            let (ResultAndState { result, state }, _is_gasless, capture_outcome) =
+                match self.transact_maybe_gasless(&mut *evm, &sequencer_tx) {
                     Ok(res) => res,
                     Err(err) => {
                         if err.is_invalid_tx_err() {
@@ -649,6 +926,46 @@ impl FlashblocksBuilderCtx {
                     }
                 };
 
+            // Equal identification: the capture outcome is evaluated here instead of
+            // being discarded. It is deliberately evaluated BEFORE the receipt/commit block and
+            // writes nothing the block depends on — `identify_deposit` is pure and
+            // `report_deposit_identification` only touches a metric and a log — so inclusion,
+            // ordering, gas, receipts and the resulting state are byte-for-byte unchanged.
+            //
+            // The classifier is fed the transaction's own RAW `result.logs()`. Capture runs in
+            // `CallstackOnly` mode, so no virtual native-transfer log exists and no log channel
+            // changed; an event-only rule therefore cannot have its verdict changed by anything
+            // this path added.
+            if let Some((filter, snapshot)) = identification {
+                let identified = identify_deposit(DepositUnderIdentification {
+                    snapshot,
+                    outcome: &capture_outcome,
+                    tx_hash: sequencer_tx.tx_hash(),
+                    origin: sequencer_tx.signer(),
+                    tx_to: sequencer_tx.to(),
+                    nonce: sequencer_tx.nonce(),
+                    value: sequencer_tx.value(),
+                    block_height: self.block_number(),
+                    result_logs: result.logs(),
+                    max_event_bindings: filter.max_event_bindings_per_tx(),
+                });
+                #[cfg(test)]
+                LAST_DEPOSIT_IDENTIFICATION.with(|d| d.set(Some(identified)));
+                #[cfg(test)]
+                if let CaptureOutcome::Complete { observations, .. } = &capture_outcome {
+                    LAST_DEPOSIT_OBSERVATIONS
+                        .with(|o| *o.borrow_mut() = Some(observations.items.clone()));
+                }
+                if let Some(metrics) = identification_metrics.as_ref() {
+                    report_deposit_identification(
+                        metrics,
+                        sequencer_tx.tx_hash(),
+                        identified,
+                        selector_bearing_rules,
+                    );
+                }
+            }
+
             // add gas used by the transaction to cumulative gas used, before creating the receipt
             let gas_used = result.tx_gas_used();
             info.cumulative_gas_used += gas_used;
@@ -661,7 +978,7 @@ impl FlashblocksBuilderCtx {
 
             let ctx = ReceiptBuilderCtx {
                 tx_type: sequencer_tx.tx_type(),
-                evm: &evm,
+                evm: &*evm,
                 result,
                 state: &state,
                 cumulative_gas_used: info.cumulative_gas_used,
@@ -1030,7 +1347,7 @@ impl FlashblocksBuilderCtx {
             if let Some(filter) = self.filter.as_ref() {
                 candidate_snapshot = self.candidate_rule_snapshot(filter, &tx_hash);
                 let config = capture_configs.config_for(candidate_snapshot.as_deref());
-                evm.scope_configure_callstack_capture(config);
+                BuilderCaptureScope(&mut *evm).scope_configure_callstack_capture(config);
             }
 
             let tx_simulation_start_time = Instant::now();
@@ -1150,6 +1467,9 @@ impl FlashblocksBuilderCtx {
                 let decision = if let CaptureOutcome::Complete { logs, observations } =
                     &capture_outcome
                 {
+                    #[cfg(test)]
+                    LAST_CANDIDATE_OBSERVATIONS
+                        .with(|o| *o.borrow_mut() = Some(observations.items.clone()));
                     let input = ScreenInput {
                         tx_hash,
                         origin: tx.signer(),
@@ -1367,7 +1687,7 @@ mod capture_decision_tests {
     /// logged, so a test can assert the level, target, and exact bounded fields of a diagnostic and
     /// prove no content leaks. One helper shared by the capture-diagnostic tests (R9 non-blocking
     /// cleanup: previously each test hand-rolled its own writer).
-    fn capture_tracing<R>(f: impl FnOnce() -> R) -> (R, String) {
+    pub(super) fn capture_tracing<R>(f: impl FnOnce() -> R) -> (R, String) {
         use std::io::Write;
         use std::sync::Mutex;
 
@@ -2849,5 +3169,805 @@ mod block_snapshot_pinning_tests {
         // The stamp travels with the selector set, so an inspector cannot be configured from one
         // snapshot and stamped with another.
         assert_eq!(config.stamp_for_test(), Some(pinned.stamp()));
+    }
+}
+
+/// Path 2 — deposit / sequencer-path call-frame identification.
+///
+/// Every test here drives the REAL `execute_sequencer_transactions` entry point against a real
+/// EVM and a real rule snapshot. The two properties under test pull in opposite directions and
+/// are therefore asserted separately on the same run: the deposit's executed implementation IS
+/// identified and reported, and the produced block is byte-for-byte what the pre-change code
+/// produced.
+#[cfg(test)]
+mod deposit_identification_tests {
+    use super::*;
+    use alloy_consensus::Sealable;
+    use alloy_genesis::Genesis;
+    use alloy_primitives::{keccak256, TxKind};
+    use alloy_rpc_types_engine::PayloadAttributes;
+    use op_alloy_consensus::{OpTxEnvelope, TxDeposit};
+    use op_alloy_rpc_types_engine::OpPayloadAttributes;
+    use rcs_filter::rules::{load_rules, RawRule};
+    use rcs_filter::{FilterConfig, SystemClock};
+    use revm::context::{BlockEnv, CfgEnv};
+    use revm::database::{CacheDB, EmptyDB};
+    use revm::state::{AccountInfo, Bytecode};
+
+    use super::capture_decision_tests::capture_tracing;
+
+    /// The proxy a rule observes. Its own code performs a first-level `DELEGATECALL`.
+    const PROXY: Address = Address::repeat_byte(0xAA);
+    /// The implementation the proxy delegates to in the "approved" fixture.
+    const APPROVED_IMPL: Address = Address::repeat_byte(0xB1);
+    /// The implementation the proxy delegates to in the "unapproved" fixture.
+    const UNAPPROVED_IMPL: Address = Address::repeat_byte(0xB2);
+    /// Depositor.
+    const DEPOSITOR: Address = Address::repeat_byte(0xC1);
+
+    /// `DELEGATECALL(gas, target, 0, 0, 0, 0); STOP` — the proxy's own first-level delegatecall,
+    /// which is exactly the frame shape a `callstack` selector on the proxy observes.
+    fn delegating_proxy_code(target: Address, times: usize) -> Vec<u8> {
+        let mut code = Vec::new();
+        for _ in 0..times {
+            // retSize, retOffset, argsSize, argsOffset (all zero), then PUSH20 target, GAS.
+            code.extend_from_slice(&[0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x73]);
+            code.extend_from_slice(target.as_slice());
+            code.extend_from_slice(&[0x5a, 0xf4, 0x50]); // GAS; DELEGATECALL; POP
+        }
+        code.push(0x00); // STOP
+        code
+    }
+
+    /// Implementation runtime code: a bare `STOP`. Non-empty, so the frame really executes and
+    /// therefore really produces an observation; an empty account would return without ever
+    /// creating an interpreter.
+    fn impl_code(tag: u8) -> Vec<u8> {
+        vec![0x60, tag, 0x50, 0x00] // PUSH1 tag; POP; STOP — distinct code per implementation
+    }
+
+    fn code_hash(code: &[u8]) -> B256 {
+        keccak256(code)
+    }
+
+    /// The normative rule pattern, verbatim in shape: observe by **proxy address
+    /// only**, then deny when the observed implementation code hash is NOT in the approved set.
+    /// The explicit non-null guard is what keeps an ordinary non-delegatecall call to the proxy
+    /// from being denied, because `implCodeHash` is null for a plain call observation.
+    fn proxy_impl_allowlist_rule(approved: &[B256]) -> RawRule {
+        let approved: Vec<String> = approved.iter().map(|h| format!("{h:#x}")).collect();
+        serde_json::from_value(serde_json::json!({
+            "id": "proxy-impl-allowlist",
+            "event_abis": {},
+            "callstack": { "entry": { "address": format!("{PROXY:#x}") } },
+            "condition": { "and": [
+                { "==": [ { "var": "entry.matched" }, true ] },
+                { "!=": [ { "var": "entry.implCodeHash" }, null ] },
+                { "!": { "in": [ { "var": "entry.implCodeHash" }, approved ] } }
+            ] },
+            "action": "deny"
+        }))
+        .expect("the normative sample must deserialize")
+    }
+
+    /// A rule that observes nothing: no `callstack` section at all, so the snapshot declares no
+    /// selectors and this path must stay on its pre-existing code.
+    fn event_only_rule() -> RawRule {
+        serde_json::from_str(rcs_filter::test_support::golden::RULE_SCENARIO_A)
+            .expect("golden fixture")
+    }
+
+    fn filter_with(rules: Vec<RawRule>, config: FilterConfig) -> Arc<FilterHandle> {
+        let protocol_version = if rules.iter().any(|r| !r.callstack.is_empty()) { 2 } else { 1 };
+        let set = load_rules(protocol_version, 1, rules);
+        assert!(set.rejected.is_empty(), "test rules must load clean: {:?}", set.rejected);
+        Arc::new(FilterHandle::for_test(config, set, Arc::new(SystemClock)))
+    }
+
+    /// One unsigned L1→L2 deposit targeting `to`, in the shape the attributes carry.
+    fn deposit_to(to: Address) -> WithEncoded<OpTransactionSigned> {
+        let deposit = TxDeposit {
+            source_hash: B256::repeat_byte(0x33),
+            from: DEPOSITOR,
+            to: TxKind::Call(to),
+            mint: 0,
+            value: U256::ZERO,
+            gas_limit: 1_000_000,
+            is_system_transaction: false,
+            input: Bytes::new(),
+        };
+        let tx = OpTransactionSigned::from(OpTxEnvelope::Deposit(deposit.seal_slow()));
+        let encoded = Bytes::from(tx.encoded_2718());
+        WithEncoded::new(encoded, tx)
+    }
+
+    /// A real `FlashblocksBuilderCtx` carrying `deposits` in its attributes. `filter` is `None`
+    /// for the reference run that reproduces the pre-change code path exactly.
+    fn ctx_with(
+        filter: Option<Arc<FilterHandle>>,
+        deposits: Vec<WithEncoded<OpTransactionSigned>>,
+    ) -> FlashblocksBuilderCtx {
+        let mut genesis: Genesis =
+            serde_json::from_str(include_str!("../tests/framework/artifacts/genesis.json.tmpl"))
+                .expect("valid genesis template JSON");
+        genesis.config.chain_id = 1;
+        genesis.base_fee_per_gas = Some(0u64.into());
+        let chain_spec = Arc::new(OpChainSpec::from_genesis(genesis));
+        let evm_config = OpEvmConfig::optimism(chain_spec.clone());
+        let mut cfg = CfgEnv::new_with_spec(OpSpecId::JOVIAN);
+        cfg.chain_id = 1;
+        let evm_env = EvmEnv::new(cfg, BlockEnv { gas_limit: 30_000_000, ..Default::default() });
+        let payload_id = PayloadId::new([0x42; 8]);
+        let rpc_attrs = OpPayloadAttributes {
+            payload_attributes: PayloadAttributes {
+                timestamp: 1_751_000_002,
+                ..Default::default()
+            },
+            gas_limit: Some(30_000_000),
+            ..Default::default()
+        };
+        let mut attributes =
+            OpPayloadBuilderAttributes::from_rpc_attrs(B256::ZERO, payload_id, rpc_attrs)
+                .expect("attrs decode");
+        attributes.transactions = deposits;
+        let config = PayloadConfig {
+            parent_header: Arc::new(SealedHeader::seal_slow(alloy_consensus::Header::default())),
+            parent_block_info: None,
+            payload_id,
+            attributes,
+        };
+        let block_env_attributes = OpNextBlockEnvAttributes {
+            timestamp: 1_751_000_002,
+            suggested_fee_recipient: Address::ZERO,
+            prev_randao: B256::ZERO,
+            gas_limit: 30_000_000,
+            parent_beacon_block_root: None,
+            extra_data: Bytes::new(),
+        };
+        let rcs_rule_snapshot = filter.as_ref().map(|f| f.rule_snapshot());
+        FlashblocksBuilderCtx {
+            evm_config,
+            da_config: OpDAConfig::default(),
+            gas_limit_config: OpGasLimitConfig::default(),
+            chain_spec,
+            config,
+            evm_env,
+            block_env_attributes,
+            cancel: CancellationToken::new(),
+            builder_signer: None,
+            metrics: Arc::new(BuilderMetrics::default()),
+            max_gas_per_txn: None,
+            bridge_intercept_config: Default::default(),
+            gasless_contract: None,
+            gasless_block_gas_limit: None,
+            filter,
+            rcs_rule_snapshot,
+        }
+    }
+
+    /// The chain state every fixture shares: a funded depositor, the delegating proxy, and both
+    /// implementations.
+    fn seeded_state(proxy_code: Vec<u8>) -> State<CacheDB<EmptyDB>> {
+        let mut cache = CacheDB::new(EmptyDB::default());
+        cache.insert_account_info(
+            DEPOSITOR,
+            AccountInfo { balance: U256::from(10u128.pow(18)), nonce: 0, ..Default::default() },
+        );
+        for (address, code) in [
+            (PROXY, proxy_code),
+            (APPROVED_IMPL, impl_code(0x01)),
+            (UNAPPROVED_IMPL, impl_code(0x02)),
+        ] {
+            cache.insert_account_info(
+                address,
+                AccountInfo {
+                    code: Some(Bytecode::new_raw(Bytes::from(code))),
+                    ..Default::default()
+                },
+            );
+        }
+        State::builder().with_database(cache).with_bundle_update().build()
+    }
+
+    /// Everything about the produced block that consensus depends on.
+    #[derive(Debug, PartialEq, Eq)]
+    struct BlockFacts {
+        /// Included transactions, in order.
+        included: Vec<B256>,
+        cumulative_gas_used: u64,
+        receipts: Vec<OpReceipt>,
+        /// Canonical digest of the merged post-state bundle.
+        ///
+        /// Deliberately the bundle rather than the state root: the state root is a function of
+        /// the post-state, so two runs with equal bundles necessarily produce the same root —
+        /// comparing the bundle is strictly stronger and needs no trie fixture.
+        post_state: B256,
+    }
+
+    /// Runs the real `execute_sequencer_transactions` and takes the consensus-visible facts of
+    /// the produced block.
+    fn run(ctx: &FlashblocksBuilderCtx, state: &mut State<CacheDB<EmptyDB>>) -> BlockFacts {
+        let info = ctx.execute_sequencer_transactions(state).expect("sequencer txs execute");
+        state.merge_transitions(reth_revm::db::states::bundle_state::BundleRetention::Reverts);
+        let bundle = state.take_bundle();
+        let mut accounts: Vec<String> = bundle
+            .state
+            .iter()
+            .map(|(address, account)| {
+                let mut storage: Vec<_> = account
+                    .storage
+                    .iter()
+                    .map(|(slot, value)| (*slot, value.present_value, value.original_value()))
+                    .collect();
+                storage.sort_unstable_by_key(|(slot, _, _)| *slot);
+                format!(
+                    "{address:?}|{:?}|{:?}|{:?}|{storage:?}",
+                    account.original_info, account.info, account.status
+                )
+            })
+            .collect();
+        accounts.sort_unstable();
+        BlockFacts {
+            included: info.executed_transactions.iter().map(|tx| tx.tx_hash()).collect(),
+            cumulative_gas_used: info.cumulative_gas_used,
+            receipts: info.receipts.clone(),
+            post_state: keccak256(accounts.join(";").as_bytes()),
+        }
+    }
+
+    /// Resets the per-thread test seams. `cargo test` reuses threads across tests, so a stale
+    /// value from an earlier test could otherwise make a later assertion pass for a wrong reason.
+    fn reset_seams() {
+        DEPOSIT_INSPECTOR_CONSTRUCTIONS.with(|c| c.set(0));
+        LAST_DEPOSIT_IDENTIFICATION.with(|d| d.set(None));
+    }
+
+    /// a deposit whose execution delegatecalls an UNAPPROVED implementation produces an
+    /// observation carrying the real executed `implCodeHash`, and the shared classifier yields
+    /// the deny-worthy verdict, which is reported.
+    #[test]
+    fn deposit_delegatecalling_unapproved_impl_is_deny_worthy() {
+        reset_seams();
+        let approved = code_hash(&impl_code(0x01));
+        let filter = filter_with(vec![proxy_impl_allowlist_rule(&[approved])], test_config());
+        let ctx = ctx_with(Some(filter), vec![deposit_to(PROXY)]);
+        let mut state = seeded_state(delegating_proxy_code(UNAPPROVED_IMPL, 1));
+
+        let facts = run(&ctx, &mut state);
+
+        assert_eq!(
+            DEPOSIT_INSPECTOR_CONSTRUCTIONS.with(|c| c.get()),
+            1,
+            "a selector-bearing snapshot must attach exactly one inspector"
+        );
+        assert_eq!(
+            LAST_DEPOSIT_IDENTIFICATION.with(|d| d.get()),
+            Some(DepositIdentification::DenyWorthy)
+        );
+        // The deny-worthy outcome changed nothing about inclusion.
+        assert_eq!(facts.included.len(), 1, "the deposit is still included");
+    }
+
+    /// contrast: the same deposit against the APPROVED implementation is identified and
+    /// yields allow, so it is not reported as a violation. Without this the previous test could
+    /// pass for the wrong reason (e.g. everything being denied).
+    #[test]
+    fn deposit_delegatecalling_approved_impl_is_allow() {
+        reset_seams();
+        let approved = code_hash(&impl_code(0x01));
+        let filter = filter_with(vec![proxy_impl_allowlist_rule(&[approved])], test_config());
+        let ctx = ctx_with(Some(filter), vec![deposit_to(PROXY)]);
+        let mut state = seeded_state(delegating_proxy_code(APPROVED_IMPL, 1));
+
+        let facts = run(&ctx, &mut state);
+
+        assert_eq!(DEPOSIT_INSPECTOR_CONSTRUCTIONS.with(|c| c.get()), 1);
+        assert_eq!(
+            LAST_DEPOSIT_IDENTIFICATION.with(|d| d.get()),
+            Some(DepositIdentification::Allow)
+        );
+        assert_eq!(facts.included.len(), 1);
+    }
+
+    /// third direction of the same sample: an ORDINARY (non-delegatecall) call to the observed
+    /// proxy is identified and ALLOWED. The frame is genuinely observed, but a plain call carries
+    /// no implementation, so the implementation code hash binds to null and the explicit non-null
+    /// guard stops the deny branch from being reached. Without this direction the pattern could
+    /// deny every ordinary caller of the proxy and both other directions would still pass.
+    #[test]
+    fn deposit_calling_the_proxy_without_delegatecall_is_allow() {
+        reset_seams();
+        let approved = code_hash(&impl_code(0x01));
+        let filter = filter_with(vec![proxy_impl_allowlist_rule(&[approved])], test_config());
+        let ctx = ctx_with(Some(filter), vec![deposit_to(PROXY)]);
+        // The proxy's own code performs NO delegatecall here: it is a bare `STOP`.
+        let mut state = seeded_state(delegating_proxy_code(UNAPPROVED_IMPL, 0));
+
+        let facts = run(&ctx, &mut state);
+
+        assert_eq!(
+            DEPOSIT_INSPECTOR_CONSTRUCTIONS.with(|c| c.get()),
+            1,
+            "a selector-bearing snapshot still attaches exactly one inspector"
+        );
+        assert_eq!(
+            LAST_DEPOSIT_IDENTIFICATION.with(|d| d.get()),
+            Some(DepositIdentification::Allow),
+            "a plain call to the proxy has no implementation to compare and must not be denied"
+        );
+        // The frame really was observed — a plain call frame with no implementation fields — so
+        // the allow above is "identified and clean", not "nothing was captured".
+        let observed = LAST_DEPOSIT_OBSERVATIONS
+            .with(|o| o.borrow().clone())
+            .expect("capture completed, so the observation set is recorded");
+        assert_eq!(observed.len(), 1, "exactly the proxy frame was observed: {observed:?}");
+        assert_eq!(observed[0].kind, CallObservationKind::Call);
+        assert_eq!(observed[0].address, PROXY);
+        assert!(
+            observed[0].impl_address.is_none() && observed[0].impl_code_hash.is_none(),
+            "a plain call carries no implementation: {observed:?}"
+        );
+        assert_eq!(facts.included.len(), 1, "the deposit is still included");
+    }
+
+    /// The consensus-invariance test. In BOTH the deny-worthy and the allow
+    /// case the block's included transactions, their order, gas used, receipts and resulting
+    /// state root are identical to the reference run with no filter at all, which is exactly the
+    /// pre-change code path (`evm_with_env`, capture outcome discarded).
+    #[test]
+    fn identification_never_changes_the_produced_block() {
+        let approved = code_hash(&impl_code(0x01));
+        for proxy_target in [UNAPPROVED_IMPL, APPROVED_IMPL] {
+            let proxy_code = delegating_proxy_code(proxy_target, 1);
+
+            reset_seams();
+            let reference = {
+                let ctx = ctx_with(None, vec![deposit_to(PROXY)]);
+                let mut state = seeded_state(proxy_code.clone());
+                run(&ctx, &mut state)
+            };
+            assert_eq!(
+                DEPOSIT_INSPECTOR_CONSTRUCTIONS.with(|c| c.get()),
+                0,
+                "the reference run must take the pre-change path"
+            );
+
+            reset_seams();
+            let identified = {
+                let filter =
+                    filter_with(vec![proxy_impl_allowlist_rule(&[approved])], test_config());
+                let ctx = ctx_with(Some(filter), vec![deposit_to(PROXY)]);
+                let mut state = seeded_state(proxy_code.clone());
+                run(&ctx, &mut state)
+            };
+            assert_eq!(DEPOSIT_INSPECTOR_CONSTRUCTIONS.with(|c| c.get()), 1);
+            // The identification actually happened — otherwise equality would be vacuous.
+            assert!(LAST_DEPOSIT_IDENTIFICATION.with(|d| d.get()).is_some());
+
+            assert_eq!(
+                identified, reference,
+                "identification must not change inclusion, order, gas, receipts or state root \
+                 (proxy target {proxy_target:?})"
+            );
+        }
+    }
+
+    /// with no selectors declared, this path constructs NO inspector (asserted at the
+    /// construction site, not derived from a counter) and the produced block is identical to the
+    /// reference run.
+    #[test]
+    fn no_selectors_constructs_no_inspector_and_changes_nothing() {
+        let proxy_code = delegating_proxy_code(UNAPPROVED_IMPL, 1);
+
+        reset_seams();
+        let reference = {
+            let ctx = ctx_with(None, vec![deposit_to(PROXY)]);
+            let mut state = seeded_state(proxy_code.clone());
+            run(&ctx, &mut state)
+        };
+
+        reset_seams();
+        // Screening ENABLED, but the snapshot declares no callstack selectors at all.
+        let filter = filter_with(vec![event_only_rule()], test_config());
+        assert!(!filter.rule_snapshot().has_callstack_rules());
+        let ctx = ctx_with(Some(filter), vec![deposit_to(PROXY)]);
+        let mut state = seeded_state(proxy_code);
+        let inert = run(&ctx, &mut state);
+
+        assert_eq!(
+            DEPOSIT_INSPECTOR_CONSTRUCTIONS.with(|c| c.get()),
+            0,
+            "an inert snapshot must not construct an inspector at all"
+        );
+        assert_eq!(
+            LAST_DEPOSIT_IDENTIFICATION.with(|d| d.get()),
+            None,
+            "an inert snapshot must not run identification"
+        );
+        assert_eq!(inert, reference);
+    }
+
+    /// a capture failure on the deposit path reports an EXPLICIT unavailable reason
+    /// (never `Available { items: [] }`, which would read as "identified, nothing matched"), and
+    /// the produced block is still identical to the reference run.
+    #[test]
+    fn callstack_budget_overflow_is_not_identified_and_block_is_unchanged() {
+        let approved = code_hash(&impl_code(0x01));
+        // Two first-level delegatecalls from the proxy ⇒ two observations, under a budget of 1.
+        let proxy_code = delegating_proxy_code(UNAPPROVED_IMPL, 2);
+
+        reset_seams();
+        let reference = {
+            let ctx = ctx_with(None, vec![deposit_to(PROXY)]);
+            let mut state = seeded_state(proxy_code.clone());
+            run(&ctx, &mut state)
+        };
+
+        reset_seams();
+        let config = FilterConfig { max_callstack_observations_per_tx: 1, ..test_config() };
+        let filter = filter_with(vec![proxy_impl_allowlist_rule(&[approved])], config);
+        let ctx = ctx_with(Some(filter), vec![deposit_to(PROXY)]);
+        let mut state = seeded_state(proxy_code);
+        let overflowed = run(&ctx, &mut state);
+
+        assert_eq!(
+            LAST_DEPOSIT_IDENTIFICATION.with(|d| d.get()),
+            Some(DepositIdentification::NotIdentified(DepositNotIdentified::BudgetExceeded)),
+            "an over-budget capture must be an explicit not-identified, never allow"
+        );
+        assert_eq!(
+            overflowed, reference,
+            "a capture failure must not change inclusion, order, gas, receipts or state root"
+        );
+    }
+
+    /// a deposit is never excluded, deferred or reordered by any rule outcome. Asserted
+    /// across all three outcome classes in ONE batch, so ordering is observable rather than
+    /// implied by a single-element list.
+    #[test]
+    fn no_rule_outcome_ever_excludes_defers_or_reorders_a_deposit() {
+        reset_seams();
+        let approved = code_hash(&impl_code(0x01));
+        let filter = filter_with(vec![proxy_impl_allowlist_rule(&[approved])], test_config());
+        // Three deposits: one to the proxy (deny-worthy), one to the approved impl directly
+        // (no observed proxy frame ⇒ allow), one to the proxy again.
+        let deposits = vec![deposit_to(PROXY), deposit_to(APPROVED_IMPL), deposit_to(PROXY)];
+        let expected: Vec<B256> = deposits.iter().map(|tx| tx.value().tx_hash()).collect();
+        let ctx = ctx_with(Some(filter), deposits);
+        let mut state = seeded_state(delegating_proxy_code(UNAPPROVED_IMPL, 1));
+
+        let facts = run(&ctx, &mut state);
+
+        assert_eq!(
+            facts.included, expected,
+            "every deposit stays included, in its original order, whatever the rule said"
+        );
+    }
+
+    /// the bounded diagnostic emits NO rule id and no transfer/observation contents. The
+    /// rule id matters specifically because `MatchError`'s `Display` does carry one, which is why
+    /// the implementation reports `error.kind()` and never formats the error.
+    #[test]
+    fn bounded_diagnostic_carries_no_rule_id_and_no_content() {
+        reset_seams();
+        let approved = code_hash(&impl_code(0x01));
+        let filter = filter_with(vec![proxy_impl_allowlist_rule(&[approved])], test_config());
+        let ctx = ctx_with(Some(filter), vec![deposit_to(PROXY)]);
+        let mut state = seeded_state(delegating_proxy_code(UNAPPROVED_IMPL, 1));
+
+        let (_facts, out) = capture_tracing(|| run(&ctx, &mut state));
+
+        assert!(out.contains("rcs_filter::deposit_identification"), "expected target: {out}");
+        assert!(out.contains("deny_worthy"), "expected the outcome class: {out}");
+        assert!(out.contains("selector_bearing_rules"), "expected the bounded count: {out}");
+        assert!(
+            !out.contains("proxy-impl-allowlist"),
+            "the diagnostic must never carry a rule id: {out}"
+        );
+        let unapproved_hash = format!("{:#x}", code_hash(&impl_code(0x02)));
+        assert!(
+            !out.contains(&unapproved_hash),
+            "the diagnostic must never carry observation content: {out}"
+        );
+        assert!(
+            !out.to_lowercase().contains(&format!("{UNAPPROVED_IMPL:#x}").to_lowercase()),
+            "the diagnostic must never carry an observed address: {out}"
+        );
+    }
+
+    /// A `FilterConfig` with screening enabled and generous budgets, so a test that is not about
+    /// a budget cannot trip one by accident.
+    fn test_config() -> FilterConfig {
+        FilterConfig { enabled: true, ..FilterConfig::default() }
+    }
+
+    /// Equal identification across the three real execution paths.
+    ///
+    /// Nested inside this module so it reuses the very same fixture builders the single-path
+    /// tests above use — the same proxy, the same two implementations, the same seeded accounts
+    /// and the same rule pattern. A separate copy of those fixtures could drift and would make
+    /// the comparison meaningless.
+    mod cross_path_identification_tests {
+        use super::*;
+        use alloy_consensus::TxEip1559;
+        use alloy_evm::EvmFactory as _;
+        use alloy_op_evm::{OpEvmFactory, OpTx};
+        use op_alloy_consensus::OpTypedTransaction;
+        use reth_optimism_txpool::OpPooledTransaction;
+        use reth_payload_util::PayloadTransactionsFixed;
+        use reth_transaction_pool::test_utils::testing_pool;
+        use revm::database::InMemoryDB;
+        use xlayer_rpc::audit::deposit::{build_deposit_tx, DepositTxRequest};
+        use xlayer_rpc::audit::rpc::test_seams::{
+            audit_capture_inspector, audit_capture_window, observations_from,
+        };
+        use xlayer_rpc::audit::verdict::{verdict_for, ExecutedTx, Verdict};
+        use xlayer_rpc::AuditCaptureConfig;
+
+        /// The per-transaction observation budget every path is given here. Large enough that no
+        /// path can differ from another by tripping a budget.
+        const GENEROUS_BUDGET: usize = 10_000;
+
+        /// The fixture chain state, shared by all three paths: the delegating (or plain) proxy,
+        /// both implementations, a funded depositor and — for the candidate path — a funded
+        /// pool sender.
+        fn fixture_state(
+            extra_funded: Option<Address>,
+            proxy_code: Vec<u8>,
+        ) -> State<CacheDB<EmptyDB>> {
+            let mut cache = CacheDB::new(EmptyDB::default());
+            for address in [DEPOSITOR].into_iter().chain(extra_funded) {
+                cache.insert_account_info(
+                    address,
+                    AccountInfo {
+                        balance: U256::from(10u128.pow(18)),
+                        nonce: 0,
+                        ..Default::default()
+                    },
+                );
+            }
+            for (address, code) in [
+                (PROXY, proxy_code),
+                (APPROVED_IMPL, impl_code(0x01)),
+                (UNAPPROVED_IMPL, impl_code(0x02)),
+            ] {
+                cache.insert_account_info(
+                    address,
+                    AccountInfo {
+                        code: Some(Bytecode::new_raw(Bytes::from(code))),
+                        ..Default::default()
+                    },
+                );
+            }
+            State::builder().with_database(cache).with_bundle_update().build()
+        }
+
+        /// The same accounts in the in-memory database shape the audit path's own EVM is built
+        /// over.
+        fn audit_path_db(proxy_code: Vec<u8>) -> InMemoryDB {
+            let mut db = InMemoryDB::default();
+            db.insert_account_info(
+                DEPOSITOR,
+                AccountInfo { balance: U256::from(10u128.pow(18)), ..Default::default() },
+            );
+            for (address, code) in [
+                (PROXY, proxy_code),
+                (APPROVED_IMPL, impl_code(0x01)),
+                (UNAPPROVED_IMPL, impl_code(0x02)),
+            ] {
+                db.insert_account_info(
+                    address,
+                    AccountInfo {
+                        code: Some(Bytecode::new_raw(Bytes::from(code))),
+                        ..Default::default()
+                    },
+                );
+            }
+            db
+        }
+
+        /// What the candidate simulation loop observed and decided. Driven through the real
+        /// `execute_best_transactions`, not a helper: the EVM, the inspector, the capture window
+        /// and the screening call are all the production ones.
+        fn candidate_path(
+            raw: Vec<RawRule>,
+            proxy_code: Vec<u8>,
+        ) -> (Vec<CallObservation>, Screen) {
+            let filter = filter_with(raw, test_config());
+            let ctx = ctx_with(Some(filter), Vec::new());
+            let signer = crate::tests::funded_signer();
+            let candidate = OpTypedTransaction::Eip1559(TxEip1559 {
+                chain_id: 1,
+                nonce: 0,
+                gas_limit: 1_000_000,
+                max_fee_per_gas: 1_000_000_000,
+                max_priority_fee_per_gas: 0,
+                to: TxKind::Call(PROXY),
+                value: U256::ZERO,
+                ..Default::default()
+            });
+            let recovered = signer.sign_tx(candidate).expect("sign the candidate");
+            let encoded_len = recovered.encode_2718_len();
+            let pooled: OpPooledTransaction = OpPooledTransaction::new(recovered, encoded_len);
+
+            let mut state = fixture_state(Some(signer.address), proxy_code);
+            let pool = testing_pool();
+            let mut best = PayloadTransactionsFixed::new(vec![pooled]);
+            let mut info = ExecutionInfo::with_capacity(1);
+            let limits = TransactionLimits {
+                block_gas: 30_000_000,
+                block_da: None,
+                block_da_footprint: None,
+            };
+
+            LAST_SCREEN_DECISION.with(|d| d.set(None));
+            LAST_CANDIDATE_OBSERVATIONS.with(|o| *o.borrow_mut() = None);
+            ctx.execute_best_transactions(&mut info, &mut state, &mut best, &pool, limits)
+                .expect("the candidate loop runs");
+
+            (
+                LAST_CANDIDATE_OBSERVATIONS
+                    .with(|o| o.borrow().clone())
+                    .expect("the candidate's capture completed, so its observations are recorded"),
+                LAST_SCREEN_DECISION
+                    .with(|d| d.get())
+                    .expect("the candidate reached the screening decision"),
+            )
+        }
+
+        /// What the sequencer/deposit loop observed and decided, through the real
+        /// `execute_sequencer_transactions`.
+        fn deposit_path(
+            raw: Vec<RawRule>,
+            proxy_code: Vec<u8>,
+        ) -> (Vec<CallObservation>, DepositIdentification) {
+            reset_seams();
+            LAST_DEPOSIT_OBSERVATIONS.with(|o| *o.borrow_mut() = None);
+            let filter = filter_with(raw, test_config());
+            let ctx = ctx_with(Some(filter), vec![deposit_to(PROXY)]);
+            let mut state = fixture_state(None, proxy_code);
+            let facts = run(&ctx, &mut state);
+            assert_eq!(facts.included.len(), 1, "the fixture deposit is included");
+            (
+                LAST_DEPOSIT_OBSERVATIONS
+                    .with(|o| o.borrow().clone())
+                    .expect("the deposit's capture completed, so its observations are recorded"),
+                LAST_DEPOSIT_IDENTIFICATION
+                    .with(|d| d.get())
+                    .expect("the deposit reached the identification step"),
+            )
+        }
+
+        /// What the audit path observed and decided. Its capture window, its outcome→observation
+        /// mapping and its verdict function are the RPC crate's own, reached through that crate's
+        /// `test-utils` feature — nothing here re-implements them, which is the only way the
+        /// comparison can mean anything.
+        fn audit_path(rules: &RuleSet, proxy_code: Vec<u8>) -> (Vec<CallObservation>, Verdict) {
+            let request = DepositTxRequest {
+                source_hash: format!("{:#x}", B256::repeat_byte(0x33)),
+                from: format!("{DEPOSITOR:#x}"),
+                to: Some(format!("{PROXY:#x}")),
+                mint: "0".to_string(),
+                value: "0".to_string(),
+                gas_limit: 1_000_000,
+                is_system_transaction: false,
+                data: "0x".to_string(),
+            };
+            let tx = build_deposit_tx(&request).expect("the fixture request builds");
+            let inspector = audit_capture_inspector(
+                rules,
+                AuditCaptureConfig { max_callstack_observations_per_tx: GENEROUS_BUDGET },
+            )
+            .expect("the fixture rule declares a selector");
+            let env = EvmEnv::new(
+                CfgEnv::new_with_spec(OpSpecId::JOVIAN),
+                BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            );
+            let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
+                audit_path_db(proxy_code),
+                env,
+                inspector,
+            );
+            let (outcome, capture) =
+                audit_capture_window(&mut evm, &tx).expect("the fixture transaction executes");
+            let observed = match &capture {
+                CaptureOutcome::Complete { observations, .. } => observations.items.clone(),
+                other => panic!("the audit path's capture must complete: {other:?}"),
+            };
+            let result = verdict_for(
+                &request,
+                ExecutedTx {
+                    from: DEPOSITOR,
+                    to: Some(PROXY),
+                    tx_hash: tx.tx_hash(),
+                    value: U256::ZERO,
+                },
+                outcome.result.logs(),
+                rules,
+                observations_from(&capture),
+            );
+            (observed, result.verdict)
+        }
+
+        /// ONE fixture — the same observed proxy, the same implementation, the same (empty)
+        /// calldata and the same seeded accounts — driven through all three real execution paths
+        /// yields the SAME observed call frames and the SAME decision, in both directions of the
+        /// rule pattern.
+        ///
+        /// The observed frames are compared, not just the three decisions: two paths can agree on
+        /// a decision while resting on different observations, and it is the observation equality
+        /// that "equal identification" actually asserts. The snapshot STAMP is deliberately not
+        /// part of the comparison — each path stamps its observations with its own rule-set
+        /// identity (the builder's installed snapshot, the audit path's per-request set), and
+        /// requiring those to be equal would assert something the design never claims.
+        #[tokio::test]
+        async fn all_three_paths_observe_the_same_frames_and_reach_the_same_decision() {
+            let approved = code_hash(&impl_code(0x01));
+            for executed_impl in [UNAPPROVED_IMPL, APPROVED_IMPL] {
+                let objected = executed_impl == UNAPPROVED_IMPL;
+                let proxy_code = delegating_proxy_code(executed_impl, 1);
+                let raw = vec![proxy_impl_allowlist_rule(&[approved])];
+                // The audit path compiles the rules carried in its own request; content version 0
+                // is what the handler uses, since that path has no persisted snapshot.
+                let audit_rules = load_rules(2, 0, raw.clone());
+                assert!(audit_rules.rejected.is_empty(), "the fixture rule must load clean");
+
+                let (candidate_observed, screen) = candidate_path(raw.clone(), proxy_code.clone());
+                let (deposit_observed, identification) =
+                    deposit_path(raw.clone(), proxy_code.clone());
+                let (audit_observed, verdict) = audit_path(&audit_rules, proxy_code.clone());
+
+                // The fixture really produced the frames the rule is about — the proxy running
+                // its own code, then its first-level delegatecall — so the equality below cannot
+                // be satisfied by three empty sets.
+                assert_eq!(
+                    candidate_observed.len(),
+                    2,
+                    "the fixture observes the proxy's own frame and its delegatecall: \
+                     {candidate_observed:?}"
+                );
+                assert_eq!(candidate_observed[0].kind, CallObservationKind::Call);
+                assert_eq!(candidate_observed[0].address, PROXY);
+                assert!(
+                    candidate_observed[0].impl_address.is_none(),
+                    "the proxy's own frame carries no implementation: {candidate_observed:?}"
+                );
+                assert_eq!(candidate_observed[1].kind, CallObservationKind::DirectDelegatecall);
+                assert_eq!(candidate_observed[1].address, PROXY);
+                assert_eq!(candidate_observed[1].impl_address, Some(executed_impl));
+                assert_eq!(
+                    candidate_observed[1].impl_code_hash,
+                    Some(code_hash(&impl_code(if objected { 0x02 } else { 0x01 }))),
+                    "the observed implementation code hash is the one that really executed"
+                );
+
+                assert_eq!(
+                    candidate_observed, deposit_observed,
+                    "the candidate loop and the sequencer loop must observe the same frames"
+                );
+                assert_eq!(
+                    deposit_observed, audit_observed,
+                    "the sequencer loop and the audit path must observe the same frames"
+                );
+
+                if objected {
+                    assert_eq!(screen, Screen::Deny, "the candidate loop rejects");
+                    assert_eq!(
+                        identification,
+                        DepositIdentification::DenyWorthy,
+                        "the sequencer loop reports a deny-worthy deposit"
+                    );
+                    assert_eq!(verdict, Verdict::Deny, "the audit path denies");
+                } else {
+                    assert_eq!(screen, Screen::Allow, "the candidate loop admits");
+                    assert_eq!(
+                        identification,
+                        DepositIdentification::Allow,
+                        "the sequencer loop reports an allowed deposit"
+                    );
+                    assert_eq!(verdict, Verdict::Allow, "the audit path allows");
+                }
+            }
+        }
     }
 }

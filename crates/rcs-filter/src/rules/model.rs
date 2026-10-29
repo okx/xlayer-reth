@@ -44,6 +44,13 @@ impl TimeoutAction {
     }
 }
 
+/// Wire keys a level does not declare, captured verbatim by `#[serde(flatten)]`.
+///
+/// serde's default is to discard an unrecognized key, which turns a misspelled security
+/// constraint into a silently absent one. Capturing them makes the loader able to name the
+/// offending key; the map exists **only** to be rejected and is never consulted for matching.
+pub type UnknownFields = BTreeMap<String, serde_json::Value>;
+
 /// A single ABI input declaration inside an [`EventAbi`]. `name` is `Option` so the
 /// loader can detect and reject a missing name.
 #[derive(Debug, Clone, Deserialize)]
@@ -53,6 +60,10 @@ pub struct AbiInput {
     #[serde(rename = "type")]
     pub param_type: String,
     pub indexed: bool,
+    /// Every wire key that is not one of this level's declared fields. Collected solely so the
+    /// loader can reject it by name; nothing ever reads a value out of this map.
+    #[serde(flatten)]
+    pub unknown: UnknownFields,
 }
 
 /// A named event declaration. The map key in [`RawRule::event_abis`] is
@@ -64,6 +75,9 @@ pub struct EventAbi {
     pub name: String,
     pub inputs: Vec<AbiInput>,
     pub anonymous: bool,
+    /// See [`AbiInput::unknown`].
+    #[serde(flatten)]
+    pub unknown: UnknownFields,
 }
 
 fn default_audit_types() -> Vec<String> {
@@ -95,6 +109,9 @@ pub struct RawRule {
     pub action: Action,
     #[serde(default)]
     pub audit_timeout_action: Option<TimeoutAction>,
+    /// See [`AbiInput::unknown`].
+    #[serde(flatten)]
+    pub unknown: UnknownFields,
 }
 
 /// A raw call-frame selector as delivered on the wire. Every field is kept as an optional
@@ -114,6 +131,9 @@ pub struct RawCallstackSelector {
     /// Exact-match constraint on the direct delegatecall target's executed code.
     #[serde(default, rename = "implCodeHash")]
     pub impl_code_hash: Option<String>,
+    /// See [`AbiInput::unknown`].
+    #[serde(flatten)]
+    pub unknown: UnknownFields,
 }
 
 /// Deserializes the `callstack` map while rejecting a repeated variable name.

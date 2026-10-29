@@ -18,6 +18,7 @@ members = [
     "crates/chainspec",
     "crates/flashblocks",
     "crates/intercept",
+    "crates/rcs-capture",
     "crates/rcs-filter",
     "crates/legacy-rpc",
     "crates/monitor",
@@ -70,6 +71,7 @@ xlayer-builder = { path = "crates/builder" }
 xlayer-chainspec = { path = "crates/chainspec" }
 xlayer-flashblocks = { path = "crates/flashblocks" }
 rcs-filter = { path = "crates/rcs-filter" }
+xlayer-rcs-capture = { path = "crates/rcs-capture" }
 # `kms:<name>` secret resolution, shared with the op-node side of the stack. The
 # private SDK behind it is pulled in only by this crate's `kms` feature; see
 # deps/optimism/rust/xlayer-kms/ for why the default build needs no credentials.
