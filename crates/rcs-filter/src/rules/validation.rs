@@ -16,7 +16,7 @@ use super::model::{
     CompiledDirectDelegatecall, CompiledEvent, CompiledInput, CompiledRule, EventAbi, RawRule,
     RejectedRule, RuleSet, TimeoutAction,
 };
-use super::raw::{rule_locator, scan_rule_root};
+use super::raw::{rule_locator, scan_rule_root, CallstackShape};
 use crate::callstack::MAX_DIRECT_DELEGATECALL_ALIASES;
 
 /// Fixed ERC20 `Transfer` quota shape (ordered input names).
@@ -168,7 +168,8 @@ fn compile_direct_delegatecalls(
 ///
 /// 1. streaming root-key scan — collects keys in order with duplicates preserved, and lifts `id`;
 /// 2. unknown root key, then duplicate root key — from that key list, which still
-///    contains repeats;
+///    contains repeats, then the `callstack` section's JSON shape, from the kinds the same scan
+///    probed on the original bytes (a wrong JSON type is rejected before any typed decode);
 /// 3. typed decode **from the bytes** — unknown key inside `callstack`, duplicate alias, wrong
 ///    JSON type. Decoding from the original bytes is what lets the duplicate-rejecting
 ///    visitor actually see both entries;
@@ -227,6 +228,18 @@ pub fn load_rules_from_raw(
                 id: locator,
                 reason: duplicate_rule_root_key_reason(duplicate),
             });
+            continue;
+        }
+
+        // (2b): the `callstack` section's JSON shape, from the shape the root scan already probed
+        // on the original bytes. It runs after the root-key checks so a misspelled safety field
+        // still reports first, and before the typed decode so the reason names the offending field
+        // deterministically instead of depending on serde's wording. An explicitly null
+        // `callstack` is admissible here and keeps its own dedicated semantic reason.
+        if let Some(problem) = scan.callstack_shape.as_ref().and_then(CallstackShape::problem) {
+            scans.push((index, scan.id.clone()));
+            parsed.push(None);
+            rejected.push(RejectedRule { id: locator, reason: problem });
             continue;
         }
 

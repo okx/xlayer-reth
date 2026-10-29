@@ -18,13 +18,15 @@
 
 use std::sync::Arc;
 
+use alloy_consensus::transaction::Recovered;
 use alloy_consensus::Transaction;
 use alloy_eips::BlockId;
-use alloy_evm::Evm;
+use alloy_evm::{Evm, IntoTxEnv};
 use alloy_op_evm::OpEvmFactory;
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use rcs_filter::rules::load_rules_from_raw;
 use reth_evm::{block::BlockExecutorFactory, ConfigureEvm};
+use reth_optimism_primitives::OpTransactionSigned;
 use reth_rpc_eth_api::{
     helpers::{Call, LoadState},
     FromEvmError, RpcNodeCore,
@@ -49,6 +51,92 @@ fn commit_and_continue(verdict: Verdict) -> (bool, bool) {
         Verdict::Malformed => (false, true),
         Verdict::Unknown => unreachable!("verdict_for never produces {verdict:?}"),
     }
+}
+
+/// Executes and classifies the built deposits **one at a time, in request order** — the whole of
+/// this handler's per-deposit contract in one place: one capture window per deposit, the shared
+/// frame code, `verdict_for`, and the ordered commit that makes an earlier deposit's state effects
+/// visible to a later one.
+///
+/// Generic over the EVM rather than inlined into the handler so that the deposit-path tests drive
+/// **this** code with a real deposit transaction instead of restating the sequence; a test that
+/// reproduces the loop can agree with itself while the handler diverges. The only thing a caller
+/// varies is how it built the EVM (including the capture mode), which is the public capture API.
+///
+/// Returns one slot per built deposit, `None` for every slot after an `Audit` stopped the pass.
+/// An execution error aborts capture (parked result included) and propagates, leaving nothing
+/// behind.
+pub(super) fn classify_ordered_deposits<E>(
+    evm: &mut E,
+    ordered_txs: &[Recovered<OpTransactionSigned>],
+    ordered_tx_reqs: &[DepositTxRequest],
+    rules: &rcs_filter::rules::RuleSet,
+    capture_config: &Option<DirectDelegatecallConfig>,
+    known_allowed: &std::collections::HashSet<String>,
+) -> Result<Vec<Option<AuditResult>>, E::Error>
+where
+    E: Evm,
+    E::DB: DatabaseCommit,
+    E::Inspector: RcsCaptureControl,
+    for<'tx> &'tx Recovered<OpTransactionSigned>: IntoTxEnv<E::Tx>,
+{
+    let mut executed: Vec<Option<AuditResult>> = (0..ordered_txs.len()).map(|_| None).collect();
+    for (exec_idx, tx) in ordered_txs.iter().enumerate() {
+        let tx_req = &ordered_tx_reqs[exec_idx];
+        // One window per deposit, each beginning with a full reset, so a deposit's observations
+        // can never be attributed to another. Ordered state effects are untouched: a prior
+        // deposit's committed upgrade is still visible here, so a later deposit resolves the new,
+        // real delegate target and its real code hash.
+        {
+            let inspector = evm.components_mut().1;
+            inspector.configure_direct_delegatecalls(capture_config.clone());
+            inspector.start_capture();
+        }
+        let transacted = evm.transact(tx);
+        let ResultAndState { result, state } = match transacted {
+            Ok(res) => res,
+            Err(err) => {
+                // An execution error leaves nothing behind, parked result included.
+                evm.components_mut().1.abort_capture();
+                return Err(err);
+            }
+        };
+        let observations = {
+            let inspector = evm.components_mut().1;
+            inspector.finish_capture(result.logs());
+            inspector.take_direct_delegatecalls()
+        };
+
+        if known_allowed.contains(&tx_req.source_hash) {
+            evm.db_mut().commit(state);
+            record_known_allowed_diagnostic(&tx_req.source_hash, &observations);
+            executed[exec_idx] = Some(known_allowed_result(tx.tx_hash(), &tx_req.source_hash));
+            continue;
+        }
+
+        let logs = result.logs().to_vec();
+        let verdict_result = super::verdict::verdict_for(
+            tx_req,
+            &super::verdict::SimulatedDeposit {
+                from: tx.signer(),
+                to: tx.to(),
+                tx_hash: tx.tx_hash(),
+                value: tx.value(),
+                logs: &logs,
+                observations: &observations,
+            },
+            rules,
+        );
+        let (commit, keep_going) = commit_and_continue(verdict_result.verdict);
+        if commit {
+            evm.db_mut().commit(state);
+        }
+        executed[exec_idx] = Some(verdict_result);
+        if !keep_going {
+            break;
+        }
+    }
+    Ok(executed)
 }
 
 /// Builds the final, request-ordered `Vec<AuditResult>` from the per-exec-index execution
@@ -398,64 +486,15 @@ where
                 let mut evm =
                     this.evm_config().evm_with_env_and_inspector(&mut state_db, evm_env, inspector);
 
-                let mut executed: Vec<Option<AuditResult>> =
-                    (0..ordered_txs.len()).map(|_| None).collect();
-                for (exec_idx, tx) in ordered_txs.iter().enumerate() {
-                    let tx_req = &ordered_tx_reqs[exec_idx];
-                    // One window per deposit, each beginning with a full reset, so a deposit's
-                    // observations can never be attributed to another. Ordered state effects are
-                    // untouched: a prior deposit's committed upgrade is still visible here, so a
-                    // later deposit resolves the new, real delegate target and its real code hash.
-                    {
-                        let inspector = evm.components_mut().1;
-                        inspector.configure_direct_delegatecalls(capture_config.clone());
-                        inspector.start_capture();
-                    }
-                    let transacted = evm.transact(tx);
-                    let ResultAndState { result, state } = match transacted {
-                        Ok(res) => res,
-                        Err(err) => {
-                            // An execution error leaves nothing behind, parked result included.
-                            evm.components_mut().1.abort_capture();
-                            return Err(T::Error::from_evm_err(err));
-                        }
-                    };
-                    let observations = {
-                        let inspector = evm.components_mut().1;
-                        inspector.finish_capture(result.logs());
-                        inspector.take_direct_delegatecalls()
-                    };
-
-                    if known_allowed.contains(&tx_req.source_hash) {
-                        evm.db_mut().commit(state);
-                        record_known_allowed_diagnostic(&tx_req.source_hash, &observations);
-                        executed[exec_idx] =
-                            Some(known_allowed_result(tx.tx_hash(), &tx_req.source_hash));
-                        continue;
-                    }
-
-                    let logs = result.logs().to_vec();
-                    let verdict_result = super::verdict::verdict_for(
-                        tx_req,
-                        &super::verdict::SimulatedDeposit {
-                            from: tx.signer(),
-                            to: tx.to(),
-                            tx_hash: tx.tx_hash(),
-                            value: tx.value(),
-                            logs: &logs,
-                            observations: &observations,
-                        },
-                        &rules,
-                    );
-                    let (commit, keep_going) = commit_and_continue(verdict_result.verdict);
-                    if commit {
-                        evm.db_mut().commit(state);
-                    }
-                    executed[exec_idx] = Some(verdict_result);
-                    if !keep_going {
-                        break;
-                    }
-                }
+                let mut executed = classify_ordered_deposits(
+                    &mut evm,
+                    &ordered_txs,
+                    &ordered_tx_reqs,
+                    &rules,
+                    &capture_config,
+                    &known_allowed,
+                )
+                .map_err(T::Error::from_evm_err)?;
 
                 Ok(assemble_results(&txs, &built, &mut executed))
             })

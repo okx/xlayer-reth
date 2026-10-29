@@ -5,26 +5,39 @@
 //! verdicts, that the ordered state effects across a batch are preserved, and that the two
 //! screening paths reach the **same** verdict from the same frames.
 //!
+//! Two things make that evidence real rather than self-referential:
+//!
+//! * the transactions are built by [`build_deposit_tx`], so every one of them is an actual OP
+//!   **Deposit** envelope — the shape this handler receives — and not a signed legacy transaction
+//!   standing in for one; and
+//! * the per-deposit sequence is **not** restated here. Capture-window arming, execution,
+//!   `finish`/`take`, the ordered commit and `verdict_for` are driven through
+//!   [`classify_ordered_deposits`], the same function `xlayer_auditTransactions` calls. A test that
+//!   reproduced that loop could stay green while the handler diverged from it.
+//!
 //! What they deliberately do not do is stand up a provider backend and go through the JSON-RPC
-//! method itself; the request-contract tests cover that layer, and the per-deposit loop's
-//! execution, capture and classification steps are reproduced here against a real EVM.
+//! method itself; the request-contract tests cover that layer, and state anchoring and task
+//! placement are reth's own.
 
-use alloy_consensus::{SignableTransaction, TxLegacy};
-use alloy_evm::{Evm, EvmEnv, EvmFactory, FromRecoveredTx};
+use std::collections::HashSet;
+
+use alloy_evm::{Evm, EvmEnv, EvmFactory};
 use alloy_op_evm::{OpEvmFactory, OpTx};
-use alloy_primitives::{keccak256, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
+use op_alloy_consensus::OpTxEnvelope;
 use op_revm::OpSpecId;
 use rcs_filter::callstack::{
     alias_set_digest, Observations, ObservationsUnavailable, SnapshotStamp,
 };
 use rcs_filter::rules::{load_rules_from_raw, RuleSet};
 use revm::context::{BlockEnv, CfgEnv};
-use revm::database::{DatabaseCommit, InMemoryDB};
+use revm::database::{DatabaseRef, InMemoryDB};
 use revm::state::{AccountInfo, Bytecode};
-use xlayer_rcs_capture::{CaptureMode, DirectDelegatecallConfig, RcsCaptureControl, RcsInspector};
+use xlayer_rcs_capture::{CaptureFaults, CaptureMode, DirectDelegatecallConfig, RcsInspector};
 
-use super::deposit::DepositTxRequest;
-use super::verdict::{verdict_for, SimulatedDeposit, Verdict};
+use super::deposit::{build_deposit_tx, DepositTxRequest};
+use super::rpc::classify_ordered_deposits;
+use super::verdict::{verdict_for, AuditResult, SimulatedDeposit, Verdict};
 
 fn sender() -> Address {
     Address::from([0xAA; 20])
@@ -38,6 +51,10 @@ fn approved_impl() -> Address {
 }
 fn unapproved_impl() -> Address {
     Address::from([0xC2; 20])
+}
+/// The upgrader implementation's address, reached through the storage proxy's slot 0.
+fn upgrader() -> Address {
+    Address::from([0xD0; 20])
 }
 
 fn stop() -> Vec<u8> {
@@ -124,21 +141,15 @@ fn config_for(rules: &RuleSet, budget: usize) -> Option<DirectDelegatecallConfig
     })
 }
 
-fn deposit_tx(to: Address, nonce: u64) -> OpTx {
-    let tx = TxLegacy {
-        nonce,
-        gas_limit: 3_000_000,
-        to: TxKind::Call(to),
-        value: U256::ZERO,
-        ..Default::default()
-    }
-    .into_signed(Signature::new(Default::default(), Default::default(), Default::default()));
-    OpTx::from_recovered_tx(&tx, sender())
+/// The `source_hash` the nth deposit of a batch carries.
+fn source_hash(index: usize) -> String {
+    format!("0x{:064x}", 0xdeadbeef00u64 + index as u64)
 }
 
-fn request(source_hash: &str) -> DepositTxRequest {
+/// One deposit request addressed to the selected proxy.
+fn request(index: usize) -> DepositTxRequest {
     DepositTxRequest {
-        source_hash: source_hash.to_string(),
+        source_hash: source_hash(index),
         from: lower_address(sender()),
         to: Some(lower_address(proxy())),
         mint: "0".to_string(),
@@ -149,65 +160,73 @@ fn request(source_hash: &str) -> DepositTxRequest {
     }
 }
 
-/// Reproduces the handler's per-deposit steps against a real EVM: arm the window, execute, finish,
-/// take, classify. Returns each deposit's verdict in request order, committing exactly where the
-/// handler commits so a prior deposit's state really reaches the next one.
-fn classify_batch(
+/// Runs a batch through the **production** per-deposit loop and returns its results together with
+/// the database the loop committed into, so an ordered state effect can be asserted on real state.
+///
+/// Every transaction is built by `build_deposit_tx`, and the assertion below pins that: these are
+/// OP `Deposit` envelopes, which is the whole point of exercising this path.
+fn run_batch(
     db: InMemoryDB,
-    txs: Vec<OpTx>,
+    requests: &[DepositTxRequest],
     rules: &RuleSet,
     mode: CaptureMode,
+    faults: CaptureFaults,
     known_allowed: &[&str],
-) -> Vec<(Verdict, Observations)> {
+) -> (Vec<Option<AuditResult>>, InMemoryDB) {
+    let txs: Vec<_> = requests
+        .iter()
+        .map(|req| build_deposit_tx(req).expect("the request builds a deposit tx"))
+        .collect();
+    for (index, tx) in txs.iter().enumerate() {
+        match tx.inner() {
+            OpTxEnvelope::Deposit(deposit) => {
+                assert_eq!(
+                    deposit.source_hash,
+                    requests[index].source_hash.parse::<B256>().expect("source hash"),
+                    "deposit {index} must carry its own source hash"
+                );
+                assert_eq!(deposit.from, sender());
+            }
+            other => panic!("deposit {index} must be an OP Deposit envelope, got {other:?}"),
+        }
+        assert_eq!(tx.signer(), sender(), "a deposit's recovered signer is its `from`");
+    }
+
     let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
         db,
         EvmEnv::new(
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::with_mode_and_faults(10_000, mode, Default::default()),
+        RcsInspector::with_mode_and_faults(10_000, mode, faults),
     );
     let capture_config = config_for(rules, 10_000);
-    let mut out = Vec::new();
-    for (index, tx) in txs.iter().enumerate() {
-        {
-            let inspector = evm.components_mut().1;
-            inspector.configure_direct_delegatecalls(capture_config.clone());
-            inspector.start_capture();
-        }
-        let executed = evm.transact(tx.clone()).expect("tx executes");
-        let observations = {
-            let inspector = evm.components_mut().1;
-            inspector.finish_capture(executed.result.logs());
-            inspector.take_direct_delegatecalls()
-        };
-        let source_hash = format!("0xdeadbeef{index:02x}");
-        if known_allowed.contains(&source_hash.as_str()) {
-            // The already-approved row: committed and allowed, with the capture result carried only
-            // as a diagnostic.
-            evm.db_mut().commit(executed.state);
-            out.push((Verdict::Allow, observations));
-            continue;
-        }
-        let req = request(&source_hash);
-        let result = verdict_for(
-            &req,
-            &SimulatedDeposit {
-                from: sender(),
-                to: Some(proxy()),
-                tx_hash: B256::ZERO,
-                value: U256::ZERO,
-                logs: executed.result.logs(),
-                observations: &observations,
-            },
-            rules,
-        );
-        if matches!(result.verdict, Verdict::Allow) {
-            evm.db_mut().commit(executed.state);
-        }
-        out.push((result.verdict, observations));
-    }
-    out
+    let known: HashSet<String> = known_allowed.iter().map(|s| (*s).to_string()).collect();
+    let results =
+        classify_ordered_deposits(&mut evm, &txs, requests, rules, &capture_config, &known)
+            .expect("the batch executes");
+    (results, evm.into_db())
+}
+
+/// `run_batch` with no faults and nothing pre-approved — the ordinary case.
+fn plain_batch(
+    db: InMemoryDB,
+    requests: &[DepositTxRequest],
+    rules: &RuleSet,
+    mode: CaptureMode,
+) -> (Vec<Option<AuditResult>>, InMemoryDB) {
+    run_batch(db, requests, rules, mode, CaptureFaults::NONE, &[])
+}
+
+#[track_caller]
+fn verdict_at(results: &[Option<AuditResult>], index: usize) -> Verdict {
+    results[index].as_ref().expect("the deposit was executed").verdict
+}
+
+/// The proxy's slot 0 as actually committed — the real ordered state effect.
+fn committed_delegate_target(db: &InMemoryDB) -> Address {
+    let slot = db.storage_ref(proxy(), U256::ZERO).expect("the proxy's slot 0 is readable");
+    Address::from_slice(&slot.to_be_bytes::<32>()[12..])
 }
 
 /// A world whose proxy delegatecalls `implementation` directly.
@@ -219,23 +238,32 @@ fn fixed_proxy_world(implementation: Address) -> InMemoryDB {
     db
 }
 
+/// A world whose proxy resolves its delegate target from slot 0, which initially points at an
+/// upgrader that rewrites that very slot.
+fn upgradeable_proxy_world(upgrader_code: &[u8]) -> InMemoryDB {
+    let mut db = InMemoryDB::default();
+    db.insert_account_info(sender(), account(1_000_000_000_000u64, None));
+    db.insert_account_info(proxy(), account(0, Some(storage_proxy())));
+    db.insert_account_info(upgrader(), account(0, Some(upgrader_code.to_vec())));
+    db.insert_account_info(unapproved_impl(), account(0, Some(stop())));
+    db.insert_account_storage(proxy(), U256::ZERO, U256::from_be_slice(upgrader().as_slice()))
+        .expect("storage insert");
+    db
+}
+
 /// A deposit whose proxy delegatecalls an **approved** implementation is allowed.
 #[test]
 fn a_deposit_executing_an_approved_implementation_is_allowed() {
     let rules = guard_rules(&[keccak256(stop())]);
-    let verdicts = classify_batch(
+    let (results, _db) = plain_batch(
         fixed_proxy_world(approved_impl()),
-        vec![deposit_tx(proxy(), 0)],
+        &[request(0)],
         &rules,
         CaptureMode::CallstackOnly,
-        &[],
     );
-    assert_eq!(verdicts[0].0, Verdict::Allow);
-    assert!(
-        matches!(&verdicts[0].1, Observations::Available { items, .. } if items.len() == 1),
-        "the deposit's own simulation produced the observation: {:?}",
-        verdicts[0].1
-    );
+    assert_eq!(verdict_at(&results, 0), Verdict::Allow);
+    // The result is reported against this deposit's own source hash.
+    assert_eq!(results[0].as_ref().unwrap().source_hash, source_hash(0));
 }
 
 /// A deposit whose proxy delegatecalls an **unapproved** implementation is denied, and the deny
@@ -244,21 +272,21 @@ fn a_deposit_executing_an_approved_implementation_is_allowed() {
 fn a_deposit_executing_an_unapproved_implementation_is_denied() {
     // The allowlist holds a hash nothing in this world executes.
     let rules = guard_rules(&[keccak256([0xFEu8])]);
-    let verdicts = classify_batch(
+    let (results, _db) = plain_batch(
         fixed_proxy_world(unapproved_impl()),
-        vec![deposit_tx(proxy(), 0)],
+        &[request(0)],
         &rules,
         CaptureMode::CallstackOnly,
-        &[],
     );
-    assert_eq!(verdicts[0].0, Verdict::Deny);
+    assert_eq!(verdict_at(&results, 0), Verdict::Deny);
 }
 
 /// Ordered state effects across a batch: an earlier deposit upgrades the proxy's delegate target,
 /// and the later deposit is judged against the **new**, real implementation.
 ///
 /// This is the property that makes the batch ordered rather than independent — remove the commit
-/// between deposits and the second one resolves the old target and comes back allowed.
+/// between deposits and the second one resolves the old target and comes back allowed. The
+/// committed state is asserted too, so the test fails if the allow stopped committing.
 #[test]
 fn an_earlier_deposits_upgrade_is_visible_to_a_later_deposit_in_the_same_batch() {
     let upgrader_code = upgrader_to(unapproved_impl());
@@ -266,39 +294,50 @@ fn an_earlier_deposits_upgrade_is_visible_to_a_later_deposit_in_the_same_batch()
     // second — which now reaches the unapproved implementation — is denied.
     let rules = guard_rules(&[keccak256(&upgrader_code)]);
 
-    let mut db = InMemoryDB::default();
-    db.insert_account_info(sender(), account(1_000_000_000_000u64, None));
-    db.insert_account_info(proxy(), account(0, Some(storage_proxy())));
-    db.insert_account_info(Address::from([0xD0; 20]), account(0, Some(upgrader_code)));
-    db.insert_account_info(unapproved_impl(), account(0, Some(stop())));
-    // Slot 0 initially points at the upgrader.
-    db.insert_account_storage(
-        proxy(),
-        U256::ZERO,
-        U256::from_be_slice(Address::from([0xD0; 20]).as_slice()),
-    )
-    .expect("storage insert");
-
-    let verdicts = classify_batch(
-        db,
-        vec![deposit_tx(proxy(), 0), deposit_tx(proxy(), 1)],
+    let (results, db) = plain_batch(
+        upgradeable_proxy_world(&upgrader_code),
+        &[request(0), request(1)],
         &rules,
         CaptureMode::CallstackOnly,
-        &[],
     );
-    assert_eq!(verdicts[0].0, Verdict::Allow, "the upgrade itself runs approved code");
+    assert_eq!(verdict_at(&results, 0), Verdict::Allow, "the upgrade itself runs approved code");
     assert_eq!(
-        verdicts[1].0,
+        verdict_at(&results, 1),
         Verdict::Deny,
         "the later deposit must be judged against the implementation the upgrade installed"
     );
-    // And the second deposit's observation names the new target, read from the real frame.
-    match &verdicts[1].1 {
-        Observations::Available { items, .. } => {
-            assert_eq!(items.len(), 1);
-            assert_eq!(items[0].delegate_address, unapproved_impl());
-        }
-        other => panic!("expected an available set, got {other:?}"),
+    assert_eq!(
+        committed_delegate_target(&db),
+        unapproved_impl(),
+        "the allowed deposit's state effect must be committed, in order, before the next deposit"
+    );
+}
+
+/// A three-deposit batch keeps every earlier effect: the first upgrade is committed, the second
+/// deposit is denied and commits nothing, and the third is still judged against the first
+/// upgrade's target.
+#[test]
+fn a_denied_deposit_commits_nothing_and_does_not_disturb_the_batch_order() {
+    let upgrader_code = upgrader_to(unapproved_impl());
+    let rules = guard_rules(&[keccak256(&upgrader_code)]);
+
+    let (results, db) = plain_batch(
+        upgradeable_proxy_world(&upgrader_code),
+        &[request(0), request(1), request(2)],
+        &rules,
+        CaptureMode::CallstackOnly,
+    );
+    assert_eq!(verdict_at(&results, 0), Verdict::Allow);
+    assert_eq!(verdict_at(&results, 1), Verdict::Deny);
+    assert_eq!(verdict_at(&results, 2), Verdict::Deny, "the denied state was never committed");
+    assert_eq!(
+        committed_delegate_target(&db),
+        unapproved_impl(),
+        "only the allowed deposit's effect is present"
+    );
+    // Every slot is filled, in request order, each against its own source hash.
+    for (index, result) in results.iter().enumerate() {
+        assert_eq!(result.as_ref().unwrap().source_hash, source_hash(index));
     }
 }
 
@@ -309,37 +348,78 @@ fn an_earlier_deposits_upgrade_is_visible_to_a_later_deposit_in_the_same_batch()
 fn both_paths_reach_the_same_verdict_for_the_same_frames() {
     let rules = guard_rules(&[keccak256([0xFEu8])]);
     for implementation in [approved_impl(), unapproved_impl()] {
-        let deposit_path = classify_batch(
+        let (deposit_path, _) = plain_batch(
             fixed_proxy_world(implementation),
-            vec![deposit_tx(proxy(), 0)],
+            &[request(0)],
             &rules,
             CaptureMode::CallstackOnly,
-            &[],
         );
-        let builder_mode = classify_batch(
+        let (builder_mode, _) = plain_batch(
             fixed_proxy_world(implementation),
-            vec![deposit_tx(proxy(), 0)],
+            &[request(0)],
             &rules,
             CaptureMode::NativeAndCallstack,
-            &[],
         );
         assert_eq!(
-            deposit_path[0].0, builder_mode[0].0,
+            verdict_at(&deposit_path, 0),
+            verdict_at(&builder_mode, 0),
             "the two paths must agree for implementation {implementation}"
-        );
-        assert_eq!(
-            deposit_path[0].1, builder_mode[0].1,
-            "and they must agree on the observations themselves"
         );
     }
 }
 
-/// An unavailable observation set is a **non-verdict** on this path, never an allow, and no state
-/// is committed for it.
+/// A real capture fault makes the production path fail closed: the observation set is unavailable,
+/// so the deposit gets a **non-verdict** and — the part that matters — commits nothing.
+///
+/// Driven through the public `CaptureFaults` API rather than a synthetic `Observations` value, so
+/// the fail-closed behaviour is observed where it has to hold: in the handler's own loop.
+#[test]
+fn a_capture_fault_makes_the_production_path_fail_closed_without_committing() {
+    let upgrader_code = upgrader_to(unapproved_impl());
+    // Everything this world executes is approved, so without the fault the deposit would be
+    // allowed and its upgrade committed. The fault is the only difference.
+    let rules = guard_rules(&[keccak256(&upgrader_code)]);
+
+    let (allowed, allowed_db) = plain_batch(
+        upgradeable_proxy_world(&upgrader_code),
+        &[request(0)],
+        &rules,
+        CaptureMode::CallstackOnly,
+    );
+    assert_eq!(verdict_at(&allowed, 0), Verdict::Allow, "control: no fault means allow");
+    assert_eq!(committed_delegate_target(&allowed_db), unapproved_impl());
+
+    for faults in [
+        CaptureFaults { force_own_code_indeterminate: true, ..CaptureFaults::NONE },
+        CaptureFaults { force_frames_unbalanced: true, ..CaptureFaults::NONE },
+    ] {
+        let (results, db) = run_batch(
+            upgradeable_proxy_world(&upgrader_code),
+            &[request(0)],
+            &rules,
+            CaptureMode::CallstackOnly,
+            faults,
+            &[],
+        );
+        assert_eq!(
+            verdict_at(&results, 0),
+            Verdict::Malformed,
+            "{faults:?} must produce a non-verdict, never an allow"
+        );
+        assert_eq!(
+            committed_delegate_target(&db),
+            upgrader(),
+            "{faults:?}: a non-verdict must commit nothing"
+        );
+    }
+}
+
+/// An unavailable observation set is a **non-verdict** on this path, never an allow — for every
+/// documented reason, including the ones no injectable fault can produce.
 #[test]
 fn an_unavailable_observation_set_is_a_non_verdict_never_an_allow() {
     let rules = guard_rules(&[keccak256(stop())]);
-    let req = request("0xdeadbeef00");
+    let req = request(0);
     for reason in [
         ObservationsUnavailable::NotCaptured,
         ObservationsUnavailable::IncompleteFrames,
@@ -384,7 +464,7 @@ fn a_wrongly_stamped_observation_set_is_refused() {
         },
         items: Vec::new(),
     };
-    let req = request("0xdeadbeef00");
+    let req = request(0);
     let result = verdict_for(
         &req,
         &SimulatedDeposit {
@@ -409,37 +489,57 @@ fn a_wrongly_stamped_observation_set_is_refused() {
 /// deliberate decision — acting on it needs a caller-supplied class label this path does not have.
 #[test]
 fn an_already_approved_deposit_is_allowed_and_its_capture_result_is_only_a_diagnostic() {
+    let upgrader_code = upgrader_to(unapproved_impl());
+    // Nothing in this world is approved, so an ordinary deposit here would be denied.
     let rules = guard_rules(&[keccak256([0xFEu8])]);
-    let verdicts = classify_batch(
-        fixed_proxy_world(unapproved_impl()),
-        vec![deposit_tx(proxy(), 0)],
+
+    let (denied, denied_db) = plain_batch(
+        upgradeable_proxy_world(&upgrader_code),
+        &[request(0)],
         &rules,
         CaptureMode::CallstackOnly,
-        // The same source hash `classify_batch` assigns to deposit 0.
-        &["0xdeadbeef00"],
+    );
+    assert_eq!(verdict_at(&denied, 0), Verdict::Deny, "control: unapproved code is denied");
+    assert_eq!(committed_delegate_target(&denied_db), upgrader(), "and commits nothing");
+
+    // The same deposit, pre-approved by the caller: allowed and committed regardless.
+    let (results, db) = run_batch(
+        upgradeable_proxy_world(&upgrader_code),
+        &[request(0)],
+        &rules,
+        CaptureMode::CallstackOnly,
+        CaptureFaults::NONE,
+        &[&source_hash(0)],
     );
     assert_eq!(
-        verdicts[0].0,
+        verdict_at(&results, 0),
         Verdict::Allow,
         "an already-approved deposit keeps its allow and its commit, unchanged"
     );
-    // The observation WAS produced — it is available for the diagnostic — and names the unapproved
-    // implementation. No verdict reads it.
-    match &verdicts[0].1 {
-        Observations::Available { items, .. } => {
-            assert_eq!(items.len(), 1);
-            assert_eq!(
-                items[0].delegate_address,
-                unapproved_impl(),
-                "the unapproved implementation is observed, and knowingly not acted on"
-            );
-        }
-        other => panic!("expected an available set for the diagnostic, got {other:?}"),
-    }
+    assert_eq!(
+        committed_delegate_target(&db),
+        unapproved_impl(),
+        "its state effect is committed unconditionally"
+    );
+    assert!(
+        results[0].as_ref().unwrap().actions.is_none(),
+        "the forced allow carries no rule actions"
+    );
+
     // And the diagnostic recorder itself is exercised on both shapes of result.
-    super::rpc::record_known_allowed_diagnostic("0xdeadbeef00", &verdicts[0].1);
     super::rpc::record_known_allowed_diagnostic(
-        "0xdeadbeef00",
+        &source_hash(0),
+        &Observations::Available {
+            stamp: SnapshotStamp {
+                protocol_version: 1,
+                content_version: 0,
+                alias_set_digest: alias_set_digest([proxy()]),
+            },
+            items: Vec::new(),
+        },
+    );
+    super::rpc::record_known_allowed_diagnostic(
+        &source_hash(0),
         &Observations::Unavailable(ObservationsUnavailable::NotCaptured),
     );
 }

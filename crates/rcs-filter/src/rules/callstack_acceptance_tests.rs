@@ -366,10 +366,23 @@ fn an_absent_callstack_on_an_event_rule_still_loads_unchanged() {
 #[test]
 fn wrong_json_types_are_rejected_naming_the_field() {
     let cases = [
-        // `callstack` is not an object
+        // `callstack` is not an object. The sequence forms matter most: serde's *derived*
+        // struct decoder also accepts a JSON array positionally, so a one-element array would
+        // bind `direct_delegatecalls` from element 0 unless the object form is required
+        // explicitly. `deny_unknown_fields` does not help — it only constrains map keys.
+        (r#""callstack":[{"proxy1":"0x1111111111111111111111111111111111111111"}]"#, "callstack"),
+        (r#""callstack":[{}]"#, "callstack"),
+        (
+            r#""callstack":[{"direct_delegatecalls":{"proxy1":"0x1111111111111111111111111111111111111111"}}]"#,
+            "callstack",
+        ),
         (r#""callstack":[]"#, "callstack"),
         (r#""callstack":7"#, "callstack"),
+        (r#""callstack":-1"#, "callstack"),
+        (r#""callstack":1.5"#, "callstack"),
+        (r#""callstack":true"#, "callstack"),
         (r#""callstack":"text""#, "callstack"),
+        (r#""callstack":"""#, "callstack"),
         // `direct_delegatecalls` is not a map
         (r#""callstack":{"direct_delegatecalls":[]}"#, "direct_delegatecalls"),
         (r#""callstack":{"direct_delegatecalls":"text"}"#, "direct_delegatecalls"),
@@ -384,6 +397,147 @@ fn wrong_json_types_are_rejected_naming_the_field() {
         );
         rejected_at_both_entry_points(&rule, needle);
     }
+}
+
+/// The `callstack` **object** form is mandatory, at both entry points.
+///
+/// This is the regression guard for a real defect: `RawCallstack` was a derived `Deserialize`, and
+/// a derived struct decoder also accepts the positional *sequence* form, so a one-element array
+/// bound `direct_delegatecalls` from element 0 and the rule LOADED. `deny_unknown_fields` could
+/// not catch it, because it constrains map keys only. Revert either layer of the fix and the first
+/// case below installs a rule again.
+#[test]
+fn callstack_in_sequence_form_is_rejected_at_both_entry_points() {
+    let sequence_forms = [
+        // The exact shape that used to load: element 0 is read as `direct_delegatecalls`.
+        format!(r#"[{{"proxy1":"{PROXY1}"}}]"#),
+        // The same, named — a producer "fixing" the array by nesting the field.
+        format!(r#"[{{"direct_delegatecalls":{{"proxy1":"{PROXY1}"}}}}]"#),
+        // Two elements, an empty object, and an empty array.
+        format!(r#"[{{"proxy1":"{PROXY1}"}},{{"proxy2":"{PROXY2}"}}]"#),
+        "[{}]".to_string(),
+        "[]".to_string(),
+    ];
+    for form in sequence_forms {
+        let rule = format!(
+            r#"{{"id":"seq","event_abis":{{"e":{EVENT_ABI}}},"callstack":{form},"condition":true,"action":"deny"}}"#
+        );
+        rejected_at_both_entry_points(&rule, "callstack must be a JSON object, got an array");
+    }
+}
+
+/// Every non-object, non-null JSON kind for `callstack` is rejected by kind, naming the field.
+#[test]
+fn a_scalar_callstack_is_rejected_at_both_entry_points() {
+    for (literal, kind) in [
+        ("7", "a number"),
+        ("-1", "a number"),
+        ("1.5", "a number"),
+        (r#""text""#, "a string"),
+        (r#""""#, "a string"),
+        ("true", "a boolean"),
+        ("false", "a boolean"),
+    ] {
+        let rule = format!(
+            r#"{{"id":"scalar","event_abis":{{"e":{EVENT_ABI}}},"callstack":{literal},"condition":true,"action":"deny"}}"#
+        );
+        rejected_at_both_entry_points(
+            &rule,
+            &format!("callstack must be a JSON object, got {kind}"),
+        );
+    }
+}
+
+/// `direct_delegatecalls` must be a map, and every alias value must be a string — both reported by
+/// field name, at both entry points.
+#[test]
+fn direct_delegatecalls_must_be_a_map_of_strings_at_both_entry_points() {
+    let not_a_map = [
+        (r#"[]"#, "an array"),
+        (format!(r#"[["proxy1","{PROXY1}"]]"#).as_str(), "an array"),
+        (r#""text""#, "a string"),
+        (r#"7"#, "a number"),
+        (r#"true"#, "a boolean"),
+        (r#"null"#, "null"),
+    ]
+    .map(|(literal, kind)| (literal.to_string(), kind));
+    for (literal, kind) in not_a_map {
+        let rule = format!(
+            r#"{{"id":"notmap","event_abis":{{"e":{EVENT_ABI}}},"callstack":{{"direct_delegatecalls":{literal}}},"condition":true,"action":"deny"}}"#
+        );
+        rejected_at_both_entry_points(
+            &rule,
+            &format!("direct_delegatecalls must be a JSON object, got {kind}"),
+        );
+    }
+
+    for (literal, kind) in [
+        ("7", "a number"),
+        ("1.5", "a number"),
+        ("null", "null"),
+        ("true", "a boolean"),
+        (r#"["0x11"]"#, "an array"),
+        (r#"{"address":"0x11"}"#, "an object"),
+    ] {
+        let rule = format!(
+            r#"{{"id":"notstr","event_abis":{{"e":{EVENT_ABI}}},"callstack":{{"direct_delegatecalls":{{"proxy1":{literal}}}}},"condition":true,"action":"deny"}}"#
+        );
+        rejected_at_both_entry_points(
+            &rule,
+            &format!("direct_delegatecalls alias 'proxy1' must be a string, got {kind}"),
+        );
+    }
+}
+
+/// Defence in depth: the **typed decode on its own** also refuses the sequence form.
+///
+/// The raw-first shape check and this are independent layers, so each is tested independently —
+/// otherwise removing one would leave the suite green on the strength of the other.
+#[test]
+fn the_typed_decode_alone_refuses_a_non_object_callstack() {
+    use crate::rules::RawRule;
+
+    for form in [
+        format!(r#"[{{"proxy1":"{PROXY1}"}}]"#),
+        format!(r#"[{{"direct_delegatecalls":{{"proxy1":"{PROXY1}"}}}}]"#),
+        "[]".to_string(),
+        "7".to_string(),
+        r#""text""#.to_string(),
+        "true".to_string(),
+    ] {
+        let rule = format!(
+            r#"{{"id":"typed-only","event_abis":{{"e":{EVENT_ABI}}},"callstack":{form},"condition":true,"action":"deny"}}"#
+        );
+        let error = serde_json::from_str::<RawRule>(&rule)
+            .expect_err("the typed decode must refuse a non-object callstack on its own")
+            .to_string();
+        assert!(error.contains("callstack"), "reason must name the field: {error}");
+    }
+
+    // And a non-map `direct_delegatecalls` / non-string alias value, likewise.
+    for fragment in [
+        r#"{"direct_delegatecalls":[]}"#.to_string(),
+        r#"{"direct_delegatecalls":"text"}"#.to_string(),
+        r#"{"direct_delegatecalls":{"proxy1":7}}"#.to_string(),
+        r#"{"direct_delegatecalls":{"proxy1":null}}"#.to_string(),
+    ] {
+        let rule = format!(
+            r#"{{"id":"typed-only","event_abis":{{"e":{EVENT_ABI}}},"callstack":{fragment},"condition":true,"action":"deny"}}"#
+        );
+        assert!(
+            serde_json::from_str::<RawRule>(&rule).is_err(),
+            "the typed decode must refuse {fragment}"
+        );
+    }
+
+    // The object form with a well-formed section still decodes, so the guards above are not
+    // passing by rejecting everything.
+    let good = format!(
+        r#"{{"id":"typed-only","event_abis":{{"e":{EVENT_ABI}}},"callstack":{{"direct_delegatecalls":{{"proxy1":"{PROXY1}"}}}},"condition":true,"action":"deny"}}"#
+    );
+    let decoded = serde_json::from_str::<RawRule>(&good).expect("the object form decodes");
+    let section = decoded.callstack.expect("present").expect("not null");
+    assert_eq!(section.direct_delegatecalls.get("proxy1").map(String::as_str), Some(PROXY1));
 }
 
 #[test]

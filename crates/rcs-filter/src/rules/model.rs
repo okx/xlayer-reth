@@ -104,19 +104,87 @@ pub fn is_accepted_rule_root_key(key: &str) -> bool {
 }
 
 /// The `callstack` rule section. Under `protocol_version` 1 the **only** admissible field is
-/// `direct_delegatecalls`; `deny_unknown_fields` is what makes a typo such as
-/// `direct_delegatecall` or `directDelegatecalls` a rejection rather than a silent ignore.
+/// `direct_delegatecalls`; an unknown key such as `direct_delegatecall` or `directDelegatecalls`
+/// is a rejection rather than a silent ignore.
 ///
-/// It is applied here and not to [`RawRuleWire`]: `callstack` is new and has no deployed shapes to
-/// protect, whereas the rule root is gated explicitly instead (see [`RULE_LEGACY_TOLERATED_KEYS`]).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// The gate is applied here and not to [`RawRuleWire`]: `callstack` is new and has no deployed
+/// shapes to protect, whereas the rule root is gated explicitly instead (see
+/// [`RULE_LEGACY_TOLERATED_KEYS`]).
+#[derive(Debug, Clone)]
 pub struct RawCallstack {
     /// Deserialized through a duplicate-rejecting visitor, **not** straight into a map: a
     /// `BTreeMap` folds a repeated key last-wins, which would destroy the evidence the duplicate
     /// check needs.
-    #[serde(deserialize_with = "alias_map_reject_duplicates")]
     pub direct_delegatecalls: BTreeMap<String, String>,
+}
+
+/// The only admissible key inside `callstack`, named in the unknown-key rejection.
+const CALLSTACK_FIELDS: &[&str] = &["direct_delegatecalls"];
+
+/// Hand-written rather than derived, because `#[derive(Deserialize)]` is **not** strict enough
+/// about the JSON type.
+///
+/// A derived struct decoder calls `deserialize_struct`, and serde_json honours that with either a
+/// map *or* a positional sequence — so `"callstack":[{"proxy1":"0x…"}]` would bind
+/// `direct_delegatecalls` from array element 0 and load a rule the producer never wrote.
+/// `#[serde(deny_unknown_fields)]` does not close that door: it constrains map keys only. Offering
+/// serde nothing but `visit_map` is what makes the object form mandatory, and
+/// [`crate::rules::raw::CallstackShape`] enforces the same requirement a phase earlier, on the
+/// original bytes, so neither entry point depends on this layer alone.
+impl<'de> Deserialize<'de> for RawCallstack {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct CallstackVisitor;
+
+        impl<'de> Visitor<'de> for CallstackVisitor {
+            type Value = RawCallstack;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("callstack as a JSON object whose only field is direct_delegatecalls")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut direct_delegatecalls: Option<BTreeMap<String, String>> = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "direct_delegatecalls" => {
+                            if direct_delegatecalls.is_some() {
+                                return Err(de::Error::duplicate_field("direct_delegatecalls"));
+                            }
+                            direct_delegatecalls = Some(map.next_value::<AliasMap>()?.0);
+                        }
+                        unknown => return Err(de::Error::unknown_field(unknown, CALLSTACK_FIELDS)),
+                    }
+                }
+                match direct_delegatecalls {
+                    Some(direct_delegatecalls) => Ok(RawCallstack { direct_delegatecalls }),
+                    None => Err(de::Error::missing_field("direct_delegatecalls")),
+                }
+            }
+        }
+
+        // `deserialize_map`, not `deserialize_struct`: the sequence form must not even be offered.
+        d.deserialize_map(CallstackVisitor)
+    }
+}
+
+/// Newtype whose only purpose is to route `direct_delegatecalls` through
+/// [`alias_map_reject_duplicates`] from a hand-written visitor, where a `deserialize_with`
+/// attribute is not available.
+struct AliasMap(BTreeMap<String, String>);
+
+impl<'de> Deserialize<'de> for AliasMap {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        alias_map_reject_duplicates(d).map(AliasMap)
+    }
 }
 
 /// Rejects a duplicate alias key **before** the map folds, so a repeated alias can never be
