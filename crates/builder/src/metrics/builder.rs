@@ -119,3 +119,24 @@ impl BuilderMetrics {
         self.payload_reverted_tx_gas_used.set(reverted_gas_used);
     }
 }
+
+/// Deposit / sequencer-path call-frame identification signals.
+///
+/// Deliberately a **separate** scope from the pool path's `rcs_filter` counters: the two paths
+/// have different authority (the pool path may exclude a transaction, this one may never), so an
+/// operator must never see them conflated in one series.
+#[derive(Metrics, Clone)]
+#[metrics(scope = "rcs_filter.deposit_identification")]
+pub struct DepositIdentificationMetrics {
+    /// Deposits identified and matching no rule.
+    pub allow_total: Counter,
+    /// Deposits whose identification matched a deny-worthy rule. Reported only — a deposit is
+    /// never excluded, deferred or reordered by this outcome.
+    pub deny_worthy_total: Counter,
+    /// Deposits whose identification matched an audit-worthy rule. Reported only.
+    pub audit_worthy_total: Counter,
+    /// Deposits whose executed code could NOT be identified (capture unavailable, incomplete,
+    /// over budget, snapshot mismatch, or a match-side budget overflow). Never reported as
+    /// "identified, nothing matched".
+    pub not_identified_total: Counter,
+}
