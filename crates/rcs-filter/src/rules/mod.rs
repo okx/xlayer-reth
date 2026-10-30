@@ -12,10 +12,10 @@ mod validation;
 /// eight leaves room for richer joins while placing a hard bound on recursive binding depth.
 pub const MAX_EVENTS_PER_RULE: usize = 8;
 
-/// Maximum call-frame selectors in one rule, following [`MAX_EVENTS_PER_RULE`] so a rule's
-/// recursive candidate-binding depth stays bounded by rule configuration rather than by
+/// Maximum `direct_delegatecalls` aliases in one rule, following [`MAX_EVENTS_PER_RULE`] so a
+/// rule's recursive candidate-binding depth stays bounded by rule configuration rather than by
 /// transaction shape.
-pub const MAX_CALLSTACK_SELECTORS_PER_RULE: usize = 8;
+pub const MAX_DIRECT_DELEGATECALL_ALIASES: usize = 8;
 
 /// Default maximum complete event bindings evaluated across all candidate rules for one
 /// transaction. This is only a default: the authoritative per-transaction limit is configured
@@ -27,8 +27,8 @@ pub const DEFAULT_MAX_EVENT_BINDINGS_PER_TX: usize = 10_000;
 pub(crate) use jsonlogic::eval_compiled;
 pub use jsonlogic::{truthy, Bindings};
 pub use model::{
-    AbiInput, Action, CompiledCallstackSelector, CompiledCondition, CompiledEvent, CompiledInput,
-    CompiledRule, EventAbi, RawCallstackSelector, RawRule, RejectedRule, RuleSet, TimeoutAction,
+    AbiInput, Action, CompiledCondition, CompiledDirectDelegatecall, CompiledEvent, CompiledInput,
+    CompiledRule, EventAbi, RawCallstack, RawRule, RejectedRule, RuleSet, TimeoutAction,
     UnknownFields,
 };
 /// The unknown-field gate. Used by the `GET /rules` response wire type so the response root is
@@ -38,4 +38,4 @@ pub use model::{
 pub use validation::reject_unknown;
 pub use validation::reject_unknown as reject_unknown_fields;
 pub(crate) use validation::RULES_RESPONSE_LOCATION;
-pub use validation::{compile_rule, compile_rule_at_protocol, load_rules};
+pub use validation::{compile_rule, load_rules};

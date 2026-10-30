@@ -10,11 +10,13 @@ use alloy_primitives::{Address, Log, B256};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::callstack::{CallObservation, ObservationUnavailable, Observations};
+use crate::callstack::{
+    CallObservation, CallObservationKind, ObservationUnavailable, Observations,
+};
 use crate::client::ActionItem;
 use crate::handle::ScreenInput;
 use crate::rules::{
-    eval_compiled, Action, CompiledCallstackSelector, CompiledEvent, CompiledRule, RuleSet,
+    eval_compiled, Action, CompiledDirectDelegatecall, CompiledEvent, CompiledRule, RuleSet,
     TimeoutAction, DEFAULT_MAX_EVENT_BINDINGS_PER_TX,
 };
 
@@ -52,8 +54,8 @@ pub enum MatchError {
         "rule '{rule_id}' would raise the complete binding count to {attempted}, exceeding the per-transaction budget of {limit}"
     )]
     BindingBudgetExceeded { rule_id: String, attempted: usize, limit: usize },
-    /// A rule declares callstack selectors but the execution path produced no adjudicable
-    /// observation set. Distinct from "observed nothing", which is an ordinary no-match.
+    /// A rule declares direct-delegatecall aliases but the execution path produced no adjudicable
+    /// observation set. Distinct from "observed nothing", which suppresses the rule.
     #[error("rule '{rule_id}' declares callstack selectors but observations are unavailable ({reason})", reason = reason.as_str())]
     ObservationsUnavailable { rule_id: String, reason: ObservationUnavailable },
     /// The observation set was captured under a different rule snapshot than the one evaluating
@@ -161,10 +163,16 @@ fn evaluate_checked(
                 }
             })
             .collect();
-        // Callstack candidates, resolved against the observation set. A rule without selectors
+        // Callstack candidates, resolved against the observation set. A rule without aliases
         // takes no part in this and keeps the pre-existing path byte for byte, including when the
         // observation set is unavailable.
-        let frame_candidates = callstack_candidates(rule, &input.observations, rules)?;
+        //
+        // Suppression is decided HERE, before the binding budget is charged, so a suppressed rule
+        // contributes zero to it rather than one.
+        let frame_candidates = match callstack_candidates(rule, &input.observations, rules)? {
+            CallstackCandidates::Suppressed => continue,
+            CallstackCandidates::Candidates(candidates) => candidates,
+        };
         // The budget covers the full event x callstack product, not each family separately:
         // bounding them independently would still let a handful of selectors and a handful of
         // events enumerate a large combination count.
@@ -183,8 +191,7 @@ fn evaluate_checked(
             });
         }
         let mut current = Vec::with_capacity(candidates.len());
-        let mut frame_current: Vec<Option<&CallObservation>> =
-            Vec::with_capacity(frame_candidates.len());
+        let mut frame_current: Vec<&CallObservation> = Vec::with_capacity(frame_candidates.len());
         let mut visit = |binding: &[Option<MatchedEvent>]| {
             // Missing events are null-bound; evaluate the condition for every binding, including
             // no-log transactions. Whether any *physical* event backed this binding decides only
@@ -282,7 +289,7 @@ fn build_bindings(
     rule: &CompiledRule,
     input: &ScreenInput,
     binding: &[Option<MatchedEvent>],
-    frames: &[Option<&CallObservation>],
+    frames: &[&CallObservation],
 ) -> crate::rules::Bindings {
     let mut b = crate::rules::Bindings::new();
     b.insert(
@@ -314,71 +321,71 @@ fn build_bindings(
         }
     }
 
-    for (selector, observed) in rule.callstack.iter().zip(frames) {
-        bind_callstack_selector(&mut b, selector, *observed);
+    for (alias, observed) in rule.callstack.iter().zip(frames) {
+        bind_direct_delegatecall(&mut b, alias, observed);
     }
 
     b
 }
 
-/// Binds one selector's six flat condition variables.
+/// Binds one alias's two flat condition variables.
 ///
-/// `matched` is mandatory and is the guard an author needs: without it, a negated allowlist test
-/// over an absent (null) hash evaluates true and a deny rule would reject every unrelated
-/// transaction, because the evaluator treats a one-sided null as not equal.
-fn bind_callstack_selector(
+/// There is no `Option` and no null branch: a rule whose alias produced no observation is
+/// suppressed before any binding is built, so this is only ever reached with a real observation.
+/// That is what removes the null-binding hazard at its source instead of asking every rule author
+/// to guard against it — a guard an author can forget is not a guard.
+fn bind_direct_delegatecall(
     b: &mut crate::rules::Bindings,
-    selector: &CompiledCallstackSelector,
-    observed: Option<&CallObservation>,
+    alias: &CompiledDirectDelegatecall,
+    observation: &CallObservation,
 ) {
-    let name = &selector.var_name;
-    match observed {
-        Some(observation) => {
-            b.insert(format!("{name}.matched"), Value::Bool(true));
-            b.insert(
-                format!("{name}.callType"),
-                Value::String(observation.kind.as_str().to_string()),
-            );
-            b.insert(format!("{name}.address"), Value::String(addr_lower(observation.address)));
-            b.insert(format!("{name}.codeHash"), Value::String(hash_lower(observation.code_hash)));
-            b.insert(
-                format!("{name}.implAddress"),
-                observation.impl_address.map(addr_lower).map(Value::String).unwrap_or(Value::Null),
-            );
-            b.insert(
-                format!("{name}.implCodeHash"),
-                observation
-                    .impl_code_hash
-                    .map(hash_lower)
-                    .map(Value::String)
-                    .unwrap_or(Value::Null),
-            );
-        }
-        None => {
-            b.insert(format!("{name}.matched"), Value::Bool(false));
-            for field in ["callType", "address", "codeHash", "implAddress", "implCodeHash"] {
-                b.insert(format!("{name}.{field}"), Value::Null);
-            }
-        }
-    }
+    let name = &alias.alias;
+    // Both values are present for a direct-delegatecall observation, and only such observations
+    // are candidates, so a missing one is an invariant violation rather than a null binding.
+    b.insert(
+        format!("{name}.delegateTo"),
+        Value::String(addr_lower(
+            observation.impl_address.expect("a direct delegatecall carries its target address"),
+        )),
+    );
+    b.insert(
+        format!("{name}.delegateCodeHash"),
+        Value::String(hash_lower(
+            observation.impl_code_hash.expect("a direct delegatecall carries its target code hash"),
+        )),
+    );
 }
 
-/// Resolves each selector of `rule` to its candidate observations.
+/// The three outcomes of resolving one rule's aliases against the observation set.
+enum CallstackCandidates<'obs> {
+    /// At least one declared alias produced no observation, so the whole rule is not evaluated.
+    Suppressed,
+    /// One candidate dimension per declared alias, each non-empty, in execution order. Empty for
+    /// a rule declaring no alias.
+    Candidates(Vec<Vec<&'obs CallObservation>>),
+}
+
+/// Resolves each declared alias of `rule` to its candidate observations.
 ///
-/// A selector with no matching observation contributes exactly one `None` candidate, so a no-match
-/// never multiplies the candidate count to zero and never skips condition evaluation — the
-/// explicit `matched = false` binding is what the condition guards on.
+/// Returns [`CallstackCandidates::Suppressed`] when any declared alias produced no observation.
+/// Suppression — not a null candidate — is the required semantics: an unobserved alias binds no
+/// variable at all, so `condition` never runs and the rule contributes no verdict. Binding the
+/// absent value as null instead would make the negated membership test these rules are written
+/// with evaluate true for every transaction that never touched the proxy, turning an
+/// implementation allowlist into a production-wide objection.
 ///
-/// Returns an error for a rule that declares selectors while the observation set cannot be
+/// Returns an error for a rule that declares an alias while the observation set cannot be
 /// adjudicated: unavailable or incomplete capture, or a set captured under a different snapshot.
-/// Rules without selectors are untouched by either condition.
+/// Both fail closed, and that is deliberately NOT the same as suppression — "capture did not run"
+/// must never read as "capture ran and this proxy was untouched". Rules without aliases are
+/// untouched by either condition.
 fn callstack_candidates<'obs>(
     rule: &CompiledRule,
     observations: &Observations<'obs>,
     rules: &RuleSet,
-) -> Result<Vec<Vec<Option<&'obs CallObservation>>>, MatchError> {
+) -> Result<CallstackCandidates<'obs>, MatchError> {
     if rule.callstack.is_empty() {
-        return Ok(Vec::new());
+        return Ok(CallstackCandidates::Candidates(Vec::new()));
     }
     let items = match observations {
         Observations::Unavailable { reason } => {
@@ -394,69 +401,49 @@ fn callstack_candidates<'obs>(
             *items
         }
     };
-    Ok(rule
-        .callstack
-        .iter()
-        .map(|selector| {
-            let matched: Vec<Option<&CallObservation>> = items
-                .iter()
-                .filter(|observation| selector_accepts(selector, observation))
-                .map(Some)
-                .collect();
-            if matched.is_empty() {
-                vec![None]
-            } else {
-                matched
-            }
-        })
-        .collect())
+    let mut candidates = Vec::with_capacity(rule.callstack.len());
+    for alias in &rule.callstack {
+        let matched: Vec<&CallObservation> =
+            items.iter().filter(|observation| alias_accepts(alias, observation)).collect();
+        if matched.is_empty() {
+            return Ok(CallstackCandidates::Suppressed);
+        }
+        candidates.push(matched);
+    }
+    Ok(CallstackCandidates::Candidates(candidates))
 }
 
-/// Whether an observation satisfies a selector. Supplied exact values narrow the selector;
-/// omitted ones accept any observed value and leave it inspectable from `condition`.
-fn selector_accepts(selector: &CompiledCallstackSelector, observation: &CallObservation) -> bool {
-    if selector.address != observation.address {
-        return false;
-    }
-    if let Some(expected) = selector.code_hash
-        && expected != observation.code_hash
-    {
-        return false;
-    }
-    // The impl fields are validated as an all-or-nothing pair, so constraining them selects only
-    // direct-delegatecall observations: a plain call observation has no impl values to match.
-    if let Some(expected) = selector.impl_address
-        && observation.impl_address != Some(expected)
-    {
-        return false;
-    }
-    if let Some(expected) = selector.impl_code_hash
-        && observation.impl_code_hash != Some(expected)
-    {
-        return false;
-    }
-    true
+/// Whether an observation is a candidate for an alias.
+///
+/// Only a direct delegatecall of the alias's own address qualifies. `Call`-kind observations are
+/// still produced — they are what lets capture attribute a delegatecall at all — but no condition
+/// variable under this contract can read one, so they are never candidates. Because the target
+/// address and target code hash are present exactly for a direct delegatecall, both bound
+/// variables are always real strings.
+fn alias_accepts(alias: &CompiledDirectDelegatecall, observation: &CallObservation) -> bool {
+    observation.kind == CallObservationKind::DirectDelegatecall
+        && observation.address == alias.address
 }
 
 /// Visits every callstack-candidate combination in candidate order without allocating the product,
 /// mirroring [`visit_bindings`]. A visitor can break immediately to return a pure deny verdict.
 fn visit_frame_bindings<'obs, F>(
-    selector_idx: usize,
-    candidates: &[Vec<Option<&'obs CallObservation>>],
-    current: &mut Vec<Option<&'obs CallObservation>>,
+    alias_idx: usize,
+    candidates: &[Vec<&'obs CallObservation>],
+    current: &mut Vec<&'obs CallObservation>,
     visit: &mut F,
 ) -> ControlFlow<MatchOutcome>
 where
-    F: FnMut(&[Option<&'obs CallObservation>]) -> ControlFlow<MatchOutcome>,
+    F: FnMut(&[&'obs CallObservation]) -> ControlFlow<MatchOutcome>,
 {
-    if selector_idx == candidates.len() {
+    if alias_idx == candidates.len() {
         return visit(current);
     }
 
-    for candidate in &candidates[selector_idx] {
-        current.push(*candidate);
+    for candidate in &candidates[alias_idx] {
+        current.push(candidate);
         if let ControlFlow::Break(outcome) =
-            visit_frame_bindings(selector_idx + 1, candidates, current, visit)
+            visit_frame_bindings(alias_idx + 1, candidates, current, visit)
         {
             current.pop();
             return ControlFlow::Break(outcome);

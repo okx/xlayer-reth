@@ -98,11 +98,15 @@ pub struct RawRule {
     /// at load.
     #[serde(default)]
     pub event_abis: BTreeMap<String, EventAbi>,
-    /// Named call-frame selectors, keyed by a rule-local variable name the engine attaches no
-    /// meaning to. Deserialized through [`deserialize_unique_selectors`] so a repeated variable
-    /// name is rejected instead of silently collapsing to the last occurrence.
-    #[serde(default, deserialize_with = "deserialize_unique_selectors")]
-    pub callstack: BTreeMap<String, RawCallstackSelector>,
+    /// The optional `callstack` rule section.
+    ///
+    /// Present-vs-explicit-null is preserved deliberately: `None` is an absent field, which is a
+    /// legitimate event-only rule, while `Some(None)` is an explicit `"callstack": null` and is
+    /// rejected at load. Collapsing the two would make a null-valued section read as "the author
+    /// declared no call-frame constraint", which is exactly the silent-absence failure the rest of
+    /// this schema is built to prevent.
+    #[serde(default, deserialize_with = "double_option")]
+    pub callstack: Option<Option<RawCallstack>>,
     #[serde(default = "default_audit_types")]
     pub audit_types: Vec<String>,
     pub condition: serde_json::Value,
@@ -114,49 +118,57 @@ pub struct RawRule {
     pub unknown: UnknownFields,
 }
 
-/// A raw call-frame selector as delivered on the wire. Every field is kept as an optional
-/// string so load-time validation can reject a missing address and malformed encodings with a
-/// precise reason instead of failing deserialization of the whole snapshot with a generic error.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct RawCallstackSelector {
-    #[serde(default)]
-    pub address: Option<String>,
-    /// Exact-match constraint on the code executed in the observed frame.
-    #[serde(default, rename = "codeHash")]
-    pub code_hash: Option<String>,
-    /// Exact-match constraint on the direct delegatecall target. Must be supplied together with
-    /// `implCodeHash`.
-    #[serde(default, rename = "implAddress")]
-    pub impl_address: Option<String>,
-    /// Exact-match constraint on the direct delegatecall target's executed code.
-    #[serde(default, rename = "implCodeHash")]
-    pub impl_code_hash: Option<String>,
-    /// See [`AbiInput::unknown`].
-    #[serde(flatten)]
-    pub unknown: UnknownFields,
+/// The `callstack` rule section as delivered on the wire.
+///
+/// Exactly one field is admissible, `direct_delegatecalls`. `deny_unknown_fields` is what makes
+/// a near-miss spelling — `direct_delegatecall`, `directDelegatecalls`, `Direct_DelegateCalls` —
+/// a loud rejection instead of a silently ignored key, so a constraint the author believes is
+/// active can never be absent.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawCallstack {
+    /// Rule-local alias -> the proxy address whose own first-level `DELEGATECALL`s are observed.
+    ///
+    /// Deserialized through [`deserialize_unique_aliases`] rather than straight into a map so a
+    /// repeated alias can never be silently collapsed to its last value.
+    #[serde(deserialize_with = "deserialize_unique_aliases")]
+    pub direct_delegatecalls: BTreeMap<String, String>,
 }
 
-/// Deserializes the `callstack` map while rejecting a repeated variable name.
+/// Distinguishes an absent field from an explicitly null one.
 ///
-/// A plain `BTreeMap` silently keeps the last of several equal keys. Because every selector
+/// With `#[serde(default)]`, an absent key yields `None` and a present key yields `Some(inner)`,
+/// where `inner` is itself `None` for a JSON `null`. A plain `Option` cannot express that
+/// difference, and the two must not be merged (see [`RawRule::callstack`]).
+fn double_option<'de, T, D>(deserializer: D) -> std::result::Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Deserialize::deserialize(deserializer).map(Some)
+}
+
+/// Deserializes the `direct_delegatecalls` map while rejecting a repeated alias.
+///
+/// A plain `BTreeMap` silently keeps the last of several equal keys. Because every alias
 /// contributes flat condition variables under its own name, a duplicate would quietly discard one
-/// author-visible selector, so it is surfaced as a deserialization error and the snapshot is
+/// author-visible alias, so it is surfaced as a deserialization error and the document is
 /// rejected whole.
-fn deserialize_unique_selectors<'de, D>(
+fn deserialize_unique_aliases<'de, D>(
     deserializer: D,
-) -> std::result::Result<BTreeMap<String, RawCallstackSelector>, D::Error>
+) -> std::result::Result<BTreeMap<String, String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     use serde::de::{Error, MapAccess, Visitor};
 
-    struct UniqueSelectors;
+    struct UniqueAliases;
 
-    impl<'de> Visitor<'de> for UniqueSelectors {
-        type Value = BTreeMap<String, RawCallstackSelector>;
+    impl<'de> Visitor<'de> for UniqueAliases {
+        type Value = BTreeMap<String, String>;
 
         fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("a map of unique callstack selector names")
+            f.write_str("a map of unique direct_delegatecalls alias names")
         }
 
         fn visit_map<A: MapAccess<'de>>(
@@ -164,12 +176,18 @@ where
             mut access: A,
         ) -> std::result::Result<Self::Value, A::Error> {
             let mut out = BTreeMap::new();
-            while let Some((name, selector)) =
-                access.next_entry::<String, RawCallstackSelector>()?
-            {
-                if out.insert(name.clone(), selector).is_some() {
+            // Key and value are read separately so a wrong value type can be reported against
+            // the alias it belongs to. `next_entry` would surface serde's bare "expected a
+            // string", which does not say WHICH alias is malformed.
+            while let Some(alias) = access.next_key::<String>()? {
+                let address: String = access.next_value().map_err(|error| {
+                    A::Error::custom(format!(
+                        "direct_delegatecalls alias '{alias}' must be a lowercase 0x 20-byte address string: {error}"
+                    ))
+                })?;
+                if out.insert(alias.clone(), address).is_some() {
                     return Err(A::Error::custom(format!(
-                        "duplicate callstack selector name '{name}'"
+                        "direct_delegatecalls declares alias '{alias}' more than once"
                     )));
                 }
             }
@@ -177,21 +195,20 @@ where
         }
     }
 
-    deserializer.deserialize_map(UniqueSelectors)
+    deserializer.deserialize_map(UniqueAliases)
 }
 
-/// A validated call-frame selector ready for matching. Supplied exact values act as additional
-/// selector constraints that narrow which observations the selector accepts; omitted ones leave
-/// the actual observed value inspectable from `condition`.
+/// A validated direct-delegatecall alias: a rule-local name and the proxy address it observes.
+///
+/// There are no narrowing constraint fields. Under this contract the `condition` does all the
+/// narrowing, against the two variables the alias binds (`<alias>.delegateTo` and
+/// `<alias>.delegateCodeHash`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompiledCallstackSelector {
-    /// Rule-local name used as the `<name>` prefix of this selector's condition variables.
-    pub var_name: String,
-    /// Address whose call frames are observed.
+pub struct CompiledDirectDelegatecall {
+    /// Rule-local alias; the `<alias>` prefix of this alias's two condition variables.
+    pub alias: String,
+    /// Proxy address whose own direct `DELEGATECALL`s are observed.
     pub address: Address,
-    pub code_hash: Option<B256>,
-    pub impl_address: Option<Address>,
-    pub impl_code_hash: Option<B256>,
 }
 
 /// A compiled ABI input: the resolved [`DynSolType`] plus indexed flag and name.
@@ -246,9 +263,9 @@ pub struct CompiledRule {
     pub contract_address: Option<Address>,
     pub origin: Option<Address>,
     pub events: Vec<CompiledEvent>,
-    /// Call-frame selectors in declared (name) order. Empty for every rule that does not use the
-    /// callstack section, which keeps those rules on the unchanged matching path.
-    pub callstack: Vec<CompiledCallstackSelector>,
+    /// Direct-delegatecall aliases in declared (alias) order. Empty for every rule that does not
+    /// use the callstack section, which keeps those rules on the unchanged matching path.
+    pub callstack: Vec<CompiledDirectDelegatecall>,
     pub audit_types: Vec<String>,
     pub condition: serde_json::Value,
     pub action: Action,

@@ -2742,9 +2742,11 @@ mod loop_level_fail_closed_tests {
                 "anonymous": false
             }},
             "audit_types": ["quota"],
-            "callstack": { "entry": { "address": format!("{:#x}", golden::token_x()) } },
+            "callstack": { "direct_delegatecalls": {
+                "entry": format!("{:#x}", golden::token_x())
+            } },
             "condition": { "and": [
-                { "==": [ { "var": "entry.matched" }, true ] },
+                { "!=": [ { "var": "entry.delegateTo" }, null ] },
                 { "==": [ { "var": "transfer.address" }, format!("{:#x}", golden::token_x()) ] }
             ]},
             "action": "audit",
@@ -2755,7 +2757,7 @@ mod loop_level_fail_closed_tests {
 
     fn callstack_rules_at(content_version: u64) -> rcs_filter::rules::RuleSet {
         let rules = load_rules(
-            rcs_filter::CALLSTACK_MIN_PROTOCOL_VERSION,
+            rcs_filter::config::MIN_PROTOCOL_VERSION,
             content_version,
             vec![callstack_gated_audit_rule()],
         );
@@ -2764,14 +2766,40 @@ mod loop_level_fail_closed_tests {
     }
 
     /// Installs the sender and the ERC20 `Transfer`-emitting contract the candidate calls.
+    /// The implementation `TOKEN_X` delegates into. Its code is what actually emits the log, so
+    /// under the `DELEGATECALL` the log's address is still `TOKEN_X`.
+    fn callstack_implementation() -> Address {
+        Address::repeat_byte(0xd1)
+    }
+
+    /// `DELEGATECALL(gas, implementation, 0, 0, 0, 0); POP; STOP` — the one frame shape a rule
+    /// can observe under this contract.
+    fn delegating_code(target: Address) -> Vec<u8> {
+        let mut code = vec![0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x73];
+        code.extend_from_slice(target.as_slice());
+        code.extend_from_slice(&[0x5a, 0xf4, 0x50, 0x00]);
+        code
+    }
+
     fn callstack_state(sender: Address) -> State<CacheDB<EmptyDB>> {
         let mut cache = CacheDB::new(EmptyDB::default());
         cache.insert_account_info(
             sender,
             AccountInfo { balance: U256::from(10u128.pow(18)), nonce: 0, ..Default::default() },
         );
+        // `TOKEN_X` performs a first-level `DELEGATECALL`, which is what makes it observable:
+        // only a direct delegatecall of a declared address is ever a candidate.
         cache.insert_account_info(
             golden::token_x(),
+            AccountInfo {
+                code: Some(Bytecode::new_raw(Bytes::from(delegating_code(
+                    callstack_implementation(),
+                )))),
+                ..Default::default()
+            },
+        );
+        cache.insert_account_info(
+            callstack_implementation(),
             AccountInfo {
                 code: Some(Bytecode::new_raw(Bytes::from(erc20_transfer_emitter_code()))),
                 ..Default::default()
@@ -2780,8 +2808,9 @@ mod loop_level_fail_closed_tests {
         State::builder().with_database(cache).with_bundle_update().build()
     }
 
-    /// Signs one candidate that calls `TOKEN_X`, so the real capture observes a call frame at the
-    /// selected address AND the emitted log matches the rule's event.
+    /// Signs one candidate that calls `TOKEN_X`, whose code delegatecalls its implementation — so
+    /// the real capture observes a DIRECT DELEGATECALL of the declared address AND the log the
+    /// implementation emits (under the delegatecall, at `TOKEN_X`) matches the rule's event.
     fn callstack_candidate() -> (Signer, OpPooledTransaction, B256) {
         let signer = crate::tests::funded_signer();
         let candidate = OpTypedTransaction::Eip1559(TxEip1559 {
@@ -2879,14 +2908,15 @@ mod loop_level_fail_closed_tests {
         );
     }
 
-    /// A callstack-only deny rule on `address`: any transaction with an observed call frame at it
-    /// is rejected. `audit` would need decoded events; `deny` is the shape a pure callstack rule
-    /// takes, so it isolates the snapshot question from the event pipeline.
+    /// A callstack-only deny rule on `address`: any transaction whose direct delegatecall of it
+    /// is observed is rejected. `audit` would need decoded events; `deny` is the shape a pure
+    /// callstack rule takes, so it isolates the snapshot question from the event pipeline.
     fn callstack_deny_rule(address: Address) -> RawRule {
         serde_json::from_value(serde_json::json!({
             "id": "deny-observed-frame",
-            "callstack": { "entry": { "address": format!("{address:#x}") } },
-            "condition": { "==": [ { "var": "entry.matched" }, true ] },
+            "event_abis": {},
+            "callstack": { "direct_delegatecalls": { "entry": format!("{address:#x}") } },
+            "condition": { "!=": [ { "var": "entry.delegateTo" }, null ] },
             "action": "deny"
         }))
         .expect("valid callstack deny rule")
@@ -2894,7 +2924,7 @@ mod loop_level_fail_closed_tests {
 
     fn deny_rules_at(address: Address, content_version: u64) -> rcs_filter::rules::RuleSet {
         let rules = load_rules(
-            rcs_filter::CALLSTACK_MIN_PROTOCOL_VERSION,
+            rcs_filter::config::MIN_PROTOCOL_VERSION,
             content_version,
             vec![callstack_deny_rule(address)],
         );
@@ -3087,8 +3117,9 @@ mod block_snapshot_pinning_tests {
     fn selector_rule(id: &str, address: Address) -> RawRule {
         serde_json::from_value(json!({
             "id": id,
-            "callstack": { "entry": { "address": format!("{address:#x}") } },
-            "condition": { "==": [ { "var": "entry.matched" }, true ] },
+            "event_abis": {},
+            "callstack": { "direct_delegatecalls": { "entry": format!("{address:#x}") } },
+            "condition": { "!=": [ { "var": "entry.delegateTo" }, null ] },
             "action": "deny"
         }))
         .expect("valid rule")
@@ -3096,7 +3127,7 @@ mod block_snapshot_pinning_tests {
 
     fn handle_with(address: Address, content_version: u64) -> Arc<FilterHandle> {
         let rules = load_rules(
-            rcs_filter::CALLSTACK_MIN_PROTOCOL_VERSION,
+            rcs_filter::config::MIN_PROTOCOL_VERSION,
             content_version,
             vec![selector_rule("guard", address)],
         );
@@ -3123,7 +3154,7 @@ mod block_snapshot_pinning_tests {
         // A hot reload lands mid-block. Rule installation is an immediate swap, so this is the
         // moment that would leak new rules into the block already being built.
         filter.install_rules(load_rules(
-            rcs_filter::CALLSTACK_MIN_PROTOCOL_VERSION,
+            rcs_filter::config::MIN_PROTOCOL_VERSION,
             2,
             vec![selector_rule("guard", second)],
         ));
@@ -3151,7 +3182,7 @@ mod block_snapshot_pinning_tests {
     fn a_snapshot_with_no_selectors_yields_an_inert_capture_config() {
         // Screening enabled but no active rule asking about call frames: the whole observation
         // path stays inert rather than observing every frame "just in case".
-        let rules = load_rules(rcs_filter::CALLSTACK_MIN_PROTOCOL_VERSION, 1, vec![]);
+        let rules = load_rules(rcs_filter::config::MIN_PROTOCOL_VERSION, 1, vec![]);
         assert!(!rules.has_callstack_rules());
         let config =
             CallstackCaptureConfig::new(rules.stamp(), rules.callstack_selectors().to_vec());
@@ -3246,12 +3277,8 @@ mod deposit_identification_tests {
         serde_json::json!({
             "id": "proxy-impl-allowlist",
             "event_abis": {},
-            "callstack": { "entry": { "address": format!("{PROXY:#x}") } },
-            "condition": { "and": [
-                { "==": [ { "var": "entry.matched" }, true ] },
-                { "!=": [ { "var": "entry.implCodeHash" }, null ] },
-                { "!": { "in": [ { "var": "entry.implCodeHash" }, approved ] } }
-            ] },
+            "callstack": { "direct_delegatecalls": { "entry": format!("{PROXY:#x}") } },
+            "condition": { "!": { "in": [ { "var": "entry.delegateCodeHash" }, approved ] } },
             "action": "deny"
         })
     }
@@ -3264,8 +3291,9 @@ mod deposit_identification_tests {
     }
 
     fn filter_with(rules: Vec<RawRule>, config: FilterConfig) -> Arc<FilterHandle> {
-        let protocol_version = if rules.iter().any(|r| !r.callstack.is_empty()) { 2 } else { 1 };
-        let set = load_rules(protocol_version, 1, rules);
+        // One protocol version covers the whole rule schema, `callstack` included, so the version
+        // no longer varies with what a rule declares.
+        let set = load_rules(rcs_filter::config::MIN_PROTOCOL_VERSION, 1, rules);
         assert!(set.rejected.is_empty(), "test rules must load clean: {:?}", set.rejected);
         Arc::new(FilterHandle::for_test(config, set, Arc::new(SystemClock)))
     }
@@ -3866,9 +3894,10 @@ mod deposit_identification_tests {
             proxy_code: Vec<u8>,
         ) -> (Vec<CallObservation>, Verdict, Option<CallstackIdentification>, u64) {
             let source_hash = format!("{:#x}", B256::repeat_byte(0x33));
-            // A real v2 request, parsed through the strict wire schema the RPC exposes.
+            // A real request, parsed through the strict wire schema the RPC exposes. The protocol
+            // version is deliberately OMITTED, which is the shape the caller actually sends and
+            // which must mean version 1.
             let request: AuditTransactionsRequest = serde_json::from_value(serde_json::json!({
-                "protocol_version": 2,
                 "rules": [proxy_impl_allowlist_rule_json(approved)],
                 "txs": [{
                     "source_hash": source_hash,
@@ -3894,7 +3923,7 @@ mod deposit_identification_tests {
                 plan.rules(),
                 AuditCaptureConfig { max_callstack_observations_per_tx: GENEROUS_BUDGET },
             )
-            .expect("the fixture rule declares a selector");
+            .expect("the fixture rule declares an alias");
             let env = EvmEnv::new(
                 CfgEnv::new_with_spec(OpSpecId::JOVIAN),
                 BlockEnv { gas_limit: 30_000_000, ..Default::default() },
@@ -3952,10 +3981,12 @@ mod deposit_identification_tests {
                 let raw = vec![proxy_impl_allowlist_rule(&[approved])];
                 // The audit path compiles the rules carried in its own request, inside
                 // `prepare_audit_batch_plan`; this only pins that the shared rule source really
-                // is a clean v2 rule, so a silent rejection could not make the comparison
-                // vacuous on any path.
+                // is a clean rule, so a silent rejection could not make the comparison vacuous
+                // on any path.
                 assert!(
-                    load_rules(2, 0, raw.clone()).rejected.is_empty(),
+                    load_rules(rcs_filter::config::MIN_PROTOCOL_VERSION, 0, raw.clone())
+                        .rejected
+                        .is_empty(),
                     "the fixture rule must load clean"
                 );
 
