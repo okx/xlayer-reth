@@ -36,6 +36,8 @@ pub mod worker;
 mod callstack_tests;
 #[cfg(test)]
 mod integration_tests;
+#[cfg(test)]
+mod upstream_rules_tests;
 
 pub use callstack::{
     CallObservation, CallObservationKind, ObservationUnavailable, Observations, SnapshotStamp,
@@ -45,7 +47,7 @@ pub use client::{
     SubmitRequest, SubmitResponse, SubmitTx, VersionResponse,
 };
 pub use clock::{Clock, SystemClock};
-pub use config::{FilterConfig, CALLSTACK_MIN_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS};
+pub use config::{FilterConfig, SUPPORTED_PROTOCOL_VERSIONS};
 pub use error::{FilterError, Result};
 pub use handle::{
     FilterHandle, LocalDenyReason, PreScreen, Screen, ScreenInput, TerminalEvent, TerminalReason,

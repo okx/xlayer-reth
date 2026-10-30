@@ -149,6 +149,49 @@ pub(crate) fn eval_compiled(node: &CompiledCondition, b: &Bindings) -> bool {
     }
 }
 
+/// Collects every variable name a condition can resolve through `var`, in sorted order.
+///
+/// The walk is over the raw condition, which is what `compile` is derived from, so it sees every
+/// `var` the compiled condition can evaluate — including one retained inside an accelerated
+/// membership node. `var` accepts `"name"`, `["name"]` and `["name", default]`
+/// (see `eval_var`), and all three forms are collected.
+///
+/// Used by rule validation to reject a condition that reads a variable the rule's own
+/// `direct_delegatecalls` aliases do not provide. Such a name resolves to `null` at evaluation
+/// time, and a one-sided null is "not equal", so a negated allowlist over a misspelled variable
+/// inverts into an unconditional match instead of failing — which has to be a load-time
+/// rejection, not a runtime surprise.
+pub(crate) fn collect_var_names(expr: &Value, out: &mut std::collections::BTreeSet<String>) {
+    match expr {
+        Value::Object(map) => {
+            if map.len() == 1
+                && let Some(arg) = map.get("var")
+            {
+                let name = match arg {
+                    Value::String(name) => Some(name.as_str()),
+                    Value::Array(parts) => parts.first().and_then(Value::as_str),
+                    _ => None,
+                };
+                if let Some(name) = name {
+                    out.insert(name.to_string());
+                }
+                // A `var` node's operands are a name and an optional default, never nested
+                // expressions, so there is nothing further to walk under it.
+                return;
+            }
+            for value in map.values() {
+                collect_var_names(value, out);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_var_names(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Validates the supported JSONLogic subset and operator arity at rule-load time.
 pub(crate) fn validate(expr: &Value) -> Result<(), String> {
     match expr {

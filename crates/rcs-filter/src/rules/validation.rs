@@ -7,13 +7,13 @@
 use std::str::FromStr;
 
 use alloy_dyn_abi::DynSolType;
-use alloy_primitives::{keccak256, Address, B256};
+use alloy_primitives::{keccak256, Address};
 use tracing::warn;
 
 use super::jsonlogic::{compile, AddressSetInterner};
 use super::model::{
-    Action, CompiledCallstackSelector, CompiledEvent, CompiledInput, CompiledRule, EventAbi,
-    RawCallstackSelector, RawRule, RejectedRule, RuleSet, TimeoutAction, UnknownFields,
+    Action, CompiledDirectDelegatecall, CompiledEvent, CompiledInput, CompiledRule, EventAbi,
+    RawCallstack, RawRule, RejectedRule, RuleSet, TimeoutAction, UnknownFields,
 };
 
 /// Fixed ERC20 `Transfer` quota shape (ordered input names).
@@ -24,6 +24,11 @@ const ERC1155_TRANSFER_SINGLE_SHAPE: &[&str] = &["operator", "from", "to", "id",
 const ERC1155_TRANSFER_BATCH_SHAPE: &[&str] = &["operator", "from", "to", "ids", "values"];
 /// The only audit type implemented today.
 const QUOTA: &str = "quota";
+
+/// The direct-delegatecall target address variable suffix bound per alias.
+const DELEGATE_TO: &str = "delegateTo";
+/// The direct-delegatecall target's executed-code-hash variable suffix bound per alias.
+const DELEGATE_CODE_HASH: &str = "delegateCodeHash";
 
 /// At most this many offending keys are echoed in a rejection reason. A hostile or broken
 /// snapshot must not be able to inflate an operator log line.
@@ -68,16 +73,18 @@ fn bound_key(key: &str) -> String {
 }
 
 /// One dedicated traversal rejecting any unknown wire key reachable from `raw`, in a fixed
-/// order: rule, then callstack selectors by name, then events by name, then each event's inputs
-/// by index. Both maps are `BTreeMap`s, so "by name" is already sorted.
+/// order: the rule root, then events by name, then each event's inputs by index. The event map is
+/// a `BTreeMap`, so "by name" is already sorted.
 ///
 /// Running this as a single pass before every other per-rule check is what makes the reported
 /// reason independent of which unrelated validation would otherwise have failed first.
+///
+/// The `callstack` section is deliberately absent from this traversal: it declares no
+/// unknown-field map, because `RawCallstack` carries `deny_unknown_fields` and so an unknown key
+/// inside it is already a deserialization failure that names the key. The rule root's own check
+/// stays exactly as it was — it is what still catches a misspelled sibling such as `callStack`.
 fn reject_unknown_rule_fields(raw: &RawRule) -> std::result::Result<(), String> {
     reject_unknown("rule", &raw.unknown)?;
-    for (var_name, selector) in &raw.callstack {
-        reject_unknown(&format!("callstack selector '{var_name}'"), &selector.unknown)?;
-    }
     for (var_name, abi) in &raw.event_abis {
         reject_unknown(&format!("event '{var_name}'"), &abi.unknown)?;
         for (index, input) in abi.inputs.iter().enumerate() {
@@ -108,7 +115,7 @@ pub fn load_rules(protocol_version: u32, content_version: u64, raw: Vec<RawRule>
             rejected.push(RejectedRule { id, reason });
             continue;
         }
-        match compile_rule_with_interner(rule, protocol_version, &mut interner) {
+        match compile_rule_with_interner(rule, &mut interner) {
             Ok(compiled) => rules.push(compiled),
             Err(reason) => {
                 warn!(target: "rcs_filter", rule_id = %id, %reason, "rule rejected during load");
@@ -152,21 +159,13 @@ pub fn load_rules(protocol_version: u32, content_version: u64, raw: Vec<RawRule>
 /// Validates and compiles a single raw rule with a fresh single-use interner. This is the
 /// preserved public entry point; batch callers share address sets via
 /// [`compile_rule_with_interner`].
+///
+/// There is no protocol-version-specific entry point: the whole rule schema, `callstack`
+/// included, belongs to the single supported version, so compilation no longer varies with it.
+/// `protocol_version` reaches [`RuleSet`] only through [`load_rules`], where its real remaining
+/// job is the snapshot stamp.
 pub fn compile_rule(raw: RawRule) -> std::result::Result<CompiledRule, String> {
-    compile_rule_with_interner(
-        raw,
-        crate::config::MIN_PROTOCOL_VERSION,
-        &mut AddressSetInterner::new(),
-    )
-}
-
-/// Validates and compiles a single raw rule against an explicit rule `protocol_version`. Needed
-/// because the callstack section is only accepted from the protocol version that introduced it.
-pub fn compile_rule_at_protocol(
-    raw: RawRule,
-    protocol_version: u32,
-) -> std::result::Result<CompiledRule, String> {
-    compile_rule_with_interner(raw, protocol_version, &mut AddressSetInterner::new())
+    compile_rule_with_interner(raw, &mut AddressSetInterner::new())
 }
 
 /// Validates and compiles a single raw rule, interning any static address-membership set through
@@ -174,7 +173,6 @@ pub fn compile_rule_at_protocol(
 /// `audit_timeout_action` defaults to `allow` for `audit` rules that omit it.
 pub(crate) fn compile_rule_with_interner(
     raw: RawRule,
-    protocol_version: u32,
     interner: &mut AddressSetInterner,
 ) -> std::result::Result<CompiledRule, String> {
     // First, and before every other per-rule check: an unknown wire key anywhere under this
@@ -182,11 +180,12 @@ pub(crate) fn compile_rule_with_interner(
     // the offending key must win over any other rejection the same input would also trigger.
     reject_unknown_rule_fields(&raw)?;
 
-    // A rule needs at least one selector family: with neither declared events nor callstack
-    // selectors it could never match. `event_abis` alone being empty is legitimate for a rule
-    // that selects purely on call frames.
-    if raw.event_abis.is_empty() && raw.callstack.is_empty() {
-        return Err("rule declares neither event_abis nor callstack selectors".to_string());
+    // A rule needs at least one selector family: with neither declared events nor a `callstack`
+    // section it could never match. `event_abis` alone being empty is legitimate for a rule that
+    // selects purely on call frames. An explicitly null `callstack` is NOT an absent one and is
+    // reported by its own reason instead (see `compile_callstack`).
+    if raw.event_abis.is_empty() && raw.callstack.is_none() {
+        return Err("rule declares neither event_abis nor callstack".to_string());
     }
     if raw.event_abis.len() > super::MAX_EVENTS_PER_RULE {
         return Err(format!(
@@ -200,7 +199,10 @@ pub(crate) fn compile_rule_with_interner(
     }
     super::jsonlogic::validate(&raw.condition)?;
 
-    let callstack = compile_callstack(&raw, protocol_version)?;
+    let callstack = compile_callstack(&raw)?;
+    // Last, because it needs the compiled alias set: a condition may only read the two variables
+    // an alias actually provides.
+    reject_unknown_alias_variables(&raw.condition, &callstack)?;
 
     // `audit_types` is irrelevant to filter-only deny/allow rules. In particular, its wire
     // default is `["quota"]`, which must not make non-audit events subject to quota shapes.
@@ -252,96 +254,109 @@ pub(crate) fn compile_rule_with_interner(
     })
 }
 
-/// Validates and compiles a rule's `callstack` section.
+/// Validates and compiles a rule's `callstack` section into its direct-delegatecall aliases.
 ///
-/// Rejections (any one of which rejects the rule, and therefore the whole snapshot update):
-/// a selector without an address; exactly one of `implAddress` / `implCodeHash`; a malformed
-/// address or code-hash encoding; a callstack-only `audit` rule, whose action payload would have
-/// no content to carry; the section appearing under a protocol version that does not define it;
-/// more selectors than the per-rule bound; and a selector name colliding with an event alias,
-/// which would otherwise silently shadow one of them in the flat condition-variable keyspace.
+/// Checks run in a fixed order so the reported reason is deterministic for a given rule: an
+/// explicitly null section, an empty alias map, the per-rule alias bound, every alias address
+/// encoding, an alias colliding with an event alias, a callstack-only `audit` rule (whose action
+/// payload would have no content to carry), and finally an empty alias name.
+///
+/// An unknown key inside `callstack`, a wrong JSON type and a repeated alias never reach here:
+/// they are rejected during deserialization, which is earlier and names the offending field.
 fn compile_callstack(
     raw: &RawRule,
-    protocol_version: u32,
-) -> std::result::Result<Vec<CompiledCallstackSelector>, String> {
-    if raw.callstack.is_empty() {
-        return Ok(Vec::new());
+) -> std::result::Result<Vec<CompiledDirectDelegatecall>, String> {
+    let section: &RawCallstack = match &raw.callstack {
+        None => return Ok(Vec::new()),
+        // An explicit null is not an absent field. Treating it as absent would let a rule the
+        // author believes carries a call-frame constraint load as an unconstrained one.
+        Some(None) => {
+            return Err("callstack is explicitly null; omit the field instead".to_string());
+        }
+        Some(Some(section)) => section,
+    };
+
+    let aliases = &section.direct_delegatecalls;
+    if aliases.is_empty() {
+        return Err("direct_delegatecalls is empty".to_string());
     }
-    if !crate::config::protocol_supports_callstack(protocol_version) {
+    if aliases.len() > super::MAX_DIRECT_DELEGATECALL_ALIASES {
         return Err(format!(
-            "callstack selectors require rule protocol_version {} or later; this set declares {protocol_version}",
-            crate::config::CALLSTACK_MIN_PROTOCOL_VERSION
+            "direct_delegatecalls declares {} aliases; at most {} are allowed",
+            aliases.len(),
+            super::MAX_DIRECT_DELEGATECALL_ALIASES
         ));
     }
+
+    // Addresses first, for every alias, before any alias-name check: the encoding gate is the
+    // one that protects the exact-match comparison the observation filter performs.
+    let mut compiled = Vec::with_capacity(aliases.len());
+    for (alias, address) in aliases {
+        let address = parse_lower_hex_address(address).map_err(|_| {
+            format!("direct_delegatecalls alias '{alias}' is not a lowercase 0x 20-byte address")
+        })?;
+        compiled.push(CompiledDirectDelegatecall { alias: alias.clone(), address });
+    }
+
+    for alias in aliases.keys() {
+        if raw.event_abis.contains_key(alias) {
+            return Err(format!(
+                "direct_delegatecalls alias '{alias}' collides with an event_abis alias; condition variables share one flat namespace"
+            ));
+        }
+    }
+
     if raw.action == Action::Audit && raw.event_abis.is_empty() {
         return Err("an audit rule selecting only on callstack declares no event payload content"
             .to_string());
     }
-    if raw.callstack.len() > super::MAX_CALLSTACK_SELECTORS_PER_RULE {
-        return Err(format!(
-            "callstack declares {} selectors; at most {} are allowed",
-            raw.callstack.len(),
-            super::MAX_CALLSTACK_SELECTORS_PER_RULE
-        ));
+
+    // Only an EMPTY alias name is rejected. A non-empty non-ASCII name is a legitimate rule-local
+    // identifier and must never be reported with this reason.
+    if aliases.keys().any(|alias| alias.is_empty()) {
+        return Err("direct_delegatecalls declares an empty alias name".to_string());
     }
 
-    let mut out = Vec::with_capacity(raw.callstack.len());
-    for (var_name, selector) in &raw.callstack {
-        if raw.event_abis.contains_key(var_name) {
-            return Err(format!(
-                "callstack selector '{var_name}' collides with an event_abis alias; condition variables share one flat namespace"
-            ));
-        }
-        out.push(compile_callstack_selector(var_name, selector)?);
-    }
-    Ok(out)
+    Ok(compiled)
 }
 
-/// Compiles one named selector, enforcing the encoding rules and the impl field pairing.
-fn compile_callstack_selector(
-    var_name: &str,
-    selector: &RawCallstackSelector,
-) -> std::result::Result<CompiledCallstackSelector, String> {
-    let address = match selector.address.as_deref() {
-        Some(value) => parse_lower_hex_address(value)
-            .map_err(|e| format!("callstack selector '{var_name}' address {e}"))?,
-        None => {
-            return Err(format!("callstack selector '{var_name}' has no address"));
-        }
-    };
-    if selector.impl_address.is_some() != selector.impl_code_hash.is_some() {
-        return Err(format!(
-            "callstack selector '{var_name}' must supply implAddress and implCodeHash together or not at all"
-        ));
+/// Rejects a condition that reads a `<alias>.<field>` variable the rule's own aliases do not
+/// provide, naming the variable.
+///
+/// This is the load-time guard for the one failure mode this contract cannot survive at runtime.
+/// An unbound `var` resolves to `null`, and the evaluator treats a one-sided null as *not equal*,
+/// so a retired or misspelled field name inside the negated membership test these rules are
+/// written with inverts the rule into an unconditional match — a rule whose proxy was never
+/// touched would object to unrelated transactions. Rejecting at load turns that class of
+/// authoring mistake into a named, visible failure.
+///
+/// Scope is deliberately narrow: it fires only for a `<prefix>.<field>` variable whose `<prefix>`
+/// is a declared alias of the SAME rule. Event variables, transaction-level variables
+/// (`contract_address`, `origin`, `value`, `nonce`) and any unrelated name are untouched, so no
+/// event-only rule can be affected.
+fn reject_unknown_alias_variables(
+    condition: &serde_json::Value,
+    aliases: &[CompiledDirectDelegatecall],
+) -> std::result::Result<(), String> {
+    if aliases.is_empty() {
+        return Ok(());
     }
-    let code_hash = match selector.code_hash.as_deref() {
-        Some(value) => Some(
-            parse_lower_hex_b256(value)
-                .map_err(|e| format!("callstack selector '{var_name}' codeHash {e}"))?,
-        ),
-        None => None,
-    };
-    let impl_address = match selector.impl_address.as_deref() {
-        Some(value) => Some(
-            parse_lower_hex_address(value)
-                .map_err(|e| format!("callstack selector '{var_name}' implAddress {e}"))?,
-        ),
-        None => None,
-    };
-    let impl_code_hash = match selector.impl_code_hash.as_deref() {
-        Some(value) => Some(
-            parse_lower_hex_b256(value)
-                .map_err(|e| format!("callstack selector '{var_name}' implCodeHash {e}"))?,
-        ),
-        None => None,
-    };
-    Ok(CompiledCallstackSelector {
-        var_name: var_name.to_string(),
-        address,
-        code_hash,
-        impl_address,
-        impl_code_hash,
-    })
+    let mut names = std::collections::BTreeSet::new();
+    super::jsonlogic::collect_var_names(condition, &mut names);
+    for alias in aliases {
+        let prefix = format!("{}.", alias.alias);
+        for name in &names {
+            let Some(field) = name.strip_prefix(prefix.as_str()) else { continue };
+            if field == DELEGATE_TO || field == DELEGATE_CODE_HASH {
+                continue;
+            }
+            return Err(format!(
+                "condition references unknown variable '{}.{field}'; direct_delegatecalls provides {DELEGATE_TO} and {DELEGATE_CODE_HASH}",
+                alias.alias
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Rejects anything that is not a lowercase `0x`-prefixed 20-byte address.
@@ -352,12 +367,6 @@ fn compile_callstack_selector(
 fn parse_lower_hex_address(value: &str) -> std::result::Result<Address, String> {
     check_lower_hex(value, Address::len_bytes())?;
     Address::from_str(value).map_err(|e| format!("is not a valid address: {e}"))
-}
-
-/// Rejects anything that is not a lowercase `0x`-prefixed 32-byte hash.
-fn parse_lower_hex_b256(value: &str) -> std::result::Result<B256, String> {
-    check_lower_hex(value, B256::len_bytes())?;
-    B256::from_str(value).map_err(|e| format!("is not a valid 32-byte hash: {e}"))
 }
 
 /// Shared encoding gate: `0x` prefix, exact byte length, lowercase hex digits only.
@@ -532,13 +541,9 @@ mod tests {
         let reason = compile_rule(parse(json)).expect_err("a rule that can never match");
         assert!(reason.contains("neither event_abis nor callstack"), "{reason}");
 
-        // The same rule with a callstack selector is valid at the version that defines it.
-        let with_callstack = r#"{"id":"r","event_abis":{},"callstack":{"entry":{"address":"0x1111111111111111111111111111111111111111"}},"condition":true,"action":"deny"}"#;
-        assert!(super::compile_rule_at_protocol(
-            parse(with_callstack),
-            crate::config::CALLSTACK_MIN_PROTOCOL_VERSION
-        )
-        .is_ok());
+        // The same rule with a `callstack` section is valid, and needs no version argument.
+        let with_callstack = r#"{"id":"r","event_abis":{},"callstack":{"direct_delegatecalls":{"entry":"0x1111111111111111111111111111111111111111"}},"condition":true,"action":"deny"}"#;
+        assert!(compile_rule(parse(with_callstack)).is_ok());
     }
 
     #[test]
@@ -640,7 +645,7 @@ mod tests {
         let decoded = serde_json::from_str::<RawRule>(missing_event_abis)
             .expect("an omitted event_abis decodes to an empty map");
         assert!(decoded.event_abis.is_empty());
-        assert!(decoded.callstack.is_empty());
+        assert!(decoded.callstack.is_none(), "an omitted callstack is an absent section");
         let reason = compile_rule(decoded).expect_err("a rule that can never match");
         assert!(reason.contains("neither event_abis nor callstack"), "{reason}");
 
@@ -730,19 +735,27 @@ mod strict_schema_tests {
         })
     }
 
-    /// Loads one raw rule at the callstack-capable protocol version and returns the rejection
-    /// reason, asserting that exactly one rule was rejected and none installed.
+    /// Loads one raw rule and returns the rejection reason, asserting that exactly one rule was
+    /// rejected and none installed. Only usable for a rule that still deserializes — a key the
+    /// `callstack` section does not declare fails earlier, during the decode itself.
     fn rejection_reason(rule: Value) -> String {
         let raw: RawRule = serde_json::from_value(rule).expect("rule must still deserialize");
-        let set = load_rules(crate::config::CALLSTACK_MIN_PROTOCOL_VERSION, 1, vec![raw]);
+        let set = load_rules(crate::config::MIN_PROTOCOL_VERSION, 1, vec![raw]);
         assert!(set.rules.is_empty(), "no rule may install: {:?}", set.rules.len());
         assert_eq!(set.rejected.len(), 1, "exactly one rejection expected");
         set.rejected[0].reason.clone()
     }
 
-    fn accepts(rule: Value, protocol_version: u32) -> RuleSet {
+    /// The decode-time rejection for a key the wire schema does not declare at all.
+    fn decode_error(rule: Value) -> String {
+        serde_json::from_value::<RawRule>(rule)
+            .expect_err("an undeclared key must fail the decode")
+            .to_string()
+    }
+
+    fn accepts(rule: Value) -> RuleSet {
         let raw: RawRule = serde_json::from_value(rule).expect("rule must deserialize");
-        let set = load_rules(protocol_version, 1, vec![raw]);
+        let set = load_rules(crate::config::MIN_PROTOCOL_VERSION, 1, vec![raw]);
         assert!(set.rejected.is_empty(), "unexpected rejection: {:?}", set.rejected);
         set
     }
@@ -761,39 +774,35 @@ mod strict_schema_tests {
         assert_eq!(reason, "unknown field(s) in rule: callStack");
     }
 
-    /// a `codehash` typo inside a selector rejects the snapshot, naming `codehash`.
-    /// Previously the selector installed with its code-hash constraint gone, matching any
-    /// executed code.
+    /// The `callstack` section declares exactly one field, so the retired selector form, a
+    /// near-miss spelling and a speculative sibling are all rejected by name — during the decode,
+    /// which is earlier than any per-rule check and cannot be reached with the constraint
+    /// silently absent.
     #[test]
-    fn selector_codehash_typo_is_rejected_by_name() {
-        let reason = rejection_reason(json!({
-            "id": "typo-selector-codehash",
-            "callstack": { "entry": { "address": PROXY, "codehash": CODE_HASH } },
-            "condition": { "==": [ { "var": "entry.matched" }, true ] },
-            "action": "deny"
-        }));
-        assert_eq!(reason, "unknown field(s) in callstack selector 'entry': codehash");
-    }
-
-    /// both `implAddress` and `implCodeHash` misspelled. Previously the pairing check
-    /// (the implAddress/implCodeHash pairing check) saw `None != None` and passed, so the
-    /// implementation allowlist was simply gone.
-    #[test]
-    fn both_impl_fields_misspelled_are_rejected() {
-        let reason = rejection_reason(json!({
-            "id": "typo-both-impl",
-            "callstack": { "entry": {
-                "address": PROXY,
-                "impladdress": IMPL,
-                "implcodehash": CODE_HASH
-            } },
-            "condition": { "==": [ { "var": "entry.matched" }, true ] },
-            "action": "deny"
-        }));
-        assert_eq!(
-            reason,
-            "unknown field(s) in callstack selector 'entry': impladdress, implcodehash"
-        );
+    fn an_undeclared_key_inside_callstack_is_rejected_by_name() {
+        for (section, expected) in [
+            // the retired selector form
+            (json!({ "entry": { "address": PROXY, "codeHash": CODE_HASH } }), "entry"),
+            // near-miss spellings of the one declared field
+            (json!({ "direct_delegatecall": { "entry": PROXY } }), "direct_delegatecall"),
+            (json!({ "directDelegatecalls": { "entry": PROXY } }), "directDelegatecalls"),
+            (json!({ "Direct_DelegateCalls": { "entry": PROXY } }), "Direct_DelegateCalls"),
+            // a speculative sibling alongside the correct field
+            (
+                json!({ "direct_delegatecalls": { "entry": PROXY }, "impl_allowlist": [IMPL] }),
+                "impl_allowlist",
+            ),
+        ] {
+            let error = decode_error(json!({
+                "id": "undeclared-callstack-key",
+                "event_abis": { "transfer": transfer_event() },
+                "callstack": section,
+                "condition": true,
+                "action": "deny"
+            }));
+            assert!(error.contains("unknown field"), "{error}");
+            assert!(error.contains(expected), "the error must name {expected}: {error}");
+        }
     }
 
     /// any unrecognised safety key at rule level is rejected with the key named.
@@ -853,63 +862,35 @@ mod strict_schema_tests {
         assert_eq!(reason, "unknown field(s) in rule: callStack");
     }
 
-    /// boundary preserved: a correct `implAddress` with only `implCodehash` misspelled is
-    /// still rejected (the pairing check already caught it), now with the unknown-field reason.
+    /// positive control: a fully correct `callstack` rule, in the producer's own shape, loads
+    /// unchanged and compiles to exactly one alias.
     #[test]
-    fn misspelled_impl_code_hash_is_rejected_with_unknown_field_reason() {
-        let reason = rejection_reason(json!({
-            "id": "typo-impl-code-hash-only",
-            "callstack": { "entry": {
-                "address": PROXY,
-                "implAddress": IMPL,
-                "implCodehash": CODE_HASH
-            } },
-            "condition": { "==": [ { "var": "entry.matched" }, true ] },
+    fn a_correct_callstack_rule_loads() {
+        let set = accepts(json!({
+            "id": "correct-callstack",
+            "event_abis": {},
+            "callstack": { "direct_delegatecalls": { "entry": PROXY } },
+            "condition": { "==": [ { "var": "entry.delegateCodeHash" }, CODE_HASH ] },
             "action": "deny"
         }));
-        assert_eq!(reason, "unknown field(s) in callstack selector 'entry': implCodehash");
-    }
-
-    /// positive control: a fully correct v2 `callstack` rule, using every selector field,
-    /// loads unchanged.
-    #[test]
-    fn correct_v2_callstack_rule_loads() {
-        let set = accepts(
-            json!({
-                "id": "correct-v2",
-                "callstack": { "entry": {
-                    "address": PROXY,
-                    "codeHash": CODE_HASH,
-                    "implAddress": IMPL,
-                    "implCodeHash": CODE_HASH
-                } },
-                "condition": { "==": [ { "var": "entry.matched" }, true ] },
-                "action": "deny"
-            }),
-            crate::config::CALLSTACK_MIN_PROTOCOL_VERSION,
-        );
         assert_eq!(set.rules.len(), 1);
-        let selector = &set.rules[0].callstack[0];
-        assert_eq!(selector.var_name, "entry");
-        assert!(selector.code_hash.is_some());
-        assert!(selector.impl_address.is_some());
-        assert!(selector.impl_code_hash.is_some());
+        let alias = &set.rules[0].callstack[0];
+        assert_eq!(alias.alias, "entry");
+        assert_eq!(alias.address, PROXY.parse::<Address>().unwrap());
+        assert_eq!(set.callstack_selectors(), [PROXY.parse::<Address>().unwrap()]);
     }
 
-    /// positive control: a correct v1 rule with no `callstack` loads unchanged.
+    /// positive control: a correct rule with no `callstack` loads unchanged.
     #[test]
-    fn correct_v1_event_rule_loads() {
-        let set = accepts(
-            json!({
-                "id": "correct-v1",
-                "contract_address": null,
-                "origin": null,
-                "event_abis": { "transfer": transfer_event() },
-                "condition": true,
-                "action": "deny"
-            }),
-            crate::config::MIN_PROTOCOL_VERSION,
-        );
+    fn a_correct_event_only_rule_loads() {
+        let set = accepts(json!({
+            "id": "correct-event-only",
+            "contract_address": null,
+            "origin": null,
+            "event_abis": { "transfer": transfer_event() },
+            "condition": true,
+            "action": "deny"
+        }));
         assert_eq!(set.rules.len(), 1);
         assert!(set.rules[0].callstack.is_empty());
     }
@@ -986,29 +967,29 @@ mod strict_schema_tests {
             "condition": true,
             "action": "deny"
         }));
-        assert_eq!(reason, "rule declares neither event_abis nor callstack selectors");
+        assert_eq!(reason, "rule declares neither event_abis nor callstack");
     }
 
-    /// control: a selector with a correct `implAddress` and `implCodeHash` genuinely
-    /// absent, with no unknown keys, is still rejected with the pairing check's **original**
-    /// reason.
+    /// control: a declared but malformed alias address, with no unknown keys anywhere, is still
+    /// rejected by the encoding gate's own reason.
     #[test]
-    fn impl_pairing_keeps_original_reason() {
+    fn a_malformed_alias_address_keeps_its_own_reason() {
         let reason = rejection_reason(json!({
-            "id": "unpaired-impl",
-            "callstack": { "entry": { "address": PROXY, "implAddress": IMPL } },
-            "condition": { "==": [ { "var": "entry.matched" }, true ] },
+            "id": "malformed-alias-address",
+            "event_abis": {},
+            "callstack": { "direct_delegatecalls": { "entry": "0xAABB" } },
+            "condition": { "==": [ { "var": "entry.delegateTo" }, IMPL ] },
             "action": "deny"
         }));
         assert_eq!(
             reason,
-            "callstack selector 'entry' must supply implAddress and implCodeHash together or not at all"
+            "direct_delegatecalls alias 'entry' is not a lowercase 0x 20-byte address"
         );
     }
 
-    /// The traversal order is fixed (rule → selectors → events → inputs), so an input carrying
-    /// unknown keys at several levels always reports the outermost one. Without that the reported
-    /// reason would depend on which unrelated check happened to run first.
+    /// The traversal order is fixed (rule root → events → inputs), so an input carrying unknown
+    /// keys at several levels always reports the outermost one. Without that the reported reason
+    /// would depend on which unrelated check happened to run first.
     #[test]
     fn traversal_order_is_fixed_outermost_first() {
         let mut event = transfer_event();
@@ -1016,9 +997,9 @@ mod strict_schema_tests {
         let reason = rejection_reason(json!({
             "id": "unknown-at-every-level",
             "event_abis": { "transfer": event },
-            "callstack": { "entry": { "address": PROXY, "codehash": CODE_HASH } },
+            "callstack": { "direct_delegatecalls": { "entry": PROXY } },
             "speculative": 1,
-            "condition": { "==": [ { "var": "entry.matched" }, true ] },
+            "condition": { "==": [ { "var": "entry.delegateTo" }, IMPL ] },
             "action": "deny"
         }));
         assert_eq!(reason, "unknown field(s) in rule: speculative");

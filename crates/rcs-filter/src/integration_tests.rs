@@ -1177,7 +1177,7 @@ async fn load_and_install_rejects_unsupported_protocol() {
 /// Bound to the real `load_and_install` entry point on purpose; a test-only helper would not
 /// prove that the typo reaches the production gate.
 #[tokio::test]
-async fn it_unknown_field_rejects_snapshot_then_corrected_poll_recovers() {
+async fn it_undeclared_callstack_key_fails_the_decode_then_a_corrected_poll_recovers() {
     let mock = Arc::new(MockRcsClient::new());
     mock.set_rules_fixture(&[golden::RULE_SCENARIO_A]);
     let client: Arc<dyn RcsClient> = mock.clone();
@@ -1187,35 +1187,38 @@ async fn it_unknown_field_rejects_snapshot_then_corrected_poll_recovers() {
     assert_eq!(previous.rules.len(), 1);
     assert_eq!(previous.content_version, 1);
 
-    // A `codeHash` typo inside the selector of one rule, alongside a valid sibling.
+    // The retired selector form inside `callstack`, alongside a valid sibling rule. The
+    // `callstack` section declares exactly one field, so this fails during the TYPED DECODE of
+    // the whole response — before `load_rules` is ever called. There is therefore no per-rule
+    // `(id, reason)` for it, and none is fabricated: the failure surfaces as the decode error,
+    // naming the offending key.
     mock.set_rules_response_override(json!({
-        "protocol_version": 2,
+        "protocol_version": 1,
         "content_version": 2,
         "rules": [
             serde_json::from_str::<serde_json::Value>(golden::RULE_SCENARIO_B).unwrap(),
             json!({
                 "id": "proxy-impl-allowlist",
+                "event_abis": {},
                 "callstack": { "entry": {
                     "address": "0x00000000000000000000000000000000000000aa",
-                    "codehash": "0x1111111111111111111111111111111111111111111111111111111111111111"
+                    "codeHash": "0x1111111111111111111111111111111111111111111111111111111111111111"
                 } },
-                "condition": { "==": [ { "var": "entry.matched" }, true ] },
+                "condition": true,
                 "action": "deny"
             })
         ]
     }));
     let err = worker::load_and_install(&shared, &client)
         .await
-        .expect_err("an unknown field must refuse the entire snapshot");
+        .expect_err("an undeclared callstack key must refuse the entire snapshot");
     match &err {
-        crate::FilterError::InvalidRules(1, rejected) => {
-            assert_eq!(rejected[0].id, "proxy-impl-allowlist");
-            assert_eq!(
-                rejected[0].reason,
-                "unknown field(s) in callstack selector 'entry': codehash"
-            );
+        crate::FilterError::Decode(reason) => {
+            assert!(reason.contains("unknown field"), "{reason}");
+            assert!(reason.contains("entry"), "the reason must name the offending key: {reason}");
+            assert!(reason.contains("direct_delegatecalls"), "{reason}");
         }
-        other => panic!("expected one rejected rule, got {other:?}"),
+        other => panic!("expected a decode failure, got {other:?}"),
     }
     let current = shared.rules.read().unwrap().clone();
     assert!(
@@ -1225,19 +1228,23 @@ async fn it_unknown_field_rejects_snapshot_then_corrected_poll_recovers() {
     assert_eq!(current.content_version, 1, "content_version must not advance on rejection");
     drop(current);
 
-    // The same two rules with the typo corrected install on the next poll.
+    // The same two rules in the correct shape install on the next poll, which proves the payload
+    // reached this decode path rather than failing for an unrelated schema reason.
     mock.set_rules_response_override(json!({
-        "protocol_version": 2,
+        "protocol_version": 1,
         "content_version": 3,
         "rules": [
             serde_json::from_str::<serde_json::Value>(golden::RULE_SCENARIO_B).unwrap(),
             json!({
                 "id": "proxy-impl-allowlist",
-                "callstack": { "entry": {
-                    "address": "0x00000000000000000000000000000000000000aa",
-                    "codeHash": "0x1111111111111111111111111111111111111111111111111111111111111111"
+                "event_abis": {},
+                "callstack": { "direct_delegatecalls": {
+                    "entry": "0x00000000000000000000000000000000000000aa"
                 } },
-                "condition": { "==": [ { "var": "entry.matched" }, true ] },
+                "condition": { "!": { "in": [
+                    { "var": "entry.delegateCodeHash" },
+                    ["0x1111111111111111111111111111111111111111111111111111111111111111"]
+                ]}},
                 "action": "deny"
             })
         ]
@@ -1249,6 +1256,120 @@ async fn it_unknown_field_rejects_snapshot_then_corrected_poll_recovers() {
     let current = shared.rules.read().unwrap();
     assert_eq!(current.content_version, 3);
     assert_eq!(current.rules.len(), 2);
+    assert!(current.has_callstack_rules());
+}
+
+/// A `GET /rules` snapshot declaring any version other than the one supported one installs
+/// NOTHING and leaves last-known-good — including its `content_version` — in force.
+///
+/// Version 2 is the case that matters: it is the version the retired `callstack` selector shape
+/// was authored against, so a snapshot declaring it must be refused by name rather than
+/// adjudicated under the current contract.
+#[tokio::test]
+async fn it_an_unsupported_protocol_version_installs_nothing_and_keeps_last_known_good() {
+    assert_eq!(UNSUPPORTED_PROTOCOL_VERSION, 2, "the first unsupported version is 2");
+
+    let mock = Arc::new(MockRcsClient::new());
+    mock.set_rules_fixture(&[golden::RULE_SCENARIO_A]);
+    let client: Arc<dyn RcsClient> = mock.clone();
+    let shared = shared_with(Arc::new(TestClock::new(START)), RuleSet::default(), false);
+    assert!(worker::load_and_install(&shared, &client).await.unwrap());
+    let previous = shared.rules.read().unwrap().clone();
+    assert_eq!(previous.content_version, 1);
+
+    for version in [UNSUPPORTED_PROTOCOL_VERSION, 0, 3, 99] {
+        mock.set_rules_response_override(json!({
+            "protocol_version": version,
+            "content_version": 2,
+            "rules": [
+                serde_json::from_str::<serde_json::Value>(golden::RULE_SCENARIO_B).unwrap()
+            ]
+        }));
+        assert!(
+            !worker::load_and_install(&shared, &client).await.unwrap(),
+            "version {version} must install nothing"
+        );
+        let current = shared.rules.read().unwrap().clone();
+        assert!(
+            Arc::ptr_eq(&previous, &current),
+            "version {version}: last-known-good must stay installed"
+        );
+        assert_eq!(current.content_version, 1, "version {version}: content_version must not move");
+    }
+
+    // The same snapshot at the supported version installs, which proves the refusals above were
+    // about the version and not about the rule.
+    mock.set_rules_response_override(json!({
+        "protocol_version": 1,
+        "content_version": 2,
+        "rules": [serde_json::from_str::<serde_json::Value>(golden::RULE_SCENARIO_B).unwrap()]
+    }));
+    assert!(worker::load_and_install(&shared, &client).await.unwrap());
+    assert_eq!(shared.rules.read().unwrap().content_version, 2);
+}
+
+/// The per-rule counterpart: a rule rejected by a check inside the rule COMPILER is reached by
+/// `load_rules`, so the diagnostic set really does carry `(id, reason)` for it alongside the valid
+/// sibling — and the install is still refused whole, with `content_version` unchanged.
+#[tokio::test]
+async fn it_a_compiler_rejected_rule_is_diagnosable_and_still_installs_nothing() {
+    let mock = Arc::new(MockRcsClient::new());
+    mock.set_rules_fixture(&[golden::RULE_SCENARIO_A]);
+    let client: Arc<dyn RcsClient> = mock.clone();
+    let shared = shared_with(Arc::new(TestClock::new(START)), RuleSet::default(), false);
+    assert!(worker::load_and_install(&shared, &client).await.unwrap());
+    let previous = shared.rules.read().unwrap().clone();
+    assert_eq!(previous.content_version, 1);
+
+    for (rule, expected_reason) in [
+        // a checksummed alias address
+        (
+            json!({
+                "id": "uppercase-alias-address",
+                "event_abis": {},
+                "callstack": { "direct_delegatecalls": {
+                    "entry": "0x00000000000000000000000000000000000000AA"
+                } },
+                "condition": { "==": [ { "var": "entry.delegateTo" }, "0x00000000000000000000000000000000000000bb" ] },
+                "action": "deny"
+            }),
+            "direct_delegatecalls alias 'entry' is not a lowercase 0x 20-byte address",
+        ),
+        // a condition reading a variable the alias does not provide
+        (
+            json!({
+                "id": "unknown-alias-variable",
+                "event_abis": {},
+                "callstack": { "direct_delegatecalls": {
+                    "entry": "0x00000000000000000000000000000000000000aa"
+                } },
+                "condition": { "==": [ { "var": "entry.delegateAddress" }, "0x00000000000000000000000000000000000000bb" ] },
+                "action": "deny"
+            }),
+            "condition references unknown variable 'entry.delegateAddress'; direct_delegatecalls provides delegateTo and delegateCodeHash",
+        ),
+    ] {
+        mock.set_rules_response_override(json!({
+            "protocol_version": 1,
+            "content_version": 2,
+            "rules": [
+                serde_json::from_str::<serde_json::Value>(golden::RULE_SCENARIO_B).unwrap(),
+                rule
+            ]
+        }));
+        let err = worker::load_and_install(&shared, &client)
+            .await
+            .expect_err("a rejected rule must refuse the entire snapshot");
+        match &err {
+            crate::FilterError::InvalidRules(1, rejected) => {
+                assert_eq!(rejected[0].reason, expected_reason);
+            }
+            other => panic!("expected one rejected rule, got {other:?}"),
+        }
+        let current = shared.rules.read().unwrap().clone();
+        assert!(Arc::ptr_eq(&previous, &current), "last-known-good must stay installed");
+        assert_eq!(current.content_version, 1, "content_version must not advance on rejection");
+    }
 }
 
 /// Root-level variant: an unknown key at the response **root** fails on the decode path

@@ -26,7 +26,9 @@ use alloy_evm::{Evm, IntoTxEnv};
 use alloy_op_evm::OpEvmFactory;
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use rcs_filter::callstack::{ObservationUnavailable, Observations};
-use rcs_filter::config::{is_supported_protocol, MIN_PROTOCOL_VERSION};
+use rcs_filter::config::{
+    is_supported_protocol, MIN_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
+};
 use rcs_filter::rules::{load_rules, RawRule, RuleSet, UnknownFields};
 use reth_evm::{block::BlockExecutorFactory, ConfigureEvm};
 use reth_optimism_primitives::OpTransactionSigned;
@@ -97,13 +99,13 @@ fn known_allowed_result(tx_hash: alloy_primitives::B256, source_hash: &str) -> A
     }
 }
 
-/// What a `known_allowed` entry IS. Supplied by the producer and **never inferred** from `to`,
+/// What a `known_allowed` entry IS. Supplied by the caller and **never inferred** from `to`,
 /// calldata, position or any other heuristic.
 ///
-/// The two classes have **opposite safe defaults** — Deny-priority is safe for an `Original` and
-/// unsafe for a `SyntheticBan`, and committing is safe for a `SyntheticBan` and unsafe for an
-/// `Original` — so there is no safe guess, which is why a missing label is a request error rather
-/// than a default.
+/// The two labelled classes have **opposite safe defaults** — Deny-priority is safe for an
+/// `Original` and unsafe for a `SyntheticBan`, and committing is safe for a `SyntheticBan` and
+/// unsafe for an `Original` — so there is no safe guess between them. That is why an unlabelled
+/// entry is given its own third class rather than silently resolved to either one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KnownAllowedKind {
@@ -112,6 +114,22 @@ pub enum KnownAllowedKind {
     /// A control prefix the caller prepended for blacklist replay. It is authored by the caller
     /// itself to rebuild base state it already decided, not an unadjudicated user payload.
     SyntheticBan,
+    /// A `known_allowed` entry the request supplied no label for.
+    ///
+    /// Not a wire value — `#[serde(skip)]` keeps the request contract to exactly the two labels
+    /// above, so a caller cannot select this class explicitly. It is resolved locally, and its
+    /// behaviour is the behaviour such an entry already has: it executes, **its state is
+    /// committed**, its verdict stays `Allow`, and the call-frame result is a bounded diagnostic
+    /// that is never acted on.
+    ///
+    /// This is deliberately conservative rather than protective. Resolving an unlabelled entry to
+    /// `Original` would adjudicate it, and a replay prefix that is withheld from the commit
+    /// corrupts the very base state the replay exists to rebuild; resolving it to `SyntheticBan`
+    /// would claim a guarantee for an ordinary deposit that this class does not provide. The
+    /// documented consequence is that an unlabelled entry is never re-judged by the call-frame
+    /// dimension, and that must never be described as end-to-end protection.
+    #[serde(skip)]
+    Unlabelled,
 }
 
 /// The rule protocol version an omitted request field means. Keeps every existing caller
@@ -134,9 +152,11 @@ pub struct AuditTransactionsRequest {
     /// re-classifying it would just produce `audit` again forever. Only the **callstack**
     /// dimension may change an `Original`'s verdict, and only ever to `deny` or a non-verdict.
     pub known_allowed: Vec<String>,
-    /// `source_hash` → class for every `known_allowed` entry. Required when the request
-    /// advertises version 2, carries a non-empty `known_allowed`, and declares at least one
-    /// callstack selector; unused (and unnecessary) otherwise.
+    /// `source_hash` → class for every `known_allowed` entry. Entirely **optional**: a request
+    /// that supplies no map at all is accepted and every entry resolves to
+    /// [`KnownAllowedKind::Unlabelled`]. A request that DOES supply the map must label every one
+    /// of its `known_allowed` entries, because a caller labelling some and not others is
+    /// label-aware and ambiguous.
     pub known_allowed_kinds: Option<BTreeMap<String, KnownAllowedKind>>,
 }
 
@@ -234,24 +254,30 @@ fn validate_protocol_version(
     }
     Err(jsonrpsee::types::ErrorObjectOwned::owned(
         -32602,
-        format!("unsupported rule protocol_version {protocol_version}"),
+        format!(
+            "unsupported rule protocol_version {protocol_version}; supported: {:?}",
+            SUPPORTED_PROTOCOL_VERSIONS
+        ),
         None::<()>,
     ))
 }
 
-/// Rejects a v2 selector-bearing request whose `known_allowed_kinds` does not cover every
+/// Rejects a request that supplies a `known_allowed_kinds` map which does not cover every
 /// `known_allowed` entry, naming the unlabelled `source_hash` values.
 ///
-/// The node does **not** silently pick a class: the two classes have opposite safe defaults, so
-/// there is no safe guess. v1 requests, and v2 requests declaring no selector, need no labels and
-/// are unaffected.
+/// Labels are optional, and that is load-bearing: a caller that sends no map at all is the
+/// ordinary case, and rejecting it would make every round that carries a non-empty
+/// `known_allowed` fail permanently. Such a request is accepted and each entry resolves to
+/// [`KnownAllowedKind::Unlabelled`].
+///
+/// A **partial** map is a different thing and is still refused: a caller that labels some entries
+/// and not others is label-aware, so the omission is ambiguous rather than conventional, and the
+/// node does not silently pick a class for the remainder.
 fn validate_known_allowed_labels(
-    protocol_version: u32,
     known_allowed: &[String],
     kinds: Option<&BTreeMap<String, KnownAllowedKind>>,
-    selectors_declared: bool,
 ) -> Result<(), jsonrpsee::types::ErrorObjectOwned> {
-    if protocol_version < 2 || known_allowed.is_empty() || !selectors_declared {
+    if kinds.is_none() || known_allowed.is_empty() {
         return Ok(());
     }
     let mut unlabelled: Vec<&str> = known_allowed
@@ -308,17 +334,16 @@ fn validate_compiled_rules(rules: &RuleSet) -> Result<(), jsonrpsee::types::Erro
 /// Filtering out rules with no `callstack` section leaves the selector address set — and
 /// therefore the `SnapshotStamp` — unchanged, so capture and screening still provably share one
 /// configuration and the existing stamp check keeps its meaning.
-fn callstack_only_projection(
-    protocol_version: u32,
-    rules: &RuleSet,
-    raw: &[RawRule],
-) -> Option<RuleSet> {
+fn callstack_only_projection(rules: &RuleSet, raw: &[RawRule]) -> Option<RuleSet> {
     if !rules.has_callstack_rules() {
         return None;
     }
-    let projected: Vec<RawRule> =
-        raw.iter().filter(|rule| !rule.callstack.is_empty()).cloned().collect();
-    Some(load_rules(protocol_version, 0, projected))
+    let projected: Vec<RawRule> = raw
+        .iter()
+        .filter(|rule| rule.callstack.as_ref().is_some_and(Option::is_some))
+        .cloned()
+        .collect();
+    Some(load_rules(MIN_PROTOCOL_VERSION, 0, projected))
 }
 
 /// The capture inspector this request needs, or `None` when it declares no call-frame selector —
@@ -364,14 +389,19 @@ struct AuditBatch<'a> {
     known_allowed_rules: Option<&'a RuleSet>,
     known_allowed: &'a HashSet<String>,
     kinds: Option<&'a BTreeMap<String, KnownAllowedKind>>,
-    /// Whether the response may carry the identification diagnostic (v2 requests only).
+    /// Whether the response may carry the identification diagnostic. Keyed on the request
+    /// actually declaring a call-frame alias, which is the condition it always meant: a request
+    /// with nothing to identify reports nothing.
     report_identification: bool,
 }
 
 impl AuditBatch<'_> {
-    /// `Some(kind)` when this `source_hash` is a `known_allowed` entry. Defaults to `Original`
-    /// only where a label is not required (a v1 request, or a v2 request declaring no selector);
-    /// where it IS required, the request was already rejected at the boundary.
+    /// `Some(kind)` when this `source_hash` is a `known_allowed` entry.
+    ///
+    /// An entry with no label resolves to [`KnownAllowedKind::Unlabelled`] rather than to either
+    /// labelled class: a partial map was already refused at the boundary, so reaching here
+    /// unlabelled means the caller supplied no labels at all, and the two labelled classes have
+    /// opposite safe defaults.
     fn known_allowed_kind(&self, source_hash: &str) -> Option<KnownAllowedKind> {
         if !self.known_allowed.contains(source_hash) {
             return None;
@@ -379,7 +409,7 @@ impl AuditBatch<'_> {
         Some(
             self.kinds
                 .and_then(|kinds| kinds.get(source_hash).copied())
-                .unwrap_or(KnownAllowedKind::Original),
+                .unwrap_or(KnownAllowedKind::Unlabelled),
         )
     }
 
@@ -418,24 +448,19 @@ impl AuditBatchPlan {
         // imply a persistence this path does not have).
         let rules = load_rules(req.protocol_version, 0, req.rules.clone());
         validate_compiled_rules(&rules)?;
-        validate_known_allowed_labels(
-            req.protocol_version,
-            &req.known_allowed,
-            req.known_allowed_kinds.as_ref(),
-            rules.has_callstack_rules(),
-        )?;
-        let known_allowed_rules =
-            callstack_only_projection(req.protocol_version, &rules, &req.rules);
+        validate_known_allowed_labels(&req.known_allowed, req.known_allowed_kinds.as_ref())?;
+        let known_allowed_rules = callstack_only_projection(&rules, &req.rules);
         debug_assert!(
             known_allowed_rules.as_ref().is_none_or(|set| set.stamp() == rules.stamp()),
             "the callstack-only projection must carry the same snapshot stamp"
         );
+        let report_identification = rules.has_callstack_rules();
         Ok(Self {
             rules,
             known_allowed_rules,
             known_allowed: req.known_allowed.iter().cloned().collect(),
             kinds: req.known_allowed_kinds.clone(),
-            report_identification: req.protocol_version >= 2,
+            report_identification,
         })
     }
 
@@ -628,14 +653,24 @@ where
         let kind = batch.known_allowed_kind(&tx_req.source_hash);
 
         // Highest priority, and deliberately BEFORE any rule is filtered or matched: a request
-        // that declares a selector and whose observation set cannot be adjudicated gets the
+        // that declares an alias and whose observation set cannot be adjudicated gets the
         // non-verdict, with no state committed. Rule-level filtering (`contract_address` /
         // `origin`) short-circuits with zero decoding, so leaving this to the matcher would let
         // an unidentifiable execution be reported as an authoritative `Allow` whenever the
-        // narrowed rules happened to be skipped. The `SyntheticBan` class is the ONE explicit
-        // exception: its contract is unconditional (it executes, commits and stays `Allow`), so
-        // it is handled by its own arm below and never reaches this gate.
-        if kind != Some(KnownAllowedKind::SyntheticBan)
+        // narrowed rules happened to be skipped.
+        //
+        // The exemption covers exactly the classes whose verdict their own contract fixes rather
+        // than adjudication: `SyntheticBan` (unconditional `Allow` + commit, because that commit
+        // is what rebuilds the base state) and `Unlabelled` (`Allow` + commit, with the
+        // call-frame result reported as a diagnostic only). Both are handled by their own arms
+        // below, so passing them through this gate would return the non-verdict for an entry that
+        // was never going to be adjudicated — and, for a replay prefix, withhold the commit the
+        // caller depends on. Ordinary deposits and labelled `Original` entries are NOT exempt.
+        let self_adjudicating = matches!(
+            kind,
+            Some(KnownAllowedKind::SyntheticBan) | Some(KnownAllowedKind::Unlabelled)
+        );
+        if !self_adjudicating
             && let Some(reason) = unadjudicable_observations(batch.rules, observations)
         {
             executed[exec_idx] = Some(unadjudicable_result(batch, &tx_req.source_hash, reason));
@@ -661,11 +696,7 @@ where
                 // A request declaring no selector still falls through to the classifier and
                 // keeps its `NotApplicable` report, because the judgement returns `None` there.
                 let identification =
-                    if unadjudicable_observations(batch.rules, observations).is_some() {
-                        CallstackIdentification::NotIdentified
-                    } else {
-                        synthetic_ban_identification(batch, tx, tx_req, &logs, observations)
-                    };
+                    diagnostic_identification(batch, tx, tx_req, &logs, observations);
                 // Observation only, and the one place an operator can see it: the consumer
                 // skips this prefix's verdict, so the response diagnostic reaches nobody.
                 report_synthetic_ban_identification(
@@ -682,9 +713,29 @@ where
                 );
                 continue;
             }
+            // An entry the request supplied no label for. Its verdict is fixed by its own
+            // contract: it executes, its state IS committed, and it stays `Allow` — the behaviour
+            // such an entry already had before the call-frame dimension could appear in a
+            // request at all. The call-frame result is computed with the SAME judgement every
+            // other class uses and is reported as a diagnostic, never acted on.
+            //
+            // The residual risk this carries is explicit and must not be restated as protection:
+            // an unlabelled entry that executes an unapproved implementation is NOT denied here.
+            // Closing it requires the caller to label its entries, which is a coordinated change
+            // on the caller's side and not something this path can decide alone.
+            Some(KnownAllowedKind::Unlabelled) => {
+                evm.db_mut().commit(state);
+                let identification =
+                    diagnostic_identification(batch, tx, tx_req, &logs, observations);
+                executed[exec_idx] = Some(
+                    known_allowed_result(tx.tx_hash(), &tx_req.source_hash)
+                        .with_identification(batch.identification(identification)),
+                );
+                continue;
+            }
             // An `Original` earns no exemption from the non-verdict rule. Priority, highest
-            // first: unavailable observations with a selector-bearing request → the existing
-            // non-verdict; a selector-bearing objection → `Deny`; otherwise `Allow` + commit,
+            // first: unavailable observations with an alias-bearing request → the existing
+            // non-verdict; an alias-bearing objection → `Deny`; otherwise `Allow` + commit,
             // byte-identical to the previous behaviour.
             Some(KnownAllowedKind::Original) => {
                 let Some(callstack_rules) = batch.known_allowed_rules else {
@@ -828,14 +879,27 @@ fn report_synthetic_ban_identification(
     }
 }
 
-/// The reported identification of a synthetic replay prefix: observation only.
-fn synthetic_ban_identification(
+/// The reported call-frame identification of a `known_allowed` entry whose verdict its own class
+/// contract fixes: observation only, never acted on.
+///
+/// The unadjudicable test is the SAME judgement the request-level gate applies, deliberately
+/// reused rather than restated: a set is adjudicable only if it is available AND was produced
+/// under this request's own snapshot. Testing only the available dimension would let an
+/// `Available` set carrying a FOREIGN stamp reach the classifier, where a narrowed rule is
+/// skipped with zero decoding and the entry would be reported `Clean` — "identified, nothing
+/// matched" about frames this snapshot cannot adjudicate at all. A request declaring no alias
+/// still falls through to the classifier and keeps its `NotApplicable` report, because the
+/// judgement returns `None` there.
+fn diagnostic_identification(
     batch: &AuditBatch<'_>,
     tx: &Recovered<OpTransactionSigned>,
     tx_req: &DepositTxRequest,
     logs: &[alloy_primitives::Log],
     observations: Observations<'_>,
 ) -> CallstackIdentification {
+    if unadjudicable_observations(batch.rules, observations).is_some() {
+        return CallstackIdentification::NotIdentified;
+    }
     let Some(callstack_rules) = batch.known_allowed_rules else {
         return CallstackIdentification::NotApplicable;
     };
@@ -1252,11 +1316,24 @@ mod capture_path_tests {
         keccak256(impl_code(0x01))
     }
 
-    /// The normative rule pattern: observe by **proxy address only**, then deny when
-    /// the observed implementation code hash is NOT in the approved set. The explicit non-null
-    /// guard keeps an ordinary non-delegatecall call to the proxy from being denied.
+    /// The normative rule pattern: declare one alias on the proxy address, then deny when the
+    /// code it delegated into is NOT in the approved set. No guard variable is needed or
+    /// available: an alias that produced no observation suppresses the whole rule, and only a
+    /// direct delegatecall is ever a candidate, so the bound hash is always a real value.
     fn proxy_impl_allowlist_rule() -> RawRule {
         proxy_impl_allowlist_rule_approving(&[approved_hash()])
+    }
+
+    /// The same rule as raw JSON, for a test that has to build a whole request body.
+    fn proxy_impl_allowlist_rule_json() -> serde_json::Value {
+        let approved = vec![format!("{:#x}", approved_hash())];
+        serde_json::json!({
+            "id": "proxy-impl-allowlist",
+            "event_abis": {},
+            "callstack": { "direct_delegatecalls": { "entry": format!("{PROXY:#x}") } },
+            "condition": { "!": { "in": [ { "var": "entry.delegateCodeHash" }, approved ] } },
+            "action": "deny"
+        })
     }
 
     /// The same normative rule under a DIFFERENT id, selecting the SAME proxy address. Two of
@@ -1274,14 +1351,14 @@ mod capture_path_tests {
         serde_json::from_value(serde_json::json!({
             "id": "two-address-observer",
             "event_abis": {},
-            "callstack": {
-                "entry": { "address": format!("{PROXY:#x}") },
-                "second": { "address": format!("{APPROVED_IMPL:#x}") }
-            },
-            "condition": { "==": [ { "var": "entry.matched" }, true ] },
+            "callstack": { "direct_delegatecalls": {
+                "entry": format!("{PROXY:#x}"),
+                "second": format!("{APPROVED_IMPL:#x}")
+            } },
+            "condition": { "!=": [ { "var": "entry.delegateTo" }, format!("{APPROVED_IMPL:#x}") ] },
             "action": "deny"
         }))
-        .expect("valid v2 rule")
+        .expect("valid rule")
     }
 
     /// The same pattern over an explicit approved set, for a fixture whose implementation is not
@@ -1291,12 +1368,8 @@ mod capture_path_tests {
         serde_json::from_value(serde_json::json!({
             "id": "proxy-impl-allowlist",
             "event_abis": {},
-            "callstack": { "entry": { "address": format!("{PROXY:#x}") } },
-            "condition": { "and": [
-                { "==": [ { "var": "entry.matched" }, true ] },
-                { "!=": [ { "var": "entry.implCodeHash" }, null ] },
-                { "!": { "in": [ { "var": "entry.implCodeHash" }, approved ] } }
-            ] },
+            "callstack": { "direct_delegatecalls": { "entry": format!("{PROXY:#x}") } },
+            "condition": { "!": { "in": [ { "var": "entry.delegateCodeHash" }, approved ] } },
             "action": "deny"
         }))
         .expect("the normative sample must deserialize")
@@ -1316,18 +1389,14 @@ mod capture_path_tests {
             "id": "proxy-impl-allowlist-origin-narrowed",
             "origin": format!("{origin:#x}"),
             "event_abis": {},
-            "callstack": { "entry": { "address": format!("{PROXY:#x}") } },
-            "condition": { "and": [
-                { "==": [ { "var": "entry.matched" }, true ] },
-                { "!=": [ { "var": "entry.implCodeHash" }, null ] },
-                { "!": { "in": [ { "var": "entry.implCodeHash" }, approved ] } }
-            ] },
+            "callstack": { "direct_delegatecalls": { "entry": format!("{PROXY:#x}") } },
+            "condition": { "!": { "in": [ { "var": "entry.delegateCodeHash" }, approved ] } },
             "action": "deny"
         }))
         .expect("the origin-narrowed sample must deserialize")
     }
 
-    /// A v1 event rule declaring no `callstack` section at all.
+    /// An event rule declaring no `callstack` section at all.
     fn event_only_rule() -> RawRule {
         serde_json::from_str(
             r#"{"id":"evt","event_abis":{"transfer":{"type":"event","name":"Transfer",
@@ -1336,7 +1405,7 @@ mod capture_path_tests {
                          {"name":"value","type":"uint256","indexed":false}],
                "anonymous":false}},"condition":true,"action":"deny"}"#,
         )
-        .expect("valid v1 rule")
+        .expect("valid event-only rule")
     }
 
     fn deposit_request(source_hash: &str, to: Address) -> DepositTxRequest {
@@ -1432,7 +1501,7 @@ mod capture_path_tests {
     ) -> BatchRun {
         let rules = load_rules(protocol_version, 0, raw_rules.clone());
         assert!(rules.rejected.is_empty(), "test rules must load clean: {:?}", rules.rejected);
-        let known_allowed_rules = callstack_only_projection(protocol_version, &rules, &raw_rules);
+        let known_allowed_rules = callstack_only_projection(&rules, &raw_rules);
         let known_allowed_set: HashSet<String> =
             known_allowed.iter().map(|h| (*h).to_string()).collect();
         let txs: Vec<_> =
@@ -1444,7 +1513,7 @@ mod capture_path_tests {
             known_allowed_rules: known_allowed_rules.as_ref(),
             known_allowed: &known_allowed_set,
             kinds: kinds.as_ref(),
-            report_identification: protocol_version >= 2,
+            report_identification: rules.has_callstack_rules(),
         };
         let mut executed: Vec<Option<AuditResult>> = (0..txs.len()).map(|_| None).collect();
         let env = EvmEnv::new(
@@ -1501,7 +1570,7 @@ mod capture_path_tests {
         let run = run_batch(
             &[deposit_request(&format!("0x{}", "33".repeat(32)), PROXY)],
             vec![proxy_impl_allowlist_rule()],
-            2,
+            1,
             &[],
             None,
             generous(),
@@ -1520,7 +1589,7 @@ mod capture_path_tests {
         let run = run_batch(
             &[deposit_request(&format!("0x{}", "33".repeat(32)), PROXY)],
             vec![proxy_impl_allowlist_rule()],
-            2,
+            1,
             &[],
             None,
             generous(),
@@ -1542,7 +1611,7 @@ mod capture_path_tests {
         let run = run_batch(
             &[deposit_request(&format!("0x{}", "33".repeat(32)), PROXY)],
             vec![proxy_impl_allowlist_rule()],
-            2,
+            1,
             &[],
             None,
             generous(),
@@ -1570,7 +1639,7 @@ mod capture_path_tests {
         let run = run_batch(
             &[deposit_request(&format!("0x{}", "33".repeat(32)), PROXY)],
             vec![proxy_impl_allowlist_rule()],
-            2,
+            1,
             &[],
             None,
             AuditCaptureConfig { max_callstack_observations_per_tx: 1 },
@@ -1586,7 +1655,7 @@ mod capture_path_tests {
         let generous_run = run_batch(
             &[deposit_request(&format!("0x{}", "33".repeat(32)), PROXY)],
             vec![proxy_impl_allowlist_rule()],
-            2,
+            1,
             &[],
             None,
             generous(),
@@ -1604,7 +1673,7 @@ mod capture_path_tests {
         let run = run_batch(
             &[deposit_request(&source, PROXY)],
             vec![proxy_impl_allowlist_rule()],
-            2,
+            1,
             &[&source],
             Some([(source.clone(), KnownAllowedKind::Original)].into_iter().collect()),
             generous(),
@@ -1623,7 +1692,7 @@ mod capture_path_tests {
         let run = run_batch(
             &[deposit_request(&source, PROXY)],
             vec![proxy_impl_allowlist_rule()],
-            2,
+            1,
             &[&source],
             Some([(source.clone(), KnownAllowedKind::Original)].into_iter().collect()),
             generous(),
@@ -1643,7 +1712,7 @@ mod capture_path_tests {
         let run = run_batch(
             &[deposit_request(&source, PROXY)],
             vec![proxy_impl_allowlist_rule()],
-            2,
+            1,
             &[&source],
             Some([(source.clone(), KnownAllowedKind::Original)].into_iter().collect()),
             AuditCaptureConfig { max_callstack_observations_per_tx: 1 },
@@ -1667,7 +1736,7 @@ mod capture_path_tests {
         let run = run_batch(
             &[deposit_request(&source, PROXY)],
             vec![proxy_impl_allowlist_rule_from_origin(OTHER_ORIGIN)],
-            2,
+            1,
             &[&source],
             Some([(source.clone(), KnownAllowedKind::Original)].into_iter().collect()),
             AuditCaptureConfig { max_callstack_observations_per_tx: 1 },
@@ -1688,7 +1757,7 @@ mod capture_path_tests {
         let identified = run_batch(
             &[deposit_request(&source, PROXY)],
             vec![proxy_impl_allowlist_rule_from_origin(OTHER_ORIGIN)],
-            2,
+            1,
             &[&source],
             Some([(source.clone(), KnownAllowedKind::Original)].into_iter().collect()),
             generous(),
@@ -1710,7 +1779,7 @@ mod capture_path_tests {
         let run = run_batch(
             &[deposit_request(&format!("0x{}", "33".repeat(32)), PROXY)],
             vec![proxy_impl_allowlist_rule_from_origin(OTHER_ORIGIN)],
-            2,
+            1,
             &[],
             None,
             AuditCaptureConfig { max_callstack_observations_per_tx: 1 },
@@ -1735,7 +1804,7 @@ mod capture_path_tests {
         let run = run_batch(
             &[deposit_request(&prefix, PROXY)],
             vec![proxy_impl_allowlist_rule_from_origin(OTHER_ORIGIN)],
-            2,
+            1,
             &[&prefix],
             Some([(prefix.clone(), KnownAllowedKind::SyntheticBan)].into_iter().collect()),
             AuditCaptureConfig { max_callstack_observations_per_tx: 1 },
@@ -1785,7 +1854,7 @@ mod capture_path_tests {
             run_batch_stamped(
                 &[deposit_request(&prefix, PROXY)],
                 raw_rules.clone(),
-                2,
+                1,
                 &[&prefix],
                 Some(kinds),
                 generous(),
@@ -1855,7 +1924,7 @@ mod capture_path_tests {
             run_batch_stamped(
                 &[deposit_request(&prefix, PROXY)],
                 raw_rules,
-                2,
+                1,
                 &[&prefix],
                 Some(kinds),
                 generous(),
@@ -1887,7 +1956,7 @@ mod capture_path_tests {
         let run = run_batch(
             &[deposit_request(&first, PROXY), deposit_request(&second, APPROVED_IMPL)],
             vec![proxy_impl_allowlist_rule()],
-            2,
+            1,
             &[&first],
             Some([(first.clone(), KnownAllowedKind::Original)].into_iter().collect()),
             generous(),
@@ -1909,7 +1978,7 @@ mod capture_path_tests {
         let run = run_batch(
             &[deposit_request(&prefix, PROXY), deposit_request(&original, APPROVED_IMPL)],
             vec![proxy_impl_allowlist_rule()],
-            2,
+            1,
             &[&prefix],
             Some([(prefix.clone(), KnownAllowedKind::SyntheticBan)].into_iter().collect()),
             generous(),
@@ -1938,7 +2007,7 @@ mod capture_path_tests {
         let run = run_batch(
             &[deposit_request(&prefix, PROXY)],
             vec![proxy_impl_allowlist_rule()],
-            2,
+            1,
             &[&prefix],
             Some([(prefix.clone(), KnownAllowedKind::SyntheticBan)].into_iter().collect()),
             AuditCaptureConfig { max_callstack_observations_per_tx: 1 },
@@ -1963,7 +2032,7 @@ mod capture_path_tests {
             run_batch(
                 &[deposit_request(&prefix, PROXY)],
                 vec![proxy_impl_allowlist_rule()],
-                2,
+                1,
                 &[&prefix],
                 Some(kinds),
                 AuditCaptureConfig { max_callstack_observations_per_tx: 1 },
@@ -1997,7 +2066,7 @@ mod capture_path_tests {
             run_batch(
                 &[deposit_request(&prefix, PROXY)],
                 vec![proxy_impl_allowlist_rule()],
-                2,
+                1,
                 &[&prefix],
                 Some(kinds),
                 generous(),
@@ -2026,7 +2095,7 @@ mod capture_path_tests {
             run_batch(
                 &[deposit_request(source, PROXY)],
                 raw_rules,
-                2,
+                1,
                 known_allowed,
                 kinds,
                 // One observation of budget against a proxy that delegatecalls twice: capture
@@ -2059,7 +2128,7 @@ mod capture_path_tests {
             proxy_impl_allowlist_rule_with_id("proxy-impl-allowlist-b"),
         ];
         assert_eq!(
-            load_rules(2, 0, rules.clone()).callstack_selectors().len(),
+            load_rules(1, 0, rules.clone()).callstack_selectors().len(),
             1,
             "the fixture must be discriminating: one address named by two rules"
         );
@@ -2090,7 +2159,7 @@ mod capture_path_tests {
         let source = format!("0x{}", "33".repeat(32));
         let rules = vec![rule_selecting_two_addresses()];
         assert_eq!(
-            load_rules(2, 0, rules.clone()).callstack_selectors().len(),
+            load_rules(1, 0, rules.clone()).callstack_selectors().len(),
             2,
             "the fixture must be discriminating: two addresses named by one rule"
         );
@@ -2122,7 +2191,7 @@ mod capture_path_tests {
         let run = run_batch(
             &[deposit_request(&prefix, PROXY), deposit_request(&original, PROXY)],
             vec![proxy_impl_allowlist_rule()],
-            2,
+            1,
             &[&prefix, &original],
             Some(
                 [
@@ -2137,6 +2206,168 @@ mod capture_path_tests {
         );
         assert_eq!(run.results[0].as_ref().unwrap().verdict, Verdict::Allow, "synthetic prefix");
         assert_eq!(run.results[1].as_ref().unwrap().verdict, Verdict::Deny, "original");
+    }
+
+    /// An UNLABELLED `known_allowed` entry executing an unapproved implementation stays `Allow`
+    /// and its state IS committed, with the call-frame result reported as a diagnostic only.
+    ///
+    /// Asserted explicitly, and deliberately, because this is a disclosed residual risk rather
+    /// than a protection: with a caller that sends no labels, such an entry is NOT denied here.
+    /// A test that merely accepted the request would hide that; this one states it, so it can
+    /// never be mistaken for end-to-end coverage.
+    #[test]
+    fn an_unlabelled_entry_running_unapproved_code_is_allowed_committed_and_only_reported() {
+        let source = format!("0x{}", "66".repeat(32));
+        let run = run_batch(
+            &[deposit_request(&source, PROXY)],
+            vec![proxy_impl_allowlist_rule()],
+            1,
+            &[&source],
+            // No label map at all — the shape a caller that is not label-aware sends.
+            None,
+            generous(),
+            seeded_db(UNAPPROVED_IMPL, 1),
+        );
+        let result = only(&run);
+        assert_eq!(result.verdict, Verdict::Allow, "an unlabelled entry is not denied");
+        assert_eq!(
+            result.callstack_identification,
+            Some(CallstackIdentification::Objected),
+            "the objection is reported as a diagnostic, and only reported"
+        );
+        assert_eq!(
+            run.proxy_slot0,
+            U256::from(2u64),
+            "its state is committed: the unapproved implementation's marker is in proxy storage"
+        );
+
+        // The contrast that makes the above a statement about the LABEL and not about the rule:
+        // the identical execution labelled `Original` IS denied, with nothing committed.
+        let labelled = run_batch(
+            &[deposit_request(&source, PROXY)],
+            vec![proxy_impl_allowlist_rule()],
+            1,
+            &[&source],
+            Some([(source.clone(), KnownAllowedKind::Original)].into_iter().collect()),
+            generous(),
+            seeded_db(UNAPPROVED_IMPL, 1),
+        );
+        let result = only(&labelled);
+        assert_eq!(result.verdict, Verdict::Deny);
+        assert_eq!(labelled.proxy_slot0, U256::ZERO, "a denied Original commits nothing");
+    }
+
+    /// A legacy batch carrying no label map at all: several `known_allowed` entries plus an
+    /// ordinary deposit, with alias-bearing rules. Every `known_allowed` entry is `Allow` and
+    /// committed; the ordinary deposit is still fully adjudicated and still fail-closed.
+    #[test]
+    fn an_unlabelled_batch_commits_its_entries_and_still_adjudicates_the_ordinary_deposit() {
+        let first = format!("0x{}", "66".repeat(32));
+        let second = format!("0x{}", "67".repeat(32));
+        let ordinary = format!("0x{}", "68".repeat(32));
+        let run = run_batch(
+            &[
+                deposit_request(&first, PROXY),
+                deposit_request(&second, PROXY),
+                deposit_request(&ordinary, PROXY),
+            ],
+            vec![proxy_impl_allowlist_rule()],
+            1,
+            &[&first, &second],
+            None,
+            generous(),
+            seeded_db(UNAPPROVED_IMPL, 1),
+        );
+        assert_eq!(run.results[0].as_ref().unwrap().verdict, Verdict::Allow, "unlabelled entry");
+        assert_eq!(run.results[1].as_ref().unwrap().verdict, Verdict::Allow, "unlabelled entry");
+        assert_eq!(
+            run.results[2].as_ref().unwrap().verdict,
+            Verdict::Deny,
+            "the ordinary deposit is adjudicated, not exempted"
+        );
+        assert_eq!(
+            run.proxy_slot0,
+            U256::from(2u64),
+            "the committed entries are visible as base state; the denied deposit added nothing"
+        );
+    }
+
+    /// An unlabelled entry whose observation set cannot be adjudicated — unavailable, and
+    /// separately `Available` under a FOREIGN stamp — is still `Allow` with its state committed.
+    ///
+    /// It must NOT be captured by the request-level unadjudicable gate: its verdict is fixed by
+    /// its own class contract, so returning the non-verdict there would withhold a commit for an
+    /// entry that was never going to be adjudicated. The reported identification is
+    /// `NotIdentified` in both cases, from the same judgement every other class uses.
+    #[test]
+    fn an_unadjudicable_unlabelled_entry_still_allows_and_commits() {
+        let source = format!("0x{}", "66".repeat(32));
+
+        // Unavailable: the observation budget is exhausted.
+        let run = run_batch(
+            &[deposit_request(&source, PROXY)],
+            vec![proxy_impl_allowlist_rule()],
+            1,
+            &[&source],
+            None,
+            AuditCaptureConfig { max_callstack_observations_per_tx: 1 },
+            seeded_db(APPROVED_IMPL, 2),
+        );
+        let result = only(&run);
+        assert_eq!(result.verdict, Verdict::Allow);
+        assert_eq!(result.callstack_identification, Some(CallstackIdentification::NotIdentified));
+        assert_eq!(run.proxy_slot0, U256::from(1u64), "its commit is never withheld");
+
+        // Available, but produced under a different snapshot identity.
+        let raw_rules = vec![proxy_impl_allowlist_rule()];
+        let run = run_batch_stamped(
+            &[deposit_request(&source, PROXY)],
+            raw_rules.clone(),
+            1,
+            &[&source],
+            None,
+            generous(),
+            seeded_db(APPROVED_IMPL, 1),
+            Some(foreign_stamp(&raw_rules, 1)),
+        );
+        let result = only(&run);
+        assert_eq!(result.verdict, Verdict::Allow);
+        assert_eq!(result.callstack_identification, Some(CallstackIdentification::NotIdentified));
+        assert_eq!(run.proxy_slot0, U256::from(1u64), "its commit is never withheld");
+    }
+
+    /// Proof that the exemption above was NARROWED and not widened: with the same unadjudicable
+    /// observation set, an ordinary deposit and a labelled `Original` both still get the
+    /// fail-closed non-verdict, with nothing committed.
+    #[test]
+    fn the_unadjudicable_gate_still_catches_ordinary_and_labelled_original_entries() {
+        let source = format!("0x{}", "66".repeat(32));
+        for kinds in [
+            None,
+            Some(
+                [(source.clone(), KnownAllowedKind::Original)]
+                    .into_iter()
+                    .collect::<BTreeMap<String, KnownAllowedKind>>(),
+            ),
+        ] {
+            let known: &[&str] = if kinds.is_some() { &[&source] } else { &[] };
+            let run = run_batch(
+                &[deposit_request(&source, PROXY)],
+                vec![proxy_impl_allowlist_rule()],
+                1,
+                known,
+                kinds,
+                AuditCaptureConfig { max_callstack_observations_per_tx: 1 },
+                seeded_db(APPROVED_IMPL, 2),
+            );
+            let result = only(&run);
+            assert_eq!(result.verdict, Verdict::Malformed, "never Allow");
+            assert_eq!(
+                result.callstack_identification,
+                Some(CallstackIdentification::NotIdentified)
+            );
+            assert_eq!(run.proxy_slot0, U256::ZERO, "state must not be committed");
+        }
     }
 
     /// when the request declares no selector, no inspector is constructed, the
@@ -2189,7 +2420,7 @@ mod capture_path_tests {
         let armed = run_batch(
             &[deposit_request(&source, PROXY)],
             vec![native_transfer_deny_rule(), inert_selector_rule()],
-            2,
+            1,
             &[],
             None,
             generous(),
@@ -2238,17 +2469,17 @@ mod capture_path_tests {
         .expect("valid native-log rule")
     }
 
-    /// A selector-bearing rule that exists only to arm capture: its condition can never hold,
-    /// because the selector always matches when the frame is observed.
+    /// An alias-bearing rule that exists only to arm capture: its condition can never hold,
+    /// because the alias only ever binds the address it was declared on.
     fn inert_selector_rule() -> RawRule {
         serde_json::from_value(serde_json::json!({
             "id": "arm-capture-only",
             "event_abis": {},
-            "callstack": { "entry": { "address": format!("{PROXY:#x}") } },
-            "condition": { "==": [ { "var": "entry.matched" }, false ] },
+            "callstack": { "direct_delegatecalls": { "entry": format!("{PROXY:#x}") } },
+            "condition": { "==": [ { "var": "entry.delegateTo" }, format!("{PROXY:#x}") ] },
             "action": "deny"
         }))
-        .expect("valid selector rule")
+        .expect("valid alias rule")
     }
 
     /// A proxy whose own code performs a non-zero internal `CALL` — a real native transfer.
@@ -2297,15 +2528,240 @@ mod capture_path_tests {
         assert!(validate_protocol_version(req.protocol_version).is_ok());
     }
 
-    /// an unsupported protocol version returns `-32602` naming the version.
+    /// an unsupported protocol version returns `-32602` naming both the received value and the
+    /// supported set, and the set is exactly `[1]`.
+    ///
+    /// `2` is included on purpose. A request declaring it was authored against a different
+    /// `callstack` contract, so adjudicating it under this one would be a silent
+    /// misinterpretation — strictly worse than a named rejection.
     #[test]
     fn unsupported_protocol_version_is_rejected_by_name() {
-        let error = validate_protocol_version(99).expect_err("99 is not supported");
-        assert_eq!(error.code(), -32602);
-        assert!(error.message().contains("99"), "{}", error.message());
-        // Both shipped versions stay accepted.
+        for unsupported in [0, 2, 3, 99] {
+            let error =
+                validate_protocol_version(unsupported).expect_err("only version 1 is supported");
+            assert_eq!(error.code(), -32602);
+            let message = error.message();
+            assert!(message.contains(&unsupported.to_string()), "{message}");
+            assert!(message.contains("[1]"), "the supported set must be named: {message}");
+        }
         assert!(validate_protocol_version(1).is_ok());
-        assert!(validate_protocol_version(2).is_ok());
+    }
+
+    /// The **verbatim upstream rule-source document** — the same bytes the rule-layer tests use —
+    /// is accepted at this entry point too, with no rejections, the projection built and the
+    /// identification diagnostic enabled.
+    ///
+    /// Both entry points share one compiler, and this pins that: a rule set accepted on the
+    /// hot-reload path must be accepted here, by the same `load_rules` call, over the same file.
+    #[test]
+    fn the_upstream_rule_source_document_is_accepted_at_this_entry_point() {
+        const UPSTREAM_RULES: &str =
+            include_str!("../../../rcs-filter/testdata/upstream-rule-source-examples.json");
+        let document: serde_json::Value = serde_json::from_str(UPSTREAM_RULES).expect("valid JSON");
+
+        // The caller's own body shape: three keys, no protocol version, no label map.
+        let req: AuditTransactionsRequest = serde_json::from_value(serde_json::json!({
+            "rules": document["rules"].clone(),
+            "txs": [],
+            "known_allowed": []
+        }))
+        .expect("the upstream rules deserialize at this entry point");
+        assert_eq!(req.protocol_version, MIN_PROTOCOL_VERSION, "an omitted version means 1");
+        assert_eq!(req.rules.len(), 7);
+
+        let plan = AuditBatchPlan::prepare(&req).expect("every upstream rule must be accepted");
+        assert!(plan.rules().rejected.is_empty(), "{:?}", plan.rules().rejected);
+        assert_eq!(plan.rules().rules.len(), 7);
+        assert_eq!(plan.rules().selector_bearing_rule_count(), 4);
+        assert_eq!(
+            plan.rules().callstack_selectors().len(),
+            3,
+            "three distinct proxy addresses, because two rules observe the same one"
+        );
+        assert!(plan.report_identification, "an alias-bearing request reports identification");
+        let projection =
+            plan.known_allowed_rules.as_ref().expect("an alias-bearing request has a projection");
+        assert_eq!(projection.rules.len(), 4, "only the alias-bearing rules survive");
+        assert_eq!(
+            projection.stamp(),
+            plan.rules().stamp(),
+            "the projection must carry the same snapshot stamp"
+        );
+    }
+
+    /// The caller's exact body — `{rules, txs, known_allowed}`, with NO `protocol_version` and NO
+    /// `known_allowed_kinds` — is accepted with alias-bearing rules and a NON-EMPTY
+    /// `known_allowed`.
+    ///
+    /// This is the regression test for the failure mode where labels are required: a caller that
+    /// resolves entries to Allow across rounds sends a growing `known_allowed` and no labels, so
+    /// requiring them would make every round after the first fail permanently. A first round with
+    /// an empty `known_allowed` proves nothing, which is why this one is non-empty.
+    #[test]
+    fn the_callers_exact_three_key_body_is_accepted_with_a_non_empty_known_allowed() {
+        let source = format!("0x{}", "66".repeat(32));
+        let body = serde_json::json!({
+            "rules": [serde_json::to_value(proxy_impl_allowlist_rule_json()).unwrap()],
+            "txs": [],
+            "known_allowed": [source]
+        });
+        assert_eq!(
+            body.as_object().unwrap().len(),
+            3,
+            "the fixture must really be the three-key body, not one that merely resembles it"
+        );
+        let req: AuditTransactionsRequest =
+            serde_json::from_value(body).expect("the three-key body deserializes");
+        assert_eq!(req.protocol_version, MIN_PROTOCOL_VERSION);
+        assert!(req.known_allowed_kinds.is_none());
+        assert!(!req.known_allowed.is_empty());
+
+        let plan = AuditBatchPlan::prepare(&req)
+            .expect("an unlabelled request must never be rejected for a missing label");
+        assert!(plan.rules().has_callstack_rules());
+    }
+
+    /// A multi-round sequence in the caller's own shape: round 1 with an empty `known_allowed`,
+    /// then each later round carrying the entries the previous round resolved to Allow. Every
+    /// round is accepted and adjudicated, and no round is rejected for a missing label.
+    ///
+    /// Convergence is also pinned: an entry already in `known_allowed` stays `Allow` and never
+    /// re-enters `Audit`, so the sequence terminates instead of looping.
+    #[test]
+    fn a_multi_round_unlabelled_sequence_is_accepted_and_converges() {
+        let first = format!("0x{}", "66".repeat(32));
+        let second = format!("0x{}", "67".repeat(32));
+        let mut resolved: Vec<String> = Vec::new();
+
+        for round in 0..3u8 {
+            let known: Vec<&str> = resolved.iter().map(String::as_str).collect();
+
+            // The boundary accepts the round, with no label map at any point.
+            let req: AuditTransactionsRequest = serde_json::from_value(serde_json::json!({
+                "rules": [serde_json::to_value(proxy_impl_allowlist_rule_json()).unwrap()],
+                "txs": [],
+                "known_allowed": resolved.clone()
+            }))
+            .expect("the round body deserializes");
+            AuditBatchPlan::prepare(&req)
+                .unwrap_or_else(|e| panic!("round {round} must be accepted: {e:?}"));
+
+            // And the batch body adjudicates it, with an approved implementation.
+            let run = run_batch(
+                &[deposit_request(&first, PROXY), deposit_request(&second, PROXY)],
+                vec![proxy_impl_allowlist_rule()],
+                1,
+                &known,
+                None,
+                generous(),
+                seeded_db(APPROVED_IMPL, 1),
+            );
+            for (index, result) in run.results.iter().enumerate() {
+                let result = result.as_ref().expect("every deposit executed");
+                assert_eq!(
+                    result.verdict,
+                    Verdict::Allow,
+                    "round {round}, deposit {index}: an approved implementation allows, and an \
+                     already-resolved entry never re-enters adjudication"
+                );
+                assert!(result.actions.is_none(), "round {round}: no audit payload is produced");
+            }
+            resolved = vec![first.clone(), second.clone()];
+        }
+    }
+
+    /// A condition reading a variable the rule's own aliases do not provide is rejected at this
+    /// entry point too, naming the variable, with nothing executed or committed.
+    ///
+    /// Asserted here as well as on the hot-reload path because both entry points share one
+    /// compiler and a negative that holds on only one of them is not a guarantee.
+    #[test]
+    fn a_condition_reading_an_unprovided_alias_variable_is_rejected_at_this_entry_point() {
+        for field in ["delegateAddress", "contextCodeHash", "matched", "implCodeHash"] {
+            let req: AuditTransactionsRequest = serde_json::from_value(serde_json::json!({
+                "rules": [{
+                    "id": "unknown-alias-variable",
+                    "event_abis": {},
+                    "callstack": { "direct_delegatecalls": { "entry": format!("{PROXY:#x}") } },
+                    "condition": { "==": [
+                        { "var": format!("entry.{field}") },
+                        format!("{APPROVED_IMPL:#x}")
+                    ] },
+                    "action": "deny"
+                }],
+                "txs": [],
+                "known_allowed": []
+            }))
+            .expect("the request decodes; the rejection happens in the compiler");
+            let error = match AuditBatchPlan::prepare(&req) {
+                Err(error) => error,
+                Ok(_) => panic!("entry.{field} must be rejected"),
+            };
+            assert_eq!(error.code(), -32602);
+            let detail = error.data().expect("the rejected rule is named").to_string();
+            assert!(detail.contains(&format!("entry.{field}")), "{detail}");
+            assert!(detail.contains("delegateTo and delegateCodeHash"), "{detail}");
+        }
+
+        // The control: the two provided variables are accepted, so the rejections above are about
+        // the variable name and not about the rule shape.
+        let req: AuditTransactionsRequest = serde_json::from_value(serde_json::json!({
+            "rules": [proxy_impl_allowlist_rule_json()],
+            "txs": [],
+            "known_allowed": []
+        }))
+        .expect("the control decodes");
+        assert!(AuditBatchPlan::prepare(&req).is_ok());
+    }
+
+    /// An undeclared key inside `callstack` fails at this entry point too, during the request
+    /// decode, naming the offending key — so a near-miss spelling can never degrade a rule into a
+    /// weakened event-only one.
+    #[test]
+    fn an_undeclared_callstack_key_is_rejected_at_this_entry_point() {
+        for section in [
+            serde_json::json!({ "entry": { "address": format!("{PROXY:#x}") } }),
+            serde_json::json!({ "direct_delegatecall": { "entry": format!("{PROXY:#x}") } }),
+            serde_json::json!({ "directDelegatecalls": { "entry": format!("{PROXY:#x}") } }),
+            serde_json::json!({ "Direct_DelegateCalls": { "entry": format!("{PROXY:#x}") } }),
+        ] {
+            let error = serde_json::from_value::<AuditTransactionsRequest>(serde_json::json!({
+                "rules": [{
+                    "id": "undeclared-callstack-key",
+                    "event_abis": {},
+                    "callstack": section,
+                    "condition": true,
+                    "action": "deny"
+                }],
+                "txs": [],
+                "known_allowed": []
+            }))
+            .expect_err("an undeclared callstack key must be rejected");
+            assert!(error.to_string().contains("unknown field"), "{error}");
+        }
+
+        // A misspelled rule-root sibling is caught by the rule root's own gate instead, and the
+        // rule is rejected rather than quietly losing its call-frame constraint.
+        let req: AuditTransactionsRequest = serde_json::from_value(serde_json::json!({
+            "rules": [{
+                "id": "misspelled-sibling",
+                "event_abis": {},
+                "callStack": { "direct_delegatecalls": { "entry": format!("{PROXY:#x}") } },
+                "condition": true,
+                "action": "deny"
+            }],
+            "txs": [],
+            "known_allowed": []
+        }))
+        .expect("the root gate runs in the compiler, so the request still decodes");
+        let error = match AuditBatchPlan::prepare(&req) {
+            Err(error) => error,
+            Ok(_) => panic!("the rule must be rejected"),
+        };
+        assert_eq!(error.code(), -32602);
+        let detail = error.data().expect("the rejected rule is named").to_string();
+        assert!(detail.contains("callStack"), "{detail}");
+        assert!(detail.contains("misspelled-sibling"), "{detail}");
     }
 
     /// The request root is as strict as the rule schema: a speculative or misspelled field is
@@ -2324,50 +2780,47 @@ mod capture_path_tests {
         );
     }
 
-    /// a v2 selector-bearing request with a missing or partial `known_allowed_kinds`
-    /// returns `-32602` naming the unlabelled hashes, and nothing is installed or committed.
+    /// A request that supplies a PARTIAL `known_allowed_kinds` map returns `-32602` naming the
+    /// unlabelled hashes, and nothing is executed or committed. A caller that labels some entries
+    /// and not others is label-aware, so the omission is ambiguous rather than conventional.
     #[test]
-    fn missing_or_partial_labels_are_rejected_naming_the_hashes() {
+    fn a_partial_label_map_is_rejected_naming_the_unlabelled_hashes() {
         let a = format!("0x{}", "33".repeat(32));
         let b = format!("0x{}", "44".repeat(32));
         let known = vec![a.clone(), b.clone()];
 
-        // Missing entirely.
-        let error = validate_known_allowed_labels(2, &known, None, true)
-            .expect_err("a missing map must be rejected");
-        assert_eq!(error.code(), -32602);
-        let data = error.data().expect("the unlabelled hashes are named").to_string();
-        assert!(data.contains(&a) && data.contains(&b), "{data}");
-
-        // Partial.
         let partial: BTreeMap<String, KnownAllowedKind> =
             [(a.clone(), KnownAllowedKind::Original)].into_iter().collect();
-        let error = validate_known_allowed_labels(2, &known, Some(&partial), true)
+        let error = validate_known_allowed_labels(&known, Some(&partial))
             .expect_err("a partial map must be rejected");
+        assert_eq!(error.code(), -32602);
         let data = error.data().expect("named").to_string();
         assert!(data.contains(&b), "only the unlabelled hash is named: {data}");
         assert!(!data.contains(&a), "a labelled hash must not be named: {data}");
 
-        // Complete.
+        // A complete map is accepted.
         let complete: BTreeMap<String, KnownAllowedKind> =
             [(a.clone(), KnownAllowedKind::Original), (b.clone(), KnownAllowedKind::SyntheticBan)]
                 .into_iter()
                 .collect();
-        assert!(validate_known_allowed_labels(2, &known, Some(&complete), true).is_ok());
+        assert!(validate_known_allowed_labels(&known, Some(&complete)).is_ok());
     }
 
-    /// v1 requests, and v2 requests declaring no selector, need no labels.
+    /// A request that supplies NO label map is accepted whatever its `known_allowed` contains.
+    ///
+    /// This is load-bearing rather than lenient: a caller that resolves entries to Allow across
+    /// rounds sends a growing `known_allowed` and no labels at all, so requiring them would make
+    /// every later round fail permanently.
     #[test]
-    fn requests_that_need_no_labels_are_unaffected() {
+    fn a_request_with_no_label_map_needs_no_labels() {
         let known = vec![format!("0x{}", "33".repeat(32))];
-        assert!(validate_known_allowed_labels(1, &known, None, true).is_ok(), "v1 needs none");
         assert!(
-            validate_known_allowed_labels(2, &known, None, false).is_ok(),
-            "a selector-free v2 request needs none"
+            validate_known_allowed_labels(&known, None).is_ok(),
+            "an unlabelled request is the ordinary case, not an error"
         );
         assert!(
-            validate_known_allowed_labels(2, &[], None, true).is_ok(),
-            "an empty known_allowed needs none"
+            validate_known_allowed_labels(&[], None).is_ok(),
+            "an empty known_allowed needs none either"
         );
     }
 
@@ -2385,6 +2838,14 @@ mod capture_path_tests {
             serde_json::from_value::<KnownAllowedKind>(serde_json::json!("syntheticBan")).is_err(),
             "a wrong spelling must not be accepted as a class"
         );
+        // The third class is resolved locally and is NOT part of the wire contract: a caller
+        // cannot select it explicitly, so the labels a request may send stay exactly two.
+        for spelling in ["unlabelled", "unlabeled", "Unlabelled"] {
+            assert!(
+                serde_json::from_value::<KnownAllowedKind>(serde_json::json!(spelling)).is_err(),
+                "{spelling} must not be a wire-selectable class"
+            );
+        }
     }
 
     /// a programmatic `AuditCaptureConfig { 0 }` yields the non-verdict, never `Allow`.
@@ -2395,7 +2856,7 @@ mod capture_path_tests {
         let run = run_batch(
             &[deposit_request(&format!("0x{}", "33".repeat(32)), PROXY)],
             vec![proxy_impl_allowlist_rule()],
-            2,
+            1,
             &[],
             None,
             AuditCaptureConfig { max_callstack_observations_per_tx: 0 },
@@ -2412,13 +2873,12 @@ mod capture_path_tests {
     #[test]
     fn callstack_only_projection_preserves_the_snapshot_stamp() {
         let raw = vec![event_only_rule(), proxy_impl_allowlist_rule()];
-        let full = load_rules(2, 0, raw.clone());
+        let full = load_rules(1, 0, raw.clone());
         assert!(full.rejected.is_empty());
-        let projected = callstack_only_projection(2, &full, &raw).expect("selectors are declared");
+        let projected = callstack_only_projection(&full, &raw).expect("aliases are declared");
         assert_eq!(projected.stamp(), full.stamp());
-        assert_eq!(projected.rules.len(), 1, "only the selector-bearing rule survives");
+        assert_eq!(projected.rules.len(), 1, "only the alias-bearing rule survives");
         assert!(callstack_only_projection(
-            1,
             &load_rules(1, 0, vec![event_only_rule()]),
             &[event_only_rule()]
         )
@@ -2429,7 +2889,7 @@ mod capture_path_tests {
     /// enforces, not a hard-coded default.
     #[test]
     fn audit_capture_config_budget_reaches_the_inspector() {
-        let rules = load_rules(2, 0, vec![proxy_impl_allowlist_rule()]);
+        let rules = load_rules(1, 0, vec![proxy_impl_allowlist_rule()]);
         let inspector = audit_capture_inspector(
             &rules,
             AuditCaptureConfig { max_callstack_observations_per_tx: 7 },
@@ -2526,7 +2986,7 @@ mod capture_path_tests {
         let fresh = run_batch(
             &[deposit_request(&source, PROXY)],
             rules.clone(),
-            2,
+            1,
             &[],
             None,
             generous(),
@@ -2543,7 +3003,7 @@ mod capture_path_tests {
             let run = run_batch(
                 &[deposit_request(&source, PROXY)],
                 rules.clone(),
-                2,
+                1,
                 &[&source],
                 Some(kinds.clone()),
                 generous(),
@@ -2585,7 +3045,7 @@ mod capture_path_tests {
         }))
         .expect("the wire type captures an unknown key instead of failing to decode");
 
-        let rules = load_rules(2, 0, vec![typo]);
+        let rules = load_rules(1, 0, vec![typo]);
         assert_eq!(rules.rejected.len(), 1, "the rule must be refused, not installed");
 
         let error = validate_compiled_rules(&rules)
@@ -2650,29 +3110,31 @@ mod identification_reporting_tests {
         (out, logged)
     }
 
-    /// A selector-bearing rule set, compiled exactly as the handler compiles a request's own.
+    /// An alias-bearing rule set, compiled exactly as the handler compiles a request's own.
     fn selector_bearing_rules() -> RuleSet {
         let rule: RawRule = serde_json::from_value(serde_json::json!({
             "id": "proxy-impl-allowlist",
             "event_abis": {},
-            "callstack": { "entry": { "address": format!("{:#x}", Address::repeat_byte(0xAA)) } },
-            "condition": { "==": [ { "var": "entry.matched" }, true ] },
+            "callstack": { "direct_delegatecalls": {
+                "entry": format!("{:#x}", Address::repeat_byte(0xAA))
+            } },
+            "condition": { "!=": [ { "var": "entry.delegateTo" }, null ] },
             "action": "deny"
         }))
         .expect("the fixture rule deserializes");
-        let rules = load_rules(2, 0, vec![rule]);
+        let rules = load_rules(1, 0, vec![rule]);
         assert!(rules.rejected.is_empty(), "the fixture rule must load clean");
         rules
     }
 
-    /// A v1 event rule declaring no call-frame selector.
+    /// An event rule declaring no call-frame alias.
     fn selector_free_rules() -> RuleSet {
         let rule: RawRule = serde_json::from_str(
             r#"{"id":"evt","event_abis":{"transfer":{"type":"event","name":"Transfer",
                "inputs":[{"name":"from","type":"address","indexed":true}],
                "anonymous":false}},"condition":true,"action":"deny"}"#,
         )
-        .expect("valid v1 rule");
+        .expect("valid event-only rule");
         load_rules(1, 0, vec![rule])
     }
 

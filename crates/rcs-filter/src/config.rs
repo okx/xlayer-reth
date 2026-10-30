@@ -5,23 +5,16 @@ use std::time::Duration;
 
 /// Locally supported RCS `protocol_version` set. Membership is an **exact match**:
 /// `protocol_version` only bumps on breaking schema changes, so there is no "partial
-/// compatibility" middle state. Both versions are supported at once so a rule source can be
-/// upgraded independently of the node fleet.
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[1, 2];
+/// compatibility" middle state.
+///
+/// The set is deliberately **exactly** `[1]`. The `callstack` section is part of the version-one
+/// rule schema, so there is no later version to tolerate: a snapshot or request declaring any
+/// other version was authored against a different `callstack` contract, and adjudicating it under
+/// this one would be a silent misinterpretation. A named rejection is strictly safer.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[1];
 
 /// The oldest rule protocol version this build accepts.
 pub const MIN_PROTOCOL_VERSION: u32 = 1;
-
-/// The rule protocol version that introduced the `callstack` selector section. A `callstack`
-/// field under an earlier version is rejected, never ignored: because the supported set is an
-/// exact match and an unsupported version already rejects the whole snapshot, a node that does
-/// not know the field can never silently accept a rule that depends on it.
-pub const CALLSTACK_MIN_PROTOCOL_VERSION: u32 = 2;
-
-/// Returns true iff rules at `pv` may declare the `callstack` selector section.
-pub fn protocol_supports_callstack(pv: u32) -> bool {
-    pv >= CALLSTACK_MIN_PROTOCOL_VERSION
-}
 
 /// Hard safety ceiling for concurrent RCS submit requests from one filter instance.
 pub const MAX_SUBMIT_CONCURRENCY: usize = 64;
@@ -227,20 +220,22 @@ mod tests {
 
     #[test]
     fn protocol_version_is_exact_match() {
-        // Both shipped versions are accepted so a rule source can move to the newer schema
-        // independently of the node fleet; anything outside the set is still refused outright,
-        // which is what stops an unknown field from being silently tolerated.
+        // Exactly one version is accepted. Anything outside the set is refused outright, which
+        // is what stops a rule authored against a different `callstack` contract from being
+        // adjudicated under this one.
+        assert_eq!(SUPPORTED_PROTOCOL_VERSIONS, &[1]);
         assert!(is_supported_protocol(1));
-        assert!(is_supported_protocol(2));
         assert!(!is_supported_protocol(0));
+        assert!(!is_supported_protocol(2));
         assert!(!is_supported_protocol(3));
     }
 
     #[test]
-    fn callstack_requires_the_version_that_introduced_it() {
-        assert!(!protocol_supports_callstack(1));
-        assert!(protocol_supports_callstack(CALLSTACK_MIN_PROTOCOL_VERSION));
-        assert_eq!(CALLSTACK_MIN_PROTOCOL_VERSION, 2);
+    fn callstack_needs_no_version_gate() {
+        // `callstack` belongs to the one supported schema, so acceptance is decided by the rule
+        // compiler alone and the only supported version is the minimum one.
+        assert_eq!(MIN_PROTOCOL_VERSION, 1);
+        assert!(is_supported_protocol(MIN_PROTOCOL_VERSION));
     }
 
     #[test]
