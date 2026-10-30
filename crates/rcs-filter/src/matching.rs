@@ -173,6 +173,18 @@ fn evaluate_checked(
             CallstackCandidates::Suppressed => continue,
             CallstackCandidates::Candidates(candidates) => candidates,
         };
+        // The other half of suppression, for a rule declaring BOTH families: every declared event
+        // must also have a physical binding, or the whole rule is not evaluated. A null-bound
+        // missing event is safe for an event-only rule — that is deployed behaviour, preserved
+        // below — but on a rule that also declares an alias it reopens exactly the hazard
+        // suppression exists to close: the negated membership tests these rules carry read a
+        // one-sided null as "not equal", so the rule objects to a transaction that merely never
+        // emitted the event. Decided here, after the unavailable / foreign-stamp cases have
+        // already failed closed above, and before the budget is charged, so a suppressed rule
+        // contributes zero to it rather than one.
+        if !rule.callstack.is_empty() && has_missing_event(&candidates) {
+            continue;
+        }
         // The budget covers the full event x callstack product, not each family separately:
         // bounding them independently would still let a handful of selectors and a handful of
         // events enumerate a large combination count.
@@ -249,6 +261,15 @@ fn evaluate_checked(
     } else {
         Ok(MatchOutcome::Allow)
     }
+}
+
+/// Whether any declared event of this rule produced no physical match.
+///
+/// Each dimension of `candidates` is either the single null candidate standing for a missing event
+/// or one entry per matching log, so "no physical match" is exactly an all-`None` dimension. Empty
+/// for a rule declaring no event, which therefore never has a missing one.
+fn has_missing_event(candidates: &[Vec<Option<MatchedEvent>>]) -> bool {
+    candidates.iter().any(|event| event.iter().all(Option::is_none))
 }
 
 /// A matched named event and the physical transaction log that produced it.
