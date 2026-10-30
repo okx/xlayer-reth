@@ -374,6 +374,156 @@ fn a_mixed_rule_requires_both_an_event_binding_and_an_observation() {
     assert_eq!(screen(&rules, &[], captured(&rules, &[])), Ok(MatchOutcome::Allow));
 }
 
+/// A `TransferSingle` declaration, used where a second, distinct declared event is needed.
+fn transfer_single_abi() -> Value {
+    json!({
+        "type": "event",
+        "name": "TransferSingle",
+        "inputs": [
+            {"name": "operator", "type": "address", "indexed": true},
+            {"name": "from", "type": "address", "indexed": true},
+            {"name": "to", "type": "address", "indexed": true},
+            {"name": "id", "type": "uint256", "indexed": false},
+            {"name": "value", "type": "uint256", "indexed": false}
+        ],
+        "anonymous": false
+    })
+}
+
+/// A mixed rule: one declared event plus one declared alias on `proxy()`, carrying `condition`.
+fn mixed_rule(id: &str, condition: Value) -> Value {
+    json!({
+        "id": id,
+        "event_abis": { "t": transfer_abi() },
+        "callstack": { "direct_delegatecalls": { "p": hex_addr(proxy()) } },
+        "condition": condition,
+        "action": "deny"
+    })
+}
+
+#[test]
+fn a_mixed_rule_with_a_missing_event_is_suppressed_even_when_its_condition_holds() {
+    use crate::test_support::log_builder::erc20_transfer;
+    let token: Address = "0x5555555555555555555555555555555555555555".parse().unwrap();
+    let from: Address = "0x6666666666666666666666666666666666666666".parse().unwrap();
+    let to: Address = "0x7777777777777777777777777777777777777777".parse().unwrap();
+
+    // `a_mixed_rule_requires_both_an_event_binding_and_an_observation` above cannot distinguish
+    // suppression from a condition that merely did not hold: its `t.from` comparison is false
+    // against a null binding whatever the rule class does. Here the condition is satisfied by the
+    // callstack side alone, so an evaluated rule denies and only suppression allows.
+    let conditions = [
+        // The degenerate case: nothing but the rule's declared shape decides the outcome.
+        json!(true),
+        // The producer's own shape, against an implementation that is not on the allowlist.
+        delegate_code_hash_allowlist("p", &[approved_impl_code()]),
+    ];
+    for condition in conditions {
+        let rules = rule_set(vec![mixed_rule("combined", condition.clone())]);
+        let rogue = [delegated(library(), rogue_code())];
+
+        assert_eq!(
+            screen(&rules, &[], captured(&rules, &rogue)),
+            Ok(MatchOutcome::Allow),
+            "a mixed rule whose declared event produced no physical binding must not be \
+             evaluated, even though its alias was observed and its condition holds \
+             (condition = {condition})"
+        );
+
+        // Positive control on the same rule set: with the event physically present the deny
+        // takes effect normally, so suppression is not "this rule can never fire".
+        let logs = vec![erc20_transfer(token, from, to, U256::from(5u64))];
+        assert_eq!(
+            screen(&rules, &logs, captured(&rules, &rogue)),
+            Ok(MatchOutcome::Deny),
+            "with the declared event present the same rule still denies (condition = {condition})"
+        );
+    }
+}
+
+#[test]
+fn a_mixed_rule_missing_exactly_one_of_several_events_is_suppressed() {
+    use crate::test_support::log_builder::{erc1155_transfer_single, erc20_transfer};
+    let token: Address = "0x5555555555555555555555555555555555555555".parse().unwrap();
+    let from: Address = "0x6666666666666666666666666666666666666666".parse().unwrap();
+    let to: Address = "0x7777777777777777777777777777777777777777".parse().unwrap();
+    let operator: Address = "0x8888888888888888888888888888888888888888".parse().unwrap();
+
+    // Two declared events, one declared alias. One missing event is enough to suppress: the whole
+    // rule requires both binding families complete, not "at least one event".
+    let rules = rule_set(vec![json!({
+        "id": "two-events",
+        "event_abis": { "t": transfer_abi(), "s": transfer_single_abi() },
+        "callstack": { "direct_delegatecalls": { "p": hex_addr(proxy()) } },
+        "condition": true,
+        "action": "deny"
+    })]);
+    let rogue = [delegated(library(), rogue_code())];
+
+    let transfer = erc20_transfer(token, from, to, U256::from(5u64));
+    let single =
+        erc1155_transfer_single(token, operator, from, to, U256::from(1u64), U256::from(2u64));
+
+    // Only the first declared event fired.
+    assert_eq!(
+        screen(&rules, std::slice::from_ref(&transfer), captured(&rules, &rogue)),
+        Ok(MatchOutcome::Allow),
+        "one of two declared events missing suppresses the rule"
+    );
+    // Only the second declared event fired.
+    assert_eq!(
+        screen(&rules, std::slice::from_ref(&single), captured(&rules, &rogue)),
+        Ok(MatchOutcome::Allow),
+        "the other one missing suppresses it just the same"
+    );
+    // Both fired: the positive control.
+    let both = vec![transfer, single];
+    assert_eq!(
+        screen(&rules, &both, captured(&rules, &rogue)),
+        Ok(MatchOutcome::Deny),
+        "with every declared event present the rule denies"
+    );
+}
+
+#[test]
+fn a_suppressed_mixed_rule_is_charged_nothing_even_at_a_zero_budget() {
+    // Suppression happens before the budget is charged, so the rule costs zero rather than the
+    // one candidate a null-bound missing event would have cost. A budget of zero is the sharpest
+    // possible assertion of that: any charge at all would exceed it.
+    let rules = rule_set(vec![mixed_rule("combined", json!(true))]);
+    let rogue = [delegated(library(), rogue_code())];
+    assert_eq!(
+        screen_with_limit(&rules, &[], captured(&rules, &rogue), 0),
+        Ok(MatchOutcome::Allow),
+        "a suppressed mixed rule must not raise BindingBudgetExceeded"
+    );
+}
+
+#[test]
+fn a_mixed_rule_with_a_missing_event_still_fails_closed_on_an_unadjudicable_set() {
+    // Suppression must not swallow the fail-closed cases: "capture did not run" and "capture ran
+    // under a different snapshot" are decided before the missing-event check, so a mixed rule
+    // with no log still reports them rather than being quietly allowed.
+    let rules = rule_set(vec![mixed_rule("combined", json!(true))]);
+
+    for reason in [ObservationUnavailable::NotCaptured, ObservationUnavailable::BudgetExceeded] {
+        assert_eq!(
+            screen(&rules, &[], Observations::Unavailable { reason }),
+            Err(MatchError::ObservationsUnavailable { rule_id: "combined".to_string(), reason }),
+            "{reason:?} must still fail closed for a mixed rule with no log"
+        );
+    }
+
+    let own = rules.stamp();
+    let foreign = SnapshotStamp { content_version: own.content_version + 1, ..own };
+    let rogue = [delegated(library(), rogue_code())];
+    assert_eq!(
+        screen(&rules, &[], Observations::available(foreign, &rogue)),
+        Err(MatchError::ObservationSnapshotMismatch { rule_id: "combined".to_string() }),
+        "a foreign-stamped set must still fail closed for a mixed rule with no log"
+    );
+}
+
 #[test]
 fn a_mixed_rule_evaluates_every_event_times_alias_combination() {
     use crate::test_support::log_builder::erc20_transfer;

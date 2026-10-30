@@ -37,6 +37,8 @@ mod callstack_tests;
 #[cfg(test)]
 mod integration_tests;
 #[cfg(test)]
+mod raw_wire_tests;
+#[cfg(test)]
 mod upstream_rules_tests;
 
 pub use callstack::{
