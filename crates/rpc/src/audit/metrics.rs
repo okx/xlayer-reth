@@ -41,3 +41,20 @@ impl SyntheticBanIdentificationMetrics {
         }
     }
 }
+
+/// How each executed `known_allowed` entry of an audit request was classified.
+///
+/// One increment per executed entry. A rising `inferred_*` series with a flat `labelled_total`
+/// shows that the caller sends no label map and the content-binding check is deciding every
+/// entry; the per-entry outcome itself is in the response and in the existing diagnostics.
+#[derive(Metrics, Clone)]
+#[metrics(scope = "rcs_filter.known_allowed_resolution")]
+pub struct KnownAllowedResolutionMetrics {
+    /// Entries whose class came from the request's `known_allowed_kinds` map.
+    pub labelled_total: Counter,
+    /// Unlabelled entries whose built deposit matched the synthetic-ban derivation.
+    pub inferred_synthetic_ban_total: Counter,
+    /// Unlabelled entries that did not match it and were therefore adjudicated as approved
+    /// originals.
+    pub inferred_original_total: Counter,
+}

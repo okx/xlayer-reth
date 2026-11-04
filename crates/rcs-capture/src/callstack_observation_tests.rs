@@ -885,3 +885,5 @@ fn aborting_a_capture_clears_the_observation_state() {
     assert!(inspector.frames.is_empty());
     assert_eq!(inspector.callstack_observed_count, 0);
 }
+
+mod nested_proxy_tests;

@@ -4,9 +4,12 @@
 //! leaving the tail `Unknown`. Native blacklist interception occurs inside EVM execution before
 //! matcher classification; RCS synthetic-ban replay is responsible for making denied force
 //! deposits reach that path.
-//! A tx whose `source_hash` is in the request's `known_allowed` set skips this classification
-//! entirely — it's executed and its state committed unconditionally as `Allow` (see
-//! `AuditTransactionsRequest::known_allowed`'s doc comment for why this bypass is necessary).
+//! A tx whose `source_hash` is in the request's `known_allowed` set is never re-classified on the
+//! quota/event dimension (see `AuditTransactionsRequest::known_allowed`'s doc comment for why). It
+//! has one of three outcomes: a synthetic ban prefix is executed and committed as `Allow`; an
+//! approved original is re-adjudicated on the call-frame dimension only, so it can become `Deny`
+//! or the non-verdict but never `Audit`; and with no call-frame rule in the request an approved
+//! original is committed as `Allow`. See [`KnownAllowedKind`] for how the class is decided.
 //!
 //! This handler does no side-effecting screening (never touches `FilterHandle::screen_tx` or its
 //! `BufferPool`): it runs a throwaway EVM overlay seeded from the current chain-tip state and
@@ -44,7 +47,8 @@ use xlayer_rcs_capture::{
 };
 
 use super::deposit::{build_deposit_tx, DepositTxRequest};
-use super::metrics::SyntheticBanIdentificationMetrics;
+use super::metrics::{KnownAllowedResolutionMetrics, SyntheticBanIdentificationMetrics};
+use super::synthetic_ban::verify_synthetic_ban;
 use super::verdict::AuditResult;
 use super::verdict::CallstackIdentification;
 use super::verdict::ExecutedTx;
@@ -86,8 +90,8 @@ fn assemble_results(
     results
 }
 
-/// Builds the forced-`Allow` result for a tx whose `source_hash` is in the caller-supplied
-/// `known_allowed` set — skips rule (re-)classification entirely (see
+/// Builds the `Allow` result for a committed tx whose `source_hash` is in the caller-supplied
+/// `known_allowed` set. No quota/event classification ran for it, so it never carries actions (see
 /// `AuditTransactionsRequest::known_allowed`'s doc comment for why).
 fn known_allowed_result(tx_hash: alloy_primitives::B256, source_hash: &str) -> AuditResult {
     AuditResult {
@@ -99,13 +103,28 @@ fn known_allowed_result(tx_hash: alloy_primitives::B256, source_hash: &str) -> A
     }
 }
 
-/// What a `known_allowed` entry IS. Supplied by the caller and **never inferred** from `to`,
-/// calldata, position or any other heuristic.
+/// What a `known_allowed` entry IS.
 ///
-/// The two labelled classes have **opposite safe defaults** — Deny-priority is safe for an
-/// `Original` and unsafe for a `SyntheticBan`, and committing is safe for a `SyntheticBan` and
-/// unsafe for an `Original` — so there is no safe guess between them. That is why an unlabelled
-/// entry is given its own third class rather than silently resolved to either one.
+/// The two classes have **opposite safe defaults** — Deny-priority is safe for an `Original` and
+/// unsafe for a `SyntheticBan`, and committing is safe for a `SyntheticBan` and unsafe for an
+/// `Original` — so the class is never guessed from `to`, position or any other heuristic. It is
+/// decided per entry, in this order:
+///
+/// 1. **Label map present** (`known_allowed_kinds` is `Some`): the caller's label is used for
+///    every entry and nothing is inferred. A partial map is rejected at the boundary.
+/// 2. **No label map**: the entry's built deposit is checked against RCS's v1 synthetic-ban
+///    derivation ([`verify_synthetic_ban`]). A match is a `SyntheticBan`; anything else is an
+///    `Original`.
+///
+/// Step 2 is a **content binding, not source authentication**. It proves only that the entry's
+/// own bytes match the derivation; anyone authoring a request can build such an entry. It is
+/// sound for a caller that derives every original's `source_hash` from the real L1 log and builds
+/// ban prefixes only through that derivation, which is how RCS builds its requests. A matching
+/// entry gets exactly the `Allow` + commit every unlabelled entry used to get, so the check grants
+/// no caller anything it did not already have. For any other caller that sends `known_allowed`
+/// without labels this is a behaviour change: an entry that does not match is now re-adjudicated
+/// on the call-frame dimension and can be `Deny` or the non-verdict, with nothing committed. Such
+/// a caller keeps the unconditional `Allow` + commit for an entry by labelling it `SyntheticBan`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KnownAllowedKind {
@@ -114,22 +133,6 @@ pub enum KnownAllowedKind {
     /// A control prefix the caller prepended for blacklist replay. It is authored by the caller
     /// itself to rebuild base state it already decided, not an unadjudicated user payload.
     SyntheticBan,
-    /// A `known_allowed` entry the request supplied no label for.
-    ///
-    /// Not a wire value — `#[serde(skip)]` keeps the request contract to exactly the two labels
-    /// above, so a caller cannot select this class explicitly. It is resolved locally, and its
-    /// behaviour is the behaviour such an entry already has: it executes, **its state is
-    /// committed**, its verdict stays `Allow`, and the call-frame result is a bounded diagnostic
-    /// that is never acted on.
-    ///
-    /// This is deliberately conservative rather than protective. Resolving an unlabelled entry to
-    /// `Original` would adjudicate it, and a replay prefix that is withheld from the commit
-    /// corrupts the very base state the replay exists to rebuild; resolving it to `SyntheticBan`
-    /// would claim a guarantee for an ordinary deposit that this class does not provide. The
-    /// documented consequence is that an unlabelled entry is never re-judged by the call-frame
-    /// dimension, and that must never be described as end-to-end protection.
-    #[serde(skip)]
-    Unlabelled,
 }
 
 /// The rule protocol version an omitted request field means. Keeps every existing caller
@@ -153,10 +156,11 @@ pub struct AuditTransactionsRequest {
     /// dimension may change an `Original`'s verdict, and only ever to `deny` or a non-verdict.
     pub known_allowed: Vec<String>,
     /// `source_hash` → class for every `known_allowed` entry. Entirely **optional**: a request
-    /// that supplies no map at all is accepted and every entry resolves to
-    /// [`KnownAllowedKind::Unlabelled`]. A request that DOES supply the map must label every one
-    /// of its `known_allowed` entries, because a caller labelling some and not others is
-    /// label-aware and ambiguous.
+    /// that supplies no map at all is accepted, and each entry's class is then decided by the
+    /// content-binding check described on [`KnownAllowedKind`] — not by source authentication. A
+    /// request that DOES supply the map must label every one of its `known_allowed` entries,
+    /// because a caller labelling some and not others is label-aware and ambiguous; no entry of
+    /// such a request is inferred.
     pub known_allowed_kinds: Option<BTreeMap<String, KnownAllowedKind>>,
 }
 
@@ -267,8 +271,8 @@ fn validate_protocol_version(
 ///
 /// Labels are optional, and that is load-bearing: a caller that sends no map at all is the
 /// ordinary case, and rejecting it would make every round that carries a non-empty
-/// `known_allowed` fail permanently. Such a request is accepted and each entry resolves to
-/// [`KnownAllowedKind::Unlabelled`].
+/// `known_allowed` fail permanently. Such a request is accepted and each entry's class is decided
+/// from its built deposit (see [`KnownAllowedKind`]).
 ///
 /// A **partial** map is a different thing and is still refused: a caller that labels some entries
 /// and not others is label-aware, so the omission is ambiguous rather than conventional, and the
@@ -395,22 +399,52 @@ struct AuditBatch<'a> {
     report_identification: bool,
 }
 
+/// How a `known_allowed` entry's class was decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KnownAllowedResolution {
+    /// Read from the request's label map.
+    Labelled,
+    /// Decided by the content-binding check, because the request supplied no label map.
+    Inferred,
+}
+
+/// The class of an unlabelled `known_allowed` entry, decided from the deposit the batch executes.
+///
+/// Only the built transaction's own `source_hash` and `input` are read — the bytes
+/// `build_deposit_tx` decoded once from the request — so every spelling of one request decodes
+/// to one class. A transaction that is not a deposit cannot be a synthetic ban.
+fn inferred_known_allowed_kind(tx: &Recovered<OpTransactionSigned>) -> KnownAllowedKind {
+    match tx.inner() {
+        op_alloy_consensus::OpTxEnvelope::Deposit(deposit)
+            if verify_synthetic_ban(deposit.source_hash, &deposit.input) =>
+        {
+            KnownAllowedKind::SyntheticBan
+        }
+        _ => KnownAllowedKind::Original,
+    }
+}
+
 impl AuditBatch<'_> {
     /// `Some(kind)` when this `source_hash` is a `known_allowed` entry.
     ///
-    /// An entry with no label resolves to [`KnownAllowedKind::Unlabelled`] rather than to either
-    /// labelled class: a partial map was already refused at the boundary, so reaching here
-    /// unlabelled means the caller supplied no labels at all, and the two labelled classes have
-    /// opposite safe defaults.
-    fn known_allowed_kind(&self, source_hash: &str) -> Option<KnownAllowedKind> {
+    /// A request with a label map is read from it: a partial map was already refused at the
+    /// boundary, so every entry has a label and nothing is inferred (an entry missing from a
+    /// validated map cannot occur; it would be adjudicated as an ordinary deposit). Without a map
+    /// the class is inferred from the built deposit `tx` (see [`KnownAllowedKind`]).
+    fn known_allowed_kind(
+        &self,
+        source_hash: &str,
+        tx: &Recovered<OpTransactionSigned>,
+    ) -> Option<(KnownAllowedKind, KnownAllowedResolution)> {
         if !self.known_allowed.contains(source_hash) {
             return None;
         }
-        Some(
-            self.kinds
-                .and_then(|kinds| kinds.get(source_hash).copied())
-                .unwrap_or(KnownAllowedKind::Unlabelled),
-        )
+        match self.kinds {
+            Some(kinds) => {
+                kinds.get(source_hash).copied().map(|kind| (kind, KnownAllowedResolution::Labelled))
+            }
+            None => Some((inferred_known_allowed_kind(tx), KnownAllowedResolution::Inferred)),
+        }
     }
 
     fn identification(&self, value: CallstackIdentification) -> Option<CallstackIdentification> {
@@ -639,6 +673,9 @@ where
     // Built on first use rather than per batch: a request without a replay prefix registers
     // nothing, and the derive caches the registration so a later batch only clones handles.
     let mut synthetic_ban_metrics: Option<SyntheticBanIdentificationMetrics> = None;
+    // Built on first use for the same reason: a request with no `known_allowed` entry
+    // registers nothing.
+    let mut resolution_metrics: Option<KnownAllowedResolutionMetrics> = None;
 
     for (exec_idx, tx) in batch.txs.iter().enumerate() {
         let tx_req = &batch.reqs[exec_idx];
@@ -650,7 +687,21 @@ where
         let observations = observations_from(&capture);
         #[cfg(any(test, feature = "test-utils"))]
         observation_recorder::record(observations);
-        let kind = batch.known_allowed_kind(&tx_req.source_hash);
+        let resolved = batch.known_allowed_kind(&tx_req.source_hash, tx);
+        if let Some((kind, resolution)) = resolved {
+            let metrics =
+                resolution_metrics.get_or_insert_with(KnownAllowedResolutionMetrics::default);
+            match (resolution, kind) {
+                (KnownAllowedResolution::Labelled, _) => metrics.labelled_total.increment(1),
+                (KnownAllowedResolution::Inferred, KnownAllowedKind::SyntheticBan) => {
+                    metrics.inferred_synthetic_ban_total.increment(1)
+                }
+                (KnownAllowedResolution::Inferred, KnownAllowedKind::Original) => {
+                    metrics.inferred_original_total.increment(1)
+                }
+            }
+        }
+        let kind = resolved.map(|(kind, _)| kind);
 
         // Highest priority, and deliberately BEFORE any rule is filtered or matched: a request
         // that declares an alias and whose observation set cannot be adjudicated gets the
@@ -659,17 +710,13 @@ where
         // an unidentifiable execution be reported as an authoritative `Allow` whenever the
         // narrowed rules happened to be skipped.
         //
-        // The exemption covers exactly the classes whose verdict their own contract fixes rather
-        // than adjudication: `SyntheticBan` (unconditional `Allow` + commit, because that commit
-        // is what rebuilds the base state) and `Unlabelled` (`Allow` + commit, with the
-        // call-frame result reported as a diagnostic only). Both are handled by their own arms
-        // below, so passing them through this gate would return the non-verdict for an entry that
-        // was never going to be adjudicated — and, for a replay prefix, withhold the commit the
-        // caller depends on. Ordinary deposits and labelled `Original` entries are NOT exempt.
-        let self_adjudicating = matches!(
-            kind,
-            Some(KnownAllowedKind::SyntheticBan) | Some(KnownAllowedKind::Unlabelled)
-        );
+        // The exemption covers exactly the one class whose verdict its own contract fixes rather
+        // than adjudication: a `SyntheticBan`, labelled or inferred (unconditional `Allow` +
+        // commit, because that commit is what rebuilds the base state). It is handled by its own
+        // arm below, so passing it through this gate would return the non-verdict for an entry
+        // that was never going to be adjudicated and withhold the commit the caller depends on.
+        // Ordinary deposits and `Original` entries, labelled or inferred, are NOT exempt.
+        let self_adjudicating = matches!(kind, Some(KnownAllowedKind::SyntheticBan));
         if !self_adjudicating
             && let Some(reason) = unadjudicable_observations(batch.rules, observations)
         {
@@ -713,30 +760,10 @@ where
                 );
                 continue;
             }
-            // An entry the request supplied no label for. Its verdict is fixed by its own
-            // contract: it executes, its state IS committed, and it stays `Allow` — the behaviour
-            // such an entry already had before the call-frame dimension could appear in a
-            // request at all. The call-frame result is computed with the SAME judgement every
-            // other class uses and is reported as a diagnostic, never acted on.
-            //
-            // The residual risk this carries is explicit and must not be restated as protection:
-            // an unlabelled entry that executes an unapproved implementation is NOT denied here.
-            // Closing it requires the caller to label its entries, which is a coordinated change
-            // on the caller's side and not something this path can decide alone.
-            Some(KnownAllowedKind::Unlabelled) => {
-                evm.db_mut().commit(state);
-                let identification =
-                    diagnostic_identification(batch, tx, tx_req, &logs, observations);
-                executed[exec_idx] = Some(
-                    known_allowed_result(tx.tx_hash(), &tx_req.source_hash)
-                        .with_identification(batch.identification(identification)),
-                );
-                continue;
-            }
-            // An `Original` earns no exemption from the non-verdict rule. Priority, highest
-            // first: unavailable observations with an alias-bearing request → the existing
-            // non-verdict; an alias-bearing objection → `Deny`; otherwise `Allow` + commit,
-            // byte-identical to the previous behaviour.
+            // An `Original`, labelled or inferred, earns no exemption from the non-verdict rule.
+            // Priority, highest first: unavailable observations with an alias-bearing request →
+            // the existing non-verdict; an alias-bearing objection → `Deny`; otherwise `Allow` +
+            // commit, byte-identical to the previous behaviour.
             Some(KnownAllowedKind::Original) => {
                 let Some(callstack_rules) = batch.known_allowed_rules else {
                     // The request declares no selector, so there is nothing to adjudicate and
@@ -926,10 +953,14 @@ pub struct AuditTransactionsResponse {
 
 #[rpc(server, namespace = "xlayer")]
 pub trait XlayerAuditApi {
-    /// Classifies each deposit tx in `req.txs` against `req.rules`, without side effects —
-    /// except for txs whose `source_hash` is in `req.known_allowed`, which are force-classified
-    /// `allow` without running `req.rules` against them at all (see
-    /// `AuditTransactionsRequest::known_allowed`).
+    /// Classifies each deposit tx in `req.txs` against `req.rules`, without side effects.
+    ///
+    /// A tx whose `source_hash` is in `req.known_allowed` is never re-classified on the
+    /// quota/event dimension. A synthetic ban prefix is `allow` and committed; an approved
+    /// original is re-adjudicated on the call-frame rules only, so it can become `deny` or
+    /// `malformed` but never `audit` (see [`KnownAllowedKind`] and
+    /// `AuditTransactionsRequest::known_allowed`). A verdict describes the request as submitted
+    /// and is never evidence of where the request or any entry came from.
     ///
     /// **Only meaningful for deposits not yet recorded in `TxBlacklist`.** If a deposit passed
     /// here has *already* been blacklisted on-chain, the underlying EVM (see the L1 force-tx
