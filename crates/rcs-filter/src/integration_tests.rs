@@ -1346,7 +1346,7 @@ async fn it_a_compiler_rejected_rule_is_diagnosable_and_still_installs_nothing()
                 "condition": { "==": [ { "var": "entry.delegateAddress" }, "0x00000000000000000000000000000000000000bb" ] },
                 "action": "deny"
             }),
-            "condition references unknown variable 'entry.delegateAddress'; direct_delegatecalls provides delegateTo and delegateCodeHash",
+            "condition references unknown variable 'entry.delegateAddress'; direct_delegatecalls provides proxyAddress, proxyCodeHash, delegateTo and delegateCodeHash",
         ),
     ] {
         mock.set_rules_response_override(json!({

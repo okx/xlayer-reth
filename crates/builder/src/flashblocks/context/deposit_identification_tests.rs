@@ -664,12 +664,21 @@ mod cross_path_identification_tests {
         approved: &[B256],
         proxy_code: Vec<u8>,
     ) -> (Vec<CallObservation>, Verdict, Option<CallstackIdentification>, u64) {
+        audit_path_with_rule(proxy_impl_allowlist_rule_json(approved), proxy_code)
+    }
+
+    /// [`audit_path`] for an arbitrary wire rule, so a test can drive a rule of another shape
+    /// through the same production pipeline.
+    fn audit_path_with_rule(
+        rule: serde_json::Value,
+        proxy_code: Vec<u8>,
+    ) -> (Vec<CallObservation>, Verdict, Option<CallstackIdentification>, u64) {
         let source_hash = format!("{:#x}", B256::repeat_byte(0x33));
         // A real request, parsed through the strict wire schema the RPC exposes. The protocol
         // version is deliberately OMITTED, which is the shape the caller actually sends and
         // which must mean version 1.
         let request: AuditTransactionsRequest = serde_json::from_value(serde_json::json!({
-            "rules": [proxy_impl_allowlist_rule_json(approved)],
+            "rules": [rule],
             "txs": [{
                 "source_hash": source_hash,
                 "from": format!("{DEPOSITOR:#x}"),
@@ -836,6 +845,8 @@ mod cross_path_identification_tests {
             }
         }
     }
+
+    mod four_field_cross_path_tests;
 
     /// An **ordered** deposit batch in which an earlier deposit upgrades the proxy's
     /// implementation and a later deposit is judged against the **new** one.

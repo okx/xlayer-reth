@@ -201,11 +201,13 @@ where
 /// A validated direct-delegatecall alias: a rule-local name and the proxy address it observes.
 ///
 /// There are no narrowing constraint fields. Under this contract the `condition` does all the
-/// narrowing, against the two variables the alias binds (`<alias>.delegateTo` and
-/// `<alias>.delegateCodeHash`).
+/// narrowing, against the four variables the alias binds for each observed direct delegatecall:
+/// `<alias>.proxyAddress` and `<alias>.proxyCodeHash` (the selected proxy and the code its own
+/// frame executed), and `<alias>.delegateTo` and `<alias>.delegateCodeHash` (the delegate target
+/// and the code executed there).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledDirectDelegatecall {
-    /// Rule-local alias; the `<alias>` prefix of this alias's two condition variables.
+    /// Rule-local alias; the `<alias>` prefix of this alias's four condition variables.
     pub alias: String,
     /// Proxy address whose own direct `DELEGATECALL`s are observed.
     pub address: Address,

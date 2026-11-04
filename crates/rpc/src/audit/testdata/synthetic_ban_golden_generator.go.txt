@@ -1,0 +1,77 @@
+package forcetx
+
+import (
+	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
+	"os"
+	"testing"
+)
+
+type oliBanVector struct {
+	N          int      `json:"n"`
+	Elements   []string `json:"elements"`
+	Data       string   `json:"data"`
+	SourceHash string   `json:"source_hash"`
+}
+
+type oliL1Vector struct {
+	L1BlockHash string `json:"l1_block_hash"`
+	LogIndex    uint64 `json:"log_index"`
+	SourceHash  string `json:"source_hash"`
+}
+
+// element i is keccak256("oli-golden-element" || be_u64(i)), computed with RCS's own keccak256.
+func oliElement(i int) [32]byte {
+	var idx [8]byte
+	binary.BigEndian.PutUint64(idx[:], uint64(i))
+	var out [32]byte
+	copy(out[:], keccak256([]byte("oli-golden-element"), idx[:]))
+	return out
+}
+
+func TestOliGenerateSyntheticBanGoldenVectors(t *testing.T) {
+	out := os.Getenv("OLI_GOLDEN_OUT")
+	if out == "" {
+		t.Skip("OLI_GOLDEN_OUT not set")
+	}
+	var bans []oliBanVector
+	for _, n := range []int{1, 2, 500} {
+		hashes := make([][32]byte, n)
+		elements := make([]string, n)
+		for i := 0; i < n; i++ {
+			hashes[i] = oliElement(i)
+			elements[i] = "0x" + hex.EncodeToString(hashes[i][:])
+		}
+		// The production calldata builder from parsed strings, cross-checked against the encoder.
+		parsed, calldata, err := buildBlacklistCalldata(elements)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hex.EncodeToString(calldata) != hex.EncodeToString(encodeBatchAddToBlacklistCalldata(parsed)) {
+			t.Fatal("calldata builders disagree")
+		}
+		bans = append(bans, oliBanVector{
+			N:          n,
+			Elements:   elements,
+			Data:       "0x" + hex.EncodeToString(calldata),
+			SourceHash: syntheticBlacklistSourceHash(parsed),
+		})
+	}
+	l1Hash := "0x" + hex.EncodeToString(keccak256([]byte("oli-golden-l1-block")))
+	l1Source, err := userDepositSourceHash(l1Hash, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := map[string]any{
+		"synthetic_bans": bans,
+		"l1_user_deposit": oliL1Vector{L1BlockHash: l1Hash, LogIndex: 7, SourceHash: l1Source},
+	}
+	b, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(out, append(b, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}

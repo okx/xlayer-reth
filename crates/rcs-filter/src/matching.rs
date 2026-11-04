@@ -349,7 +349,9 @@ fn build_bindings(
     b
 }
 
-/// Binds one alias's two flat condition variables.
+/// Binds one alias's four flat condition variables: the selected proxy's own address and executed
+/// code hash (`<alias>.proxyAddress`, `<alias>.proxyCodeHash`) and the delegate target's address
+/// and executed code hash (`<alias>.delegateTo`, `<alias>.delegateCodeHash`).
 ///
 /// There is no `Option` and no null branch: a rule whose alias produced no observation is
 /// suppressed before any binding is built, so this is only ever reached with a real observation.
@@ -361,8 +363,14 @@ fn bind_direct_delegatecall(
     observation: &CallObservation,
 ) {
     let name = &alias.alias;
-    // Both values are present for a direct-delegatecall observation, and only such observations
-    // are candidates, so a missing one is an invariant violation rather than a null binding.
+    // The proxy side is always present: candidate selection already required
+    // `observation.address == alias.address`, and `code_hash` is the hash of the code the proxy's
+    // own frame executed.
+    b.insert(format!("{name}.proxyAddress"), Value::String(addr_lower(observation.address)));
+    b.insert(format!("{name}.proxyCodeHash"), Value::String(hash_lower(observation.code_hash)));
+    // Both target values are present for a direct-delegatecall observation, and only such
+    // observations are candidates, so a missing one is an invariant violation rather than a null
+    // binding.
     b.insert(
         format!("{name}.delegateTo"),
         Value::String(addr_lower(

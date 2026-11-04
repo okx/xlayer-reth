@@ -180,10 +180,12 @@ fn seeded_db(proxy_target: Address, delegatecalls: usize) -> InMemoryDB {
 }
 
 /// One batch outcome: the per-transaction results plus the PROXY storage slot the
-/// implementation writes, which is how "state committed" is observed directly.
+/// implementation writes, which is how "state committed" is observed directly. The depositor's
+/// nonce counts committed transactions for fixtures whose code writes no storage.
 struct BatchRun {
     results: Vec<Option<AuditResult>>,
     proxy_slot0: U256,
+    depositor_nonce: u64,
 }
 
 /// Runs the production `run_audit_batch` against a real EVM, exactly as the handler does:
@@ -251,7 +253,7 @@ fn run_batch_stamped(
             )
         }),
     };
-    let proxy_slot0 = match inspector {
+    let (proxy_slot0, depositor_nonce) = match inspector {
         Some(inspector) => {
             let mut evm =
                 OpEvmFactory::<OpTx>::default().create_evm_with_inspector(db, env, inspector);
@@ -264,15 +266,21 @@ fn run_batch_stamped(
                 ),
                 "the inspector must be left inactive after the batch"
             );
-            evm.db_mut().storage(PROXY, U256::ZERO).expect("storage read")
+            (
+                evm.db_mut().storage(PROXY, U256::ZERO).expect("storage read"),
+                evm.db_mut().basic(DEPOSITOR).expect("account read").map_or(0, |a| a.nonce),
+            )
         }
         None => {
             let mut evm = OpEvmFactory::<OpTx>::default().create_evm(db, env);
             run_audit_batch(&mut evm, &batch, &mut executed).expect("batch executes");
-            evm.db_mut().storage(PROXY, U256::ZERO).expect("storage read")
+            (
+                evm.db_mut().storage(PROXY, U256::ZERO).expect("storage read"),
+                evm.db_mut().basic(DEPOSITOR).expect("account read").map_or(0, |a| a.nonce),
+            )
         }
     };
-    BatchRun { results: executed, proxy_slot0 }
+    BatchRun { results: executed, proxy_slot0, depositor_nonce }
 }
 
 fn generous() -> AuditCaptureConfig {
@@ -927,15 +935,15 @@ fn both_classes_are_handled_differently_in_one_request() {
     assert_eq!(run.results[1].as_ref().unwrap().verdict, Verdict::Deny, "original");
 }
 
-/// An UNLABELLED `known_allowed` entry executing an unapproved implementation stays `Allow`
-/// and its state IS committed, with the call-frame result reported as a diagnostic only.
+/// An UNLABELLED `known_allowed` entry that is not a synthetic ban, executing an unapproved
+/// implementation, is adjudicated as an approved original: `Deny`, with nothing committed.
 ///
-/// Asserted explicitly, and deliberately, because this is a disclosed residual risk rather
-/// than a protection: with a caller that sends no labels, such an entry is NOT denied here.
-/// A test that merely accepted the request would hide that; this one states it, so it can
-/// never be mistaken for end-to-end coverage.
+/// Updated in place. This test used to pin the opposite (`Allow`, committed, objection reported
+/// only), which was the gap: a caller that sends no labels never had an approved original
+/// re-judged on the call-frame dimension. The labelled `Original` contrast below is unchanged and
+/// now agrees with the unlabelled result.
 #[test]
-fn an_unlabelled_entry_running_unapproved_code_is_allowed_committed_and_only_reported() {
+fn an_unlabelled_original_running_unapproved_code_is_denied_and_commits_nothing() {
     let source = format!("0x{}", "66".repeat(32));
     let run = run_batch(
         &[deposit_request(&source, PROXY)],
@@ -948,20 +956,11 @@ fn an_unlabelled_entry_running_unapproved_code_is_allowed_committed_and_only_rep
         seeded_db(UNAPPROVED_IMPL, 1),
     );
     let result = only(&run);
-    assert_eq!(result.verdict, Verdict::Allow, "an unlabelled entry is not denied");
-    assert_eq!(
-        result.callstack_identification,
-        Some(CallstackIdentification::Objected),
-        "the objection is reported as a diagnostic, and only reported"
-    );
-    assert_eq!(
-        run.proxy_slot0,
-        U256::from(2u64),
-        "its state is committed: the unapproved implementation's marker is in proxy storage"
-    );
+    assert_eq!(result.verdict, Verdict::Deny, "an unlabelled original is re-adjudicated");
+    assert_eq!(result.callstack_identification, Some(CallstackIdentification::Objected));
+    assert_eq!(run.proxy_slot0, U256::ZERO, "a denied original commits nothing");
 
-    // The contrast that makes the above a statement about the LABEL and not about the rule:
-    // the identical execution labelled `Original` IS denied, with nothing committed.
+    // The identical execution labelled `Original` gets the identical result.
     let labelled = run_batch(
         &[deposit_request(&source, PROXY)],
         vec![proxy_impl_allowlist_rule()],
@@ -977,10 +976,13 @@ fn an_unlabelled_entry_running_unapproved_code_is_allowed_committed_and_only_rep
 }
 
 /// A legacy batch carrying no label map at all: several `known_allowed` entries plus an
-/// ordinary deposit, with alias-bearing rules. Every `known_allowed` entry is `Allow` and
-/// committed; the ordinary deposit is still fully adjudicated and still fail-closed.
+/// ordinary deposit, with alias-bearing rules, all executing an unapproved implementation.
+///
+/// Updated in place: the `known_allowed` entries used to be `Allow` and committed. None of them
+/// is a synthetic ban, so each is now adjudicated as an approved original and denied, exactly
+/// like the ordinary deposit, and nothing is committed.
 #[test]
-fn an_unlabelled_batch_commits_its_entries_and_still_adjudicates_the_ordinary_deposit() {
+fn an_unlabelled_batch_adjudicates_its_originals_and_the_ordinary_deposit_alike() {
     let first = format!("0x{}", "66".repeat(32));
     let second = format!("0x{}", "67".repeat(32));
     let ordinary = format!("0x{}", "68".repeat(32));
@@ -997,29 +999,25 @@ fn an_unlabelled_batch_commits_its_entries_and_still_adjudicates_the_ordinary_de
         generous(),
         seeded_db(UNAPPROVED_IMPL, 1),
     );
-    assert_eq!(run.results[0].as_ref().unwrap().verdict, Verdict::Allow, "unlabelled entry");
-    assert_eq!(run.results[1].as_ref().unwrap().verdict, Verdict::Allow, "unlabelled entry");
+    assert_eq!(run.results[0].as_ref().unwrap().verdict, Verdict::Deny, "unlabelled original");
+    assert_eq!(run.results[1].as_ref().unwrap().verdict, Verdict::Deny, "unlabelled original");
     assert_eq!(
         run.results[2].as_ref().unwrap().verdict,
         Verdict::Deny,
         "the ordinary deposit is adjudicated, not exempted"
     );
-    assert_eq!(
-        run.proxy_slot0,
-        U256::from(2u64),
-        "the committed entries are visible as base state; the denied deposit added nothing"
-    );
+    assert_eq!(run.proxy_slot0, U256::ZERO, "no denied transaction added state");
 }
 
-/// An unlabelled entry whose observation set cannot be adjudicated — unavailable, and
-/// separately `Available` under a FOREIGN stamp — is still `Allow` with its state committed.
+/// An unlabelled entry that is not a synthetic ban, whose observation set cannot be adjudicated
+/// — unavailable, and separately `Available` under a FOREIGN stamp — gets the non-verdict with
+/// nothing committed, exactly as a labelled `Original` does.
 ///
-/// It must NOT be captured by the request-level unadjudicable gate: its verdict is fixed by
-/// its own class contract, so returning the non-verdict there would withhold a commit for an
-/// entry that was never going to be adjudicated. The reported identification is
-/// `NotIdentified` in both cases, from the same judgement every other class uses.
+/// Updated in place: this used to pin `Allow` + commit. Such an entry is now an approved
+/// original, so the request-level unadjudicable gate applies to it; only a synthetic ban stays
+/// exempt (see `an_unadjudicable_inferred_original_does_not_stop_the_prefix_from_committing`).
 #[test]
-fn an_unadjudicable_unlabelled_entry_still_allows_and_commits() {
+fn an_unadjudicable_unlabelled_original_is_the_non_verdict_and_commits_nothing() {
     let source = format!("0x{}", "66".repeat(32));
 
     // Unavailable: the observation budget is exhausted.
@@ -1033,9 +1031,9 @@ fn an_unadjudicable_unlabelled_entry_still_allows_and_commits() {
         seeded_db(APPROVED_IMPL, 2),
     );
     let result = only(&run);
-    assert_eq!(result.verdict, Verdict::Allow);
+    assert_eq!(result.verdict, Verdict::Malformed);
     assert_eq!(result.callstack_identification, Some(CallstackIdentification::NotIdentified));
-    assert_eq!(run.proxy_slot0, U256::from(1u64), "its commit is never withheld");
+    assert_eq!(run.proxy_slot0, U256::ZERO, "a non-verdict commits nothing");
 
     // Available, but produced under a different snapshot identity.
     let raw_rules = vec![proxy_impl_allowlist_rule()];
@@ -1050,9 +1048,9 @@ fn an_unadjudicable_unlabelled_entry_still_allows_and_commits() {
         Some(foreign_stamp(&raw_rules, 1)),
     );
     let result = only(&run);
-    assert_eq!(result.verdict, Verdict::Allow);
+    assert_eq!(result.verdict, Verdict::Malformed);
     assert_eq!(result.callstack_identification, Some(CallstackIdentification::NotIdentified));
-    assert_eq!(run.proxy_slot0, U256::from(1u64), "its commit is never withheld");
+    assert_eq!(run.proxy_slot0, U256::ZERO, "a non-verdict commits nothing");
 }
 
 /// Proof that the exemption above was NARROWED and not widened: with the same unadjudicable
@@ -1413,7 +1411,13 @@ fn a_condition_reading_an_unprovided_alias_variable_is_rejected_at_this_entry_po
         assert_eq!(error.code(), -32602);
         let detail = error.data().expect("the rejected rule is named").to_string();
         assert!(detail.contains(&format!("entry.{field}")), "{detail}");
-        assert!(detail.contains("delegateTo and delegateCodeHash"), "{detail}");
+        assert!(
+            detail.contains(&format!(
+                "condition references unknown variable 'entry.{field}'; direct_delegatecalls \
+                 provides proxyAddress, proxyCodeHash, delegateTo and delegateCodeHash"
+            )),
+            "{detail}"
+        );
     }
 
     // The control: the two provided variables are accepted, so the rejections above are about
@@ -1537,8 +1541,8 @@ fn a_request_with_no_label_map_needs_no_labels() {
     );
 }
 
-/// The class is read from the labels and NEVER inferred. `synthetic_ban` is the wire spelling
-/// a producer must send for a replay prefix.
+/// The two wire labels. `synthetic_ban` is the wire spelling a producer must send for a replay
+/// prefix; an unlabelled entry's class is decided locally and is not a wire value.
 #[test]
 fn known_allowed_kind_wire_spelling_is_snake_case() {
     let kinds: BTreeMap<String, KnownAllowedKind> =
@@ -1550,8 +1554,7 @@ fn known_allowed_kind_wire_spelling_is_snake_case() {
         serde_json::from_value::<KnownAllowedKind>(serde_json::json!("syntheticBan")).is_err(),
         "a wrong spelling must not be accepted as a class"
     );
-    // The third class is resolved locally and is NOT part of the wire contract: a caller
-    // cannot select it explicitly, so the labels a request may send stay exactly two.
+    // No third class exists on the wire: the labels a request may send stay exactly two.
     for spelling in ["unlabelled", "unlabeled", "Unlabelled"] {
         assert!(
             serde_json::from_value::<KnownAllowedKind>(serde_json::json!(spelling)).is_err(),
@@ -1771,3 +1774,7 @@ fn a_rejected_rule_is_listed_in_the_error_detail_with_its_id_and_reason() {
     let reason = detail[0]["reason"].as_str().expect("the entry carries a reason");
     assert!(reason.contains("callStack"), "the reason must name the unrecognised key: {reason}");
 }
+
+mod force_tx_replay_tests;
+
+mod known_allowed_inference_tests;

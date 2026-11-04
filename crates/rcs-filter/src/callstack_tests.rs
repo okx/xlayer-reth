@@ -947,6 +947,13 @@ fn a_condition_reading_an_unprovided_alias_variable_is_rejected() {
         "implCodeHash",
         "delegateto",
         "delegateCodehash",
+        // Near misses of the two proxy-side names: matching is exact and case-sensitive.
+        "address",
+        "proxyAddr",
+        "proxyaddress",
+        "proxycodehash",
+        "ProxyCodeHash",
+        "proxyHash",
     ] {
         let reason = reject_reason(deny_on_alias(
             "r",
@@ -957,7 +964,7 @@ fn a_condition_reading_an_unprovided_alias_variable_is_rejected() {
         assert_eq!(
             reason,
             format!(
-                "condition references unknown variable 'p.{field}'; direct_delegatecalls provides delegateTo and delegateCodeHash"
+                "condition references unknown variable 'p.{field}'; direct_delegatecalls provides proxyAddress, proxyCodeHash, delegateTo and delegateCodeHash"
             )
         );
     }
@@ -1729,3 +1736,5 @@ fn a_re_simulation_whose_executed_code_changed_is_not_silently_consistent() {
         "a changed executed code hash must not pass the consistency check"
     );
 }
+
+mod four_field_tests;

@@ -25,6 +25,10 @@ const ERC1155_TRANSFER_BATCH_SHAPE: &[&str] = &["operator", "from", "to", "ids",
 /// The only audit type implemented today.
 const QUOTA: &str = "quota";
 
+/// The selected proxy's own address variable suffix bound per alias.
+const PROXY_ADDRESS: &str = "proxyAddress";
+/// The selected proxy's own executed-code-hash variable suffix bound per alias.
+const PROXY_CODE_HASH: &str = "proxyCodeHash";
 /// The direct-delegatecall target address variable suffix bound per alias.
 const DELEGATE_TO: &str = "delegateTo";
 /// The direct-delegatecall target's executed-code-hash variable suffix bound per alias.
@@ -200,7 +204,7 @@ pub(crate) fn compile_rule_with_interner(
     super::jsonlogic::validate(&raw.condition)?;
 
     let callstack = compile_callstack(&raw)?;
-    // Last, because it needs the compiled alias set: a condition may only read the two variables
+    // Last, because it needs the compiled alias set: a condition may only read the four variables
     // an alias actually provides.
     reject_unknown_alias_variables(&raw.condition, &callstack)?;
 
@@ -347,11 +351,11 @@ fn reject_unknown_alias_variables(
         let prefix = format!("{}.", alias.alias);
         for name in &names {
             let Some(field) = name.strip_prefix(prefix.as_str()) else { continue };
-            if field == DELEGATE_TO || field == DELEGATE_CODE_HASH {
+            if [PROXY_ADDRESS, PROXY_CODE_HASH, DELEGATE_TO, DELEGATE_CODE_HASH].contains(&field) {
                 continue;
             }
             return Err(format!(
-                "condition references unknown variable '{}.{field}'; direct_delegatecalls provides {DELEGATE_TO} and {DELEGATE_CODE_HASH}",
+                "condition references unknown variable '{}.{field}'; direct_delegatecalls provides {PROXY_ADDRESS}, {PROXY_CODE_HASH}, {DELEGATE_TO} and {DELEGATE_CODE_HASH}",
                 alias.alias
             ));
         }
