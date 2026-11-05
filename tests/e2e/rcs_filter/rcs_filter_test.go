@@ -8,6 +8,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/lmittmann/w3"
 
 	"github.com/ethereum-optimism/optimism/op-devstack/devtest"
 	"github.com/ethereum-optimism/optimism/op-devstack/dsl"
@@ -63,7 +64,7 @@ func headBlock(t devtest.T, sys *presets.XLayer) uint64 {
 // included submits a planned transaction and reports whether it reached a successful canonical
 // receipt within timeout. A transaction the RCS filter denies is rejected at txpool ingress (the
 // submit fails) or is never built into a block (the receipt poll times out); both map to false, so
-// a false result means "denied / not included" and true means "allowed and mined". It never fails
+// execution failures also map to false; true means "allowed and successfully mined". It never fails
 // the test — the caller asserts the boolean — which is why the failing-on-timeout tests/common
 // helpers (SendTransfer / WaitForReceipt) are not reused here.
 func included(t devtest.T, sys *presets.XLayer, ptx *txplan.PlannedTx, timeout time.Duration) bool {
@@ -72,10 +73,12 @@ func included(t devtest.T, sys *presets.XLayer, ptx *txplan.PlannedTx, timeout t
 
 	if _, err := ptx.Submitted.Eval(ctx); err != nil {
 		// Rejected before entering the pool (the deny path for txpool-ingress screening).
+		t.Logger().Info("Probe submission failed", "err", err)
 		return false
 	}
 	signed, err := ptx.Signed.Eval(ctx)
 	if err != nil {
+		t.Logger().Info("Probe signing failed", "err", err)
 		return false
 	}
 	hash := signed.Hash()
@@ -86,10 +89,12 @@ func included(t devtest.T, sys *presets.XLayer, ptx *txplan.PlannedTx, timeout t
 	for {
 		receipt, err := client.TransactionReceipt(ctx, hash)
 		if err == nil && receipt != nil {
+			t.Logger().Info("Probe receipt", "tx", hash, "status", receipt.Status)
 			return receipt.Status == types.ReceiptStatusSuccessful
 		}
 		select {
 		case <-ctx.Done():
+			t.Logger().Info("Probe receipt wait ended", "tx", hash, "err", ctx.Err(), "receiptErr", err)
 			return false
 		case <-ticker.C:
 		}
@@ -208,9 +213,12 @@ func TestEmergencyDenyAll(gt *testing.T) {
 	t.Require().False(createIncluded(t, sys, create, contractInitBytecode(), denyReceiptTimeout),
 		"contract creation must be denied")
 
-	// (e) transfer to the TxBlacklist exception target → included (gets a receipt).
-	t.Require().True(transferIncluded(t, sys, exception, txBlacklist, denyReceiptTimeout),
-		"transfer to the TxBlacklist contract must be allowed and included")
+	// (e) A no-log call to the same exception address must succeed. The predeployed
+	// TxBlacklist has no payable receive/fallback, so use a valid zero-value call.
+	data, err := w3.MustNewFunc("isBlacklisted(bytes32)", "bool").EncodeArgs(common.Hash{})
+	t.Require().NoError(err, "encode TxBlacklist exception probe")
+	t.Require().True(callIncluded(t, sys, exception, txBlacklist, data, denyReceiptTimeout),
+		"call to the TxBlacklist exception address must be allowed and included")
 
 	// Chain keeps producing blocks during the emergency (the exception tx alone advanced it, but
 	// assert progress explicitly).
