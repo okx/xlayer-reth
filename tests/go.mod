@@ -12,7 +12,7 @@ replace github.com/ethereum-optimism/optimism => ../deps/optimism
 // Go replace directives are not transitive, so the harness must repeat the
 // go-ethereum fork replacement declared by deps/optimism; without it op-service
 // resolves the upstream go-ethereum and fails to compile against OP Stack types.
-replace github.com/ethereum/go-ethereum => github.com/ethereum-optimism/op-geth v1.101702.3-rc.4
+replace github.com/ethereum/go-ethereum => github.com/ethereum-optimism/op-geth v1.101702.3-rc.6
 
 require (
 	github.com/ethereum-optimism/optimism v0.0.0
