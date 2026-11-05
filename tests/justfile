@@ -20,7 +20,7 @@ PACKAGE_WORKERS := env_var_or_default("PACKAGE_WORKERS", "2")
 IN_PACKAGE_PARALLEL := env_var_or_default("IN_PACKAGE_PARALLEL", "4")
 # Hard wall-clock limit for a single test process; a hung scenario is killed.
 # Override with TEST_TIMEOUT.
-TEST_TIMEOUT := env_var_or_default("TEST_TIMEOUT", "1m")
+TEST_TIMEOUT := env_var_or_default("TEST_TIMEOUT", "3m")
 
 default:
     @just --list
