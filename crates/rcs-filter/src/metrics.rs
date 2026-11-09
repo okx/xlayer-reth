@@ -46,6 +46,9 @@ pub(crate) struct RcsFilterMetrics {
     pub drop_total: Counter,
     /// Approval consistency mismatches.
     pub consistency_mismatch_total: Counter,
+    /// Timed-out-allow audit transactions dropped because the local re-check matched a deny rule
+    /// or could not decide (matcher error / unavailable or mismatched observations).
+    pub timed_out_allow_recheck_drop_total: Counter,
     /// Total buffered transactions.
     pub buffered_transactions: Gauge,
     /// Buffered transactions awaiting submission.
