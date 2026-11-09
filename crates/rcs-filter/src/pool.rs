@@ -9,8 +9,9 @@
 //! the entry would let the builder re-screen the tx from scratch on the next round, resetting
 //! `first_not_submitted_at` (timeout clock) and re-submitting a denied/outdated tx — an
 //! infinite loop. The tombstone gives `screen_tx` a deterministic mapping
-//! (`TimedOutAllow → Screen::AuditApproved`, `Dropped → Screen::Drop` for tx-pool eviction)
-//! and keeps the tx out of the submit / query / timeout scans for the rest of
+//! (`TimedOutAllow → Screen::AuditApproved` unless the local re-check on that execution denies or
+//! cannot decide, in which case the lifecycle becomes `Dropped`; `Dropped → Screen::Drop` for
+//! tx-pool eviction) and keeps the tx out of the submit / query / timeout scans for the rest of
 //! the build cycle. To bound memory over the node's (unbounded) lifetime, tombstones are
 //! evicted by [`BufferPool::prune_terminal`] once they have been terminal for longer than
 //! `terminal_entry_retention_seconds`. Non-terminal state is removed when the
@@ -34,8 +35,10 @@ pub enum BufferStatus {
     Submitted,
     Pending,
     Approved,
-    /// Terminal fail-open timeout. A successful consistency check does not enter this state:
-    /// approval remains attempt-scoped until canonical inclusion.
+    /// Terminal fail-open timeout (the audit service never decided). A successful consistency
+    /// check does not enter this state: approval remains attempt-scoped until canonical inclusion.
+    /// Releasing it still requires the local matcher to decide allow/audit on the current
+    /// execution; a local deny (or an undecidable match) turns the lifecycle into `Dropped`.
     TimedOutAllow,
     /// Terminal: discard the tx (denied / outdated / consistency-mismatch / fail-close
     /// timeout). Never packaged, never re-submitted, never re-admitted this build cycle.
@@ -184,6 +187,30 @@ impl BufferPool {
             return None;
         }
         if entry.status == BufferStatus::Approved && !consistent {
+            entry.status = BufferStatus::Dropped;
+            entry.last_transition_at = now;
+        }
+        Some(entry.status)
+    }
+
+    /// Applies a `TimedOutAllow` local-deny re-check if the entry is still the same lifecycle.
+    ///
+    /// The builder recomputes the re-check without holding the pool lock; re-checking generation
+    /// here prevents a stale result from touching a reinserted lifecycle. `release == false` (a
+    /// local deny or an undecidable match) tombstones the entry as `Dropped`; the cumulative
+    /// timeout clock is untouched, and the entry is never removed, re-submitted or re-buffered.
+    pub fn finish_timed_out_allow_recheck(
+        &mut self,
+        tx_hash: &B256,
+        expected_generation: u64,
+        release: bool,
+        now: u64,
+    ) -> Option<BufferStatus> {
+        let entry = self.entries.get_mut(tx_hash)?;
+        if entry.generation != expected_generation {
+            return None;
+        }
+        if entry.status == BufferStatus::TimedOutAllow && !release {
             entry.status = BufferStatus::Dropped;
             entry.last_transition_at = now;
         }

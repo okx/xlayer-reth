@@ -563,17 +563,66 @@ impl FilterHandle {
         rule_snapshot: Arc<RuleSet>,
     ) -> Screen {
         match status {
-            // Terminal fail-open: release into the block without resetting the retry clock.
+            // Terminal fail-open for the RCS verdict only: the audit service never answered, but a
+            // local deny (e.g. a codeHash whitelist rule) needs no RCS and must still win. Re-run
+            // the matcher on THIS execution against the saved snapshot; no quota-consistency gate,
+            // no clock reset, no re-submit.
             BufferStatus::TimedOutAllow => {
-                if !self.shared.pool_lock().matches(
+                let release = match matching::try_evaluate(
+                    &rule_snapshot,
+                    input,
+                    self.shared.config.max_event_bindings_per_tx,
+                ) {
+                    Ok(MatchOutcome::Allow | MatchOutcome::Audit { .. }) => true,
+                    Ok(MatchOutcome::Deny) => {
+                        // Bounded: tx hash and a fixed reason only.
+                        tracing::warn!(
+                            target: "rcs_filter",
+                            tx_hash = %input.tx_hash,
+                            "local deny matched on timed-out-allow re-check; dropping (Screen::Drop)"
+                        );
+                        false
+                    }
+                    Err(error) => {
+                        let (attempted, limit) = binding_overflow_counts(
+                            &error,
+                            self.shared.config.max_event_bindings_per_tx,
+                        );
+                        error!(
+                            target: "rcs_filter",
+                            tx_hash = %input.tx_hash,
+                            kind = ?error.kind(),
+                            observed_count = attempted,
+                            limit = limit,
+                            "screening failed closed during timed-out-allow re-check"
+                        );
+                        false
+                    }
+                };
+                let now = self.shared.clock.now_unix();
+                let status = self.shared.pool_lock().finish_timed_out_allow_recheck(
                     &input.tx_hash,
                     generation,
-                    BufferStatus::TimedOutAllow,
-                ) {
-                    return Screen::AuditPending;
+                    release,
+                    now,
+                );
+                if !release {
+                    self.shared.update_buffer_metric();
                 }
-                self.shared.metrics.audit_approved_total.increment(1);
-                Screen::AuditApproved
+                match status {
+                    Some(BufferStatus::TimedOutAllow) if release => {
+                        self.shared.metrics.audit_approved_total.increment(1);
+                        Screen::AuditApproved
+                    }
+                    Some(BufferStatus::Dropped) => {
+                        if !release {
+                            self.shared.metrics.timed_out_allow_recheck_drop_total.increment(1);
+                        }
+                        self.shared.metrics.drop_total.increment(1);
+                        Screen::Drop
+                    }
+                    _ => Screen::AuditPending,
+                }
             }
 
             // Terminal: dropped (denied/outdated/fail-close/consistency-mismatch). Never

@@ -887,3 +887,5 @@ fn aborting_a_capture_clears_the_observation_state() {
 }
 
 mod nested_proxy_tests;
+mod self_delegatecall_tests;
+mod timed_out_allow_recheck_evm_tests;

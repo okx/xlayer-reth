@@ -804,30 +804,28 @@ impl RcsInspector {
     ) -> Option<PendingObservation> {
         // A create frame runs init code; see `FrameRecord::is_create`.
         let scheme = scheme?;
+        // A direct delegatecall is decided FIRST. A selected proxy DELEGATECALLing ITSELF enters a
+        // frame whose target and bytecode are both the proxy, which the own-code test below would
+        // otherwise claim as a plain call and hide from every direct-delegatecall rule. `CALLCODE`
+        // stays excluded.
+        if scheme == CallScheme::DelegateCall
+            && let Some(parent) = self.frames.last()
+            && !parent.is_create
+            && parent.bytecode == parent.target
+            && self.callstack.observes(&parent.target)
+        {
+            // The parent issued this DELEGATECALL, so it is executing and its executed code hash
+            // is known. Without it there is nothing truthful to report, so nothing is.
+            let code_hash = parent.code_hash?;
+            return Some(PendingObservation::DirectDelegatecall {
+                address: parent.target,
+                code_hash,
+                impl_address: bytecode,
+            });
+        }
         // The selected address running its own code.
         if bytecode == target && self.callstack.observes(&target) {
             return Some(PendingObservation::Call { address: target });
-        }
-        // The selected address's own code delegatecalling out. `CALLCODE` is excluded: it sets
-        // `target_address == caller`, so it is not a proxy-implementation relationship.
-        if scheme == CallScheme::DelegateCall {
-            let parent = self.frames.last()?;
-            // The parent must be running the selected address's OWN code. When the parent is
-            // running implementation code its `bytecode` differs from its `target`, which is what
-            // excludes implementation-internal business delegatecalls.
-            if !parent.is_create
-                && parent.bytecode == parent.target
-                && self.callstack.observes(&parent.target)
-            {
-                // The parent issued this DELEGATECALL, so it is executing and its executed code
-                // hash is known. Without it there is nothing truthful to report, so nothing is.
-                let code_hash = parent.code_hash?;
-                return Some(PendingObservation::DirectDelegatecall {
-                    address: parent.target,
-                    code_hash,
-                    impl_address: bytecode,
-                });
-            }
         }
         None
     }
