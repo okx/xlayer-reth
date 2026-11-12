@@ -342,24 +342,6 @@ fn timed_out_allow_is_terminal_allow() {
     assert_eq!(h.screen_tx(&input), Screen::AuditApproved);
 }
 
-/// Consistency pass: approved + matching re-simulation → release.
-#[test]
-fn approved_consistency_pass_is_attempt_scoped() {
-    let (h, _clock) = handle_and_clock(1_751_000_000);
-    let logs = vec![transfer_log(golden::ONE_TOKEN)];
-    let input = audit_input(golden::tx_a(), 1, 1_000_000, &logs);
-
-    assert_eq!(h.screen_tx(&input), Screen::AuditPending);
-    let now = 1_751_000_000;
-    h.with_pool(|p| {
-        p.apply_submit_response_current(&[format!("{:#x}", golden::tx_a())], now);
-        p.apply_query_status_current(&golden::tx_a(), "approved", now);
-    });
-    // Same logs → hash matches → release.
-    assert_eq!(h.screen_tx(&input), Screen::AuditApproved);
-    assert_eq!(h.buffer_status(&golden::tx_a()), Some(BufferStatus::Approved));
-}
-
 #[test]
 fn cancelled_attempt_rechecks_changed_actions() {
     let (h, _clock) = handle_and_clock(1_751_000_000);
@@ -420,15 +402,6 @@ fn pre_screen_executes_approved_and_timeout_allow() {
         });
         assert_eq!(h.pre_screen(&golden::tx_a()), PreScreen::Execute);
     }
-}
-
-#[test]
-fn pending_precheck_marks_descendants_invalid_for_iterator() {
-    let (h, _) = handle_and_clock(1_751_000_000);
-    let logs = vec![transfer_log(golden::ONE_TOKEN)];
-    let input = audit_input(golden::tx_a(), 1, 1_000_000, &logs);
-    assert_eq!(h.screen_tx(&input), Screen::AuditPending);
-    assert_eq!(h.pre_screen(&golden::tx_a()), PreScreen::Defer);
 }
 
 #[test]

@@ -534,39 +534,14 @@ fn derivation_ran_true_when_journal_read_for_address_derivation() {
     );
 }
 
-#[test]
-fn derivation_ran_false_when_create_hook_not_hit() {
-    // The not-hit sentinel: an inspector that was never armed leaves BOTH the capture-body flag
-    // and the derivation flag clear, so `derivation_ran == false` here cannot be confused with
-    // the "ran, but no journal read was needed" state (which reports capture_body_ran == true).
-    reset_create_gate_seams();
-    let deployer = Address::from([0xDD; 20]);
-    let mut db = InMemoryDB::default();
-    db.insert_account_info(deployer, account(1_000_000_000, None));
-    let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
-        db,
-        EvmEnv::new(
-            CfgEnv::new_with_spec(OpSpecId::JOVIAN),
-            BlockEnv { gas_limit: 30_000_000, ..Default::default() },
-        ),
-        RcsInspector::new(16),
-    );
-    // Deliberately do NOT call start_capture().
-    let _ = evm.transact(create_tx_with_value(deployer, U256::from(5u64))).expect("tx executes");
-
-    let (_, _, capture_body_ran, derivation_ran) = CREATE_GATE_SNAPSHOT.with(|s| s.get());
-    assert!(!capture_body_ran, "the capture body must not run while inactive");
-    assert!(!derivation_ran, "the not-hit sentinel must report that no derivation ran");
-}
-
 // ── distinguish "create hook never invoked" from "invoked while inactive" ──────────────────
 
 #[test]
 fn non_create_control_leaves_create_hook_hits_zero() {
     // A real transaction with NO `CREATE` at any depth (pure `CALL` only) must leave the
     // create-hook hit counter at zero, which is what makes `derivation_ran == false` in
-    // `derivation_ran_false_when_create_hook_not_hit` a statement about a hook that DID run
-    // (because the create hook was never entered) rather than one that never fired.
+    // `inactive_create_no_mutation_and_no_derivation_at_create_return` a statement about a hook
+    // that DID run (because the create hook was never entered) rather than one that never fired.
     reset_create_gate_seams();
     let contract = Address::from([0xC3; 20]);
     let dst = Address::from([0xD4; 20]);
@@ -591,8 +566,8 @@ fn non_create_control_leaves_create_hook_hits_zero() {
 fn inactive_create_hook_hit_is_nonzero_with_derivation_false() {
     // The other side of the control above: an UNARMED inspector that really does execute a
     // CREATE records a hook hit while reporting neither a capture body nor a derivation —
-    // proving `derivation_ran_false_when_create_hook_not_hit`'s `false` comes from a hook that
-    // DID run, not one that never fired.
+    // proving `inactive_create_no_mutation_and_no_derivation_at_create_return`'s `false` comes from
+    // a hook that DID run, not one that never fired.
     reset_create_gate_seams();
     let deployer = Address::from([0xD6; 20]);
     let mut db = InMemoryDB::default();

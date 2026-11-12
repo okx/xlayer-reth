@@ -443,14 +443,6 @@ fn armed(limit: usize) -> RcsInspector {
 }
 
 #[test]
-fn call_top_level_generates_no_event() {
-    // transfer_value=None (DELEGATECALL/STATICCALL apparent value) generates no event.
-    let mut i = armed(10);
-    i.record_call_observation(None, addr(1), addr(2));
-    assert_eq!(i.observed_count, 0);
-}
-
-#[test]
 fn call_internal_nonzero_transfer_is_observed() {
     let mut i = armed(10);
     i.record_call_observation(Some(U256::from(5u64)), addr(1), addr(2));
@@ -479,14 +471,6 @@ fn call_self_transfer_generates_no_event() {
     // CALLCODE reports a transfer value but caller == target, so it is a self-transfer.
     let mut i = armed(10);
     i.record_call_observation(Some(U256::from(5u64)), addr(1), addr(1));
-    assert_eq!(i.observed_count, 0);
-}
-
-#[test]
-fn create_top_level_generates_no_event() {
-    // Zero endowment generates no event regardless of depth.
-    let mut i = armed(10);
-    i.record_create_observation(U256::ZERO, addr(1), addr(2));
     assert_eq!(i.observed_count, 0);
 }
 

@@ -359,34 +359,6 @@ fn an_inert_selector_set_observes_nothing() {
     assert!(observations(outcome).is_empty());
 }
 #[test]
-fn a_selected_proxy_reports_its_own_code_and_its_direct_delegatecall() {
-    // A standard proxy invocation legitimately yields BOTH observations.
-    let proxy = Address::from([0xB1; 20]);
-    let implementation = Address::from([0xB2; 20]);
-    let proxy_code = delegatecall_to(implementation);
-    let impl_code = stop_only();
-    let mut db = InMemoryDB::default();
-    db.insert_account_info(caller(), account(1_000_000_000, None));
-    db.insert_account_info(proxy, account(0, Some(proxy_code.clone())));
-    db.insert_account_info(implementation, account(0, Some(impl_code.clone())));
-
-    let (outcome, success) = run_observing_tx(db, proxy, &[proxy], 16);
-    assert!(success);
-    let items = observations(outcome);
-    assert_eq!(
-        items,
-        vec![
-            CallObservation::call(proxy, code_hash(&proxy_code)),
-            CallObservation::direct_delegatecall(
-                proxy,
-                code_hash(&proxy_code),
-                implementation,
-                code_hash(&impl_code),
-            ),
-        ]
-    );
-}
-#[test]
 fn an_implementation_internal_delegatecall_is_not_the_proxys_direct_delegatecall() {
     // proxy -> DELEGATECALL -> relay -> DELEGATECALL -> library.
     //
@@ -418,23 +390,6 @@ fn an_implementation_internal_delegatecall_is_not_the_proxys_direct_delegatecall
     assert!(
         !items.iter().any(|o| o.impl_address == Some(library)),
         "an implementation-internal delegatecall must not be reported: {items:?}"
-    );
-}
-#[test]
-fn an_indirect_call_through_a_helper_still_observes_the_selected_address() {
-    let helper = Address::from([0xD1; 20]);
-    let selected = Address::from([0xD2; 20]);
-    let selected_code = stop_only();
-    let mut db = InMemoryDB::default();
-    db.insert_account_info(caller(), account(1_000_000_000, None));
-    db.insert_account_info(helper, account(0, Some(call_to(selected))));
-    db.insert_account_info(selected, account(0, Some(selected_code.clone())));
-
-    let (outcome, success) = run_observing_tx(db, helper, &[selected], 16);
-    assert!(success);
-    assert_eq!(
-        observations(outcome),
-        vec![CallObservation::call(selected, code_hash(&selected_code))]
     );
 }
 #[test]

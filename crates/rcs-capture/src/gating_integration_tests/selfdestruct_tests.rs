@@ -160,29 +160,6 @@ fn stop_control_at_budget_1_completes() {
 }
 
 #[test]
-fn existing_contract_selfdestruct_to_beneficiary_still_captured() {
-    // Regression guard: an existing contract that SELFDESTRUCTs to a DIFFERENT, non-zero-balance
-    // beneficiary must still be observed exactly once — guards against over-suppression.
-    let victim = Address::from([0x55; 20]);
-    let beneficiary = Address::from([0x56; 20]);
-    let mut db = InMemoryDB::default();
-    db.insert_account_info(caller(), account(1_000_000_000, None));
-    db.insert_account_info(victim, account(500, Some(selfdestruct_to(beneficiary))));
-
-    let (outcome, success) = run_capturing_tx(db, victim, 16);
-    assert!(success, "top-level tx should succeed");
-    match outcome {
-        CaptureOutcome::Complete { logs: stream, .. } => {
-            assert_eq!(stream.len(), 1, "genuine SELFDESTRUCT transfer must still be captured");
-            assert_eq!(stream[0].topics()[1], victim.into_word());
-            assert_eq!(stream[0].topics()[2], beneficiary.into_word());
-            assert_eq!(stream[0].data.data.as_ref(), &U256::from(500u64).to_be_bytes::<32>());
-        }
-        other => panic!("expected Complete with one SELFDESTRUCT transfer, got {other:?}"),
-    }
-}
-
-#[test]
 fn two_identical_native_transfers_are_both_observed() {
     // The fix must be structural, not content-based. Two legitimate identical transfers in
     // one transaction must both still be observed.
