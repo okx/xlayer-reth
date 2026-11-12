@@ -82,5 +82,6 @@ fn small_word(word: &[u8]) -> Option<usize> {
     high.iter().all(|byte| *byte == 0).then(|| usize::from(u16::from_be_bytes([low[0], low[1]])))
 }
 
+#[path = "../../tests/audit__synthetic_ban__tests.rs"]
 #[cfg(test)]
 pub(crate) mod tests;

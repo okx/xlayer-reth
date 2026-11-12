@@ -4,7 +4,7 @@ use super::*;
 use alloy_primitives::hex;
 
 /// Vectors produced by RCS's own derivation code; see the file's `provenance` object.
-pub(crate) const GOLDEN: &str = include_str!("../testdata/synthetic-ban-golden-vectors.json");
+pub(crate) const GOLDEN: &str = include_str!("data/synthetic-ban-golden-vectors.json");
 
 pub(crate) struct GoldenBan {
     pub(crate) n: usize,

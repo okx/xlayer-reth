@@ -163,7 +163,7 @@ fn the_request_rules_field_type_is_pinned() {
 /// finding that boundary is asserted so the guard can never degrade into scanning nothing.
 #[test]
 fn no_value_hop_exists_on_the_production_audit_request_path() {
-    const SOURCE: &str = include_str!("../rpc.rs");
+    const SOURCE: &str = include_str!("../src/audit/rpc.rs");
     let boundary = SOURCE
         .find("#[cfg(test)]\nmod ")
         .expect("the production/test boundary must be findable, or this guard scans nothing");

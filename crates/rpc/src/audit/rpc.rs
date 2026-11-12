@@ -1297,11 +1297,14 @@ mod algorithm_tests {
     }
 }
 
+#[path = "../../tests/audit__rpc__capture_path_tests.rs"]
 #[cfg(test)]
 mod capture_path_tests;
 
+#[path = "../../tests/audit__rpc__identification_reporting_tests.rs"]
 #[cfg(test)]
 mod identification_reporting_tests;
 
+#[path = "../../tests/audit__rpc__raw_request_wire_tests.rs"]
 #[cfg(test)]
 mod raw_request_wire_tests;

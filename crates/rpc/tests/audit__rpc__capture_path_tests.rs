@@ -1267,7 +1267,7 @@ fn unsupported_protocol_version_is_rejected_by_name() {
 #[test]
 fn the_upstream_rule_source_document_is_accepted_at_this_entry_point() {
     const UPSTREAM_RULES: &str =
-        include_str!("../../../../rcs-filter/tests/data/upstream-rule-source-examples.json");
+        include_str!("../../rcs-filter/tests/data/upstream-rule-source-examples.json");
     let document: serde_json::Value = serde_json::from_str(UPSTREAM_RULES).expect("valid JSON");
 
     // The caller's own body shape: three keys, no protocol version, no label map.
@@ -1775,6 +1775,8 @@ fn a_rejected_rule_is_listed_in_the_error_detail_with_its_id_and_reason() {
     assert!(reason.contains("callStack"), "the reason must name the unrecognised key: {reason}");
 }
 
+#[path = "audit__rpc__capture_path_tests__force_tx_replay_tests.rs"]
 mod force_tx_replay_tests;
 
+#[path = "audit__rpc__capture_path_tests__known_allowed_inference_tests.rs"]
 mod known_allowed_inference_tests;
