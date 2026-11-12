@@ -6,6 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
+# Test files live in `tests/` but are NOT Cargo integration tests: every one of them is
+# attached to its production parent module with `#[path]`, so it keeps private access and its
+# module path. With Cargo's auto-discovery each `tests/*.rs` would ALSO be compiled as a
+# separate crate and fail (`too many leading super keywords`). A new test or helper file must
+# therefore be declared from its parent with `#[path]`; it is never picked up implicitly.
+autotests = false
 
 [dependencies]
 alloy-primitives.workspace = true

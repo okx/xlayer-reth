@@ -1218,7 +1218,7 @@ mod cross_path_identification_tests {
     /// The rendered body is the one the producer's own renderer emitted at
     /// `8944b24f00c058cb5e65090a5c210335d1f186ed`; its provenance, the exact command and its
     /// `sha256` are recorded where it is vendored
-    /// (`crates/rcs-filter/testdata/producer-rendered-rules-response.json`) and in the
+    /// (`crates/rcs-filter/tests/data/producer-rendered-rules-response.json`) and in the
     /// rule-layer tests that pin it. This module takes the rendered `rules` array as raw
     /// TEXT — never re-serialised — so the bytes the consumer decodes here are the producer's
     /// own.
@@ -1234,7 +1234,7 @@ mod cross_path_identification_tests {
 
         /// The producer's rendered `GET /rules` body, verbatim.
         const RENDERED_RESPONSE: &str =
-            include_str!("../../../../rcs-filter/testdata/producer-rendered-rules-response.json");
+            include_str!("../../../../rcs-filter/tests/data/producer-rendered-rules-response.json");
 
         /// The rendered `rules` array as raw text, sliced out without parsing so the rule
         /// bytes the consumer decodes are byte-for-byte the producer's.

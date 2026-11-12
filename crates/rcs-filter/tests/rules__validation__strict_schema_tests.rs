@@ -197,9 +197,8 @@ fn golden_fixtures_still_load_clean() {
     assert!(set.rejected.is_empty(), "golden fixtures rejected: {:?}", set.rejected);
     assert_eq!(set.rules.len(), 2);
 
-    let snapshot: Value =
-        serde_json::from_str(include_str!("../../../testdata/rules-snapshot.json"))
-            .expect("official snapshot must deserialize");
+    let snapshot: Value = serde_json::from_str(include_str!("data/rules-snapshot.json"))
+        .expect("official snapshot must deserialize");
     let raw: Vec<RawRule> = snapshot["rules"]
         .as_array()
         .expect("rules array")

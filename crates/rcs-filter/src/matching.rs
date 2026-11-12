@@ -606,5 +606,6 @@ fn hash_lower(h: B256) -> String {
     format!("{h:#x}")
 }
 
+#[path = "../tests/matching__tests.rs"]
 #[cfg(test)]
 mod tests;

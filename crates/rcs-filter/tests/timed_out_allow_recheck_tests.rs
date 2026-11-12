@@ -286,4 +286,5 @@ async fn timed_out_allow_recheck_preserves_the_clock_and_never_resubmits() {
 // F13 — the existing terminal-allow and timeout behaviours are unchanged; they are covered by
 // the module and integration suites in this crate and are deliberately not duplicated here.
 
+#[path = "timed_out_allow_recheck_tests__pool_api_tests.rs"]
 mod pool_api_tests;

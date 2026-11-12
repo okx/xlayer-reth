@@ -58,9 +58,8 @@ fn transfer_batch_rules() -> RuleSet {
 }
 
 fn official_snapshot_rules() -> RuleSet {
-    let response: RulesResponse =
-        serde_json::from_str(include_str!("../testdata/rules-snapshot.json"))
-            .expect("official RCS snapshot must deserialize");
+    let response: RulesResponse = serde_json::from_str(include_str!("data/rules-snapshot.json"))
+        .expect("official RCS snapshot must deserialize");
     assert_eq!(response.protocol_version, 1);
     assert_eq!(response.content_version, 1_784_019_568);
     load_rules(response.protocol_version, response.content_version, response.rules)

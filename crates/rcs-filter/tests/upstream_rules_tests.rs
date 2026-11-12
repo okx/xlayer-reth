@@ -1,5 +1,5 @@
 //! Joint-acceptance coverage against the **genuinely rendered** upstream rule-source document,
-//! reproduced byte-for-byte in `testdata/upstream-rule-source-examples.json`.
+//! reproduced byte-for-byte in `tests/data/upstream-rule-source-examples.json`.
 //!
 //! Provenance of that fixture, so it can be re-verified rather than trusted: it is the
 //! `config/rules-examples.json` blob of the locked upstream revision
@@ -20,7 +20,7 @@ use crate::matching::{try_evaluate, MatchOutcome};
 use crate::rules::{load_rules, RawRule, RuleSet, DEFAULT_MAX_EVENT_BINDINGS_PER_TX};
 
 /// The verbatim upstream document.
-const UPSTREAM_RULES: &str = include_str!("../testdata/upstream-rule-source-examples.json");
+const UPSTREAM_RULES: &str = include_str!("data/upstream-rule-source-examples.json");
 
 /// The content hash the upstream repository reports for that blob. Recorded so the fixture's
 /// provenance stays checkable from outside this crate.
@@ -135,7 +135,7 @@ fn the_vendored_fixture_has_not_drifted() {
     // The pin is a keccak digest because that hash is already available in this crate's
     // dependencies; equality with the upstream blob is established by its byte length and by the
     // sha256 recorded in [`UPSTREAM_CONTENT_SHA256`], re-checkable at any time with
-    // `sha256sum crates/rcs-filter/testdata/upstream-rule-source-examples.json`.
+    // `sha256sum crates/rcs-filter/tests/data/upstream-rule-source-examples.json`.
     assert_eq!(UPSTREAM_RULES.len(), 5_654, "the upstream blob is 5,654 bytes");
     assert_eq!(
         alloy_primitives::keccak256(UPSTREAM_RULES.as_bytes()),

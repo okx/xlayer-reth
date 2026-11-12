@@ -1267,7 +1267,7 @@ fn unsupported_protocol_version_is_rejected_by_name() {
 #[test]
 fn the_upstream_rule_source_document_is_accepted_at_this_entry_point() {
     const UPSTREAM_RULES: &str =
-        include_str!("../../../../rcs-filter/testdata/upstream-rule-source-examples.json");
+        include_str!("../../../../rcs-filter/tests/data/upstream-rule-source-examples.json");
     let document: serde_json::Value = serde_json::from_str(UPSTREAM_RULES).expect("valid JSON");
 
     // The caller's own body shape: three keys, no protocol version, no label map.

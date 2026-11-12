@@ -29,17 +29,23 @@ pub mod pool;
 pub mod quota_hash;
 pub mod rules;
 mod submit;
+#[path = "../tests/test_support.rs"]
 pub mod test_support;
 pub mod worker;
 
+#[path = "../tests/callstack_tests.rs"]
 #[cfg(test)]
 mod callstack_tests;
+#[path = "../tests/integration_tests.rs"]
 #[cfg(test)]
 mod integration_tests;
+#[path = "../tests/raw_wire_tests.rs"]
 #[cfg(test)]
 mod raw_wire_tests;
+#[path = "../tests/timed_out_allow_recheck_tests.rs"]
 #[cfg(test)]
 mod timed_out_allow_recheck_tests;
+#[path = "../tests/upstream_rules_tests.rs"]
 #[cfg(test)]
 mod upstream_rules_tests;
 

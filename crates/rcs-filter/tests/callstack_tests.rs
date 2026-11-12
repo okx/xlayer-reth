@@ -1737,4 +1737,5 @@ fn a_re_simulation_whose_executed_code_changed_is_not_silently_consistent() {
     );
 }
 
+#[path = "callstack_tests__four_field_tests.rs"]
 mod four_field_tests;

@@ -770,5 +770,6 @@ impl FilterHandle {
     }
 }
 
+#[path = "../tests/handle__tests.rs"]
 #[cfg(test)]
 mod tests;

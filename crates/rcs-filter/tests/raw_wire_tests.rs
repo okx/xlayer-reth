@@ -292,11 +292,11 @@ fn the_rules_field_type_is_pinned_at_the_rules_boundary() {
 fn no_value_hop_exists_on_the_production_rule_path() {
     // (path label, source, whether the file is expected to carry a test module)
     let files = [
-        ("client.rs", include_str!("client.rs"), true),
-        ("worker.rs", include_str!("worker.rs"), true),
-        ("rules/model.rs", include_str!("rules/model.rs"), false),
-        ("rules/mod.rs", include_str!("rules/mod.rs"), false),
-        ("rules/validation.rs", include_str!("rules/validation.rs"), true),
+        ("client.rs", include_str!("../src/client.rs"), true),
+        ("worker.rs", include_str!("../src/worker.rs"), true),
+        ("rules/model.rs", include_str!("../src/rules/model.rs"), false),
+        ("rules/mod.rs", include_str!("../src/rules/mod.rs"), false),
+        ("rules/validation.rs", include_str!("../src/rules/validation.rs"), true),
     ];
     for (label, source, has_tests) in files {
         let cut = source.find("#[cfg(test)]");
@@ -336,10 +336,10 @@ fn no_value_hop_exists_on_the_production_rule_path() {
 /// different key order, `omitempty` fields dropped, the audit defaults applied, and the
 /// `protocol_version` / `content_version` envelope added. Pinning the source file would prove
 /// provenance only; pinning the rendered response is what makes the acceptance below joint.
-const RENDERED_RESPONSE: &str = include_str!("../testdata/producer-rendered-rules-response.json");
+const RENDERED_RESPONSE: &str = include_str!("data/producer-rendered-rules-response.json");
 
 /// `sha256` of [`RENDERED_RESPONSE`] — re-checkable with
-/// `sha256sum crates/rcs-filter/testdata/producer-rendered-rules-response.json`.
+/// `sha256sum crates/rcs-filter/tests/data/producer-rendered-rules-response.json`.
 const RENDERED_RESPONSE_SHA256: &str =
     "dbd8d60bc1c04d153670c859d08dfb02a7b4d5f2c0e899b7442264062a03244e";
 
