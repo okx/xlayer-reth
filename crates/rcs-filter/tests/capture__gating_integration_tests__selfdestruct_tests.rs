@@ -2,10 +2,10 @@
 //! gating, out-of-gas leaks across windows and inactive gates.
 
 use super::*;
+use crate::callstack::Observations;
 use alloy_evm::{Evm, EvmEnv, EvmFactory};
 use alloy_op_evm::{OpEvmFactory, OpTx};
 use op_revm::OpSpecId;
-use rcs_filter::callstack::Observations;
 use revm::context::{BlockEnv, CfgEnv};
 use revm::database::InMemoryDB;
 // ── screen_tx integration tests ───────────────────────────────────────────
@@ -252,7 +252,7 @@ fn call_value_1_to_two(a: Address, b: Address) -> Vec<u8> {
 
 /// A `quota` audit rule matching `Transfer(address,address,uint256)` on
 /// [`NATIVE_ASSET_ADDRESS`], for driving a real capture stream through `rcs-filter` screening.
-fn quota_native_transfer_rule() -> rcs_filter::rules::RuleSet {
+fn quota_native_transfer_rule() -> crate::rules::RuleSet {
     let json = format!(
         r#"{{
               "id": "quota-native-transfer",
@@ -274,8 +274,8 @@ fn quota_native_transfer_rule() -> rcs_filter::rules::RuleSet {
             }}"#,
         native = NATIVE_ASSET_ADDRESS
     );
-    let raw: rcs_filter::rules::RawRule = serde_json::from_str(&json).expect("valid rule json");
-    rcs_filter::rules::load_rules(1, 0, vec![raw])
+    let raw: crate::rules::RawRule = serde_json::from_str(&json).expect("valid rule json");
+    crate::rules::load_rules(1, 0, vec![raw])
 }
 
 #[test]
@@ -297,7 +297,7 @@ fn selfdestruct_to_self_quota_actions_report_one_transfer() {
     };
 
     let rules = quota_native_transfer_rule();
-    let input = rcs_filter::handle::ScreenInput {
+    let input = crate::handle::ScreenInput {
         tx_hash: B256::ZERO,
         origin: entry,
         tx_to: Some(victim),
@@ -307,8 +307,8 @@ fn selfdestruct_to_self_quota_actions_report_one_transfer() {
         logs: &stream,
         observations: Observations::NOT_CAPTURED,
     };
-    match rcs_filter::matching::evaluate(&rules, &input) {
-        rcs_filter::matching::MatchOutcome::Audit { actions, .. } => {
+    match crate::matching::evaluate(&rules, &input) {
+        crate::matching::MatchOutcome::Audit { actions, .. } => {
             let quota = actions.get("quota").expect("quota audit_type key present");
             assert_eq!(quota.len(), 1, "expected exactly one quota action, not a replay");
             assert_eq!(quota[0].params.get("value").and_then(|v| v.as_str()), Some("1"));
@@ -335,7 +335,7 @@ fn stop_control_quota_actions_report_one_transfer() {
     };
 
     let rules = quota_native_transfer_rule();
-    let input = rcs_filter::handle::ScreenInput {
+    let input = crate::handle::ScreenInput {
         tx_hash: B256::ZERO,
         origin: entry,
         tx_to: Some(victim),
@@ -345,8 +345,8 @@ fn stop_control_quota_actions_report_one_transfer() {
         logs: &stream,
         observations: Observations::NOT_CAPTURED,
     };
-    match rcs_filter::matching::evaluate(&rules, &input) {
-        rcs_filter::matching::MatchOutcome::Audit { actions, .. } => {
+    match crate::matching::evaluate(&rules, &input) {
+        crate::matching::MatchOutcome::Audit { actions, .. } => {
             let quota = actions.get("quota").expect("quota audit_type key present");
             assert_eq!(quota.len(), 1);
             assert_eq!(quota[0].params.get("value").and_then(|v| v.as_str()), Some("1"));

@@ -147,9 +147,15 @@ fn create2_endowment_7() -> Vec<u8> {
     vec![0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x07, 0xf5, 0x00]
 }
 
+#[path = "capture__gating_integration_tests__composite_forwarding_tests.rs"]
 mod composite_forwarding_tests;
+#[path = "capture__gating_integration_tests__create_tests.rs"]
 mod create_tests;
+#[path = "capture__gating_integration_tests__delegation_tests.rs"]
 mod delegation_tests;
+#[path = "capture__gating_integration_tests__screen_tx_tests.rs"]
 mod screen_tx_tests;
+#[path = "capture__gating_integration_tests__selfdestruct_tests.rs"]
 mod selfdestruct_tests;
+#[path = "capture__gating_integration_tests__tx_lifecycle_tests.rs"]
 mod tx_lifecycle_tests;

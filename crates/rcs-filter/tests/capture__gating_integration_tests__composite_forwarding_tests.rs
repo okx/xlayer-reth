@@ -245,7 +245,7 @@ fn runtime_forced_real_log_mismatch_fails_closed_through_composite() {
     // proven together on the real screening path by test 35 (context.rs), which consumes this same
     // fixture. Stopping at `InvariantViolation` does NOT close the fail-closed loop — that is test
     // 35's job.
-    let outcome = crate::test_fixtures::real_runtime_reallogmismatch_outcome();
+    let outcome = crate::capture::test_fixtures::real_runtime_reallogmismatch_outcome();
     assert!(
         matches!(
             outcome,

@@ -2,9 +2,9 @@
 //! observation binds through the four condition variables.
 
 use super::*;
-use rcs_filter::handle::ScreenInput;
-use rcs_filter::matching::{try_evaluate, MatchOutcome};
-use rcs_filter::rules::{load_rules, RawRule, RuleSet, DEFAULT_MAX_EVENT_BINDINGS_PER_TX};
+use crate::handle::ScreenInput;
+use crate::matching::{try_evaluate, MatchOutcome};
+use crate::rules::{load_rules, RawRule, RuleSet, DEFAULT_MAX_EVENT_BINDINGS_PER_TX};
 
 const P: Address = Address::repeat_byte(0xC1);
 const I: Address = Address::repeat_byte(0xC2);
@@ -37,7 +37,7 @@ fn rule_set(aliases: &[(&str, Address)], condition: serde_json::Value) -> RuleSe
         "action": "deny"
     }))
     .expect("the rule deserializes");
-    let rules = load_rules(rcs_filter::config::MIN_PROTOCOL_VERSION, 1, vec![raw]);
+    let rules = load_rules(crate::config::MIN_PROTOCOL_VERSION, 1, vec![raw]);
     assert!(rules.rejected.is_empty(), "{:?}", rules.rejected);
     rules
 }
@@ -76,7 +76,7 @@ fn capture_and_screen(
             value: U256::ZERO,
             block_height: 1,
             logs: &[],
-            observations: rcs_filter::callstack::Observations::available(rules.stamp(), &items),
+            observations: crate::callstack::Observations::available(rules.stamp(), &items),
         },
         DEFAULT_MAX_EVENT_BINDINGS_PER_TX,
     )

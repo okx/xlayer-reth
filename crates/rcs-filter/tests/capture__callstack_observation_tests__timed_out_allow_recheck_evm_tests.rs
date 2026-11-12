@@ -4,13 +4,13 @@
 
 use std::sync::Arc;
 
-use rcs_filter::callstack::{Observations, SnapshotStamp};
-use rcs_filter::config::MIN_PROTOCOL_VERSION;
-use rcs_filter::handle::{FilterHandle, Screen, ScreenInput};
-use rcs_filter::pool::BufferStatus;
-use rcs_filter::rules::{load_rules, RawRule, RuleSet};
-use rcs_filter::test_support::TestClock;
-use rcs_filter::FilterConfig;
+use crate::callstack::{Observations, SnapshotStamp};
+use crate::config::MIN_PROTOCOL_VERSION;
+use crate::handle::{FilterHandle, Screen, ScreenInput};
+use crate::pool::BufferStatus;
+use crate::rules::{load_rules, RawRule, RuleSet};
+use crate::test_support::TestClock;
+use crate::FilterConfig;
 
 use super::*;
 

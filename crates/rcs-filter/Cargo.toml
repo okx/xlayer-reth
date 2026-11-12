@@ -27,20 +27,32 @@ async-trait.workspace = true
 futures-util.workspace = true
 reth-metrics.workspace = true
 metrics.workspace = true
+# Used only by the `capture` module (the moved capture inspector). It names no concrete EVM type:
+# the EVM-generic surface stays free of `alloy-op-evm`/`op-revm`.
+revm.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 metrics-util.workspace = true
 tracing-subscriber = "0.3"
+# Test-only dependencies of the moved capture tests: they drive the production inspector through
+# a real `alloy_op_evm::OpEvm` built by the same factory the flashblocks path uses. Keeping them
+# in `[dev-dependencies]` is what keeps the normal dependency graph EVM-agnostic.
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+alloy-evm.workspace = true
+alloy-op-evm.workspace = true
+op-revm.workspace = true
 
 [features]
 default = []
 
-# Non-default. Exposes the crate's in-process test helpers to a *dependent* crate's test code
-# without compiling them into a production build: a dependency's `cfg(test)` is inactive when
-# this crate is compiled as a dependency, so `#[cfg(test)]` alone cannot reach consumers' tests.
-# Downstream crates enable it from `[dev-dependencies]`, so the helpers are available to their
-# test/bench targets only — never to a release artifact of this crate or of its consumers.
+# Non-default. Exposes this crate's in-process test seams — screening helpers AND the capture
+# module's seams — to a *dependent* crate's test code without compiling them into a production
+# build: a dependency's `cfg(test)` is inactive when this crate is compiled as a dependency, and
+# `pub(crate)` does not cross a crate boundary, so `#[cfg(test)]` alone cannot reach consumers'
+# tests. Downstream crates enable it from `[dev-dependencies]`, so the seams are available to
+# their test/bench targets only — never to a release artifact of this crate or of its consumers.
 test-utils = []
 
 [lints]

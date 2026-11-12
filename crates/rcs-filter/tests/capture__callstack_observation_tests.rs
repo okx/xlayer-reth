@@ -5,13 +5,13 @@
 //! executed, and that a frame which never executed never becomes an observation.
 
 use super::*;
+use crate::callstack::{CallObservation, CallObservationKind};
 use alloy_consensus::{SignableTransaction, TxEip7702, TxLegacy};
 use alloy_eips::eip7702::Authorization;
 use alloy_evm::{Evm, EvmEnv, EvmFactory, FromRecoveredTx};
 use alloy_op_evm::{OpEvmFactory, OpTx};
 use alloy_primitives::{Signature, TxKind};
 use op_revm::OpSpecId;
-use rcs_filter::callstack::{CallObservation, CallObservationKind};
 use revm::context::{BlockEnv, CfgEnv};
 use revm::database::InMemoryDB;
 use revm::state::{AccountInfo, Bytecode};
@@ -650,7 +650,11 @@ fn create_frames_keep_the_frame_stack_balanced_and_emit_no_observation() {
     );
 }
 
+#[path = "capture__callstack_observation_tests__frame_stage_tests.rs"]
 mod frame_stage_tests;
+#[path = "capture__callstack_observation_tests__nested_proxy_tests.rs"]
 mod nested_proxy_tests;
+#[path = "capture__callstack_observation_tests__self_delegatecall_tests.rs"]
 mod self_delegatecall_tests;
+#[path = "capture__callstack_observation_tests__timed_out_allow_recheck_evm_tests.rs"]
 mod timed_out_allow_recheck_evm_tests;

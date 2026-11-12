@@ -473,7 +473,7 @@ thread_local! {
 
 /// The builder's EVM adapter for the shared [`RcsCaptureScope`].
 ///
-/// [`RcsCaptureScope`] is owned by `xlayer-rcs-capture` and `OpEvm` by `alloy-op-evm`, so
+/// [`RcsCaptureScope`] is owned by `rcs_filter::capture` and `OpEvm` by `alloy-op-evm`, so
 /// `impl RcsCaptureScope for OpEvm<..>` cannot be written in either of those crates nor here —
 /// that is an orphan-rule violation. `impl ForeignTrait for LocalType` is permitted, so this
 /// crate wraps the EVM in a type it owns. The borrow goes through the adapter, which keeps the

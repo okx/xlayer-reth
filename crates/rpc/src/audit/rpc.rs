@@ -29,6 +29,10 @@ use alloy_evm::{Evm, IntoTxEnv};
 use alloy_op_evm::OpEvmFactory;
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use rcs_filter::callstack::{ObservationUnavailable, Observations};
+use rcs_filter::capture::{
+    CallstackCaptureConfig, CaptureGuard, CaptureOutcome, ObservationBudget, RcsCaptureControl,
+    RcsCaptureScope, RcsInspector,
+};
 use rcs_filter::config::{
     is_supported_protocol, MIN_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
 };
@@ -41,10 +45,6 @@ use reth_rpc_eth_api::{
 };
 use reth_storage_api::BlockReaderIdExt;
 use revm::{context_interface::result::ResultAndState, DatabaseCommit};
-use xlayer_rcs_capture::{
-    CallstackCaptureConfig, CaptureGuard, CaptureOutcome, ObservationBudget, RcsCaptureControl,
-    RcsCaptureScope, RcsInspector,
-};
 
 use super::deposit::{build_deposit_tx, DepositTxRequest};
 use super::metrics::{KnownAllowedResolutionMetrics, SyntheticBanIdentificationMetrics};
@@ -210,7 +210,7 @@ pub struct AuditCaptureConfig {
 
 /// The RPC crate's EVM adapter for the shared [`RcsCaptureScope`].
 ///
-/// `RcsCaptureScope` is owned by `xlayer-rcs-capture` and the concrete EVM by its own crate, so
+/// `RcsCaptureScope` is owned by `rcs_filter::capture` and the concrete EVM by its own crate, so
 /// `impl RcsCaptureScope for <that EVM>` belongs in neither — that is an orphan-rule violation.
 /// `impl ForeignTrait for LocalType` is permitted, so this crate wraps the EVM in a type it owns.
 /// The delegation target is the `Evm` trait's own `components_mut()` accessor, exactly as the

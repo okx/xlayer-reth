@@ -1,12 +1,12 @@
 //! Real capture stream fed into the filter's `screen_tx` / `evaluate` path.
 
 use super::*;
+use crate::callstack::Observations;
 use alloy_consensus::{SignableTransaction, TxLegacy};
 use alloy_evm::{Evm, EvmEnv, EvmFactory, FromRecoveredTx};
 use alloy_op_evm::{OpEvmFactory, OpTx};
 use alloy_primitives::{Signature, TxKind};
 use op_revm::OpSpecId;
-use rcs_filter::callstack::Observations;
 use revm::context::{BlockEnv, CfgEnv};
 use revm::database::InMemoryDB;
 // ── screen_tx integration tests ───────────────────────────────────────────
@@ -14,9 +14,9 @@ use revm::database::InMemoryDB;
 // stream, then feed it directly into FilterHandle::screen_tx, proving
 // the full pipeline from EVM execution through the rule engine.
 
-use rcs_filter::rules::{load_rules, RawRule};
-use rcs_filter::test_support::TestClock;
-use rcs_filter::{BufferStatus, FilterConfig, FilterHandle, Screen, ScreenInput};
+use crate::rules::{load_rules, RawRule};
+use crate::test_support::TestClock;
+use crate::{BufferStatus, FilterConfig, FilterHandle, Screen, ScreenInput};
 use std::sync::Arc;
 
 const DENY_NATIVE_RULE: &str = r#"{

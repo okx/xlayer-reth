@@ -368,6 +368,7 @@ fn native_budget_boundary_10000_allowed_10001_overflows() {
     ));
 }
 
+#[path = "capture__tests__capture_mode_tests.rs"]
 #[cfg(test)]
 mod capture_mode_tests;
 

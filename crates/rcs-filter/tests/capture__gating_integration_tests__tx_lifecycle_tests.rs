@@ -52,7 +52,7 @@ fn inspector_state_does_not_cross_transactions_through_real_evm() {
     );
     // R10 item 6: the `LimitExceeded` exit cleared ALL state IMMEDIATELY — assert the inspector is
     // clean right now, BEFORE tx2's `start_capture`, so cross-tx isolation does not depend on the
-    // next reset. (Fields are visible: this test module is a descendant of `rcs_capture`.)
+    // next reset. (Fields are visible: this test module is a descendant of `capture`.)
     {
         let insp = evm.components_mut().1;
         assert!(insp.queue.is_empty(), "queue cleared immediately on the LimitExceeded exit");

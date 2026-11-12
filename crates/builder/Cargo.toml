@@ -14,7 +14,6 @@ workspace = true
 xlayer-trace-monitor.workspace = true
 xlayer-bridge-intercept.workspace = true
 rcs-filter.workspace = true
-xlayer-rcs-capture.workspace = true
 
 # reth
 reth.workspace = true
@@ -151,11 +150,6 @@ reth-transaction-pool = { workspace = true, features = ["test-utils"] }
 # The feature is deliberately absent from `[dependencies]` above, so a production build of
 # `xlayer-builder` (and of `rcs-filter` itself) never compiles the helpers in.
 rcs-filter = { workspace = true, features = ["test-utils"] }
-# Same reasoning for the shared capture crate's seams: `#[cfg(test)]` is inactive when it is
-# compiled as a dependency, and `pub(crate)` does not cross a crate boundary, so the seams this
-# crate's loop-level tests arm are reached through its non-default `test-utils` feature — enabled
-# from `[dev-dependencies]` only, never from `[dependencies]` above.
-xlayer-rcs-capture = { workspace = true, features = ["test-utils"] }
 # The equal-identification comparison across the three execution paths has to run two of those
 # paths (the candidate loop and the sequencer loop), which live in THIS crate behind `pub(super)`
 # and `#[cfg(test)]`, and the third (the audit path) which lives in `xlayer-rpc`. So the test

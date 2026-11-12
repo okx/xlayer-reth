@@ -69,7 +69,8 @@ pub enum PreScreen {
 
 /// Why the builder locally denied a transaction before rule evaluation, driven by its native
 /// observation pipeline. A fixed, low-cardinality enum used as a metric label — never a dynamic
-/// error string. This crate stays revm-free; the builder maps its capture outcomes onto this enum.
+/// error string. The screening modules stay revm-free; the builder maps its capture outcomes onto
+/// this enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalDenyReason {
     /// The per-transaction internal native-transfer observation budget was exceeded.

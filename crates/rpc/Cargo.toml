@@ -39,7 +39,6 @@ op-alloy-network.workspace = true
 op-revm.workspace = true
 
 rcs-filter.workspace = true
-xlayer-rcs-capture.workspace = true
 
 jsonrpsee.workspace = true
 serde.workspace = true
@@ -55,9 +54,10 @@ tokio = { workspace = true, features = ["rt", "macros"] }
 metrics-util.workspace = true
 # Captures this crate's own structured diagnostics so their field boundaries are asserted.
 tracing-subscriber = "0.3"
-# Enable the shared capture crate's non-default seams for THIS crate's test targets only; the
-# feature is deliberately absent from `[dependencies]`, so a production build compiles none of it.
-xlayer-rcs-capture = { workspace = true, features = ["test-utils"] }
+# Enable `rcs-filter`'s non-default seams (screening and capture) for THIS crate's test targets
+# only; the feature is deliberately absent from `[dependencies]`, so a production build compiles
+# none of it.
+rcs-filter = { workspace = true, features = ["test-utils"] }
 
 [lints]
 workspace = true

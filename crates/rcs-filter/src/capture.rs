@@ -2,13 +2,13 @@
 //! transfers and rule-configured call frames during simulation, plus the capture-control seam and
 //! the panic-safe RAII guard that drive it.
 //!
-//! This crate exists so every execution path that must identify executed code — the payload
+//! This module exists so every execution path that must identify executed code — the payload
 //! builder's candidate loop, the deposit/sequencer path, and the audit RPC's simulation — runs
 //! the **same** inspector from **one** implementation. Two inspectors that merely behave alike
 //! would drift the moment one of them changes, which would make "equal identification" a
 //! coincidence rather than a property.
 //!
-//! The crate is deliberately EVM-**agnostic**: it owns [`RcsCaptureScope`] and [`CaptureGuard`]
+//! The module is deliberately EVM-**agnostic**: it owns [`RcsCaptureScope`] and [`CaptureGuard`]
 //! but names no concrete EVM type, so it needs no `alloy-op-evm` dependency. Each consuming
 //! crate supplies a local newtype adapter over its own EVM value, which is what keeps
 //! `impl RcsCaptureScope for <that crate's EVM>` legal under the orphan rule.
@@ -29,15 +29,15 @@
 //! configuration rather than with transaction call depth. An empty selector set makes the whole
 //! path inert.
 //!
-//! The screening crate stays free of any EVM / frame-lifecycle dependency: the inspector, its
-//! capture-control seam, and the capture outcomes are all owned by this crate. The pure
+//! The screening modules stay free of any EVM / frame-lifecycle dependency: the inspector, its
+//! capture-control seam, and the capture outcomes are all owned by this module. The pure
 //! observation value type is owned by the screening crate so both the builder and the RPC layer
 //! can hand screening the same type.
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::callstack::{CallObservation, SnapshotStamp};
 use alloy_primitives::{address, keccak256, Address, Bytes, Log, LogData, B256, U256};
-use rcs_filter::callstack::{CallObservation, SnapshotStamp};
 use revm::{
     bytecode::opcode,
     context_interface::{ContextTr, CreateScheme, JournalTr},
@@ -229,7 +229,8 @@ impl CallstackCaptureConfig {
 
 /// Builder-internal capture-control seam. These methods are **not** part of revm's `Inspector`
 /// trait, so a generic execution loop bounds its inspector on `Inspector + RcsCaptureControl` to
-/// drive capture without a runtime downcast. The `rcs-filter` crate gains no revm dependency.
+/// drive capture without a runtime downcast. Only this module links revm; the screening modules
+/// stay free of it.
 pub trait RcsCaptureControl {
     /// Installs the capture configuration the NEXT capture window will use.
     ///
@@ -265,7 +266,7 @@ impl RcsCaptureControl for NoOpInspector {
 /// The capture lifecycle, expressed without naming an EVM.
 ///
 /// Moved here from the builder so the audit-RPC path can reuse the **same** guard discipline.
-/// This crate owns the trait but not any EVM type, so it deliberately provides **no**
+/// This module owns the trait but not any EVM type, so it deliberately provides **no**
 /// implementation: `impl RcsCaptureScope for SomeEvm` here would require depending on
 /// `alloy-op-evm` and pinning one concrete EVM type. Each consuming crate instead wraps its own
 /// EVM value in a newtype it owns — `impl ForeignTrait for LocalType` is permitted, so that is
@@ -1424,6 +1425,7 @@ where
     }
 }
 
+#[path = "../tests/capture__tests.rs"]
 #[cfg(test)]
 mod tests;
 
@@ -1432,6 +1434,7 @@ mod tests;
 /// re-implementation. NOTE: the loop-level fail-closed test 35 in `context.rs` does NOT consume this
 /// fixture; it drives the real candidate loop and forces the mismatch inside the loop's own
 /// `RcsInspector::finish_capture` via the `FORCE_REALLOG_MISMATCH` seam.
+#[path = "../tests/capture__test_fixtures.rs"]
 #[cfg(test)]
 pub(crate) mod test_fixtures;
 
@@ -1446,8 +1449,10 @@ pub(crate) mod test_fixtures;
 /// prove — plus CREATE2 endowment, parent-frame revert rollback, a runtime-forced real-log mismatch,
 /// and that the composite's own SDM/post-exec warming is preserved. A green CI pipeline does NOT
 /// replace this gate.
+#[path = "../tests/capture__gating_integration_tests.rs"]
 #[cfg(test)]
 mod gating_integration_tests;
 
+#[path = "../tests/capture__callstack_observation_tests.rs"]
 #[cfg(test)]
 mod callstack_observation_tests;
