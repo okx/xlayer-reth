@@ -5,7 +5,7 @@
 //!
 //! These scenarios use only pre-existing crate APIs, so the whole module compiles against the
 //! pre-fix base for the regression proof. The tests that exercise the new pool method and metric
-//! live in the sibling `timed_out_allow_recheck_api_tests` module.
+//! live in the child `pool_api_tests` module.
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -285,3 +285,5 @@ async fn timed_out_allow_recheck_preserves_the_clock_and_never_resubmits() {
 
 // F13 — the existing terminal-allow and timeout behaviours are unchanged; they are covered by
 // the module and integration suites in this crate and are deliberately not duplicated here.
+
+mod pool_api_tests;

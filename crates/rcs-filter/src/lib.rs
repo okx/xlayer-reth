@@ -39,8 +39,6 @@ mod integration_tests;
 #[cfg(test)]
 mod raw_wire_tests;
 #[cfg(test)]
-mod timed_out_allow_recheck_api_tests;
-#[cfg(test)]
 mod timed_out_allow_recheck_tests;
 #[cfg(test)]
 mod upstream_rules_tests;

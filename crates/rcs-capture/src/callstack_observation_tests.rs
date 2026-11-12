@@ -15,11 +15,9 @@ use rcs_filter::callstack::{CallObservation, CallObservationKind};
 use revm::context::{BlockEnv, CfgEnv};
 use revm::database::InMemoryDB;
 use revm::state::{AccountInfo, Bytecode};
-
 fn caller() -> Address {
     Address::from([0xAA; 20])
 }
-
 fn account(balance: u64, code: Option<Vec<u8>>) -> AccountInfo {
     AccountInfo {
         balance: U256::from(balance),
@@ -27,13 +25,11 @@ fn account(balance: u64, code: Option<Vec<u8>>) -> AccountInfo {
         ..Default::default()
     }
 }
-
 /// The runtime code hash an observation must report for `code`: keccak256 of the bytecode the
 /// EVM loads, which is also what the account's `code_hash` holds for a non-delegated account.
 fn code_hash(code: &[u8]) -> B256 {
     keccak256(code)
 }
-
 fn stamp() -> SnapshotStamp {
     SnapshotStamp {
         protocol_version: 2,
@@ -41,7 +37,6 @@ fn stamp() -> SnapshotStamp {
         selector_digest: B256::repeat_byte(0x5e),
     }
 }
-
 fn call_tx(target: Address) -> OpTx {
     let tx = TxLegacy {
         nonce: 0,
@@ -53,7 +48,6 @@ fn call_tx(target: Address) -> OpTx {
     .into_signed(Signature::new(Default::default(), Default::default(), Default::default()));
     OpTx::from_recovered_tx(&tx, caller())
 }
-
 /// Executes one candidate transaction with the given capture selector set and observation
 /// budget, through the same seam the builder uses.
 fn run_observing_tx(
@@ -80,7 +74,6 @@ fn run_observing_tx(
     let outcome = evm.components_mut().1.finish_capture(result.result.logs());
     (outcome, success)
 }
-
 /// Unwraps a completed capture, asserting the stamp travelled with the observations.
 fn observations(outcome: CaptureOutcome) -> Vec<CallObservation> {
     match outcome {
@@ -91,7 +84,6 @@ fn observations(outcome: CaptureOutcome) -> Vec<CallObservation> {
         other => panic!("expected a completed capture, got {other:?}"),
     }
 }
-
 // ── bytecode builders ────────────────────────────────────────────────────────────────────
 
 /// `DELEGATECALL(500000, dst, 0, 0, 0, 0); POP; STOP`.
@@ -107,7 +99,6 @@ fn delegatecall_to(dst: Address) -> Vec<u8> {
     code.extend_from_slice(&[0x62, 0x07, 0xA1, 0x20, 0xF4, 0x50, 0x00]);
     code
 }
-
 /// `CALLCODE(500000, dst, value=0, 0, 0, 0, 0); POP; STOP`.
 ///
 /// `CALLCODE` runs `dst`'s code but keeps the caller as BOTH the target and the executing
@@ -125,7 +116,6 @@ fn callcode_to(dst: Address) -> Vec<u8> {
     code.extend_from_slice(&[0x62, 0x07, 0xA1, 0x20, 0xF2, 0x50, 0x00]);
     code
 }
-
 /// `CALL(500000, dst, value=0, 0, 0, 0, 0); POP; STOP`.
 fn call_to(dst: Address) -> Vec<u8> {
     let mut code = vec![
@@ -140,7 +130,6 @@ fn call_to(dst: Address) -> Vec<u8> {
     code.extend_from_slice(&[0x62, 0x07, 0xA1, 0x20, 0xF1, 0x50, 0x00]);
     code
 }
-
 /// `CALL` twice to the same destination, then STOP.
 fn call_twice_to(dst: Address) -> Vec<u8> {
     let mut code = call_to(dst);
@@ -148,7 +137,6 @@ fn call_twice_to(dst: Address) -> Vec<u8> {
     code.extend_from_slice(&call_to(dst));
     code
 }
-
 /// `DELEGATECALL` twice from the same frame, to two destinations, then STOP.
 fn delegatecall_twice(first: Address, second: Address) -> Vec<u8> {
     let mut code = delegatecall_to(first);
@@ -156,17 +144,14 @@ fn delegatecall_twice(first: Address, second: Address) -> Vec<u8> {
     code.extend_from_slice(&delegatecall_to(second));
     code
 }
-
 /// `STOP` only.
 fn stop_only() -> Vec<u8> {
     vec![0x00]
 }
-
 /// `PUSH1 0; PUSH1 0; REVERT` — executes, then reverts the frame.
 fn revert_after_executing() -> Vec<u8> {
     vec![0x60, 0x00, 0x60, 0x00, 0xFD]
 }
-
 /// Proxy code that upgrades its own implementation pointer, delegatecalls through it, then
 /// restores the pointer — all in one transaction:
 /// `SSTORE(0, rogue); DELEGATECALL(SLOAD(0)); SSTORE(0, approved); STOP`.
@@ -192,7 +177,6 @@ fn upgrade_execute_rollback(rogue: Address, approved: Address) -> Vec<u8> {
     code.extend_from_slice(&[0x60, 0x00, 0x55, 0x00]); // PUSH1 0; SSTORE; STOP
     code
 }
-
 /// `CREATE(0, 0, 0)` with empty init code, twice, then STOP. Used to check that create frames
 /// keep the frame stack balanced without producing observations.
 fn create_twice() -> Vec<u8> {
@@ -203,7 +187,6 @@ fn create_twice() -> Vec<u8> {
     code.push(0x00);
     code
 }
-
 // ── no selector / not armed: the callstack path must be fully inert ───────────────────────
 
 /// Executes one candidate like [`run_observing_tx`], but WITHOUT arming capture — the exact
@@ -227,7 +210,6 @@ fn run_unarmed_tx(db: InMemoryDB, target: Address, selectors: &[Address]) -> usi
     assert!(result.result.is_success(), "the unarmed control transaction still executes");
     evm.components_mut().1.open_frame_count()
 }
-
 /// Proxy → DELEGATECALL → implementation, with the proxy selected: the positive control for the
 /// two tests below. Exactly the two frames whose hash is actually reported get hashed.
 #[test]
@@ -262,7 +244,6 @@ fn a_selected_proxy_hashes_exactly_the_two_frames_it_reports() {
         "exactly the proxy frame and its direct delegatecall are hashed"
     );
 }
-
 /// An unselected frame is never hashed, even when it executes and even when a selected frame
 /// runs inside it.
 ///
@@ -293,7 +274,6 @@ fn only_the_frames_whose_identity_is_reported_are_hashed() {
         "the unselected helper frame executed but was never hashed"
     );
 }
-
 /// An empty selector set must cost nothing: no bytecode hash and no frame-state work, for a
 /// transaction whose frames would otherwise all qualify.
 ///
@@ -318,26 +298,6 @@ fn an_empty_selector_set_computes_no_hash_and_tracks_no_frame() {
         "an empty selector set must not hash any frame's bytecode"
     );
 }
-
-/// The same inertness, asserted on frame state rather than on hashing: with an empty selector
-/// set no [`FrameRecord`] is pushed at all, and the window still closes as `Complete` — an
-/// `enter_frame` that pushed while `exit_frame` did not pop (or the reverse) would surface
-/// `FrameStackUnbalanced` instead.
-#[test]
-fn an_empty_selector_set_pushes_no_frame_record() {
-    let any = Address::from([0xD7; 20]);
-    let mut inspector = RcsInspector::with_callstack(1_000, 16, CallstackCaptureConfig::default());
-    inspector.start_capture();
-    inspector.enter_frame(any, any, Some(CallScheme::Call));
-    assert_eq!(inspector.open_frame_count(), 0, "no frame is tracked for an inert selector set");
-    inspector.exit_frame();
-    assert_eq!(inspector.open_frame_count(), 0);
-    match inspector.finish_capture(&[]) {
-        CaptureOutcome::Complete { observations, .. } => assert!(observations.items.is_empty()),
-        other => panic!("an inert window must close cleanly, got {other:?}"),
-    }
-}
-
 /// An inspector that was never armed does no callstack work either — the state the gasless
 /// pre-check and every other non-candidate simulation run in. The selector set is deliberately
 /// NON-empty here, so only the `active` gate can be what suppresses the work.
@@ -359,7 +319,6 @@ fn an_unarmed_inspector_computes_no_hash_and_tracks_no_frame() {
         "an unarmed inspector must not hash any frame's bytecode"
     );
 }
-
 // ── direct call vs. direct delegatecall ──────────────────────────────────────────────────
 
 #[test]
@@ -375,7 +334,6 @@ fn a_selected_address_running_its_own_code_is_a_call_observation() {
     let items = observations(outcome);
     assert_eq!(items, vec![CallObservation::call(selected, code_hash(&code))]);
 }
-
 #[test]
 fn an_unselected_address_produces_no_observation() {
     let other = Address::from([0xC2; 20]);
@@ -389,7 +347,6 @@ fn an_unselected_address_produces_no_observation() {
     assert!(success);
     assert!(observations(outcome).is_empty());
 }
-
 #[test]
 fn an_inert_selector_set_observes_nothing() {
     let target = Address::from([0xC3; 20]);
@@ -401,7 +358,6 @@ fn an_inert_selector_set_observes_nothing() {
     assert!(success);
     assert!(observations(outcome).is_empty());
 }
-
 #[test]
 fn a_selected_proxy_reports_its_own_code_and_its_direct_delegatecall() {
     // A standard proxy invocation legitimately yields BOTH observations.
@@ -430,7 +386,6 @@ fn a_selected_proxy_reports_its_own_code_and_its_direct_delegatecall() {
         ]
     );
 }
-
 #[test]
 fn an_implementation_internal_delegatecall_is_not_the_proxys_direct_delegatecall() {
     // proxy -> DELEGATECALL -> relay -> DELEGATECALL -> library.
@@ -465,7 +420,6 @@ fn an_implementation_internal_delegatecall_is_not_the_proxys_direct_delegatecall
         "an implementation-internal delegatecall must not be reported: {items:?}"
     );
 }
-
 #[test]
 fn an_indirect_call_through_a_helper_still_observes_the_selected_address() {
     let helper = Address::from([0xD1; 20]);
@@ -483,7 +437,6 @@ fn an_indirect_call_through_a_helper_still_observes_the_selected_address() {
         vec![CallObservation::call(selected, code_hash(&selected_code))]
     );
 }
-
 #[test]
 fn repeated_calls_to_the_same_address_are_independent_observations() {
     let helper = Address::from([0xD1; 20]);
@@ -500,7 +453,6 @@ fn repeated_calls_to_the_same_address_are_independent_observations() {
     assert_eq!(items.len(), 2, "each frame is its own observation: {items:?}");
     assert!(items.iter().all(|o| *o == CallObservation::call(selected, code_hash(&selected_code))));
 }
-
 #[test]
 fn two_direct_delegatecalls_from_one_frame_each_emit_an_observation() {
     let proxy = Address::from([0xB1; 20]);
@@ -524,7 +476,6 @@ fn two_direct_delegatecalls_from_one_frame_each_emit_an_observation() {
         .collect();
     assert_eq!(impls, vec![Some(first), Some(second)], "both hops observed: {items:?}");
 }
-
 #[test]
 fn callcode_is_not_a_direct_delegatecall() {
     // `CALLCODE` runs another account's code but leaves the caller as its own target, so it
@@ -546,7 +497,6 @@ fn callcode_is_not_a_direct_delegatecall() {
     );
     assert!(items.iter().all(|o| o.impl_address.is_none()));
 }
-
 // ── the hash must be of the code that actually executed ──────────────────────────────────
 
 #[test]
@@ -584,7 +534,6 @@ fn an_upgrade_executed_and_rolled_back_in_one_transaction_reports_what_ran() {
         "the restored pointer's code must not be what is reported"
     );
 }
-
 #[test]
 fn an_executed_then_reverted_frame_remains_observable() {
     // A revert undoes effects, not the fact that the code ran. A malicious call that executed
@@ -605,7 +554,6 @@ fn an_executed_then_reverted_frame_remains_observable() {
         "the reverted frame's execution identity survives"
     );
 }
-
 #[test]
 fn a_frame_that_never_executed_produces_no_observation() {
     // The `call` hook fires before the frame is initialized, and a call into an account with
@@ -625,7 +573,6 @@ fn a_frame_that_never_executed_produces_no_observation() {
         "a call whose frame never executed must not appear as an observation"
     );
 }
-
 #[test]
 fn a_precompile_frame_produces_no_observation() {
     // A precompile is answered without an interpreter, so it never reaches the confirmed-
@@ -641,7 +588,6 @@ fn a_precompile_frame_produces_no_observation() {
     assert!(success);
     assert!(observations(outcome).is_empty(), "a precompile frame runs no bytecode");
 }
-
 #[test]
 fn eip7702_delegation_is_a_call_observation_with_the_executed_delegate_code() {
     // Under EIP-7702 the account's own `code_hash` names the delegation designator while the
@@ -696,7 +642,6 @@ fn eip7702_delegation_is_a_call_observation_with_the_executed_delegate_code() {
     assert!(items[0].impl_address.is_none(), "7702 delegation is not a direct delegatecall");
     assert!(items[0].impl_code_hash.is_none());
 }
-
 // ── budgets and frame-stack invariants ───────────────────────────────────────────────────
 
 #[test]
@@ -728,7 +673,6 @@ fn the_observation_budget_accepts_the_limit_th_and_fails_closed_on_the_next() {
         other => panic!("expected a callstack budget overflow, got {other:?}"),
     }
 }
-
 #[test]
 fn create_frames_keep_the_frame_stack_balanced_and_emit_no_observation() {
     // A create frame runs init code, not deployed runtime code, so the only hash available
@@ -751,141 +695,7 @@ fn create_frames_keep_the_frame_stack_balanced_and_emit_no_observation() {
     );
 }
 
-#[test]
-fn an_unbalanced_frame_stack_fails_closed() {
-    // Driven directly, because a real EVM always balances its frames. A leftover entry means
-    // parentage cannot be trusted, so the capture must not be reported as complete.
-    let mut inspector = RcsInspector::with_callstack(
-        1_000,
-        16,
-        CallstackCaptureConfig::new(stamp(), vec![Address::repeat_byte(0x11)]),
-    );
-    inspector.start_capture();
-    inspector.enter_frame(
-        Address::repeat_byte(0x11),
-        Address::repeat_byte(0x11),
-        Some(CallScheme::Call),
-    );
-    match inspector.finish_capture(&[]) {
-        CaptureOutcome::InvariantViolation {
-            reason: CaptureInvariantError::FrameStackUnbalanced { remaining },
-        } => assert_eq!(remaining, 1),
-        other => panic!("expected an unbalanced frame stack, got {other:?}"),
-    }
-}
-
-#[test]
-fn exhausting_the_frame_stack_bound_fails_closed() {
-    let selected = Address::repeat_byte(0x11);
-    let mut inspector = RcsInspector::with_callstack(
-        1_000,
-        usize::MAX,
-        CallstackCaptureConfig::new(stamp(), vec![selected]),
-    );
-    inspector.start_capture();
-    for _ in 0..=MAX_OPEN_FRAMES {
-        inspector.enter_frame(selected, selected, Some(CallScheme::Call));
-    }
-    match inspector.finish_capture(&[]) {
-        CaptureOutcome::InvariantViolation {
-            reason: CaptureInvariantError::FrameStackOverflow { depth },
-        } => assert_eq!(depth, MAX_OPEN_FRAMES),
-        other => panic!("expected a frame-stack overflow, got {other:?}"),
-    }
-}
-
-#[test]
-fn a_staged_candidate_is_discarded_when_its_frame_never_executes() {
-    // The stage/commit/discard discipline, exercised directly: entering a frame allocates no
-    // observation, and leaving it without a confirmed execution leaves none behind.
-    let selected = Address::repeat_byte(0x11);
-    let mut inspector = RcsInspector::with_callstack(
-        1_000,
-        16,
-        CallstackCaptureConfig::new(stamp(), vec![selected]),
-    );
-    inspector.start_capture();
-    inspector.enter_frame(selected, selected, Some(CallScheme::Call));
-    assert!(inspector.observations.is_empty(), "staging allocates no observation");
-    assert_eq!(inspector.callstack_observed_count, 0, "staging consumes no budget");
-    inspector.exit_frame();
-    assert!(observations(inspector.finish_capture(&[])).is_empty());
-
-    // Whereas a confirmed execution commits exactly one.
-    inspector.start_capture();
-    inspector.enter_frame(selected, selected, Some(CallScheme::Call));
-    inspector.confirm_frame_execution(B256::repeat_byte(0xaa));
-    inspector.exit_frame();
-    assert_eq!(
-        observations(inspector.finish_capture(&[])),
-        vec![CallObservation::call(selected, B256::repeat_byte(0xaa))]
-    );
-}
-
-#[test]
-fn capture_state_does_not_leak_between_transactions() {
-    let selected = Address::repeat_byte(0x11);
-    let mut inspector = RcsInspector::with_callstack(
-        1_000,
-        1,
-        CallstackCaptureConfig::new(stamp(), vec![selected]),
-    );
-    // First window overflows its observation budget.
-    inspector.start_capture();
-    for _ in 0..2 {
-        inspector.enter_frame(selected, selected, Some(CallScheme::Call));
-        inspector.confirm_frame_execution(B256::repeat_byte(0xaa));
-        inspector.exit_frame();
-    }
-    assert!(matches!(
-        inspector.finish_capture(&[]),
-        CaptureOutcome::LimitExceeded { budget: ObservationBudget::Callstack, .. }
-    ));
-    // The next window starts clean: the sticky overflow and the counter are both reset.
-    inspector.start_capture();
-    inspector.enter_frame(selected, selected, Some(CallScheme::Call));
-    inspector.confirm_frame_execution(B256::repeat_byte(0xbb));
-    inspector.exit_frame();
-    assert_eq!(
-        observations(inspector.finish_capture(&[])),
-        vec![CallObservation::call(selected, B256::repeat_byte(0xbb))]
-    );
-}
-
-#[test]
-fn hooks_are_inert_until_capture_is_armed() {
-    let selected = Address::repeat_byte(0x11);
-    let mut inspector = RcsInspector::with_callstack(
-        1_000,
-        16,
-        CallstackCaptureConfig::new(stamp(), vec![selected]),
-    );
-    // Not armed: a gasless pre-check or any non-candidate simulation must capture nothing.
-    inspector.enter_frame(selected, selected, Some(CallScheme::Call));
-    inspector.confirm_frame_execution(B256::repeat_byte(0xaa));
-    inspector.exit_frame();
-    assert!(inspector.frames.is_empty());
-    assert!(inspector.observations.is_empty());
-    assert_eq!(inspector.callstack_observed_count, 0);
-}
-
-#[test]
-fn aborting_a_capture_clears_the_observation_state() {
-    let selected = Address::repeat_byte(0x11);
-    let mut inspector = RcsInspector::with_callstack(
-        1_000,
-        16,
-        CallstackCaptureConfig::new(stamp(), vec![selected]),
-    );
-    inspector.start_capture();
-    inspector.enter_frame(selected, selected, Some(CallScheme::Call));
-    inspector.confirm_frame_execution(B256::repeat_byte(0xaa));
-    inspector.abort_capture();
-    assert!(inspector.observations.is_empty());
-    assert!(inspector.frames.is_empty());
-    assert_eq!(inspector.callstack_observed_count, 0);
-}
-
+mod frame_stage_tests;
 mod nested_proxy_tests;
 mod self_delegatecall_tests;
 mod timed_out_allow_recheck_evm_tests;

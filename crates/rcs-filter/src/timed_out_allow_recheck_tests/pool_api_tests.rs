@@ -1,7 +1,7 @@
 //! Pool-level contracts of the timed-out-allow re-check: generation fencing, the already-dropped
-//! commit case, and the additive drop counter. Split from `timed_out_allow_recheck_tests` so the
-//! regression module compiles unchanged against the pre-fix base (this module references the new
-//! pool method and metric, which do not exist there).
+//! commit case, and the additive drop counter. These were originally split out so the regression
+//! module could compile unchanged against the pre-fix base; they now live under the same behaviour
+//! as their parent module.
 
 use std::sync::Arc;
 

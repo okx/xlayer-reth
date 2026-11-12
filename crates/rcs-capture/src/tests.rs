@@ -544,3 +544,62 @@ fn reverse_transfers_parent_revert_removes_both_count_stays() {
     assert!(i.queue.is_empty());
     assert_eq!(i.observed_count, 2, "observed_count must not roll back on revert");
 }
+
+#[test]
+fn address_mismatch_flag_cleared_by_both_finish_and_abort() {
+    // The sticky mismatch flag must not survive either exit path: `finish_capture` reports it
+    // exactly once and clears it, and `abort_capture` clears it without reporting. A flag left
+    // set would make the NEXT capture window fail closed on a stale mismatch.
+    //
+    // (a) armed flag → finish_capture surfaces it AND clears it.
+    let mut inspector = RcsInspector::new(10);
+    inspector.start_capture();
+    inspector.address_mismatch_create_index = Some(3);
+    let outcome = inspector.finish_capture(&[]);
+    assert_eq!(
+        outcome,
+        CaptureOutcome::InvariantViolation {
+            reason: CaptureInvariantError::CreateAddressMismatch { create_index: 3 }
+        },
+        "an armed mismatch flag must surface as InvariantViolation on finish_capture"
+    );
+    assert!(
+        inspector.address_mismatch_create_index.is_none(),
+        "finish_capture must clear the sticky mismatch flag on its exit path"
+    );
+
+    // (b) armed flag → abort_capture clears it.
+    inspector.start_capture();
+    inspector.address_mismatch_create_index = Some(7);
+    inspector.abort_capture();
+    assert!(
+        inspector.address_mismatch_create_index.is_none(),
+        "abort_capture must clear the sticky mismatch flag on its exit path"
+    );
+    assert!(!inspector.active, "abort_capture must leave the inspector disarmed");
+}
+
+// ── T1 proof-boundary: abort_capture clears mid-window state ─────────────────────────────────
+
+#[test]
+fn abort_capture_mid_window_leaves_state_clean() {
+    // abort_capture must reset all inspector state even when called with entries mid-flight:
+    // a partially-filled queue, an open checkpoint, and an in-progress create_recipients entry.
+    let mut inspector = RcsInspector::new(10);
+    inspector.start_capture();
+    inspector.push_checkpoint();
+    inspector.observe_native_transfer(
+        Address::from([0x01u8; 20]),
+        Address::from([0x02u8; 20]),
+        U256::from(5u64),
+        NativeTransferKind::Call,
+    );
+    inspector.create_recipients.push(Some(Address::from([0x03u8; 20])));
+    inspector.abort_capture();
+    assert!(!inspector.active, "must be inactive after abort");
+    assert!(inspector.queue.is_empty(), "queue must be cleared by abort");
+    assert!(inspector.checkpoints.is_empty(), "checkpoints must be cleared by abort");
+    assert_eq!(inspector.observed_count, 0, "observed_count must be reset by abort");
+    assert!(!inspector.overflowed, "overflow flag must be reset by abort");
+    assert!(inspector.create_recipients.is_empty(), "create_recipients must be cleared by abort");
+}
