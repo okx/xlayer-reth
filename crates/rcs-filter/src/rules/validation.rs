@@ -36,9 +36,9 @@ const DELEGATE_CODE_HASH: &str = "delegateCodeHash";
 
 /// At most this many offending keys are echoed in a rejection reason. A hostile or broken
 /// snapshot must not be able to inflate an operator log line.
-const MAX_UNKNOWN_KEYS_REPORTED: usize = 8;
+pub(crate) const MAX_UNKNOWN_KEYS_REPORTED: usize = 8;
 /// At most this many bytes of each echoed key are reproduced, for the same reason.
-const MAX_UNKNOWN_KEY_BYTES: usize = 64;
+pub(crate) const MAX_UNKNOWN_KEY_BYTES: usize = 64;
 /// Location label used when the offending keys sit at the `GET /rules` response root.
 pub(crate) const RULES_RESPONSE_LOCATION: &str = "rules response";
 
@@ -64,7 +64,7 @@ pub fn reject_unknown(location: &str, unknown: &UnknownFields) -> std::result::R
 
 /// Truncates one echoed key to [`MAX_UNKNOWN_KEY_BYTES`] bytes on a char boundary, marking
 /// that it was cut so a reader cannot mistake the prefix for the whole key.
-fn bound_key(key: &str) -> String {
+pub(crate) fn bound_key(key: &str) -> String {
     if key.len() <= MAX_UNKNOWN_KEY_BYTES {
         return key.to_string();
     }
@@ -536,9 +536,6 @@ mod tests {
         assert!(compile_rule(parse(json)).is_err());
     }
 
-    #[cfg(test)]
-    mod selector_family_tests;
-
     #[test]
     fn event_alias_depth_above_eight_is_rejected() {
         let mut raw = parse(
@@ -699,6 +696,3 @@ mod tests {
         assert_eq!(set.rules[0].id, "valid");
     }
 }
-
-#[cfg(test)]
-mod strict_schema_tests;

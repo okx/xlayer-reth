@@ -2,6 +2,7 @@
 //! and a correct response root still decodes.
 
 use super::*;
+use serde_json::json;
 
 /// an unknown key at the `GET /rules` response **root** rejects the whole response.
 /// `RulesResponse` never reaches `compile_rule`, so there is no per-rule gate to carry this

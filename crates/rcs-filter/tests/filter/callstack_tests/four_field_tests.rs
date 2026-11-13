@@ -202,7 +202,7 @@ fn a_proxy_field_name_on_an_event_alias_is_not_touched_by_the_alias_guard() {
         "condition": { "==": [ { "var": "transfer.proxyCodeHash" }, null ] },
         "action": "deny"
     })]);
-    use crate::test_support::log_builder::erc20_transfer;
+    use rcs_filter::test_support::log_builder::erc20_transfer;
     let logs = vec![erc20_transfer(proxy(), library(), implementation(), U256::from(1u64))];
     assert_eq!(
         screen(&rules, &logs, Observations::available(rules.stamp(), &[])),

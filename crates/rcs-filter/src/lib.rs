@@ -31,21 +31,13 @@ pub mod pool;
 pub mod quota_hash;
 pub mod rules;
 mod submit;
+#[cfg(feature = "test-utils")]
+pub mod test_seams;
 pub mod test_support;
 pub mod worker;
 
 #[cfg(test)]
-mod callstack_tests;
-#[cfg(test)]
 mod integration_tests;
-#[cfg(test)]
-mod raw_wire_tests;
-#[cfg(test)]
-mod timed_out_allow_recheck_api_tests;
-#[cfg(test)]
-mod timed_out_allow_recheck_tests;
-#[cfg(test)]
-mod upstream_rules_tests;
 
 pub use callstack::{
     CallObservation, CallObservationKind, ObservationUnavailable, Observations, SnapshotStamp,

@@ -6,7 +6,9 @@
 //! removed.
 
 use super::*;
-use crate::test_support::golden;
+use alloy_primitives::Address;
+use rcs_filter::test_seams::{bound_key, MAX_UNKNOWN_KEYS_REPORTED, MAX_UNKNOWN_KEY_BYTES};
+use rcs_filter::test_support::golden;
 use serde_json::{json, Value};
 
 const PROXY: &str = "0x00000000000000000000000000000000000000aa";
@@ -30,7 +32,7 @@ fn transfer_event() -> Value {
 /// `callstack` section does not declare fails earlier, during the decode itself.
 fn rejection_reason(rule: Value) -> String {
     let raw: RawRule = serde_json::from_value(rule).expect("rule must still deserialize");
-    let set = load_rules(crate::config::MIN_PROTOCOL_VERSION, 1, vec![raw]);
+    let set = load_rules(rcs_filter::config::MIN_PROTOCOL_VERSION, 1, vec![raw]);
     assert!(set.rules.is_empty(), "no rule may install: {:?}", set.rules.len());
     assert_eq!(set.rejected.len(), 1, "exactly one rejection expected");
     set.rejected[0].reason.clone()
@@ -45,7 +47,7 @@ fn decode_error(rule: Value) -> String {
 
 fn accepts(rule: Value) -> RuleSet {
     let raw: RawRule = serde_json::from_value(rule).expect("rule must deserialize");
-    let set = load_rules(crate::config::MIN_PROTOCOL_VERSION, 1, vec![raw]);
+    let set = load_rules(rcs_filter::config::MIN_PROTOCOL_VERSION, 1, vec![raw]);
     assert!(set.rejected.is_empty(), "unexpected rejection: {:?}", set.rejected);
     set
 }
@@ -197,9 +199,11 @@ fn golden_fixtures_still_load_clean() {
     assert!(set.rejected.is_empty(), "golden fixtures rejected: {:?}", set.rejected);
     assert_eq!(set.rules.len(), 2);
 
-    let snapshot: Value =
-        serde_json::from_str(include_str!("../../../testdata/rules-snapshot.json"))
-            .expect("official snapshot must deserialize");
+    let snapshot: Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/testdata/rules-snapshot.json"
+    )))
+    .expect("official snapshot must deserialize");
     let raw: Vec<RawRule> = snapshot["rules"]
         .as_array()
         .expect("rules array")

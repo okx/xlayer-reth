@@ -14,13 +14,16 @@
 use alloy_primitives::{Address, Log, B256, U256};
 use serde_json::Value;
 
-use crate::callstack::{CallObservation, Observations};
-use crate::handle::ScreenInput;
-use crate::matching::{try_evaluate, MatchOutcome};
-use crate::rules::{load_rules, RawRule, RuleSet, DEFAULT_MAX_EVENT_BINDINGS_PER_TX};
+use rcs_filter::callstack::{CallObservation, Observations};
+use rcs_filter::handle::ScreenInput;
+use rcs_filter::matching::{try_evaluate, MatchOutcome};
+use rcs_filter::rules::{load_rules, RawRule, RuleSet, DEFAULT_MAX_EVENT_BINDINGS_PER_TX};
 
 /// The verbatim upstream document.
-const UPSTREAM_RULES: &str = include_str!("../testdata/upstream-rule-source-examples.json");
+const UPSTREAM_RULES: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/testdata/upstream-rule-source-examples.json"
+));
 
 /// The content hash the upstream repository reports for that blob. Recorded so the fixture's
 /// provenance stays checkable from outside this crate.
@@ -107,7 +110,7 @@ fn upstream_rule_set() -> RuleSet {
         .iter()
         .map(|rule| serde_json::from_value(rule.clone()).expect("every upstream rule decodes"))
         .collect();
-    load_rules(crate::config::MIN_PROTOCOL_VERSION, 0, raw)
+    load_rules(rcs_filter::config::MIN_PROTOCOL_VERSION, 0, raw)
 }
 
 fn screen<'a>(rules: &RuleSet, logs: &'a [Log], items: &'a [CallObservation]) -> MatchOutcome {
@@ -273,7 +276,7 @@ fn a_transaction_that_touches_no_declared_proxy_produces_no_objection() {
 
 #[test]
 fn the_mixed_rule_needs_both_dimensions_and_then_audits() {
-    use crate::test_support::log_builder::erc20_transfer;
+    use rcs_filter::test_support::log_builder::erc20_transfer;
     let rules = upstream_rule_set();
     let token = addr("0x0000000000000000000000000000000000000777");
     let to = addr("0x0000000000000000000000000000000000000888");

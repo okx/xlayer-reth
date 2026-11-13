@@ -9,14 +9,16 @@
 use alloy_primitives::{Address, Log, B256, U256};
 use serde_json::{json, Value};
 
-use crate::callstack::{CallObservation, ObservationUnavailable, Observations, SnapshotStamp};
-use crate::handle::ScreenInput;
-use crate::matching::{try_evaluate, MatchError, MatchErrorKind, MatchOutcome};
-use crate::rules::{compile_rule, load_rules, RawRule, RuleSet, DEFAULT_MAX_EVENT_BINDINGS_PER_TX};
+use rcs_filter::callstack::{CallObservation, ObservationUnavailable, Observations, SnapshotStamp};
+use rcs_filter::handle::ScreenInput;
+use rcs_filter::matching::{try_evaluate, MatchError, MatchErrorKind, MatchOutcome};
+use rcs_filter::rules::{
+    compile_rule, load_rules, RawRule, RuleSet, DEFAULT_MAX_EVENT_BINDINGS_PER_TX,
+};
 
 /// The one supported rule protocol version. `callstack` belongs to it, so there is no version
 /// gate left to exercise — only the fact that this is the single accepted value.
-const PV: u32 = crate::config::MIN_PROTOCOL_VERSION;
+const PV: u32 = rcs_filter::config::MIN_PROTOCOL_VERSION;
 
 fn proxy() -> Address {
     "0x1111111111111111111111111111111111111111".parse().unwrap()
@@ -343,7 +345,7 @@ fn an_unobserved_alias_suppresses_the_whole_rule() {
 
 #[test]
 fn a_mixed_rule_requires_both_an_event_binding_and_an_observation() {
-    use crate::test_support::log_builder::erc20_transfer;
+    use rcs_filter::test_support::log_builder::erc20_transfer;
     let token: Address = "0x5555555555555555555555555555555555555555".parse().unwrap();
     let from: Address = "0x6666666666666666666666666666666666666666".parse().unwrap();
     let to: Address = "0x7777777777777777777777777777777777777777".parse().unwrap();
@@ -403,7 +405,7 @@ fn mixed_rule(id: &str, condition: Value) -> Value {
 
 #[test]
 fn a_mixed_rule_with_a_missing_event_is_suppressed_even_when_its_condition_holds() {
-    use crate::test_support::log_builder::erc20_transfer;
+    use rcs_filter::test_support::log_builder::erc20_transfer;
     let token: Address = "0x5555555555555555555555555555555555555555".parse().unwrap();
     let from: Address = "0x6666666666666666666666666666666666666666".parse().unwrap();
     let to: Address = "0x7777777777777777777777777777777777777777".parse().unwrap();
@@ -443,7 +445,7 @@ fn a_mixed_rule_with_a_missing_event_is_suppressed_even_when_its_condition_holds
 
 #[test]
 fn a_mixed_rule_missing_exactly_one_of_several_events_is_suppressed() {
-    use crate::test_support::log_builder::{erc1155_transfer_single, erc20_transfer};
+    use rcs_filter::test_support::log_builder::{erc1155_transfer_single, erc20_transfer};
     let token: Address = "0x5555555555555555555555555555555555555555".parse().unwrap();
     let from: Address = "0x6666666666666666666666666666666666666666".parse().unwrap();
     let to: Address = "0x7777777777777777777777777777777777777777".parse().unwrap();
@@ -526,7 +528,7 @@ fn a_mixed_rule_with_a_missing_event_still_fails_closed_on_an_unadjudicable_set(
 
 #[test]
 fn a_mixed_rule_evaluates_every_event_times_alias_combination() {
-    use crate::test_support::log_builder::erc20_transfer;
+    use rcs_filter::test_support::log_builder::erc20_transfer;
     let token: Address = "0x5555555555555555555555555555555555555555".parse().unwrap();
     let from: Address = "0x6666666666666666666666666666666666666666".parse().unwrap();
     let other: Address = "0x8888888888888888888888888888888888888888".parse().unwrap();
@@ -719,7 +721,7 @@ fn a_non_lowercase_or_malformed_alias_address_is_rejected() {
 #[test]
 fn more_than_eight_aliases_in_one_rule_is_rejected() {
     let mut aliases = serde_json::Map::new();
-    for i in 0..=crate::rules::MAX_DIRECT_DELEGATECALL_ALIASES {
+    for i in 0..=rcs_filter::rules::MAX_DIRECT_DELEGATECALL_ALIASES {
         aliases.insert(format!("p{i}"), Value::String(hex_addr(Address::repeat_byte(i as u8 + 1))));
     }
     let reason = reject_reason(json!({
@@ -733,7 +735,7 @@ fn more_than_eight_aliases_in_one_rule_is_rejected() {
 
     // Exactly eight stays valid.
     let mut aliases = serde_json::Map::new();
-    for i in 0..crate::rules::MAX_DIRECT_DELEGATECALL_ALIASES {
+    for i in 0..rcs_filter::rules::MAX_DIRECT_DELEGATECALL_ALIASES {
         aliases.insert(format!("p{i}"), Value::String(hex_addr(Address::repeat_byte(i as u8 + 1))));
     }
     assert!(
@@ -1000,12 +1002,12 @@ fn the_unprovided_variable_would_otherwise_invert_into_a_universal_objection() {
             { "==": [ { "var": "bridgeProxy.delegateCodeHash" }, hex_hash(approved_impl_code()) ] }
         ]}
     ]}});
-    let mut bindings = crate::rules::Bindings::new();
+    let mut bindings = rcs_filter::rules::Bindings::new();
     bindings.insert("bridgeProxy.delegateTo".to_string(), json!(hex_addr(implementation())));
     bindings
         .insert("bridgeProxy.delegateCodeHash".to_string(), json!(hex_hash(approved_impl_code())));
     assert!(
-        crate::rules::truthy(&condition, &bindings),
+        rcs_filter::rules::truthy(&condition, &bindings),
         "an unbound variable inverts the negated allowlist, which is why it is a load-time error"
     );
 
@@ -1016,7 +1018,7 @@ fn the_unprovided_variable_would_otherwise_invert_into_a_universal_objection() {
             { "==": [ { "var": "bridgeProxy.delegateCodeHash" }, hex_hash(approved_impl_code()) ] }
         ]}
     ]}});
-    assert!(!crate::rules::truthy(&correct, &bindings));
+    assert!(!rcs_filter::rules::truthy(&correct, &bindings));
 }
 
 #[test]
@@ -1083,9 +1085,9 @@ fn the_guard_leaves_event_and_transaction_variables_alone() {
 
 #[test]
 fn exactly_one_protocol_version_is_supported() {
-    assert!(crate::config::is_supported_protocol(PV));
-    assert!(!crate::config::is_supported_protocol(0));
-    assert!(!crate::config::is_supported_protocol(PV + 1));
+    assert!(rcs_filter::config::is_supported_protocol(PV));
+    assert!(!rcs_filter::config::is_supported_protocol(0));
+    assert!(!rcs_filter::config::is_supported_protocol(PV + 1));
 }
 
 #[test]
@@ -1117,7 +1119,7 @@ fn event_only_rules_are_byte_identical_under_the_narrowed_version_set() {
 
 #[test]
 fn an_event_only_rule_with_a_missing_event_is_still_evaluated() {
-    use crate::test_support::log_builder::erc20_transfer;
+    use rcs_filter::test_support::log_builder::erc20_transfer;
     let token: Address = "0x5555555555555555555555555555555555555555".parse().unwrap();
     let from: Address = "0x6666666666666666666666666666666666666666".parse().unwrap();
     let to: Address = "0x7777777777777777777777777777777777777777".parse().unwrap();
@@ -1327,7 +1329,7 @@ fn event_and_alias_rule(id: &str) -> Value {
 
 #[test]
 fn the_budget_counts_the_event_times_alias_product() {
-    use crate::test_support::log_builder::erc20_transfer;
+    use rcs_filter::test_support::log_builder::erc20_transfer;
     let token: Address = "0x5555555555555555555555555555555555555555".parse().unwrap();
     let from: Address = "0x6666666666666666666666666666666666666666".parse().unwrap();
     let to: Address = "0x7777777777777777777777777777777777777777".parse().unwrap();
@@ -1358,7 +1360,7 @@ fn the_budget_counts_the_event_times_alias_product() {
 
 #[test]
 fn a_suppressed_rule_contributes_zero_to_the_budget() {
-    use crate::test_support::log_builder::erc20_transfer;
+    use rcs_filter::test_support::log_builder::erc20_transfer;
     let token: Address = "0x5555555555555555555555555555555555555555".parse().unwrap();
     let from: Address = "0x6666666666666666666666666666666666666666".parse().unwrap();
     let to: Address = "0x7777777777777777777777777777777777777777".parse().unwrap();
@@ -1415,7 +1417,7 @@ fn candidate_count_overflow_fails_closed() {
     // Eight aliases, each matching enough observations that the product overflows `usize` rather
     // than merely exceeding the configured limit. Overflow is itself a budget failure.
     let mut aliases = serde_json::Map::new();
-    for i in 0..crate::rules::MAX_DIRECT_DELEGATECALL_ALIASES {
+    for i in 0..rcs_filter::rules::MAX_DIRECT_DELEGATECALL_ALIASES {
         aliases.insert(format!("p{i}"), Value::String(hex_addr(proxy())));
     }
     let rules = rule_set(vec![json!({
@@ -1440,9 +1442,9 @@ fn candidate_count_overflow_fails_closed() {
 
 #[test]
 fn a_hot_reload_recomputes_the_alias_set_and_changes_the_stamp() {
-    use crate::clock::SystemClock;
-    use crate::config::FilterConfig;
-    use crate::handle::FilterHandle;
+    use rcs_filter::clock::SystemClock;
+    use rcs_filter::config::FilterConfig;
+    use rcs_filter::handle::FilterHandle;
     use std::sync::Arc;
 
     let first = rule_set(vec![deny_on_alias("r1", "p", proxy(), json!(true))]);
@@ -1473,9 +1475,9 @@ fn a_hot_reload_recomputes_the_alias_set_and_changes_the_stamp() {
 
 #[test]
 fn observations_captured_under_the_pinned_snapshot_are_adjudicated_by_it() {
-    use crate::clock::SystemClock;
-    use crate::config::FilterConfig;
-    use crate::handle::{FilterHandle, Screen};
+    use rcs_filter::clock::SystemClock;
+    use rcs_filter::config::FilterConfig;
+    use rcs_filter::handle::{FilterHandle, Screen};
     use std::sync::Arc;
 
     let rules = rule_set(vec![deny_on_alias(
@@ -1528,9 +1530,9 @@ fn observations_captured_under_the_pinned_snapshot_are_adjudicated_by_it() {
 
 #[test]
 fn screen_tx_without_an_explicit_snapshot_uses_the_current_one() {
-    use crate::clock::SystemClock;
-    use crate::config::FilterConfig;
-    use crate::handle::{FilterHandle, Screen};
+    use rcs_filter::clock::SystemClock;
+    use rcs_filter::config::FilterConfig;
+    use rcs_filter::handle::{FilterHandle, Screen};
     use std::sync::Arc;
 
     let rules = rule_set(vec![deny_on_alias("guard", "p", proxy(), json!(true))]);
@@ -1559,11 +1561,11 @@ fn screen_tx_without_an_explicit_snapshot_uses_the_current_one() {
 /// Keep both: this one would still pass if the builder configured capture from the wrong snapshot.
 #[test]
 fn an_approved_transaction_re_evaluates_under_its_saved_snapshot() {
-    use crate::clock::SystemClock;
-    use crate::config::FilterConfig;
-    use crate::handle::{FilterHandle, Screen};
-    use crate::pool::BufferStatus;
-    use crate::test_support::log_builder::erc20_transfer;
+    use rcs_filter::clock::SystemClock;
+    use rcs_filter::config::FilterConfig;
+    use rcs_filter::handle::{FilterHandle, Screen};
+    use rcs_filter::pool::BufferStatus;
+    use rcs_filter::test_support::log_builder::erc20_transfer;
     use std::sync::Arc;
 
     let token: Address = "0x5555555555555555555555555555555555555555".parse().unwrap();
@@ -1625,10 +1627,10 @@ fn an_approved_transaction_re_evaluates_under_its_saved_snapshot() {
 /// caller falls back to its own pinned snapshot.
 #[test]
 fn the_saved_snapshot_of_a_buffered_transaction_survives_a_reload() {
-    use crate::clock::SystemClock;
-    use crate::config::FilterConfig;
-    use crate::handle::{FilterHandle, Screen};
-    use crate::test_support::log_builder::erc20_transfer;
+    use rcs_filter::clock::SystemClock;
+    use rcs_filter::config::FilterConfig;
+    use rcs_filter::handle::{FilterHandle, Screen};
+    use rcs_filter::test_support::log_builder::erc20_transfer;
     use std::sync::Arc;
 
     let token: Address = "0x5555555555555555555555555555555555555555".parse().unwrap();
@@ -1682,11 +1684,11 @@ fn the_saved_snapshot_of_a_buffered_transaction_survives_a_reload() {
 
 #[test]
 fn a_re_simulation_whose_executed_code_changed_is_not_silently_consistent() {
-    use crate::clock::SystemClock;
-    use crate::config::FilterConfig;
-    use crate::handle::{FilterHandle, Screen};
-    use crate::pool::BufferStatus;
-    use crate::test_support::log_builder::erc20_transfer;
+    use rcs_filter::clock::SystemClock;
+    use rcs_filter::config::FilterConfig;
+    use rcs_filter::handle::{FilterHandle, Screen};
+    use rcs_filter::pool::BufferStatus;
+    use rcs_filter::test_support::log_builder::erc20_transfer;
     use std::sync::Arc;
 
     let token: Address = "0x5555555555555555555555555555555555555555".parse().unwrap();

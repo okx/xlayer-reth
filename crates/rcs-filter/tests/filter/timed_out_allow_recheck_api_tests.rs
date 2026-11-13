@@ -7,10 +7,10 @@ use std::sync::Arc;
 
 use alloy_primitives::B256;
 
-use crate::config::FilterConfig;
-use crate::pool::{BufferEntry, BufferPool, BufferStatus};
-use crate::rules::{RuleSet, TimeoutAction};
-use crate::test_support::{golden, TestClock};
+use rcs_filter::config::FilterConfig;
+use rcs_filter::pool::{BufferEntry, BufferPool, BufferStatus};
+use rcs_filter::rules::{RuleSet, TimeoutAction};
+use rcs_filter::test_support::{golden, TestClock};
 
 const START: u64 = 1_751_000_000;
 
@@ -87,14 +87,14 @@ fn already_dropped_entry_reports_drop_at_commit() {
 /// `Screen` assertions in the sibling module already pin the behaviour the counter reports.
 #[test]
 fn timed_out_allow_recheck_drop_counter_is_additive() {
-    let metrics = crate::metrics::RcsFilterMetrics::default();
-    metrics.timed_out_allow_recheck_drop_total.increment(1);
+    let metrics = rcs_filter::test_seams::FilterMetrics::default();
+    metrics.timed_out_allow_recheck_drop_total().increment(1);
     // A separate series from the approved-path consistency signal and the shared drop total.
-    metrics.consistency_mismatch_total.increment(1);
-    metrics.drop_total.increment(1);
-    metrics.audit_approved_total.increment(1);
+    metrics.consistency_mismatch_total().increment(1);
+    metrics.drop_total().increment(1);
+    metrics.audit_approved_total().increment(1);
     // The handle used by the behavioural tests still builds with the metric registered.
-    let _handle = crate::handle::FilterHandle::for_test(
+    let _handle = rcs_filter::handle::FilterHandle::for_test(
         FilterConfig::default(),
         RuleSet::default(),
         Arc::new(TestClock::new(START)),

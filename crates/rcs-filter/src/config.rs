@@ -230,9 +230,6 @@ mod tests {
         assert!(!is_supported_protocol(3));
     }
 
-    #[cfg(test)]
-    mod callstack_config_tests;
-
     #[test]
     fn enabled_requires_base_url() {
         let c = FilterConfig { enabled: true, ..Default::default() };

@@ -13,12 +13,12 @@ use std::time::Duration;
 
 use alloy_primitives::{Address, Log, B256, U256};
 
-use crate::callstack::{CallObservation, Observations, SnapshotStamp};
-use crate::config::{FilterConfig, MIN_PROTOCOL_VERSION};
-use crate::handle::{FilterHandle, PreScreen, Screen, ScreenInput};
-use crate::pool::BufferStatus;
-use crate::rules::{load_rules, RawRule, RuleSet};
-use crate::test_support::{golden, log_builder, MockRcsClient, TestClock};
+use rcs_filter::callstack::{CallObservation, Observations, SnapshotStamp};
+use rcs_filter::config::{FilterConfig, MIN_PROTOCOL_VERSION};
+use rcs_filter::handle::{FilterHandle, PreScreen, Screen, ScreenInput};
+use rcs_filter::pool::BufferStatus;
+use rcs_filter::rules::{load_rules, RawRule, RuleSet};
+use rcs_filter::test_support::{golden, log_builder, MockRcsClient, TestClock};
 
 const START: u64 = 1_751_000_000;
 

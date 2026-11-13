@@ -150,6 +150,3 @@ impl<'a> Observations<'a> {
         Observations::Available { stamp, items }
     }
 }
-
-#[cfg(test)]
-mod tests;

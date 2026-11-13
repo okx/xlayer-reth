@@ -341,9 +341,6 @@ mod wire_tests {
         assert!(serde_json::from_value::<QueryResponse>(json!({})).is_err());
     }
 
-    #[cfg(test)]
-    mod response_root_tests;
-
     #[tokio::test]
     async fn endpoint_specific_statuses_are_enforced() {
         let submit_body = r#"{"accepted":[],"rejected_malformed":[]}"#;

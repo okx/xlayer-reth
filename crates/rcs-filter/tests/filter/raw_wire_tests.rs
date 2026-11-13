@@ -8,24 +8,20 @@
 //! about what the production path does with the original bytes.
 //!
 //! Every case here therefore starts as a raw JSON **string**, is written onto a socket, and is
-//! read back by the production [`crate::client::ReqwestRcsClient`] and installed (or refused) by
-//! the production [`crate::worker::load_and_install`]. Nothing in between converts it to a
+//! read back by the production [`rcs_filter::client::ReqwestRcsClient`] and installed (or refused) by
+//! the production [`rcs_filter::worker::load_and_install`]. Nothing in between converts it to a
 //! `Value`, and [`the_value_hop_these_tests_exclude_would_accept_the_duplicate`] demonstrates,
 //! executably, that the shortcut would have accepted exactly what the real path refuses.
 
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use crate::client::{RcsClient, ReqwestRcsClient, RulesResponse};
-use crate::config::FilterConfig;
-use crate::handle::Shared;
-use crate::pool::BufferPool;
-use crate::rules::{RawRule, RuleSet};
-use crate::test_support::TestClock;
-use crate::worker;
+use rcs_filter::client::{RcsClient, ReqwestRcsClient, RulesResponse};
+use rcs_filter::config::FilterConfig;
+use rcs_filter::rules::{RawRule, RuleSet};
+use rcs_filter::test_support::TestClock;
 
 const START: u64 = 1_751_000_000;
 
@@ -64,31 +60,24 @@ async fn serve_one_raw_body(body: String) -> (String, tokio::task::JoinHandle<()
 }
 
 fn last_known_good() -> RuleSet {
-    let rule: RawRule =
-        serde_json::from_str(crate::test_support::golden::RULE_SCENARIO_A).expect("golden fixture");
-    crate::rules::load_rules(crate::config::MIN_PROTOCOL_VERSION, 7, vec![rule])
+    let rule: RawRule = serde_json::from_str(rcs_filter::test_support::golden::RULE_SCENARIO_A)
+        .expect("golden fixture");
+    rcs_filter::rules::load_rules(rcs_filter::config::MIN_PROTOCOL_VERSION, 7, vec![rule])
 }
 
-fn shared_with_last_known_good() -> Shared {
-    let (terminal_events, _) = tokio::sync::broadcast::channel(16);
-    Shared {
-        config: FilterConfig {
-            enabled: true,
-            rcs_base_url: "http://unused".into(),
-            ..Default::default()
-        },
-        rules: Arc::new(RwLock::new(Arc::new(last_known_good()))),
-        pool: Arc::new(Mutex::new(BufferPool::default())),
-        clock: Arc::new(TestClock::new(START)),
-        ready: Arc::new(AtomicBool::new(true)),
-        terminal_events,
-        metrics: crate::metrics::RcsFilterMetrics::default(),
-    }
+fn shared_with_last_known_good() -> rcs_filter::test_seams::WorkerShared {
+    rcs_filter::test_seams::worker_shared(
+        FilterConfig { enabled: true, rcs_base_url: "http://unused".into(), ..Default::default() },
+        last_known_good(),
+        Arc::new(TestClock::new(START)),
+        true,
+        16,
+    )
 }
 
 /// What one raw `GET /rules` body did to the installed snapshot.
 struct WireOutcome {
-    result: crate::Result<bool>,
+    result: rcs_filter::Result<bool>,
     /// `true` when the very same `Arc` is still installed — i.e. nothing was swapped in.
     last_known_good_retained: bool,
     content_version: u64,
@@ -99,17 +88,17 @@ struct WireOutcome {
 /// last-known-good snapshot, and reports what happened to that snapshot.
 async fn install_raw_body(body: &str) -> WireOutcome {
     let shared = shared_with_last_known_good();
-    let previous = shared.rules.read().expect("the rule slot is readable").clone();
+    let previous = shared.rules_slot().read().expect("the rule slot is readable").clone();
     assert_eq!(previous.content_version, 7, "the fixture installs a known last-known-good");
     assert_eq!(previous.rules.len(), 1);
 
     let (url, server) = serve_one_raw_body(body.to_string()).await;
     let client: Arc<dyn RcsClient> =
         Arc::new(ReqwestRcsClient::new(url).expect("the production client builds"));
-    let result = worker::load_and_install(&shared, &client).await;
+    let result = rcs_filter::test_seams::load_and_install(&shared, &client).await;
     server.await.expect("the one-shot server finishes");
 
-    let current = shared.rules.read().expect("the rule slot is readable").clone();
+    let current = shared.rules_slot().read().expect("the rule slot is readable").clone();
     WireOutcome {
         result,
         last_known_good_retained: Arc::ptr_eq(&previous, &current),
@@ -292,11 +281,23 @@ fn the_rules_field_type_is_pinned_at_the_rules_boundary() {
 fn no_value_hop_exists_on_the_production_rule_path() {
     // (path label, source, whether the file is expected to carry a test module)
     let files = [
-        ("client.rs", include_str!("client.rs"), true),
-        ("worker.rs", include_str!("worker.rs"), true),
-        ("rules/model.rs", include_str!("rules/model.rs"), false),
-        ("rules/mod.rs", include_str!("rules/mod.rs"), false),
-        ("rules/validation.rs", include_str!("rules/validation.rs"), true),
+        ("client.rs", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/client.rs")), true),
+        ("worker.rs", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/worker.rs")), true),
+        (
+            "rules/model.rs",
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/rules/model.rs")),
+            false,
+        ),
+        (
+            "rules/mod.rs",
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/rules/mod.rs")),
+            false,
+        ),
+        (
+            "rules/validation.rs",
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/rules/validation.rs")),
+            true,
+        ),
     ];
     for (label, source, has_tests) in files {
         let cut = source.find("#[cfg(test)]");
@@ -336,7 +337,10 @@ fn no_value_hop_exists_on_the_production_rule_path() {
 /// different key order, `omitempty` fields dropped, the audit defaults applied, and the
 /// `protocol_version` / `content_version` envelope added. Pinning the source file would prove
 /// provenance only; pinning the rendered response is what makes the acceptance below joint.
-const RENDERED_RESPONSE: &str = include_str!("../testdata/producer-rendered-rules-response.json");
+const RENDERED_RESPONSE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/testdata/producer-rendered-rules-response.json"
+));
 
 /// `sha256` of [`RENDERED_RESPONSE`] — re-checkable with
 /// `sha256sum crates/rcs-filter/testdata/producer-rendered-rules-response.json`.
@@ -396,22 +400,24 @@ async fn the_locked_producers_rendered_response_installs_over_the_real_wire() {
 /// only ever deny would satisfy a one-sided test without actually evaluating anything.
 #[tokio::test]
 async fn every_rendered_callstack_condition_actually_fires_on_the_installed_snapshot() {
-    use crate::callstack::{CallObservation, Observations};
-    use crate::handle::ScreenInput;
-    use crate::matching::{try_evaluate, MatchOutcome};
-    use crate::test_support::log_builder::erc20_transfer;
     use alloy_primitives::{Address, B256, U256};
+    use rcs_filter::callstack::{CallObservation, Observations};
+    use rcs_filter::handle::ScreenInput;
+    use rcs_filter::matching::{try_evaluate, MatchOutcome};
+    use rcs_filter::test_support::log_builder::erc20_transfer;
 
     let shared = shared_with_last_known_good();
     let (url, server) = serve_one_raw_body(RENDERED_RESPONSE.to_string()).await;
     let client: Arc<dyn RcsClient> =
         Arc::new(ReqwestRcsClient::new(url).expect("the production client builds"));
     assert!(
-        worker::load_and_install(&shared, &client).await.expect("the rendered response installs"),
+        rcs_filter::test_seams::load_and_install(&shared, &client)
+            .await
+            .expect("the rendered response installs"),
         "the rendered response must install"
     );
     server.await.expect("the one-shot server finishes");
-    let rules = shared.rules.read().expect("the rule slot is readable").clone();
+    let rules = shared.rules_slot().read().expect("the rule slot is readable").clone();
 
     // Composition, read off the installed snapshot rather than off the fixture text.
     let ids: Vec<&str> = rules.rules.iter().map(|rule| rule.id.as_str()).collect();

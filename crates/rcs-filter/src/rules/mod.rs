@@ -38,4 +38,6 @@ pub use model::{
 pub use validation::reject_unknown;
 pub use validation::reject_unknown as reject_unknown_fields;
 pub(crate) use validation::RULES_RESPONSE_LOCATION;
+#[cfg(feature = "test-utils")]
+pub(crate) use validation::{bound_key, MAX_UNKNOWN_KEYS_REPORTED, MAX_UNKNOWN_KEY_BYTES};
 pub use validation::{compile_rule, load_rules};
