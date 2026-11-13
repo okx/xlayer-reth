@@ -20,13 +20,13 @@
 //! joint run against a reachable node.
 
 use super::*;
-use crate::audit::synthetic_ban::{
-    BATCH_ADD_TO_BLACKLIST_SIGNATURE, MAX_SYNTHETIC_BAN_BATCH, SYNTHETIC_BAN_SOURCE_HASH_DOMAIN,
-};
 use alloy_primitives::{address, hex, Keccak256};
 use op_revm::OpHaltReason;
 use revm::context_interface::result::ExecutionResult;
 use std::collections::HashMap;
+use xlayer_rpc::audit::synthetic_ban::{
+    BATCH_ADD_TO_BLACKLIST_SIGNATURE, MAX_SYNTHETIC_BAN_BATCH, SYNTHETIC_BAN_SOURCE_HASH_DOMAIN,
+};
 
 /// The devnet chain id: the only chain whose blacklist address the interceptor resolves and that
 /// a test can deploy a fixture at.
@@ -368,7 +368,7 @@ fn audit_call(
         body["known_allowed_kinds"] = map.into();
     }
     let req: AuditTransactionsRequest = serde_json::from_value(body).expect("the request decodes");
-    let plan = AuditBatchPlan::prepare(&req).expect("the request passes every check");
+    let plan = prepare_audit_batch_plan(&req).expect("the request passes every check");
 
     let mut ordered_txs = Vec::new();
     let mut ordered_reqs = Vec::new();
@@ -384,7 +384,7 @@ fn audit_call(
         }
     }
     let mut executed: Vec<Option<AuditResult>> = (0..ordered_txs.len()).map(|_| None).collect();
-    let batch = plan.batch(&ordered_txs, &ordered_reqs);
+    let batch = plan.batch_for_test(&ordered_txs, &ordered_reqs);
     let capture = AuditCaptureConfig { max_callstack_observations_per_tx: 10_000 };
     if let Some(inspector) = audit_capture_inspector(plan.rules(), capture) {
         let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
@@ -392,10 +392,10 @@ fn audit_call(
             devnet_env(),
             inspector,
         );
-        run_audit_batch(&mut evm, &batch, &mut executed).expect("the batch executes");
+        run_mirrored_batch(&mut evm, &batch, &mut executed).expect("the batch executes");
     } else {
         let mut evm = OpEvmFactory::<OpTx>::default().create_evm(base.clone(), devnet_env());
-        run_audit_batch(&mut evm, &batch, &mut executed).expect("the batch executes");
+        run_mirrored_batch(&mut evm, &batch, &mut executed).expect("the batch executes");
     }
     assemble_results(&req.txs, &built, &mut executed)
 }
@@ -629,7 +629,7 @@ use Verdict::{Allow, Audit, Deny, Unknown};
 
 #[test]
 fn the_driver_builds_synthetic_bans_exactly_like_the_golden_vectors() {
-    for ban in crate::audit::synthetic_ban::tests::golden_bans() {
+    for ban in rcs_filter::test_support::synthetic_ban_golden::golden_bans() {
         let elements: Vec<String> = ban.elements.iter().map(|e| format!("{e:#x}")).collect();
         let built = build_blacklist_simulation(&elements);
         assert_eq!(built.len(), 1);
@@ -637,7 +637,7 @@ fn the_driver_builds_synthetic_bans_exactly_like_the_golden_vectors() {
         assert_eq!(built[0].source_hash, ban.source_hash, "n = {}", ban.n);
     }
     let doc: serde_json::Value =
-        serde_json::from_str(crate::audit::synthetic_ban::tests::GOLDEN).expect("JSON");
+        serde_json::from_str(rcs_filter::test_support::synthetic_ban_golden::GOLDEN).expect("JSON");
     let l1 = &doc["l1_user_deposit"];
     assert_eq!(
         format!(

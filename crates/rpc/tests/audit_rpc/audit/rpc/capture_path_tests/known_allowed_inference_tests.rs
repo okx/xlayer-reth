@@ -5,11 +5,13 @@
 //! originals' hashes from real L1 logs; that is a property of the caller.
 
 use super::*;
-use crate::audit::synthetic_ban::tests::{golden_bans, golden_l1_user_deposit_source_hash};
-use crate::audit::synthetic_ban::{
+use alloy_primitives::{hex, Keccak256};
+use rcs_filter::test_support::synthetic_ban_golden::{
+    golden_bans, golden_l1_user_deposit_source_hash,
+};
+use xlayer_rpc::audit::synthetic_ban::{
     verify_synthetic_ban, BATCH_ADD_TO_BLACKLIST_SIGNATURE, SYNTHETIC_BAN_SOURCE_HASH_DOMAIN,
 };
-use alloy_primitives::{hex, Keccak256};
 
 /// The golden one-element synthetic ban, sent to `to`. The fixture proxy delegatecalls whatever
 /// its calldata says, so a ban sent to it executes the implementation the rule inspects.

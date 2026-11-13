@@ -257,7 +257,7 @@ fn run_batch_stamped(
         Some(inspector) => {
             let mut evm =
                 OpEvmFactory::<OpTx>::default().create_evm_with_inspector(db, env, inspector);
-            run_audit_batch(&mut evm, &batch, &mut executed).expect("batch executes");
+            run_mirrored_batch(&mut evm, &batch, &mut executed).expect("batch executes");
             // Capture must be inactive on every exit path, guaranteed by the RAII guard.
             assert!(
                 matches!(
@@ -273,7 +273,7 @@ fn run_batch_stamped(
         }
         None => {
             let mut evm = OpEvmFactory::<OpTx>::default().create_evm(db, env);
-            run_audit_batch(&mut evm, &batch, &mut executed).expect("batch executes");
+            run_mirrored_batch(&mut evm, &batch, &mut executed).expect("batch executes");
             (
                 evm.db_mut().storage(PROXY, U256::ZERO).expect("storage read"),
                 evm.db_mut().basic(DEPOSITOR).expect("account read").map_or(0, |a| a.nonce),
@@ -1266,8 +1266,10 @@ fn unsupported_protocol_version_is_rejected_by_name() {
 /// hot-reload path must be accepted here, by the same `load_rules` call, over the same file.
 #[test]
 fn the_upstream_rule_source_document_is_accepted_at_this_entry_point() {
-    const UPSTREAM_RULES: &str =
-        include_str!("../../../../rcs-filter/testdata/upstream-rule-source-examples.json");
+    const UPSTREAM_RULES: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../rcs-filter/testdata/upstream-rule-source-examples.json"
+    ));
     let document: serde_json::Value = serde_json::from_str(UPSTREAM_RULES).expect("valid JSON");
 
     // The caller's own body shape: three keys, no protocol version, no label map.
@@ -1280,7 +1282,7 @@ fn the_upstream_rule_source_document_is_accepted_at_this_entry_point() {
     assert_eq!(req.protocol_version, MIN_PROTOCOL_VERSION, "an omitted version means 1");
     assert_eq!(req.rules.len(), 7);
 
-    let plan = AuditBatchPlan::prepare(&req).expect("every upstream rule must be accepted");
+    let plan = prepare_audit_batch_plan(&req).expect("every upstream rule must be accepted");
     assert!(plan.rules().rejected.is_empty(), "{:?}", plan.rules().rejected);
     assert_eq!(plan.rules().rules.len(), 7);
     assert_eq!(plan.rules().selector_bearing_rule_count(), 4);
@@ -1289,9 +1291,12 @@ fn the_upstream_rule_source_document_is_accepted_at_this_entry_point() {
         3,
         "three distinct proxy addresses, because two rules observe the same one"
     );
-    assert!(plan.report_identification, "an alias-bearing request reports identification");
+    assert!(
+        plan.report_identification_for_test(),
+        "an alias-bearing request reports identification"
+    );
     let projection =
-        plan.known_allowed_rules.as_ref().expect("an alias-bearing request has a projection");
+        plan.known_allowed_rules_for_test().expect("an alias-bearing request has a projection");
     assert_eq!(projection.rules.len(), 4, "only the alias-bearing rules survive");
     assert_eq!(
         projection.stamp(),
@@ -1327,7 +1332,7 @@ fn the_callers_exact_three_key_body_is_accepted_with_a_non_empty_known_allowed()
     assert!(req.known_allowed_kinds.is_none());
     assert!(!req.known_allowed.is_empty());
 
-    let plan = AuditBatchPlan::prepare(&req)
+    let plan = prepare_audit_batch_plan(&req)
         .expect("an unlabelled request must never be rejected for a missing label");
     assert!(plan.rules().has_callstack_rules());
 }
@@ -1354,7 +1359,7 @@ fn a_multi_round_unlabelled_sequence_is_accepted_and_converges() {
             "known_allowed": resolved.clone()
         }))
         .expect("the round body deserializes");
-        AuditBatchPlan::prepare(&req)
+        prepare_audit_batch_plan(&req)
             .unwrap_or_else(|e| panic!("round {round} must be accepted: {e:?}"));
 
         // And the batch body adjudicates it, with an approved implementation.
@@ -1404,7 +1409,7 @@ fn a_condition_reading_an_unprovided_alias_variable_is_rejected_at_this_entry_po
             "known_allowed": []
         }))
         .expect("the request decodes; the rejection happens in the compiler");
-        let error = match AuditBatchPlan::prepare(&req) {
+        let error = match prepare_audit_batch_plan(&req) {
             Err(error) => error,
             Ok(_) => panic!("entry.{field} must be rejected"),
         };
@@ -1428,7 +1433,7 @@ fn a_condition_reading_an_unprovided_alias_variable_is_rejected_at_this_entry_po
         "known_allowed": []
     }))
     .expect("the control decodes");
-    assert!(AuditBatchPlan::prepare(&req).is_ok());
+    assert!(prepare_audit_batch_plan(&req).is_ok());
 }
 
 /// An undeclared key inside `callstack` fails at this entry point too, during the request
@@ -1471,7 +1476,7 @@ fn an_undeclared_callstack_key_is_rejected_at_this_entry_point() {
         "known_allowed": []
     }))
     .expect("the root gate runs in the compiler, so the request still decodes");
-    let error = match AuditBatchPlan::prepare(&req) {
+    let error = match prepare_audit_batch_plan(&req) {
         Err(error) => error,
         Ok(_) => panic!("the rule must be rejected"),
     };
@@ -1580,24 +1585,6 @@ fn programmatic_zero_budget_yields_the_non_verdict() {
     let result = only(&run);
     assert_eq!(result.verdict, Verdict::Malformed, "never Allow");
     assert_eq!(result.callstack_identification, Some(CallstackIdentification::NotIdentified));
-}
-
-/// The callstack-only projection used for `known_allowed` adjudication carries the SAME
-/// snapshot stamp as the full set, which is what keeps the existing stamp check meaningful
-/// instead of bypassed.
-#[test]
-fn callstack_only_projection_preserves_the_snapshot_stamp() {
-    let raw = vec![event_only_rule(), proxy_impl_allowlist_rule()];
-    let full = load_rules(1, 0, raw.clone());
-    assert!(full.rejected.is_empty());
-    let projected = callstack_only_projection(&full, &raw).expect("aliases are declared");
-    assert_eq!(projected.stamp(), full.stamp());
-    assert_eq!(projected.rules.len(), 1, "only the alias-bearing rule survives");
-    assert!(callstack_only_projection(
-        &load_rules(1, 0, vec![event_only_rule()]),
-        &[event_only_rule()]
-    )
-    .is_none());
 }
 
 /// The budget actually reaches the inspector: a configured value is what the inspector

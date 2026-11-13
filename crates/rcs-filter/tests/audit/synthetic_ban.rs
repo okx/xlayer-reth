@@ -1,43 +1,11 @@
-//! Golden and byte-level vectors for [`super::verify_synthetic_ban`].
+//! Golden and byte-level vectors for [`rcs_filter::audit::synthetic_ban::verify_synthetic_ban`].
 
-use super::*;
-use alloy_primitives::hex;
+use alloy_primitives::{hex, keccak256, Keccak256, B256};
+use rcs_filter::audit::synthetic_ban::*;
+use rcs_filter::test_support::synthetic_ban_golden::*;
 
-/// Vectors produced by RCS's own derivation code; see the file's `provenance` object.
-pub(crate) const GOLDEN: &str = include_str!("../testdata/synthetic-ban-golden-vectors.json");
-
-pub(crate) struct GoldenBan {
-    pub(crate) n: usize,
-    pub(crate) elements: Vec<B256>,
-    pub(crate) data: String,
-    pub(crate) source_hash: String,
-}
-
-pub(crate) fn golden_bans() -> Vec<GoldenBan> {
-    let doc: serde_json::Value = serde_json::from_str(GOLDEN).expect("golden vectors are JSON");
-    doc["synthetic_bans"]
-        .as_array()
-        .expect("synthetic_bans is an array")
-        .iter()
-        .map(|ban| GoldenBan {
-            n: ban["n"].as_u64().expect("n") as usize,
-            elements: ban["elements"]
-                .as_array()
-                .expect("elements")
-                .iter()
-                .map(|e| e.as_str().expect("element").parse().expect("element is a hash"))
-                .collect(),
-            data: ban["data"].as_str().expect("data").to_string(),
-            source_hash: ban["source_hash"].as_str().expect("source_hash").to_string(),
-        })
-        .collect()
-}
-
-/// The L1-log-derived `source_hash` of a user deposit, as RCS computes it from a decoded log.
-pub(crate) fn golden_l1_user_deposit_source_hash() -> String {
-    let doc: serde_json::Value = serde_json::from_str(GOLDEN).expect("golden vectors are JSON");
-    doc["l1_user_deposit"]["source_hash"].as_str().expect("source_hash").to_string()
-}
+/// Selector (4) ‖ offset word (32) ‖ length word (32): the fixed head of the canonical encoding.
+const HEAD_LEN: usize = 4 + 32 + 32;
 
 fn bytes(data: &str) -> Vec<u8> {
     hex::decode(data).expect("golden data is hex")

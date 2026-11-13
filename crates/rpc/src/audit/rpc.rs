@@ -35,6 +35,10 @@ use rcs_filter::audit::{
     unlabelled_known_allowed, KnownAllowedResolution,
 };
 use rcs_filter::callstack::{ObservationUnavailable, Observations};
+use rcs_filter::capture::{
+    CallstackCaptureConfig, CaptureGuard, CaptureOutcome, RcsCaptureControl, RcsCaptureScope,
+    RcsInspector,
+};
 use rcs_filter::config::{
     is_supported_protocol, MIN_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
 };
@@ -47,10 +51,6 @@ use reth_rpc_eth_api::{
 };
 use reth_storage_api::BlockReaderIdExt;
 use revm::{context_interface::result::ResultAndState, DatabaseCommit};
-use rcs_filter::capture::{
-    CallstackCaptureConfig, CaptureGuard, CaptureOutcome, RcsCaptureControl, RcsCaptureScope,
-    RcsInspector,
-};
 
 use super::deposit::{build_deposit_tx, DepositTxRequest};
 use super::metrics::{KnownAllowedResolutionMetrics, SyntheticBanIdentificationMetrics};
@@ -1015,6 +1015,125 @@ pub mod test_seams {
         super::run_audit_batch(evm, &plan.batch(txs, reqs), executed)
     }
 
+    /// Public mirror of the private `AuditBatch`, field for field, so an integration test can build
+    /// the exact borrowed batch the production loop consumes.
+    pub struct AuditBatch<'a> {
+        pub txs: &'a [Recovered<OpTransactionSigned>],
+        pub reqs: &'a [DepositTxRequest],
+        pub rules: &'a RuleSet,
+        pub known_allowed_rules: Option<&'a RuleSet>,
+        pub known_allowed: &'a HashSet<String>,
+        pub kinds: Option<&'a BTreeMap<String, KnownAllowedKind>>,
+        pub report_identification: bool,
+    }
+
+    /// Runs the production [`super::run_audit_batch`] over a mirrored batch.
+    pub fn run_mirrored_batch<E>(
+        evm: &mut E,
+        batch: &AuditBatch<'_>,
+        executed: &mut [Option<AuditResult>],
+    ) -> Result<(), E::Error>
+    where
+        E: Evm,
+        E::DB: DatabaseCommit,
+        E::Inspector: RcsCaptureControl,
+        for<'tx> &'tx Recovered<OpTransactionSigned>: IntoTxEnv<E::Tx>,
+    {
+        let batch = super::AuditBatch {
+            txs: batch.txs,
+            reqs: batch.reqs,
+            rules: batch.rules,
+            known_allowed_rules: batch.known_allowed_rules,
+            known_allowed: batch.known_allowed,
+            kinds: batch.kinds,
+            report_identification: batch.report_identification,
+        };
+        super::run_audit_batch(evm, &batch, executed)
+    }
+
+    impl AuditBatchPlan {
+        /// The plan borrowed for one ordered set of built transactions, as a mirrored batch.
+        pub fn batch_for_test<'a>(
+            &'a self,
+            txs: &'a [Recovered<OpTransactionSigned>],
+            reqs: &'a [DepositTxRequest],
+        ) -> AuditBatch<'a> {
+            let b = self.batch(txs, reqs);
+            AuditBatch {
+                txs: b.txs,
+                reqs: b.reqs,
+                rules: b.rules,
+                known_allowed_rules: b.known_allowed_rules,
+                known_allowed: b.known_allowed,
+                kinds: b.kinds,
+                report_identification: b.report_identification,
+            }
+        }
+
+        /// Whether the plan reports the identification diagnostic.
+        pub fn report_identification_for_test(&self) -> bool {
+            self.report_identification
+        }
+
+        /// The callstack-only projection the plan adjudicates `known_allowed` originals with.
+        pub fn known_allowed_rules_for_test(&self) -> Option<&RuleSet> {
+            self.known_allowed_rules.as_ref()
+        }
+    }
+
+    /// Delegates to this path's own [`super::validate_protocol_version`].
+    pub fn validate_protocol_version(
+        protocol_version: u32,
+    ) -> Result<(), jsonrpsee::types::ErrorObjectOwned> {
+        super::validate_protocol_version(protocol_version)
+    }
+
+    /// Delegates to this path's own [`super::validate_known_allowed_labels`].
+    pub fn validate_known_allowed_labels(
+        known_allowed: &[String],
+        kinds: Option<&BTreeMap<String, KnownAllowedKind>>,
+    ) -> Result<(), jsonrpsee::types::ErrorObjectOwned> {
+        super::validate_known_allowed_labels(known_allowed, kinds)
+    }
+
+    /// Delegates to this path's own [`super::validate_compiled_rules`].
+    pub fn validate_compiled_rules(
+        rules: &RuleSet,
+    ) -> Result<(), jsonrpsee::types::ErrorObjectOwned> {
+        super::validate_compiled_rules(rules)
+    }
+
+    /// Delegates to this path's own [`super::assemble_results`].
+    pub fn assemble_results(
+        txs: &[DepositTxRequest],
+        built: &[Option<usize>],
+        executed: &mut [Option<AuditResult>],
+    ) -> Vec<AuditResult> {
+        super::assemble_results(txs, built, executed)
+    }
+
+    /// Delegates to this path's own [`super::inferred_known_allowed_kind`].
+    pub fn inferred_known_allowed_kind(tx: &Recovered<OpTransactionSigned>) -> KnownAllowedKind {
+        super::inferred_known_allowed_kind(tx)
+    }
+
+    /// Delegates to this path's own [`super::report_synthetic_ban_identification`].
+    pub fn report_synthetic_ban_identification(
+        metrics: &SyntheticBanIdentificationMetrics,
+        tx_hash: alloy_primitives::B256,
+        source_hash: &str,
+        identification: CallstackIdentification,
+        selector_bearing_rules: usize,
+    ) {
+        super::report_synthetic_ban_identification(
+            metrics,
+            tx_hash,
+            source_hash,
+            identification,
+            selector_bearing_rules,
+        )
+    }
+
     /// Delegates to this path's own [`super::audit_capture_window`].
     pub fn audit_capture_window<E, Tx>(
         evm: &mut E,
@@ -1166,12 +1285,3 @@ mod algorithm_tests {
         assert!(!known_allowed.contains("0xsrc3"));
     }
 }
-
-#[cfg(test)]
-mod capture_path_tests;
-
-#[cfg(test)]
-mod identification_reporting_tests;
-
-#[cfg(test)]
-mod raw_request_wire_tests;

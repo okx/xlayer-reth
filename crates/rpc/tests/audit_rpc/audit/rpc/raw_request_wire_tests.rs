@@ -109,7 +109,7 @@ fn the_legal_v1_request_decodes_and_prepares_through_the_same_decoder() {
         decode_params(&params_with_rule(&legal_rule())).expect("the legal control must decode");
     assert_eq!(req.protocol_version, MIN_PROTOCOL_VERSION, "an omitted version means 1");
     assert_eq!(req.rules.len(), 1);
-    let plan = AuditBatchPlan::prepare(&req).expect("the legal control passes every check");
+    let plan = prepare_audit_batch_plan(&req).expect("the legal control passes every check");
     assert!(plan.rules().rejected.is_empty(), "{:?}", plan.rules().rejected);
     assert_eq!(plan.rules().rules.len(), 1);
 }
@@ -163,7 +163,7 @@ fn the_request_rules_field_type_is_pinned() {
 /// finding that boundary is asserted so the guard can never degrade into scanning nothing.
 #[test]
 fn no_value_hop_exists_on_the_production_audit_request_path() {
-    const SOURCE: &str = include_str!("../rpc.rs");
+    const SOURCE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/audit/rpc.rs"));
     let boundary = SOURCE
         .find("#[cfg(test)]\nmod ")
         .expect("the production/test boundary must be findable, or this guard scans nothing");

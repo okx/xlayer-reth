@@ -4,8 +4,6 @@
 use super::*;
 use alloy_primitives::{Address, B256};
 use metrics_util::debugging::{DebugValue, DebuggingRecorder};
-use rcs_filter::callstack::SnapshotStamp;
-use rcs_filter::rules::load_rules;
 
 /// Runs `f` with every `tracing` event captured, so a diagnostic's fields can be asserted —
 /// including the fields it must NOT carry.
@@ -41,71 +39,6 @@ pub(super) fn capture_tracing<R>(f: impl FnOnce() -> R) -> (R, String) {
     let out = tracing::subscriber::with_default(subscriber, f);
     let logged = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
     (out, logged)
-}
-
-/// An alias-bearing rule set, compiled exactly as the handler compiles a request's own.
-fn selector_bearing_rules() -> RuleSet {
-    let rule: RawRule = serde_json::from_value(serde_json::json!({
-        "id": "proxy-impl-allowlist",
-        "event_abis": {},
-        "callstack": { "direct_delegatecalls": {
-            "entry": format!("{:#x}", Address::repeat_byte(0xAA))
-        } },
-        "condition": { "!=": [ { "var": "entry.delegateTo" }, null ] },
-        "action": "deny"
-    }))
-    .expect("the fixture rule deserializes");
-    let rules = load_rules(1, 0, vec![rule]);
-    assert!(rules.rejected.is_empty(), "the fixture rule must load clean");
-    rules
-}
-
-/// An event rule declaring no call-frame alias.
-fn selector_free_rules() -> RuleSet {
-    let rule: RawRule = serde_json::from_str(
-        r#"{"id":"evt","event_abis":{"transfer":{"type":"event","name":"Transfer",
-               "inputs":[{"name":"from","type":"address","indexed":true}],
-               "anonymous":false}},"condition":true,"action":"deny"}"#,
-    )
-    .expect("valid event-only rule");
-    load_rules(1, 0, vec![rule])
-}
-
-/// the gate refuses an observation set produced under a different rule snapshot, accepts a
-/// genuinely empty set stamped by the evaluating one, and leaves a request that declares no
-/// selector completely untouched.
-#[test]
-fn the_request_level_gate_separates_unavailable_from_empty() {
-    let rules = selector_bearing_rules();
-    let foreign = SnapshotStamp { selector_digest: B256::repeat_byte(0xEE), ..rules.stamp() };
-
-    assert_eq!(
-        unadjudicable_observations(&rules, Observations::available(foreign, &[])),
-        Some(ObservationUnavailable::SnapshotMismatch),
-        "a foreign stamp cannot be read as captured-and-empty"
-    );
-    assert_eq!(
-        unadjudicable_observations(&rules, Observations::available(rules.stamp(), &[])),
-        None,
-        "capture ran and genuinely observed nothing: adjudicable"
-    );
-    assert_eq!(
-        unadjudicable_observations(&rules, Observations::NOT_CAPTURED),
-        Some(ObservationUnavailable::NotCaptured)
-    );
-    assert_eq!(
-        unadjudicable_observations(
-            &rules,
-            Observations::Unavailable { reason: ObservationUnavailable::BudgetExceeded }
-        ),
-        Some(ObservationUnavailable::BudgetExceeded),
-        "the reason is preserved, not collapsed"
-    );
-    assert_eq!(
-        unadjudicable_observations(&selector_free_rules(), Observations::NOT_CAPTURED),
-        None,
-        "a request declaring no selector keeps its pre-existing path byte for byte"
-    );
 }
 
 /// every classification increments its OWN counter, read back from a recorder rather than

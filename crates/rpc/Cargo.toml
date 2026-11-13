@@ -54,9 +54,10 @@ tokio = { workspace = true, features = ["rt", "macros"] }
 metrics-util.workspace = true
 # Captures this crate's own structured diagnostics so their field boundaries are asserted.
 tracing-subscriber = "0.3"
-# Enable the capture module's non-default seams for THIS crate's test targets only; the
+# Enable the shared capture crate's non-default seams for THIS crate's test targets only; the
 # feature is deliberately absent from `[dependencies]`, so a production build compiles none of it.
 rcs-filter = { workspace = true, features = ["test-utils"] }
+xlayer-rpc = { path = ".", features = ["test-utils"] }
 
 [lints]
 workspace = true
