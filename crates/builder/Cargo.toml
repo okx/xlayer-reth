@@ -162,9 +162,16 @@ rcs-filter = { workspace = true, features = ["test-utils"] }
 # `[dev-dependencies]` only — `xlayer-rpc` is deliberately absent from `[dependencies]` above, so
 # no production build of this crate links it or compiles the seams.
 xlayer-rpc = { workspace = true, features = ["test-utils"] }
+# Enable this crate's own non-default `test-utils` seam (`flashblocks::test_seams`) for its
+# integration tests in `tests/`; never enabled from `[dependencies]` or by any dependent.
+xlayer-builder = { path = ".", features = ["test-utils"] }
 
 [features]
 default = []
+
+# Test seams for this crate's own `tests/` targets (see `flashblocks::test_seams`). Enabled only
+# by the self dev-dependency above.
+test-utils = []
 
 # Gates X Layer tests that need Docker. Enable explicitly with
 # `just test false true`.

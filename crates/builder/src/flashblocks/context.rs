@@ -21,8 +21,8 @@ use core::fmt::Debug;
 use op_alloy_consensus::{OpDepositReceipt, OpTxType};
 use op_revm::{L1BlockInfo, OpSpecId};
 
-#[cfg(test)]
-use rcs_filter::callstack::{CallObservation, CallObservationKind};
+#[cfg(any(test, feature = "test-utils"))]
+use rcs_filter::callstack::CallObservation;
 use rcs_filter::callstack::{Observations, SnapshotStamp};
 use rcs_filter::matching::{MatchErrorKind, MatchOutcome};
 use rcs_filter::rules::RuleSet;
@@ -124,7 +124,7 @@ pub(super) struct TransactionLimits {
 // Incremented at the exact construction site, so `0` means no inspector was built — which a
 // derived counter could never distinguish from an inspector that observed nothing. Kept as `//`
 // (not `///`) because `thread_local!` is a macro invocation and carries no documentation.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 thread_local! {
     pub(crate) static DEPOSIT_INSPECTOR_CONSTRUCTIONS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
@@ -132,7 +132,7 @@ thread_local! {
 
 // Test-only record of the LAST deposit identification this path produced, so a test asserts the
 // real classification directly instead of inferring it from a metric or a log line.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 thread_local! {
     pub(crate) static LAST_DEPOSIT_IDENTIFICATION: std::cell::Cell<Option<DepositIdentification>> =
         const { std::cell::Cell::new(None) };
@@ -142,14 +142,14 @@ thread_local! {
 // transaction it screened. A test comparing two paths needs the observed frames themselves: two
 // verdicts can agree while resting on different observations, so verdict equality alone would not
 // establish equal identification. Kept as `//` (not `///`) because `thread_local!` is a macro
-// invocation and carries no documentation; `#[cfg(test)]` compiles both out of production builds.
-#[cfg(test)]
+// invocation and carries no documentation; the test/`test-utils` gate compiles both out of production builds.
+#[cfg(any(test, feature = "test-utils"))]
 thread_local! {
     pub(crate) static LAST_CANDIDATE_OBSERVATIONS: std::cell::RefCell<Option<Vec<CallObservation>>> =
         const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 thread_local! {
     pub(crate) static LAST_DEPOSIT_OBSERVATIONS: std::cell::RefCell<Option<Vec<CallObservation>>> =
         const { std::cell::RefCell::new(None) };
@@ -464,8 +464,8 @@ fn fail_closed_screen(
 // lets a loop-level test assert `Screen::Deny` DIRECTLY — a Deny-only signal that distinguishes the
 // fail-closed path from `Screen::Drop`, which shares the `mark_invalid`/txpool-removal side effects.
 // Kept as `//` (not `///`) so no doc comment is orphaned onto the `thread_local!` macro;
-// `#[cfg(test)]` compiles it out of production builds entirely.
-#[cfg(test)]
+// the test/`test-utils` gate compiles it out of production builds entirely.
+#[cfg(any(test, feature = "test-utils"))]
 thread_local! {
     pub(crate) static LAST_SCREEN_DECISION: std::cell::Cell<Option<Screen>> =
         const { std::cell::Cell::new(None) };
@@ -822,7 +822,7 @@ impl FlashblocksBuilderCtx {
                 // Construction-site observable: asserted directly, so "no
                 // inspector was built" is evidence rather than an inference from a counter that
                 // could also be zero for an inspector that simply observed nothing.
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-utils"))]
                 DEPOSIT_INSPECTOR_CONSTRUCTIONS.with(|c| c.set(c.get() + 1));
                 let mut evm = self.evm_config.evm_with_env_and_inspector(
                     &mut *db,
@@ -949,9 +949,9 @@ impl FlashblocksBuilderCtx {
                     result_logs: result.logs(),
                     max_event_bindings: filter.max_event_bindings_per_tx(),
                 });
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-utils"))]
                 LAST_DEPOSIT_IDENTIFICATION.with(|d| d.set(Some(identified)));
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-utils"))]
                 if let CaptureOutcome::Complete { observations, .. } = &capture_outcome {
                     LAST_DEPOSIT_OBSERVATIONS
                         .with(|o| *o.borrow_mut() = Some(observations.items.clone()));
@@ -1467,7 +1467,7 @@ impl FlashblocksBuilderCtx {
                 let decision = if let CaptureOutcome::Complete { logs, observations } =
                     &capture_outcome
                 {
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-utils"))]
                     LAST_CANDIDATE_OBSERVATIONS
                         .with(|o| *o.borrow_mut() = Some(observations.items.clone()));
                     let input = ScreenInput {
@@ -1512,7 +1512,7 @@ impl FlashblocksBuilderCtx {
                 // Test-only decision seam (spec §5.10.3 P1.2): record the ACTUAL screen decision so a
                 // loop-level test asserts `Screen::Deny` DIRECTLY — a Deny-only signal, never inferred
                 // from `mark_invalid`/txpool removal that `Screen::Drop` shares. No effect in production.
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-utils"))]
                 LAST_SCREEN_DECISION.with(|d| d.set(Some(decision)));
                 match decision {
                     Screen::Allow | Screen::AuditApproved => {}
@@ -1908,7 +1908,7 @@ mod loop_level_fail_closed_tests {
     use alloy_rpc_types_engine::PayloadAttributes;
     use op_alloy_consensus::OpTypedTransaction;
     use op_alloy_rpc_types_engine::OpPayloadAttributes;
-    use rcs_filter::rules::{load_rules, RawRule};
+    use rcs_filter::rules::load_rules;
     use rcs_filter::test_support::golden;
     use rcs_filter::{BufferStatus, FilterConfig, SystemClock};
     use reth_optimism_txpool::OpPooledTransaction;
@@ -2724,9 +2724,6 @@ mod loop_level_fail_closed_tests {
         );
         assert_eq!(filter.buffered_len(), 1, "exactly #1 occupies the pending buffer");
     }
-
-    #[cfg(test)]
-    mod snapshot_binding_tests;
 }
 
 #[cfg(test)]
@@ -2809,9 +2806,3 @@ mod bridge_intercept_tests {
         assert!(intercept_bridge_transaction_if_need(&[log], SENDER, &config).is_ok());
     }
 }
-
-#[cfg(test)]
-mod block_snapshot_pinning_tests;
-
-#[cfg(test)]
-mod deposit_identification_tests;

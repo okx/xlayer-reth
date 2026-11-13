@@ -138,14 +138,14 @@ async fn approved_resimulation_after_a_cross_block_reload_uses_the_saved_snapsho
     // ===== BLOCK N: the candidate is screened under version 41 and buffers. =====
     let ctx_v41 = build_ctx(filter.clone());
     assert_eq!(ctx_v41.rcs_rule_snapshot.as_ref().expect("snapshot pinned").content_version, 41);
-    LAST_SCREEN_DECISION.with(|d| d.set(None));
+    clear_last_screen_decision();
     let mut best_txs = RecordingTxs { tx: Some(pooled.clone()), marked: Vec::new() };
     let mut info = ExecutionInfo::with_capacity(1);
     let first =
         ctx_v41.execute_best_transactions(&mut info, &mut state, &mut best_txs, &pool, limits);
     assert!(matches!(first, Ok(None)), "block N loop completes: {first:?}");
     assert_eq!(
-        LAST_SCREEN_DECISION.with(|d| d.get()),
+        last_screen_decision(),
         Some(Screen::AuditPending),
         "the candidate's first screening buffers it for adjudication"
     );
@@ -163,14 +163,14 @@ async fn approved_resimulation_after_a_cross_block_reload_uses_the_saved_snapsho
         42,
         "the next block pins the reloaded snapshot"
     );
-    LAST_SCREEN_DECISION.with(|d| d.set(None));
+    clear_last_screen_decision();
     let mut best_txs = RecordingTxs { tx: Some(pooled), marked: Vec::new() };
     let mut info = ExecutionInfo::with_capacity(1);
     let second =
         ctx_v42.execute_best_transactions(&mut info, &mut state, &mut best_txs, &pool, limits);
     assert!(matches!(second, Ok(None)), "block N+1 loop completes: {second:?}");
     assert_eq!(
-        LAST_SCREEN_DECISION.with(|d| d.get()),
+        last_screen_decision(),
         Some(Screen::AuditApproved),
         "the Approved re-simulation must configure capture from the SAVED snapshot, so a \
              version-only reload cannot turn it into a stamp mismatch and a Drop"
@@ -240,13 +240,13 @@ async fn every_flashblock_of_one_block_keeps_the_pinned_snapshot() {
     assert_eq!(pinned_version, 1);
 
     // ===== FLASHBLOCK 1 =====
-    LAST_SCREEN_DECISION.with(|d| d.set(None));
+    clear_last_screen_decision();
     let mut best_txs = RecordingTxs { tx: Some(pooled.clone()), marked: Vec::new() };
     let mut info = ExecutionInfo::with_capacity(1);
     let first = ctx.execute_best_transactions(&mut info, &mut state, &mut best_txs, &pool, limits);
     assert!(matches!(first, Ok(None)), "flashblock 1 loop completes: {first:?}");
     assert_eq!(
-        LAST_SCREEN_DECISION.with(|d| d.get()),
+        last_screen_decision(),
         Some(Screen::Deny),
         "flashblock 1: the observed frame at the selected address denies the candidate"
     );
@@ -257,13 +257,13 @@ async fn every_flashblock_of_one_block_keeps_the_pinned_snapshot() {
     filter.install_rules(deny_rules_at(elsewhere, 2));
 
     // ===== FLASHBLOCK 2 of the SAME block =====
-    LAST_SCREEN_DECISION.with(|d| d.set(None));
+    clear_last_screen_decision();
     let mut best_txs = RecordingTxs { tx: Some(pooled.clone()), marked: Vec::new() };
     let mut info = ExecutionInfo::with_capacity(1);
     let second = ctx.execute_best_transactions(&mut info, &mut state, &mut best_txs, &pool, limits);
     assert!(matches!(second, Ok(None)), "flashblock 2 loop completes: {second:?}");
     assert_eq!(
-        LAST_SCREEN_DECISION.with(|d| d.get()),
+        last_screen_decision(),
         Some(Screen::Deny),
         "flashblock 2 of the same block must still capture and screen under the pinned \
              snapshot, so the mid-block reload cannot change the verdict"
@@ -277,14 +277,14 @@ async fn every_flashblock_of_one_block_keeps_the_pinned_snapshot() {
     // ===== NEXT L2 BLOCK — a new payload job, where the reload finally takes effect. =====
     let next_ctx = build_ctx(filter.clone());
     assert_eq!(next_ctx.rcs_rule_snapshot.as_ref().expect("snapshot pinned").content_version, 2);
-    LAST_SCREEN_DECISION.with(|d| d.set(None));
+    clear_last_screen_decision();
     let mut best_txs = RecordingTxs { tx: Some(pooled), marked: Vec::new() };
     let mut info = ExecutionInfo::with_capacity(1);
     let third =
         next_ctx.execute_best_transactions(&mut info, &mut state, &mut best_txs, &pool, limits);
     assert!(matches!(third, Ok(None)), "next block loop completes: {third:?}");
     assert_eq!(
-        LAST_SCREEN_DECISION.with(|d| d.get()),
+        last_screen_decision(),
         Some(Screen::Allow),
         "the next block pins the reloaded snapshot, whose selector the candidate never touches"
     );

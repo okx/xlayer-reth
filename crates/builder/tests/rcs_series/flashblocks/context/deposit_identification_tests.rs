@@ -114,9 +114,11 @@ fn ctx_with(
     filter: Option<Arc<FilterHandle>>,
     deposits: Vec<WithEncoded<OpTransactionSigned>>,
 ) -> FlashblocksBuilderCtx {
-    let mut genesis: Genesis =
-        serde_json::from_str(include_str!("../../tests/framework/artifacts/genesis.json.tmpl"))
-            .expect("valid genesis template JSON");
+    let mut genesis: Genesis = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/tests/framework/artifacts/genesis.json.tmpl"
+    )))
+    .expect("valid genesis template JSON");
     genesis.config.chain_id = 1;
     genesis.base_fee_per_gas = Some(0u64.into());
     let chain_spec = Arc::new(OpChainSpec::from_genesis(genesis));
@@ -237,8 +239,8 @@ fn run(ctx: &FlashblocksBuilderCtx, state: &mut State<CacheDB<EmptyDB>>) -> Bloc
 /// Resets the per-thread test seams. `cargo test` reuses threads across tests, so a stale
 /// value from an earlier test could otherwise make a later assertion pass for a wrong reason.
 fn reset_seams() {
-    DEPOSIT_INSPECTOR_CONSTRUCTIONS.with(|c| c.set(0));
-    LAST_DEPOSIT_IDENTIFICATION.with(|d| d.set(None));
+    reset_deposit_inspector_constructions();
+    clear_last_deposit_identification();
 }
 
 /// a deposit whose execution delegatecalls an UNAPPROVED implementation produces an
@@ -255,14 +257,11 @@ fn deposit_delegatecalling_unapproved_impl_is_deny_worthy() {
     let facts = run(&ctx, &mut state);
 
     assert_eq!(
-        DEPOSIT_INSPECTOR_CONSTRUCTIONS.with(|c| c.get()),
+        deposit_inspector_constructions(),
         1,
         "a selector-bearing snapshot must attach exactly one inspector"
     );
-    assert_eq!(
-        LAST_DEPOSIT_IDENTIFICATION.with(|d| d.get()),
-        Some(DepositIdentification::DenyWorthy)
-    );
+    assert_eq!(last_deposit_identification(), Some(DepositIdentification::DenyWorthy));
     // The deny-worthy outcome changed nothing about inclusion.
     assert_eq!(facts.included.len(), 1, "the deposit is still included");
 }
@@ -280,8 +279,8 @@ fn deposit_delegatecalling_approved_impl_is_allow() {
 
     let facts = run(&ctx, &mut state);
 
-    assert_eq!(DEPOSIT_INSPECTOR_CONSTRUCTIONS.with(|c| c.get()), 1);
-    assert_eq!(LAST_DEPOSIT_IDENTIFICATION.with(|d| d.get()), Some(DepositIdentification::Allow));
+    assert_eq!(deposit_inspector_constructions(), 1);
+    assert_eq!(last_deposit_identification(), Some(DepositIdentification::Allow));
     assert_eq!(facts.included.len(), 1);
 }
 
@@ -302,20 +301,19 @@ fn deposit_calling_the_proxy_without_delegatecall_is_allow() {
     let facts = run(&ctx, &mut state);
 
     assert_eq!(
-        DEPOSIT_INSPECTOR_CONSTRUCTIONS.with(|c| c.get()),
+        deposit_inspector_constructions(),
         1,
         "a selector-bearing snapshot still attaches exactly one inspector"
     );
     assert_eq!(
-        LAST_DEPOSIT_IDENTIFICATION.with(|d| d.get()),
+        last_deposit_identification(),
         Some(DepositIdentification::Allow),
         "a plain call to the proxy has no implementation to compare and must not be denied"
     );
     // The frame really was observed — a plain call frame with no implementation fields — so
     // the allow above is "identified and clean", not "nothing was captured".
-    let observed = LAST_DEPOSIT_OBSERVATIONS
-        .with(|o| o.borrow().clone())
-        .expect("capture completed, so the observation set is recorded");
+    let observed =
+        last_deposit_observations().expect("capture completed, so the observation set is recorded");
     assert_eq!(observed.len(), 1, "exactly the proxy frame was observed: {observed:?}");
     assert_eq!(observed[0].kind, CallObservationKind::Call);
     assert_eq!(observed[0].address, PROXY);
@@ -343,7 +341,7 @@ fn identification_never_changes_the_produced_block() {
             run(&ctx, &mut state)
         };
         assert_eq!(
-            DEPOSIT_INSPECTOR_CONSTRUCTIONS.with(|c| c.get()),
+            deposit_inspector_constructions(),
             0,
             "the reference run must take the pre-change path"
         );
@@ -355,9 +353,9 @@ fn identification_never_changes_the_produced_block() {
             let mut state = seeded_state(proxy_code.clone());
             run(&ctx, &mut state)
         };
-        assert_eq!(DEPOSIT_INSPECTOR_CONSTRUCTIONS.with(|c| c.get()), 1);
+        assert_eq!(deposit_inspector_constructions(), 1);
         // The identification actually happened — otherwise equality would be vacuous.
-        assert!(LAST_DEPOSIT_IDENTIFICATION.with(|d| d.get()).is_some());
+        assert!(last_deposit_identification().is_some());
 
         assert_eq!(
             identified, reference,
@@ -390,12 +388,12 @@ fn no_selectors_constructs_no_inspector_and_changes_nothing() {
     let inert = run(&ctx, &mut state);
 
     assert_eq!(
-        DEPOSIT_INSPECTOR_CONSTRUCTIONS.with(|c| c.get()),
+        deposit_inspector_constructions(),
         0,
         "an inert snapshot must not construct an inspector at all"
     );
     assert_eq!(
-        LAST_DEPOSIT_IDENTIFICATION.with(|d| d.get()),
+        last_deposit_identification(),
         None,
         "an inert snapshot must not run identification"
     );
@@ -426,7 +424,7 @@ fn callstack_budget_overflow_is_not_identified_and_block_is_unchanged() {
     let overflowed = run(&ctx, &mut state);
 
     assert_eq!(
-        LAST_DEPOSIT_IDENTIFICATION.with(|d| d.get()),
+        last_deposit_identification(),
         Some(DepositIdentification::NotIdentified(DepositNotIdentified::BudgetExceeded)),
         "an over-budget capture must be an explicit not-identified, never allow"
     );
@@ -610,18 +608,15 @@ mod cross_path_identification_tests {
         let limits =
             TransactionLimits { block_gas: 30_000_000, block_da: None, block_da_footprint: None };
 
-        LAST_SCREEN_DECISION.with(|d| d.set(None));
-        LAST_CANDIDATE_OBSERVATIONS.with(|o| *o.borrow_mut() = None);
+        clear_last_screen_decision();
+        clear_last_candidate_observations();
         ctx.execute_best_transactions(&mut info, &mut state, &mut best, &pool, limits)
             .expect("the candidate loop runs");
 
         (
-            LAST_CANDIDATE_OBSERVATIONS
-                .with(|o| o.borrow().clone())
+            last_candidate_observations()
                 .expect("the candidate's capture completed, so its observations are recorded"),
-            LAST_SCREEN_DECISION
-                .with(|d| d.get())
-                .expect("the candidate reached the screening decision"),
+            last_screen_decision().expect("the candidate reached the screening decision"),
         )
     }
 
@@ -632,19 +627,16 @@ mod cross_path_identification_tests {
         proxy_code: Vec<u8>,
     ) -> (Vec<CallObservation>, DepositIdentification) {
         reset_seams();
-        LAST_DEPOSIT_OBSERVATIONS.with(|o| *o.borrow_mut() = None);
+        clear_last_deposit_observations();
         let filter = filter_with(raw, test_config());
         let ctx = ctx_with(Some(filter), vec![deposit_to(PROXY)]);
         let mut state = fixture_state(None, proxy_code);
         let facts = run(&ctx, &mut state);
         assert_eq!(facts.included.len(), 1, "the fixture deposit is included");
         (
-            LAST_DEPOSIT_OBSERVATIONS
-                .with(|o| o.borrow().clone())
+            last_deposit_observations()
                 .expect("the deposit's capture completed, so its observations are recorded"),
-            LAST_DEPOSIT_IDENTIFICATION
-                .with(|d| d.get())
-                .expect("the deposit reached the identification step"),
+            last_deposit_identification().expect("the deposit reached the identification step"),
         )
     }
 
@@ -1233,8 +1225,10 @@ mod cross_path_identification_tests {
             Address::new(alloy_primitives::hex!("00000000000000000000000000000000000f00f0"));
 
         /// The producer's rendered `GET /rules` body, verbatim.
-        const RENDERED_RESPONSE: &str =
-            include_str!("../../../../rcs-filter/testdata/producer-rendered-rules-response.json");
+        const RENDERED_RESPONSE: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../rcs-filter/testdata/producer-rendered-rules-response.json"
+        ));
 
         /// The rendered `rules` array as raw text, sliced out without parsing so the rule
         /// bytes the consumer decodes are byte-for-byte the producer's.

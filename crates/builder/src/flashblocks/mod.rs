@@ -19,6 +19,8 @@ mod handler;
 mod handler_ctx;
 mod rcs_capture;
 mod service;
+#[cfg(feature = "test-utils")]
+pub mod test_seams;
 mod timing;
 pub(crate) mod utils;
 
@@ -376,9 +378,6 @@ mod rcs_filter_config_tests {
         assert!(build_rcs_filter_config(&args).is_err());
         assert!(build_rcs_filter_handle(&args).is_err());
     }
-
-    #[cfg(test)]
-    mod callstack_budget_tests;
 
     #[test]
     fn budgets_default_to_10_000_and_map_into_config() {
