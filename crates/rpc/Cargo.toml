@@ -6,12 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-# Test files live in `tests/` but are NOT Cargo integration tests: each one is attached to its
-# production parent module with `#[path]`, so it keeps private access and its module path. With
-# Cargo's auto-discovery every `tests/*.rs` would ALSO be compiled as a separate crate and fail
-# (`too many leading super keywords`). A new test or helper file must therefore be declared from
-# its parent with `#[path]`; it is never picked up implicitly.
-autotests = false
 
 [features]
 default = []
@@ -45,6 +39,7 @@ op-alloy-network.workspace = true
 op-revm.workspace = true
 
 rcs-filter.workspace = true
+xlayer-rcs-capture.workspace = true
 
 jsonrpsee.workspace = true
 serde.workspace = true
@@ -60,10 +55,9 @@ tokio = { workspace = true, features = ["rt", "macros"] }
 metrics-util.workspace = true
 # Captures this crate's own structured diagnostics so their field boundaries are asserted.
 tracing-subscriber = "0.3"
-# Enable `rcs-filter`'s non-default seams (screening and capture) for THIS crate's test targets
-# only; the feature is deliberately absent from `[dependencies]`, so a production build compiles
-# none of it.
-rcs-filter = { workspace = true, features = ["test-utils"] }
+# Enable the shared capture crate's non-default seams for THIS crate's test targets only; the
+# feature is deliberately absent from `[dependencies]`, so a production build compiles none of it.
+xlayer-rcs-capture = { workspace = true, features = ["test-utils"] }
 
 [lints]
 workspace = true

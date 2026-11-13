@@ -151,6 +151,5 @@ impl<'a> Observations<'a> {
     }
 }
 
-#[path = "../tests/callstack__tests.rs"]
 #[cfg(test)]
 mod tests;
