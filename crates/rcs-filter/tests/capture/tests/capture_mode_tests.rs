@@ -70,7 +70,8 @@ fn default_mode_is_native_and_callstack() {
 fn callstack_only_still_enforces_the_callstack_budget() {
     let mut inspector = RcsInspector::callstack_only(0, selector_config());
     inspector.start_capture();
-    inspector.commit_observation(CallObservation::call(addr(0xAA), B256::repeat_byte(0xCC)));
+    inspector
+        .commit_observation_for_test(CallObservation::call(addr(0xAA), B256::repeat_byte(0xCC)));
     assert!(matches!(
         inspector.finish_capture(&[]),
         CaptureOutcome::LimitExceeded { budget: ObservationBudget::Callstack, .. }
@@ -86,7 +87,7 @@ fn callstack_only_still_produces_stamped_observations() {
     let mut inspector = RcsInspector::callstack_only(usize::MAX, config);
     inspector.start_capture();
     let observation = CallObservation::call(addr(0xAA), B256::repeat_byte(0xCC));
-    inspector.commit_observation(observation);
+    inspector.commit_observation_for_test(observation);
     match inspector.finish_capture(&[]) {
         CaptureOutcome::Complete { logs, observations } => {
             assert!(logs.is_empty());

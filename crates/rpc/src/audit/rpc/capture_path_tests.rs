@@ -1176,7 +1176,7 @@ fn native_transfer_deny_rule() -> RawRule {
         } },
         "condition": { "==": [
             { "var": "transfer.address" },
-            format!("{:#x}", xlayer_rcs_capture::NATIVE_ASSET_ADDRESS)
+            format!("{:#x}", rcs_filter::capture::NATIVE_ASSET_ADDRESS)
         ] },
         "action": "deny"
     }))
@@ -1610,7 +1610,7 @@ fn audit_capture_config_budget_reaches_the_inspector() {
         AuditCaptureConfig { max_callstack_observations_per_tx: 7 },
     )
     .expect("selectors declared");
-    assert_eq!(inspector.mode(), xlayer_rcs_capture::CaptureMode::CallstackOnly);
+    assert_eq!(inspector.mode(), rcs_filter::capture::CaptureMode::CallstackOnly);
 }
 
 // ----------------------------------------------------- repeated-adjudication fixtures ----

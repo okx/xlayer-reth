@@ -18,6 +18,7 @@
 //! 3. Rules are hot-swapped atomically ([`Arc<RwLock<Arc<RuleSet>>>`]).
 
 pub mod callstack;
+pub mod capture;
 pub mod client;
 pub mod clock;
 pub mod config;

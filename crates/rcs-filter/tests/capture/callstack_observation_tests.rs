@@ -328,9 +328,9 @@ fn an_empty_selector_set_pushes_no_frame_record() {
     let any = Address::from([0xD7; 20]);
     let mut inspector = RcsInspector::with_callstack(1_000, 16, CallstackCaptureConfig::default());
     inspector.start_capture();
-    inspector.enter_frame(any, any, Some(CallScheme::Call));
+    inspector.enter_frame_for_test(any, any, Some(CallScheme::Call));
     assert_eq!(inspector.open_frame_count(), 0, "no frame is tracked for an inert selector set");
-    inspector.exit_frame();
+    inspector.exit_frame_for_test();
     assert_eq!(inspector.open_frame_count(), 0);
     match inspector.finish_capture(&[]) {
         CaptureOutcome::Complete { observations, .. } => assert!(observations.items.is_empty()),
@@ -714,7 +714,7 @@ fn an_unbalanced_frame_stack_fails_closed() {
         CallstackCaptureConfig::new(stamp(), vec![Address::repeat_byte(0x11)]),
     );
     inspector.start_capture();
-    inspector.enter_frame(
+    inspector.enter_frame_for_test(
         Address::repeat_byte(0x11),
         Address::repeat_byte(0x11),
         Some(CallScheme::Call),
@@ -737,7 +737,7 @@ fn exhausting_the_frame_stack_bound_fails_closed() {
     );
     inspector.start_capture();
     for _ in 0..=MAX_OPEN_FRAMES {
-        inspector.enter_frame(selected, selected, Some(CallScheme::Call));
+        inspector.enter_frame_for_test(selected, selected, Some(CallScheme::Call));
     }
     match inspector.finish_capture(&[]) {
         CaptureOutcome::InvariantViolation {
@@ -758,17 +758,17 @@ fn a_staged_candidate_is_discarded_when_its_frame_never_executes() {
         CallstackCaptureConfig::new(stamp(), vec![selected]),
     );
     inspector.start_capture();
-    inspector.enter_frame(selected, selected, Some(CallScheme::Call));
-    assert!(inspector.observations.is_empty(), "staging allocates no observation");
-    assert_eq!(inspector.callstack_observed_count, 0, "staging consumes no budget");
-    inspector.exit_frame();
+    inspector.enter_frame_for_test(selected, selected, Some(CallScheme::Call));
+    assert!(inspector.observations_for_test().is_empty(), "staging allocates no observation");
+    assert_eq!(inspector.callstack_observed_count_for_test(), 0, "staging consumes no budget");
+    inspector.exit_frame_for_test();
     assert!(observations(inspector.finish_capture(&[])).is_empty());
 
     // Whereas a confirmed execution commits exactly one.
     inspector.start_capture();
-    inspector.enter_frame(selected, selected, Some(CallScheme::Call));
-    inspector.confirm_frame_execution(B256::repeat_byte(0xaa));
-    inspector.exit_frame();
+    inspector.enter_frame_for_test(selected, selected, Some(CallScheme::Call));
+    inspector.confirm_frame_execution_for_test(B256::repeat_byte(0xaa));
+    inspector.exit_frame_for_test();
     assert_eq!(
         observations(inspector.finish_capture(&[])),
         vec![CallObservation::call(selected, B256::repeat_byte(0xaa))]
@@ -786,9 +786,9 @@ fn capture_state_does_not_leak_between_transactions() {
     // First window overflows its observation budget.
     inspector.start_capture();
     for _ in 0..2 {
-        inspector.enter_frame(selected, selected, Some(CallScheme::Call));
-        inspector.confirm_frame_execution(B256::repeat_byte(0xaa));
-        inspector.exit_frame();
+        inspector.enter_frame_for_test(selected, selected, Some(CallScheme::Call));
+        inspector.confirm_frame_execution_for_test(B256::repeat_byte(0xaa));
+        inspector.exit_frame_for_test();
     }
     assert!(matches!(
         inspector.finish_capture(&[]),
@@ -796,9 +796,9 @@ fn capture_state_does_not_leak_between_transactions() {
     ));
     // The next window starts clean: the sticky overflow and the counter are both reset.
     inspector.start_capture();
-    inspector.enter_frame(selected, selected, Some(CallScheme::Call));
-    inspector.confirm_frame_execution(B256::repeat_byte(0xbb));
-    inspector.exit_frame();
+    inspector.enter_frame_for_test(selected, selected, Some(CallScheme::Call));
+    inspector.confirm_frame_execution_for_test(B256::repeat_byte(0xbb));
+    inspector.exit_frame_for_test();
     assert_eq!(
         observations(inspector.finish_capture(&[])),
         vec![CallObservation::call(selected, B256::repeat_byte(0xbb))]
@@ -814,12 +814,12 @@ fn hooks_are_inert_until_capture_is_armed() {
         CallstackCaptureConfig::new(stamp(), vec![selected]),
     );
     // Not armed: a gasless pre-check or any non-candidate simulation must capture nothing.
-    inspector.enter_frame(selected, selected, Some(CallScheme::Call));
-    inspector.confirm_frame_execution(B256::repeat_byte(0xaa));
-    inspector.exit_frame();
-    assert!(inspector.frames.is_empty());
-    assert!(inspector.observations.is_empty());
-    assert_eq!(inspector.callstack_observed_count, 0);
+    inspector.enter_frame_for_test(selected, selected, Some(CallScheme::Call));
+    inspector.confirm_frame_execution_for_test(B256::repeat_byte(0xaa));
+    inspector.exit_frame_for_test();
+    assert!(inspector.open_frame_count() == 0);
+    assert!(inspector.observations_for_test().is_empty());
+    assert_eq!(inspector.callstack_observed_count_for_test(), 0);
 }
 
 #[test]
@@ -831,12 +831,12 @@ fn aborting_a_capture_clears_the_observation_state() {
         CallstackCaptureConfig::new(stamp(), vec![selected]),
     );
     inspector.start_capture();
-    inspector.enter_frame(selected, selected, Some(CallScheme::Call));
-    inspector.confirm_frame_execution(B256::repeat_byte(0xaa));
+    inspector.enter_frame_for_test(selected, selected, Some(CallScheme::Call));
+    inspector.confirm_frame_execution_for_test(B256::repeat_byte(0xaa));
     inspector.abort_capture();
-    assert!(inspector.observations.is_empty());
-    assert!(inspector.frames.is_empty());
-    assert_eq!(inspector.callstack_observed_count, 0);
+    assert!(inspector.observations_for_test().is_empty());
+    assert!(inspector.open_frame_count() == 0);
+    assert_eq!(inspector.callstack_observed_count_for_test(), 0);
 }
 
 mod nested_proxy_tests;
