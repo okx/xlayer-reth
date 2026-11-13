@@ -28,6 +28,12 @@ use alloy_eips::BlockId;
 use alloy_evm::{Evm, IntoTxEnv};
 use alloy_op_evm::OpEvmFactory;
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
+pub use rcs_filter::audit::KnownAllowedKind;
+use rcs_filter::audit::{
+    callstack_only_inspector, callstack_only_projection, deposit_known_allowed_kind,
+    observations_from, resolve_known_allowed_kind, unadjudicable_observations,
+    unlabelled_known_allowed, KnownAllowedResolution,
+};
 use rcs_filter::callstack::{ObservationUnavailable, Observations};
 use rcs_filter::config::{
     is_supported_protocol, MIN_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
@@ -42,13 +48,12 @@ use reth_rpc_eth_api::{
 use reth_storage_api::BlockReaderIdExt;
 use revm::{context_interface::result::ResultAndState, DatabaseCommit};
 use rcs_filter::capture::{
-    CallstackCaptureConfig, CaptureGuard, CaptureOutcome, ObservationBudget, RcsCaptureControl,
-    RcsCaptureScope, RcsInspector,
+    CallstackCaptureConfig, CaptureGuard, CaptureOutcome, RcsCaptureControl, RcsCaptureScope,
+    RcsInspector,
 };
 
 use super::deposit::{build_deposit_tx, DepositTxRequest};
 use super::metrics::{KnownAllowedResolutionMetrics, SyntheticBanIdentificationMetrics};
-use super::synthetic_ban::verify_synthetic_ban;
 use super::verdict::AuditResult;
 use super::verdict::CallstackIdentification;
 use super::verdict::ExecutedTx;
@@ -101,38 +106,6 @@ fn known_allowed_result(tx_hash: alloy_primitives::B256, source_hash: &str) -> A
         actions: None,
         callstack_identification: None,
     }
-}
-
-/// What a `known_allowed` entry IS.
-///
-/// The two classes have **opposite safe defaults** — Deny-priority is safe for an `Original` and
-/// unsafe for a `SyntheticBan`, and committing is safe for a `SyntheticBan` and unsafe for an
-/// `Original` — so the class is never guessed from `to`, position or any other heuristic. It is
-/// decided per entry, in this order:
-///
-/// 1. **Label map present** (`known_allowed_kinds` is `Some`): the caller's label is used for
-///    every entry and nothing is inferred. A partial map is rejected at the boundary.
-/// 2. **No label map**: the entry's built deposit is checked against RCS's v1 synthetic-ban
-///    derivation ([`verify_synthetic_ban`]). A match is a `SyntheticBan`; anything else is an
-///    `Original`.
-///
-/// Step 2 is a **content binding, not source authentication**. It proves only that the entry's
-/// own bytes match the derivation; anyone authoring a request can build such an entry. It is
-/// sound for a caller that derives every original's `source_hash` from the real L1 log and builds
-/// ban prefixes only through that derivation, which is how RCS builds its requests. A matching
-/// entry gets exactly the `Allow` + commit every unlabelled entry used to get, so the check grants
-/// no caller anything it did not already have. For any other caller that sends `known_allowed`
-/// without labels this is a behaviour change: an entry that does not match is now re-adjudicated
-/// on the call-frame dimension and can be `Deny` or the non-verdict, with nothing committed. Such
-/// a caller keeps the unconditional `Allow` + commit for an entry by labelling it `SyntheticBan`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum KnownAllowedKind {
-    /// An ordinary deposit the caller's adjudicator already resolved to Allow.
-    Original,
-    /// A control prefix the caller prepended for blacklist replay. It is authored by the caller
-    /// itself to rebuild base state it already decided, not an unadjudicated user payload.
-    SyntheticBan,
 }
 
 /// The rule protocol version an omitted request field means. Keeps every existing caller
@@ -281,16 +254,7 @@ fn validate_known_allowed_labels(
     known_allowed: &[String],
     kinds: Option<&BTreeMap<String, KnownAllowedKind>>,
 ) -> Result<(), jsonrpsee::types::ErrorObjectOwned> {
-    if kinds.is_none() || known_allowed.is_empty() {
-        return Ok(());
-    }
-    let mut unlabelled: Vec<&str> = known_allowed
-        .iter()
-        .filter(|hash| !kinds.is_some_and(|kinds| kinds.contains_key(hash.as_str())))
-        .map(String::as_str)
-        .collect();
-    unlabelled.sort_unstable();
-    unlabelled.dedup();
+    let unlabelled = unlabelled_known_allowed(known_allowed, kinds);
     if unlabelled.is_empty() {
         return Ok(());
     }
@@ -331,25 +295,6 @@ fn validate_compiled_rules(rules: &RuleSet) -> Result<(), jsonrpsee::types::Erro
     ))
 }
 
-/// The callstack-only projection of a request's rules, used ONLY to adjudicate a `known_allowed`
-/// `Original`. `None` when the request declares no selector, where there is nothing to adjudicate
-/// and the pre-existing unconditional `Allow` applies unchanged.
-///
-/// Filtering out rules with no `callstack` section leaves the selector address set — and
-/// therefore the `SnapshotStamp` — unchanged, so capture and screening still provably share one
-/// configuration and the existing stamp check keeps its meaning.
-fn callstack_only_projection(rules: &RuleSet, raw: &[RawRule]) -> Option<RuleSet> {
-    if !rules.has_callstack_rules() {
-        return None;
-    }
-    let projected: Vec<RawRule> = raw
-        .iter()
-        .filter(|rule| rule.callstack.as_ref().is_some_and(Option::is_some))
-        .cloned()
-        .collect();
-    Some(load_rules(MIN_PROTOCOL_VERSION, 0, projected))
-}
-
 /// The capture inspector this request needs, or `None` when it declares no call-frame selector —
 /// in which case NO inspector is constructed at all and the path keeps its pre-existing EVM.
 ///
@@ -358,12 +303,7 @@ fn callstack_only_projection(rules: &RuleSet, raw: &[RawRule]) -> Option<RuleSet
 /// observation budget — the same `max_callstack_observations_per_tx` the candidate loop uses,
 /// applied PER TRANSACTION inside the batch.
 fn audit_capture_inspector(rules: &RuleSet, capture: AuditCaptureConfig) -> Option<RcsInspector> {
-    rules.has_callstack_rules().then(|| {
-        RcsInspector::callstack_only(
-            capture.max_callstack_observations_per_tx,
-            CallstackCaptureConfig::new(rules.stamp(), rules.callstack_selectors().to_vec()),
-        )
-    })
+    callstack_only_inspector(rules, capture.max_callstack_observations_per_tx)
 }
 
 // Test-only construction-site observable for the audit RPC's inspector, the
@@ -399,15 +339,6 @@ struct AuditBatch<'a> {
     report_identification: bool,
 }
 
-/// How a `known_allowed` entry's class was decided.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KnownAllowedResolution {
-    /// Read from the request's label map.
-    Labelled,
-    /// Decided by the content-binding check, because the request supplied no label map.
-    Inferred,
-}
-
 /// The class of an unlabelled `known_allowed` entry, decided from the deposit the batch executes.
 ///
 /// Only the built transaction's own `source_hash` and `input` are read — the bytes
@@ -415,10 +346,8 @@ enum KnownAllowedResolution {
 /// to one class. A transaction that is not a deposit cannot be a synthetic ban.
 fn inferred_known_allowed_kind(tx: &Recovered<OpTransactionSigned>) -> KnownAllowedKind {
     match tx.inner() {
-        op_alloy_consensus::OpTxEnvelope::Deposit(deposit)
-            if verify_synthetic_ban(deposit.source_hash, &deposit.input) =>
-        {
-            KnownAllowedKind::SyntheticBan
+        op_alloy_consensus::OpTxEnvelope::Deposit(deposit) => {
+            deposit_known_allowed_kind(deposit.source_hash, &deposit.input)
         }
         _ => KnownAllowedKind::Original,
     }
@@ -436,15 +365,9 @@ impl AuditBatch<'_> {
         source_hash: &str,
         tx: &Recovered<OpTransactionSigned>,
     ) -> Option<(KnownAllowedKind, KnownAllowedResolution)> {
-        if !self.known_allowed.contains(source_hash) {
-            return None;
-        }
-        match self.kinds {
-            Some(kinds) => {
-                kinds.get(source_hash).copied().map(|kind| (kind, KnownAllowedResolution::Labelled))
-            }
-            None => Some((inferred_known_allowed_kind(tx), KnownAllowedResolution::Inferred)),
-        }
+        resolve_known_allowed_kind(self.known_allowed, self.kinds, source_hash, || {
+            inferred_known_allowed_kind(tx)
+        })
     }
 
     fn identification(&self, value: CallstackIdentification) -> Option<CallstackIdentification> {
@@ -518,59 +441,6 @@ impl AuditBatchPlan {
             kinds: self.kinds.as_ref(),
             report_identification: self.report_identification,
         }
-    }
-}
-
-/// Maps a non-`Complete` capture outcome to the observation state screening must see. Every
-/// variant is an EXPLICIT unavailable reason — never `Available { items: [] }`, which would read
-/// as "captured, nothing matched".
-fn observations_from(outcome: &CaptureOutcome) -> Observations<'_> {
-    match outcome {
-        CaptureOutcome::Complete { observations, .. } => {
-            Observations::available(observations.stamp, &observations.items)
-        }
-        CaptureOutcome::LimitExceeded { budget: ObservationBudget::Callstack, .. } => {
-            Observations::Unavailable {
-                reason: rcs_filter::callstack::ObservationUnavailable::BudgetExceeded,
-            }
-        }
-        // The native budget is not applicable in `CallstackOnly` mode and is never consulted, so
-        // reaching it would be a capture-state bug; it is unidentifiable, not ignorable.
-        CaptureOutcome::LimitExceeded { .. } | CaptureOutcome::InvariantViolation { .. } => {
-            Observations::Unavailable {
-                reason: rcs_filter::callstack::ObservationUnavailable::Incomplete,
-            }
-        }
-        CaptureOutcome::Passthrough => super::verdict::observations_not_captured(),
-    }
-}
-
-/// Why one transaction cannot be adjudicated AT ALL against the request's rules, decided from the
-/// request's own compiled set before a single rule is filtered or matched.
-///
-/// This has to be a request-level question, not a per-rule one. Matching skips a rule narrowed by
-/// `contract_address` / `origin` with zero decoding, so for such a rule the per-rule observation
-/// check is never reached and an unidentifiable execution would fall through to an authoritative
-/// `Allow` — exactly what the highest-priority rule forbids. `has_callstack_rules()` keeps a
-/// request that declares no selector byte-identical to its previous behaviour: nothing is
-/// declared, so nothing can be unidentifiable.
-///
-/// The stamp comparison mirrors the matcher's own: an observation set produced under a different
-/// rule snapshot cannot distinguish an absent frame from an unobserved one, so it is unavailable
-/// rather than empty.
-fn unadjudicable_observations(
-    rules: &RuleSet,
-    observations: Observations<'_>,
-) -> Option<ObservationUnavailable> {
-    if !rules.has_callstack_rules() {
-        return None;
-    }
-    match observations {
-        Observations::Unavailable { reason } => Some(reason),
-        Observations::Available { stamp, .. } if stamp != rules.stamp() => {
-            Some(ObservationUnavailable::SnapshotMismatch)
-        }
-        Observations::Available { .. } => None,
     }
 }
 

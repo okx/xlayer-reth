@@ -17,6 +17,7 @@
 //! 2. All RCS network IO happens on background tokio workers ([`worker`]).
 //! 3. Rules are hot-swapped atomically ([`Arc<RwLock<Arc<RuleSet>>>`]).
 
+pub mod audit;
 pub mod callstack;
 pub mod capture;
 pub mod client;

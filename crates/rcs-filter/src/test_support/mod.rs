@@ -8,6 +8,8 @@ mod clock;
 pub mod golden;
 pub mod log_builder;
 mod mock;
+#[cfg(feature = "test-utils")]
+pub mod synthetic_ban_golden;
 
 pub use clock::TestClock;
 pub use mock::MockRcsClient;
