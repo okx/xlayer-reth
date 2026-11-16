@@ -11,6 +11,15 @@
 //! or the non-verdict but never `Audit`; and with no call-frame rule in the request an approved
 //! original is committed as `Allow`. See [`KnownAllowedKind`] for how the class is decided.
 //!
+//! Every transaction has its own call-frame observation budget ([`AuditCaptureConfig`], default
+//! 1 000), applied per transaction and never pooled across the batch. Over budget, an ordinary
+//! deposit or an approved original is the non-verdict and its state is not committed. A synthetic
+//! ban prefix — labelled `synthetic_ban` by the caller, or recognised by the content-binding check
+//! when the request sends no label map — keeps its unconditional `Allow` + commit, because that
+//! commit rebuilds the base state the later entries are adjudicated on; it is reported
+//! `not_identified`, and an over-budget prefix also emits the bounded
+//! `xlayer_audit_rpc::synthetic_ban_budget` event.
+//!
 //! This handler does no side-effecting screening (never touches `FilterHandle::screen_tx` or its
 //! `BufferPool`): it runs a throwaway EVM overlay seeded from the current chain-tip state and
 //! discards it after producing verdicts.
@@ -169,16 +178,30 @@ impl TryFrom<AuditTransactionsRequestWire> for AuditTransactionsRequest {
     }
 }
 
-/// The capture configuration threaded into the audit RPC from the node's `rcs-filter` args.
+/// The audit RPC's own capture configuration.
 ///
-/// `max_callstack_observations_per_tx` is the SAME per-transaction bound the payload builder's
-/// candidate loop uses, and it is applied **per transaction** inside a batch — a deposit batch
-/// does not share one pooled allowance. The value carried here has already been validated as
-/// `>= 1` by `FilterConfig::validate()` at startup, which this type does not relax, bypass or
-/// re-interpret.
+/// `max_callstack_observations_per_tx` is applied **per transaction** inside a batch — a deposit
+/// batch does not share one pooled allowance. The handler always uses [`Self::default`]; the
+/// value is deliberately not read from the node's `rcs-filter` args, whose
+/// `max-callstack-observations-per-tx` (default 10 000) bounds the payload builder's own paths
+/// only. Exceeding it fails closed for every adjudicated transaction — an ordinary deposit or an
+/// approved original is the non-verdict and its state is not committed. The one exception is a
+/// synthetic ban prefix, which keeps its `Allow` + commit and is reported `not_identified` (see
+/// the module documentation).
 #[derive(Debug, Clone, Copy)]
 pub struct AuditCaptureConfig {
     pub max_callstack_observations_per_tx: usize,
+}
+
+impl AuditCaptureConfig {
+    /// Per-transaction call-frame observation budget of `xlayer_auditTransactions`.
+    pub const DEFAULT_MAX_CALLSTACK_OBSERVATIONS_PER_TX: usize = 1_000;
+}
+
+impl Default for AuditCaptureConfig {
+    fn default() -> Self {
+        Self { max_callstack_observations_per_tx: Self::DEFAULT_MAX_CALLSTACK_OBSERVATIONS_PER_TX }
+    }
 }
 
 /// The RPC crate's EVM adapter for the shared [`RcsCaptureScope`].
@@ -300,8 +323,7 @@ fn validate_compiled_rules(rules: &RuleSet) -> Result<(), jsonrpsee::types::Erro
 ///
 /// `CallstackOnly`: this path produces and consumes no virtual native-transfer log, screens
 /// against the raw execution logs it already used, and the only live budget is the callstack
-/// observation budget — the same `max_callstack_observations_per_tx` the candidate loop uses,
-/// applied PER TRANSACTION inside the batch.
+/// observation budget of `capture`, applied PER TRANSACTION inside the batch.
 fn audit_capture_inspector(rules: &RuleSet, capture: AuditCaptureConfig) -> Option<RcsInspector> {
     callstack_only_inspector(rules, capture.max_callstack_observations_per_tx)
 }
@@ -586,6 +608,10 @@ where
         // arm below, so passing it through this gate would return the non-verdict for an entry
         // that was never going to be adjudicated and withhold the commit the caller depends on.
         // Ordinary deposits and `Original` entries, labelled or inferred, are NOT exempt.
+        // That includes a prefix over the observation budget: its unavailable set is reported
+        // (`not_identified`, plus the bounded budget event), never acted on. The class is the
+        // caller's label or, without a label map, the content-binding check of
+        // [`KnownAllowedKind`] — a binding to the entry's own bytes, not source authentication.
         let self_adjudicating = matches!(kind, Some(KnownAllowedKind::SyntheticBan));
         if !self_adjudicating
             && let Some(reason) = unadjudicable_observations(batch.rules, observations)
@@ -624,6 +650,15 @@ where
                     identification,
                     batch.rules.selector_bearing_rule_count(),
                 );
+                if unadjudicable_observations(batch.rules, observations)
+                    == Some(ObservationUnavailable::BudgetExceeded)
+                {
+                    report_synthetic_ban_budget_exceeded(
+                        tx.tx_hash(),
+                        &tx_req.source_hash,
+                        batch.rules.selector_bearing_rule_count(),
+                    );
+                }
                 executed[exec_idx] = Some(
                     known_allowed_result(tx.tx_hash(), &tx_req.source_hash)
                         .with_identification(batch.identification(identification)),
@@ -776,6 +811,31 @@ fn report_synthetic_ban_identification(
     }
 }
 
+/// The separately filterable record that a synthetic replay prefix exceeded the call-frame
+/// observation budget and was STILL committed under the synthetic-ban exception.
+///
+/// It complements, and never replaces, the `not_identified` counter and log above: those cover
+/// every unidentifiable prefix whatever the reason, this event only the over-budget one, so an
+/// operator can select it without reading every `not_identified` as an over-budget event. Its
+/// fields are fixed and low-cardinality, bounded exactly like the identification log. The
+/// prefix's `Allow` and its commit are decided by the caller and are unchanged by this.
+fn report_synthetic_ban_budget_exceeded(
+    tx_hash: alloy_primitives::B256,
+    source_hash: &str,
+    selector_bearing_rules: usize,
+) {
+    tracing::warn!(
+        target: "xlayer_audit_rpc::synthetic_ban_budget",
+        %tx_hash,
+        %source_hash,
+        outcome = "not_identified",
+        reason = ObservationUnavailable::BudgetExceeded.as_str(),
+        committed = true,
+        selector_bearing_rules,
+        "replay prefix exceeded the call-frame observation budget; committed under the synthetic-ban exception"
+    );
+}
+
 /// The reported call-frame identification of a `known_allowed` entry whose verdict its own class
 /// contract fixes: observation only, never acted on.
 ///
@@ -832,6 +892,12 @@ pub trait XlayerAuditApi {
     /// `AuditTransactionsRequest::known_allowed`). A verdict describes the request as submitted
     /// and is never evidence of where the request or any entry came from.
     ///
+    /// Each transaction has its own call-frame observation budget of 1 000. Over it, an ordinary
+    /// deposit or an approved original is `malformed` and not committed; a synthetic ban prefix —
+    /// labelled `synthetic_ban`, or recognised by the content-binding check when no label map is
+    /// sent — stays `allow`, is committed (it rebuilds the base state) and is reported
+    /// `not_identified`.
+    ///
     /// **Only meaningful for deposits not yet recorded in `TxBlacklist`.** If a deposit passed
     /// here has *already* been blacklisted on-chain, the underlying EVM (see the L1 force-tx
     /// intercept design) skips its payload before this handler ever sees any logs from it — the
@@ -853,16 +919,6 @@ pub trait XlayerAuditApi {
 #[derive(Debug)]
 pub struct XlayerAuditRpc<T> {
     pub backend: Arc<T>,
-    /// Capture configuration, read from the node's `rcs-filter` args at registration. Only the
-    /// **budget** comes from that args group: the audit RPC adjudicates the rules carried in the
-    /// request, not the node's installed snapshot, so it keeps working with the filter disabled.
-    pub capture: AuditCaptureConfig,
-}
-
-impl<T> XlayerAuditRpc<T> {
-    pub fn new(backend: Arc<T>, capture: AuditCaptureConfig) -> Self {
-        Self { backend, capture }
-    }
 }
 
 #[jsonrpsee::core::async_trait]
@@ -882,7 +938,7 @@ where
         // Every request-level check, the rule compilation and the callstack-only projection, in
         // the one place a test can drive them too.
         let plan = AuditBatchPlan::prepare(&req)?;
-        let capture_config = self.capture;
+        let capture_config = AuditCaptureConfig::default();
 
         // Build every tx up front so a per-item construction failure produces a `Malformed`
         // result without aborting the rest of the batch.
