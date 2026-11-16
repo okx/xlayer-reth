@@ -37,6 +37,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::callstack::{CallObservation, SnapshotStamp};
+use crate::rules::RuleSet;
 use alloy_primitives::{address, keccak256, Address, Bytes, Log, LogData, B256, U256};
 use revm::{
     bytecode::opcode,
@@ -208,6 +209,17 @@ impl CallstackCaptureConfig {
     /// Builds a configuration from a snapshot's selector addresses and its stamp.
     pub fn new(stamp: SnapshotStamp, addresses: impl IntoIterator<Item = Address>) -> Self {
         Self { stamp: Some(stamp), addresses: Arc::new(addresses.into_iter().collect()) }
+    }
+
+    /// Builds the configuration for one compiled rule snapshot: its own stamp and its own
+    /// selector addresses, so the two can never come from different snapshots. A snapshot that
+    /// declares no selector yields an inert configuration.
+    ///
+    /// The one place a rule snapshot becomes a capture configuration, shared by the payload
+    /// builder and the audit RPC. Each caller keeps its own observation budget, which is not part
+    /// of this configuration.
+    pub fn from_rules(rules: &RuleSet) -> Self {
+        Self::new(rules.stamp(), rules.callstack_selectors().iter().copied())
     }
 
     /// Whether any address is observed. `false` short-circuits every observation hook.

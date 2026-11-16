@@ -538,7 +538,7 @@ impl CaptureConfigMemo {
         if let Some((_, config)) = self.entries.iter().find(|(known, _)| *known == stamp) {
             return config.clone();
         }
-        let config = CallstackCaptureConfig::new(stamp, rules.callstack_selectors().to_vec());
+        let config = CallstackCaptureConfig::from_rules(rules);
         self.entries.push((stamp, config.clone()));
         config
     }
@@ -814,10 +814,7 @@ impl FlashblocksBuilderCtx {
             Some((filter, snapshot)) => {
                 let inspector = RcsInspector::callstack_only(
                     filter.max_callstack_observations_per_tx(),
-                    CallstackCaptureConfig::new(
-                        snapshot.stamp(),
-                        snapshot.callstack_selectors().to_vec(),
-                    ),
+                    CallstackCaptureConfig::from_rules(&snapshot),
                 );
                 // Construction-site observable: asserted directly, so "no
                 // inspector was built" is evidence rather than an inference from a counter that
@@ -1130,9 +1127,7 @@ impl FlashblocksBuilderCtx {
     /// [`Self::candidate_rule_snapshot`].
     fn callstack_capture_config(&self) -> CallstackCaptureConfig {
         match self.rcs_rule_snapshot.as_ref() {
-            Some(rules) => {
-                CallstackCaptureConfig::new(rules.stamp(), rules.callstack_selectors().to_vec())
-            }
+            Some(rules) => CallstackCaptureConfig::from_rules(rules),
             None => CallstackCaptureConfig::default(),
         }
     }

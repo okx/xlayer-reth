@@ -142,9 +142,8 @@ pub fn callstack_only_projection(rules: &RuleSet, raw: &[RawRule]) -> Option<Rul
 /// which case NO inspector is constructed at all and the caller keeps its plain EVM.
 ///
 /// `CallstackOnly`: the audit path produces and consumes no virtual native-transfer log, screens
-/// against the raw execution logs it already used, and the only live budget is the callstack
-/// observation budget — the same `max_callstack_observations_per_tx` the candidate loop uses,
-/// applied PER TRANSACTION inside the batch.
+/// against the raw execution logs it already used, and the only live budget is the caller's
+/// callstack observation budget, applied PER TRANSACTION inside the batch.
 pub fn callstack_only_inspector(
     rules: &RuleSet,
     max_callstack_observations_per_tx: usize,
@@ -152,7 +151,7 @@ pub fn callstack_only_inspector(
     rules.has_callstack_rules().then(|| {
         RcsInspector::callstack_only(
             max_callstack_observations_per_tx,
-            CallstackCaptureConfig::new(rules.stamp(), rules.callstack_selectors().to_vec()),
+            CallstackCaptureConfig::from_rules(rules),
         )
     })
 }

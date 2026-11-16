@@ -3,6 +3,7 @@
 use alloy_primitives::{keccak256, Address, B256};
 use rcs_filter::audit::{callstack_only_projection, unadjudicable_observations};
 use rcs_filter::callstack::{ObservationUnavailable, Observations, SnapshotStamp};
+use rcs_filter::capture::CallstackCaptureConfig;
 use rcs_filter::rules::{load_rules, RawRule, RuleSet};
 
 // ---- fixtures, copied verbatim from xlayer-rpc capture_path_tests.rs ----
@@ -137,4 +138,20 @@ fn the_request_level_gate_separates_unavailable_from_empty() {
         None,
         "a request declaring no selector keeps its pre-existing path byte for byte"
     );
+}
+
+/// `from_rules` carries the snapshot's own stamp and its own selector set, so the two can never
+/// come from different snapshots, and yields an inert configuration exactly when the snapshot
+/// declares no selector.
+#[test]
+fn callstack_capture_config_from_rules_carries_the_snapshot_stamp_and_its_selectors() {
+    let rules = selector_bearing_rules();
+    let config = CallstackCaptureConfig::from_rules(&rules);
+    assert_eq!(config.stamp_for_test(), Some(rules.stamp()));
+    assert!(!config.is_inert(), "a selector-bearing snapshot observes");
+
+    let selector_free = selector_free_rules();
+    let inert = CallstackCaptureConfig::from_rules(&selector_free);
+    assert_eq!(inert.stamp_for_test(), Some(selector_free.stamp()));
+    assert!(inert.is_inert(), "a snapshot declaring no selector yields an inert configuration");
 }
