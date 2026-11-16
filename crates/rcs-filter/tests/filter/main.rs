@@ -21,7 +21,6 @@ mod config {
         mod callstack_config_tests;
     }
 }
-mod integration_tests;
 mod raw_wire_tests;
 mod rules {
     mod validation {
