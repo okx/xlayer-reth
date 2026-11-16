@@ -838,6 +838,29 @@ mod cross_path_identification_tests {
         }
     }
 
+    /// The builder's observation budget is its own configured value (10 000 by default) and is
+    /// unrelated to the audit RPC's 1 000: through the real sequencer execution path a deposit
+    /// producing 1 001 observations is captured in full and identified, never truncated.
+    #[test]
+    fn the_builder_budget_is_not_bounded_by_the_audit_default() {
+        let approved = code_hash(&impl_code(0x01));
+        // The proxy's own frame plus one per first-level delegatecall: 1 001 observations.
+        let (observed, identification) = deposit_path(
+            vec![proxy_impl_allowlist_rule(&[approved])],
+            delegating_proxy_code(APPROVED_IMPL, 1_000),
+        );
+        assert_eq!(
+            observed.len(),
+            1_001,
+            "the builder's default budget captures every frame of the fixture"
+        );
+        assert_eq!(
+            identification,
+            DepositIdentification::Allow,
+            "an in-budget deposit under the builder's own default is identified, not truncated"
+        );
+    }
+
     mod four_field_cross_path_tests;
 
     /// An **ordered** deposit batch in which an earlier deposit upgrades the proxy's

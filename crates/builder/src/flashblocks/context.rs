@@ -23,7 +23,7 @@ use op_revm::{L1BlockInfo, OpSpecId};
 
 #[cfg(any(test, feature = "test-utils"))]
 use rcs_filter::callstack::CallObservation;
-use rcs_filter::callstack::{Observations, SnapshotStamp};
+use rcs_filter::callstack::{ObservationUnavailable, Observations, SnapshotStamp};
 use rcs_filter::matching::{MatchErrorKind, MatchOutcome};
 use rcs_filter::rules::RuleSet;
 use rcs_filter::{FilterHandle, LocalDenyReason, PreScreen, Screen, ScreenInput};
@@ -186,6 +186,22 @@ impl DepositNotIdentified {
     }
 }
 
+/// The deposit report's reading of the shared observation-unavailable reasons, one for one.
+///
+/// Exhaustive by construction: a new [`ObservationUnavailable`] variant fails to compile here
+/// instead of being folded into an existing report token. `MatchBudget` has no counterpart
+/// because it is raised by the matcher, not by capture.
+impl From<ObservationUnavailable> for DepositNotIdentified {
+    fn from(reason: ObservationUnavailable) -> Self {
+        match reason {
+            ObservationUnavailable::NotCaptured => DepositNotIdentified::NotCaptured,
+            ObservationUnavailable::Incomplete => DepositNotIdentified::Incomplete,
+            ObservationUnavailable::BudgetExceeded => DepositNotIdentified::BudgetExceeded,
+            ObservationUnavailable::SnapshotMismatch => DepositNotIdentified::SnapshotMismatch,
+        }
+    }
+}
+
 /// What the deposit/sequencer path concluded about one transaction's executed code.
 ///
 /// This is an **identification** result, not an enforcement decision. A deposit is
@@ -254,29 +270,13 @@ pub(super) fn identify_deposit(input: DepositUnderIdentification<'_>) -> Deposit
         result_logs,
         max_event_bindings,
     } = input;
-    let observations = match outcome {
-        CaptureOutcome::Complete { observations, .. } => {
-            // Capture completed, so the set is authoritative: an empty list genuinely means no
-            // observed frame rather than an absence of capture.
-            Observations::available(observations.stamp, &observations.items)
-        }
-        // Every other outcome is an explicit "cannot identify" — never `Available { items: [] }`.
-        CaptureOutcome::LimitExceeded { budget: ObservationBudget::Callstack, .. } => {
-            return DepositIdentification::NotIdentified(DepositNotIdentified::BudgetExceeded);
-        }
-        // The native budget is not applicable in `CallstackOnly` mode and is never consulted, so
-        // reaching it would itself be a capture-state bug. Treat it as unidentifiable rather than
-        // silently continuing.
-        CaptureOutcome::LimitExceeded { budget: ObservationBudget::NativeTransfer, .. } => {
-            return DepositIdentification::NotIdentified(DepositNotIdentified::Incomplete);
-        }
-        CaptureOutcome::InvariantViolation { .. } => {
-            return DepositIdentification::NotIdentified(DepositNotIdentified::Incomplete);
-        }
-        CaptureOutcome::Passthrough => {
-            return DepositIdentification::NotIdentified(DepositNotIdentified::NotCaptured);
-        }
-    };
+    // The SAME capture-outcome mapping the audit RPC uses: a completed capture is authoritative
+    // (an empty list genuinely means no observed frame), and every other outcome is an explicit
+    // "cannot identify" — never `Available { items: [] }`.
+    let observations = rcs_filter::audit::observations_from(outcome);
+    if let Observations::Unavailable { reason } = observations {
+        return DepositIdentification::NotIdentified(reason.into());
+    }
 
     let input = ScreenInput {
         tx_hash,

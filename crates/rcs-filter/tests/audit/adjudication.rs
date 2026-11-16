@@ -1,9 +1,12 @@
 //! Direct checks of the request-level adjudication helpers moved from the audit RPC.
 
 use alloy_primitives::{keccak256, Address, B256};
-use rcs_filter::audit::{callstack_only_projection, unadjudicable_observations};
+use rcs_filter::audit::{callstack_only_projection, observations_from, unadjudicable_observations};
 use rcs_filter::callstack::{ObservationUnavailable, Observations, SnapshotStamp};
-use rcs_filter::capture::CallstackCaptureConfig;
+use rcs_filter::capture::{
+    CallstackCaptureConfig, CaptureInvariantError, CaptureOutcome, CapturedObservations,
+    ObservationBudget,
+};
 use rcs_filter::rules::{load_rules, RawRule, RuleSet};
 
 // ---- fixtures, copied verbatim from xlayer-rpc capture_path_tests.rs ----
@@ -138,6 +141,51 @@ fn the_request_level_gate_separates_unavailable_from_empty() {
         None,
         "a request declaring no selector keeps its pre-existing path byte for byte"
     );
+}
+
+/// Every capture outcome maps to the observation state both callers read: a completed capture is
+/// authoritative — even when it is empty — and every other outcome is an explicit unavailable
+/// reason rather than an empty available set that would read as "captured, nothing matched".
+#[test]
+fn observations_from_maps_every_capture_outcome_variant() {
+    let rules = selector_bearing_rules();
+    let stamp = rules.stamp();
+
+    let complete = CaptureOutcome::Complete {
+        logs: Vec::new(),
+        observations: CapturedObservations::new(stamp, Vec::new()),
+    };
+    assert_eq!(
+        observations_from(&complete),
+        Observations::available(stamp, &[]),
+        "a completed empty capture is available, not unavailable"
+    );
+
+    assert_eq!(
+        observations_from(&CaptureOutcome::LimitExceeded {
+            attempted: 2,
+            limit: 1,
+            budget: ObservationBudget::Callstack,
+        }),
+        Observations::Unavailable { reason: ObservationUnavailable::BudgetExceeded }
+    );
+    // The native budget is never consulted in `CallstackOnly` mode, so reaching it is a
+    // capture-state bug: unidentifiable, not ignorable.
+    assert_eq!(
+        observations_from(&CaptureOutcome::LimitExceeded {
+            attempted: 2,
+            limit: 1,
+            budget: ObservationBudget::NativeTransfer,
+        }),
+        Observations::Unavailable { reason: ObservationUnavailable::Incomplete }
+    );
+    assert_eq!(
+        observations_from(&CaptureOutcome::InvariantViolation {
+            reason: CaptureInvariantError::FrameStackUnbalanced { remaining: 1 },
+        }),
+        Observations::Unavailable { reason: ObservationUnavailable::Incomplete }
+    );
+    assert_eq!(observations_from(&CaptureOutcome::Passthrough), Observations::NOT_CAPTURED);
 }
 
 /// `from_rules` carries the snapshot's own stamp and its own selector set, so the two can never
