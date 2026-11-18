@@ -21,7 +21,6 @@ use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 use serde_json::json;
 
 use crate::callstack::Observations;
-
 use crate::client::{
     QueryParams, QueryResponse, QueryTx, RcsClient, RulesResponse, SubmitRequest, SubmitResponse,
     VersionResponse,
