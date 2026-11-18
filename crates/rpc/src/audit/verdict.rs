@@ -11,7 +11,9 @@ use alloy_primitives::{Address, Log, B256, U256};
 use rcs_filter::callstack::Observations;
 use rcs_filter::client::ActionItem;
 use rcs_filter::handle::ScreenInput;
-use rcs_filter::matching::{try_evaluate, MatchOutcome};
+use rcs_filter::matching::{
+    try_evaluate_attributed, AttributedOutcome, DenyAttribution, MatchOutcome,
+};
 use rcs_filter::rules::{RuleSet, DEFAULT_MAX_EVENT_BINDINGS_PER_TX};
 use serde::Serialize;
 
@@ -35,13 +37,33 @@ pub enum Verdict {
 ///
 /// The adjudication itself lands in [`Verdict`], which is the only field the real caller acts on.
 /// This field explains *why* a verdict came out as it did; no correctness property depends on a
-/// consumer reading it. It is emitted only for a v2 request, so a v1 response stays byte-identical.
+/// consumer reading it.
+///
+/// Wire contract (rule protocol version 1, the only supported version): the field is present on
+/// every **executed** entry of a request whose compiled rules declare at least one call-frame
+/// selector, and absent otherwise — absent for every entry of a selector-free request, and absent
+/// on an entry that was never executed (`unknown`) or whose deposit could not be built
+/// (`malformed`).
+///
+/// `Objected` describes the call-frame match, never the verdict, so the same value sits beside
+/// different verdicts depending on the entry's class:
+///
+/// - an ordinary deposit: `Objected` ⇒ `deny`, not committed;
+/// - an `Original` (labelled or inferred): `Objected` ⇒ `deny`, not committed;
+/// - a synthetic ban prefix: `Objected` ⇒ still `allow` and committed — the objection is reported
+///   only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CallstackIdentification {
-    /// Identified, and no selector-bearing rule objected.
+    /// Identified, and no selector-bearing rule objected. For an ordinary deposit this means no
+    /// `deny` was decided by a selector-bearing rule: a `deny` decided by a rule without a
+    /// call-frame selector reports `Clean`, and because the matcher stops at the first deny it
+    /// does not claim that a later selector-bearing rule would not have objected.
     Clean,
-    /// Identified, and a selector-bearing rule objected (would deny).
+    /// Identified, and a selector-bearing rule objected to the executed code. This describes the
+    /// call-frame match, not the final verdict: an ordinary deposit or an `Original` is then
+    /// `deny` and not committed, while a synthetic ban prefix keeps `allow` and is committed (the
+    /// objection is reported only).
     Objected,
     /// The executed code could not be identified: capture failure, budget overflow or a
     /// snapshot-stamp mismatch. Never reported as `Clean`.
@@ -57,9 +79,9 @@ pub struct AuditResult {
     pub source_hash: String,
     pub verdict: Verdict,
     pub actions: Option<BTreeMap<String, Vec<ActionItem>>>,
-    /// Diagnostic only; see [`CallstackIdentification`]. Absent from the serialized response
-    /// unless the request advertised protocol version 2, so `tx_hash` / `source_hash` /
-    /// `verdict` / `actions` keep their exact previous wire shape for every existing caller.
+    /// Diagnostic only; see [`CallstackIdentification`] for when it is present. Absent from the
+    /// serialized response of a request that declares no call-frame selector, so such a response
+    /// keeps the exact `tx_hash` / `source_hash` / `verdict` / `actions` shape.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub callstack_identification: Option<CallstackIdentification>,
 }
@@ -78,7 +100,7 @@ impl AuditResult {
         }
     }
 
-    /// Attaches the identification diagnostic, for a v2 request only.
+    /// Attaches the identification diagnostic; `None` leaves the field out of the response.
     pub fn with_identification(mut self, identification: Option<CallstackIdentification>) -> Self {
         self.callstack_identification = identification;
         self
@@ -138,7 +160,7 @@ pub fn verdict_for(
     };
     // The audit RPC path holds no FilterConfig, so it uses the default binding budget. This keeps
     // its existing matcher-overflow `Malformed` semantics unchanged.
-    match try_evaluate(rules, &input, DEFAULT_MAX_EVENT_BINDINGS_PER_TX) {
+    match try_evaluate_attributed(rules, &input, DEFAULT_MAX_EVENT_BINDINGS_PER_TX) {
         Err(error) => {
             // Every screening failure returns the existing non-verdict channel rather than an
             // authoritative verdict. A matcher budget overflow and an unadjudicable observation
@@ -154,21 +176,26 @@ pub fn verdict_for(
             AuditResult::malformed(req.source_hash.clone())
                 .with_identification(Some(CallstackIdentification::NotIdentified))
         }
-        Ok(MatchOutcome::Allow) => AuditResult {
+        Ok(AttributedOutcome { outcome: MatchOutcome::Allow, .. }) => AuditResult {
             tx_hash: format!("{tx_hash:#x}"),
             source_hash: req.source_hash.clone(),
             verdict: Verdict::Allow,
             actions: None,
             callstack_identification: Some(identification),
         },
-        Ok(MatchOutcome::Deny) => AuditResult {
+        Ok(AttributedOutcome { outcome: MatchOutcome::Deny, deny_attribution }) => AuditResult {
             tx_hash: format!("{tx_hash:#x}"),
             source_hash: req.source_hash.clone(),
             verdict: Verdict::Deny,
             actions: None,
-            callstack_identification: Some(identification),
+            // Only an objection the matcher attributes to a selector-bearing rule is reported as
+            // one; a deny an event-only rule decided keeps the observation-set diagnostic.
+            callstack_identification: Some(match deny_attribution {
+                Some(DenyAttribution::Callstack) => CallstackIdentification::Objected,
+                Some(DenyAttribution::Event) | None => identification,
+            }),
         },
-        Ok(MatchOutcome::Audit { actions, .. }) => AuditResult {
+        Ok(AttributedOutcome { outcome: MatchOutcome::Audit { actions, .. }, .. }) => AuditResult {
             tx_hash: format!("{tx_hash:#x}"),
             source_hash: req.source_hash.clone(),
             verdict: Verdict::Audit,
@@ -181,8 +208,8 @@ pub fn verdict_for(
 /// The diagnostic for one adjudication, decided BEFORE evaluation so it describes the
 /// observation set rather than the rule outcome's shape.
 ///
-/// `Objected` is attached afterwards by the caller when a selector-bearing request denies, since
-/// `MatchOutcome::Deny` carries no rule id and therefore cannot say which dimension objected.
+/// `Objected` replaces it in [`verdict_for`] only when the matcher attributes the deny to a
+/// selector-bearing rule ([`DenyAttribution::Callstack`]).
 fn identification_for(rules: &RuleSet, observations: Observations<'_>) -> CallstackIdentification {
     if !rules.has_callstack_rules() {
         return CallstackIdentification::NotApplicable;

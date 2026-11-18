@@ -31,7 +31,7 @@ const LOG_TARGET: Address = Address::repeat_byte(0xDD);
 /// a `callstack` rule is accepted and classified from REAL capture: the
 /// deposit→proxy→unapproved-implementation request returns the deny verdict.
 #[test]
-fn v2_callstack_rule_denies_unapproved_implementation() {
+fn a_callstack_rule_denies_unapproved_implementation() {
     let run = run_batch(
         &[deposit_request(&format!("0x{}", "33".repeat(32)), PROXY)],
         vec![proxy_impl_allowlist_rule()],
@@ -91,6 +91,63 @@ fn ordinary_call_to_the_observed_proxy_is_allowed() {
         Some(CallstackIdentification::Clean),
         "the frame WAS identified; it simply carries no implementation"
     );
+}
+
+/// A `deny` rule that reads only the event and transaction dimensions: `Transfer.from` binds to
+/// null because the deposit emits no `Transfer`, so the rule fires with no call-frame selector
+/// anywhere in it.
+fn null_bound_transfer_deny_rule() -> RawRule {
+    serde_json::from_value(serde_json::json!({
+        "id": "null-bound-transfer",
+        "event_abis": { "t": {
+            "type": "event", "name": "Transfer",
+            "inputs": [
+                { "name": "from", "type": "address", "indexed": true },
+                { "name": "to", "type": "address", "indexed": true },
+                { "name": "value", "type": "uint256", "indexed": false }
+            ],
+            "anonymous": false
+        } },
+        "condition": { "==": [ { "var": "t.from" }, null ] },
+        "action": "deny"
+    }))
+    .expect("valid event-only deny rule")
+}
+
+/// The deny is attributed to the rule that decided it: an event-only rule denies while the
+/// request's selector-bearing rule points at a proxy the deposit never calls, so the call-frame
+/// diagnostic stays `clean` instead of claiming an objection that never happened.
+#[test]
+fn an_event_only_deny_beside_an_untouched_callstack_rule_is_not_reported_as_objected() {
+    let run = run_batch(
+        &[deposit_request(&format!("0x{}", "55".repeat(32)), LOG_TARGET)],
+        vec![null_bound_transfer_deny_rule(), proxy_impl_allowlist_rule()],
+        1,
+        &[],
+        None,
+        log0_db(0),
+    );
+    let result = only(&run);
+    assert_eq!(result.verdict, Verdict::Deny);
+    assert_eq!(
+        result.callstack_identification,
+        Some(CallstackIdentification::Clean),
+        "an event-only rule decided this deny; no call-frame rule was reached"
+    );
+    assert_eq!(run.depositor_nonce, 0, "a denied transaction's state is not committed");
+
+    // Control: the same event-only rule alone. The request declares no selector, so the field is
+    // not part of the response at all.
+    let control = run_batch(
+        &[deposit_request(&format!("0x{}", "56".repeat(32)), LOG_TARGET)],
+        vec![null_bound_transfer_deny_rule()],
+        1,
+        &[],
+        None,
+        log0_db(0),
+    );
+    assert_eq!(only(&control).verdict, Verdict::Deny);
+    assert_eq!(only(&control).callstack_identification, None);
 }
 
 /// a `known_allowed` Original denied on the callstack dimension does NOT stop the

@@ -11,7 +11,10 @@ use serde_json::{json, Value};
 
 use rcs_filter::callstack::{CallObservation, ObservationUnavailable, Observations, SnapshotStamp};
 use rcs_filter::handle::ScreenInput;
-use rcs_filter::matching::{try_evaluate, MatchError, MatchErrorKind, MatchOutcome};
+use rcs_filter::matching::{
+    try_evaluate, try_evaluate_attributed, AttributedOutcome, DenyAttribution, MatchError,
+    MatchErrorKind, MatchOutcome,
+};
 use rcs_filter::rules::{
     compile_rule, load_rules, RawRule, RuleSet, DEFAULT_MAX_EVENT_BINDINGS_PER_TX,
 };
@@ -1737,4 +1740,127 @@ fn a_re_simulation_whose_executed_code_changed_is_not_silently_consistent() {
         Screen::Drop,
         "a changed executed code hash must not pass the consistency check"
     );
+}
+
+// --------------------------------------------------------------------------------------------
+// Deny attribution
+// --------------------------------------------------------------------------------------------
+
+/// `try_evaluate` with the deny attribution kept.
+fn screen_attributed<'a>(
+    rules: &RuleSet,
+    logs: &'a [Log],
+    observations: Observations<'a>,
+) -> Result<AttributedOutcome, MatchError> {
+    let input = ScreenInput {
+        tx_hash: B256::repeat_byte(0x77),
+        origin: "0x9999999999999999999999999999999999999999".parse().unwrap(),
+        tx_to: Some(proxy()),
+        nonce: 1,
+        value: U256::ZERO,
+        block_height: 100,
+        logs,
+        observations,
+    };
+    try_evaluate_attributed(rules, &input, DEFAULT_MAX_EVENT_BINDINGS_PER_TX)
+}
+
+/// A `deny` rule declaring no `callstack` section at all: its family is `Event`.
+fn event_only_deny(id: &str) -> Value {
+    json!({
+        "id": id,
+        "event_abis": { "transfer": transfer_abi() },
+        "condition": true,
+        "action": "deny"
+    })
+}
+
+#[test]
+fn an_event_only_deny_beside_an_untouched_alias_rule_is_attributed_to_the_event_family() {
+    let rules = rule_set(vec![
+        event_only_deny("event-deny"),
+        deny_on_alias(
+            "alias-deny",
+            "otherProxy",
+            other_proxy(),
+            delegate_code_hash_allowlist("otherProxy", &[approved_impl_code()]),
+        ),
+    ]);
+    // Every frame is observed through `proxy()`, so the alias rule on `other_proxy()` is
+    // suppressed and the event-only rule is what denies.
+    let items = [delegated(implementation(), rogue_code())];
+    let attributed = screen_attributed(&rules, &[], captured(&rules, &items)).expect("no error");
+    assert_eq!(attributed.outcome, MatchOutcome::Deny);
+    assert_eq!(attributed.deny_attribution, Some(DenyAttribution::Event));
+}
+
+#[test]
+fn a_selector_bearing_deny_is_attributed_to_the_callstack_family() {
+    let rules = rule_set(vec![deny_on_alias(
+        "alias-deny",
+        "vaultProxy",
+        proxy(),
+        delegate_code_hash_allowlist("vaultProxy", &[approved_impl_code()]),
+    )]);
+    let items = [delegated(implementation(), rogue_code())];
+    let attributed = screen_attributed(&rules, &[], captured(&rules, &items)).expect("no error");
+    assert_eq!(attributed.outcome, MatchOutcome::Deny);
+    assert_eq!(attributed.deny_attribution, Some(DenyAttribution::Callstack));
+}
+
+#[test]
+fn the_attribution_names_the_first_rule_that_denied() {
+    let alias_deny = deny_on_alias(
+        "alias-deny",
+        "vaultProxy",
+        proxy(),
+        delegate_code_hash_allowlist("vaultProxy", &[approved_impl_code()]),
+    );
+    let items = [delegated(implementation(), rogue_code())];
+
+    // Both rules deny; the visit stops at the first one.
+    let event_first = rule_set(vec![event_only_deny("event-deny"), alias_deny.clone()]);
+    let event_first_outcome =
+        screen_attributed(&event_first, &[], captured(&event_first, &items)).expect("no error");
+    assert_eq!(event_first_outcome.outcome, MatchOutcome::Deny);
+    assert_eq!(event_first_outcome.deny_attribution, Some(DenyAttribution::Event));
+
+    let alias_first = rule_set(vec![alias_deny, event_only_deny("event-deny")]);
+    let alias_first_outcome =
+        screen_attributed(&alias_first, &[], captured(&alias_first, &items)).expect("no error");
+    assert_eq!(alias_first_outcome.outcome, MatchOutcome::Deny);
+    assert_eq!(alias_first_outcome.deny_attribution, Some(DenyAttribution::Callstack));
+}
+
+#[test]
+fn try_evaluate_is_the_attributed_outcome_without_its_attribution() {
+    let rules = rule_set(vec![deny_on_alias(
+        "alias-deny",
+        "vaultProxy",
+        proxy(),
+        delegate_code_hash_allowlist("vaultProxy", &[approved_impl_code()]),
+    )]);
+
+    let allowed_items = [delegated(implementation(), approved_impl_code())];
+    let rogue_items = [delegated(implementation(), rogue_code())];
+
+    for (label, items, expected_outcome, expected_attribution) in [
+        ("allow", allowed_items.as_slice(), MatchOutcome::Allow, None),
+        ("deny", rogue_items.as_slice(), MatchOutcome::Deny, Some(DenyAttribution::Callstack)),
+    ] {
+        let observations = captured(&rules, items);
+        let plain = screen_with_limit(&rules, &[], observations, DEFAULT_MAX_EVENT_BINDINGS_PER_TX)
+            .expect("no error");
+        let attributed = screen_attributed(&rules, &[], observations).expect("no error");
+        assert_eq!(plain, attributed.outcome, "{label}: the outcome is identical");
+        assert_eq!(attributed.outcome, expected_outcome, "{label}");
+        assert_eq!(attributed.deny_attribution, expected_attribution, "{label}");
+    }
+
+    // An unadjudicable observation set fails with the same error either way.
+    let unavailable = Observations::Unavailable { reason: ObservationUnavailable::Incomplete };
+    let plain =
+        screen_with_limit(&rules, &[], unavailable, DEFAULT_MAX_EVENT_BINDINGS_PER_TX).unwrap_err();
+    let attributed = screen_attributed(&rules, &[], unavailable).unwrap_err();
+    assert_eq!(plain, attributed, "the error is unchanged");
 }

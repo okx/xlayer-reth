@@ -582,19 +582,14 @@ impl AuditBatchPlan {
             &self.rules,
             observations,
         );
-        // `MatchOutcome::Deny` carries no rule id, so the diagnostic cannot name the objecting
-        // dimension; for a selector-bearing request a deny is reported as an objection.
-        let identification = match (verdict_result.verdict, self.rules.has_callstack_rules()) {
-            (Verdict::Deny, true) => Some(CallstackIdentification::Objected),
-            _ => verdict_result.callstack_identification,
-        };
+        // `verdict_for` already reports `Objected` only for a deny the matcher attributes to a
+        // selector-bearing rule; an event-only deny keeps the observation-set diagnostic.
+        let identification = verdict_result
+            .callstack_identification
+            .unwrap_or(CallstackIdentification::NotApplicable);
         let (commit, keep_going) = commit_and_continue(verdict_result.verdict);
         (
-            verdict_result.with_identification(
-                self.identification(
-                    identification.unwrap_or(CallstackIdentification::NotApplicable),
-                ),
-            ),
+            verdict_result.with_identification(self.identification(identification)),
             commit,
             keep_going,
         )

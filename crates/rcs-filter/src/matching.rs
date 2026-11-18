@@ -89,6 +89,27 @@ pub enum MatchErrorKind {
     ObservationSnapshotMismatch,
 }
 
+/// Which family of rule decided a [`MatchOutcome::Deny`]. Fixed and low-cardinality: it never
+/// names the rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DenyAttribution {
+    /// The deciding rule declares no direct-delegatecall alias, so its condition read only events
+    /// and transaction fields.
+    Event,
+    /// The deciding rule declares at least one direct-delegatecall alias.
+    Callstack,
+}
+
+/// A screening outcome together with the family of the rule that decided a `Deny`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttributedOutcome {
+    pub outcome: MatchOutcome,
+    /// `Some` exactly when `outcome` is [`MatchOutcome::Deny`]. Rules are visited in order and a
+    /// deny short-circuits, so this names the FIRST rule that denied; it says nothing about
+    /// whether a later rule would also have denied.
+    pub deny_attribution: Option<DenyAttribution>,
+}
+
 /// Fallible screening entry used by callers that can surface malformed/error outcomes.
 ///
 /// `max_event_bindings` is the authoritative per-transaction complete-binding budget. Callers with
@@ -99,6 +120,18 @@ pub fn try_evaluate(
     input: &ScreenInput,
     max_event_bindings: usize,
 ) -> Result<MatchOutcome, MatchError> {
+    try_evaluate_attributed(rules, input, max_event_bindings).map(|attributed| attributed.outcome)
+}
+
+/// [`try_evaluate`], keeping the family of the rule that decided a `Deny`.
+///
+/// The attribution is read from the rule that broke the binding visit, so it costs no extra
+/// matching work and never changes the outcome.
+pub fn try_evaluate_attributed(
+    rules: &RuleSet,
+    input: &ScreenInput,
+    max_event_bindings: usize,
+) -> Result<AttributedOutcome, MatchError> {
     evaluate_checked(rules, input, max_event_bindings)
 }
 
@@ -122,7 +155,7 @@ fn evaluate_checked(
     rules: &RuleSet,
     input: &ScreenInput,
     max_event_bindings: usize,
-) -> Result<MatchOutcome, MatchError> {
+) -> Result<AttributedOutcome, MatchError> {
     // Merge audit rules at the physical-log level. Multiple rules can match the same log, but
     // RCS must receive that event only once per audit type or it would account the same action
     // multiple times.
@@ -248,19 +281,27 @@ fn evaluate_checked(
         if let ControlFlow::Break(outcome) =
             visit_bindings(0, &candidates, &mut current, &mut visit)
         {
-            return Ok(outcome);
+            // The rule that broke the visit decided the deny; its family is read from the
+            // declaration that was already consulted for suppression.
+            let deny_attribution = Some(if rule.callstack.is_empty() {
+                DenyAttribution::Event
+            } else {
+                DenyAttribution::Callstack
+            });
+            return Ok(AttributedOutcome { outcome, deny_attribution });
         }
     }
 
-    if has_audit {
+    let outcome = if has_audit {
         let actions = actions_by_log
             .into_iter()
             .map(|(audit_type, by_log)| (audit_type, by_log.into_values().collect()))
             .collect();
-        Ok(MatchOutcome::Audit { actions, timeout_action })
+        MatchOutcome::Audit { actions, timeout_action }
     } else {
-        Ok(MatchOutcome::Allow)
-    }
+        MatchOutcome::Allow
+    };
+    Ok(AttributedOutcome { outcome, deny_attribution: None })
 }
 
 /// Whether any declared event of this rule produced no physical match.

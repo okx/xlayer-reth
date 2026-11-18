@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, U256};
 use jsonrpsee::types::Params;
 use rcs_filter::config::MIN_PROTOCOL_VERSION;
 use rcs_filter::rules::{load_rules, RawRule};
@@ -12,7 +12,9 @@ use revm::state::{AccountInfo, Bytecode};
 use revm::Database as _;
 use xlayer_rpc::audit::rpc::observation_recorder;
 use xlayer_rpc::audit::rpc::test_seams::execute_audit_batch;
-use xlayer_rpc::audit::rpc::{AuditTransactionsRequest, KnownAllowedKind};
+use xlayer_rpc::audit::rpc::{
+    AuditTransactionsRequest, AuditTransactionsResponse, KnownAllowedKind,
+};
 use xlayer_rpc::audit::verdict::Verdict;
 
 use crate::harness::*;
@@ -762,4 +764,176 @@ fn a_deposit_touching_no_declared_proxy_is_allowed_and_commits() {
     );
     assert_eq!(verdict, Verdict::Allow);
     assert_eq!(nonce, 1, "an allowed deposit commits its state");
+}
+
+// ------------------------------------------------------- diagnostic wire contract -------
+
+/// A proxy that delegatecalls the address carried in its calldata and, with empty calldata,
+/// simply stops: `CALLDATASIZE; PUSH1 5; JUMPI; STOP; JUMPDEST; DELEGATECALL(gas,
+/// calldataload(0), 0,0,0,0); POP; STOP`.
+///
+/// Calldata is what lets ONE request carry both an approved and an unapproved execution
+/// against the same observed proxy.
+fn calldata_delegating_proxy_code() -> Vec<u8> {
+    vec![
+        0x36, // CALLDATASIZE
+        0x60, 0x05, // PUSH1 5 (the delegate branch)
+        0x57, // JUMPI
+        0x00, // STOP
+        0x5b, // JUMPDEST
+        0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60,
+        0x00, // retSize, retOffset, argsSize, argsOffset
+        0x60, 0x00, 0x35, // PUSH1 0; CALLDATALOAD -> the target address
+        0x5a, 0xf4, // GAS; DELEGATECALL
+        0x50, 0x00, // POP; STOP
+    ]
+}
+
+/// The observed proxy, its two implementations and the depositor.
+fn calldata_db() -> InMemoryDB {
+    let mut db = InMemoryDB::default();
+    db.insert_account_info(
+        DEPOSITOR,
+        AccountInfo { balance: U256::from(10u128.pow(18)), ..Default::default() },
+    );
+    db.insert_account_info(
+        PROXY,
+        AccountInfo {
+            code: Some(Bytecode::new_raw(calldata_delegating_proxy_code().into())),
+            ..Default::default()
+        },
+    );
+    for (address, marker) in [(APPROVED_IMPL, 0x01u8), (UNAPPROVED_IMPL, 0x02u8)] {
+        db.insert_account_info(
+            address,
+            AccountInfo {
+                code: Some(Bytecode::new_raw(impl_code(marker).into())),
+                ..Default::default()
+            },
+        );
+    }
+    db
+}
+
+/// One deposit request body, spelled out as the caller sends it.
+fn deposit_body(source_hash: &str, from: Address, to: Address, data: &str) -> serde_json::Value {
+    serde_json::json!({
+        "source_hash": source_hash,
+        "from": format!("{from:#x}"),
+        "to": format!("{to:#x}"),
+        "mint": "0",
+        "value": "0",
+        "gas_limit": 1_000_000,
+        "is_system_transaction": false,
+        "data": data,
+    })
+}
+
+/// The calldata word that makes the fixture proxy delegatecall `target`.
+fn delegate_calldata(target: Address) -> String {
+    format!("0x{}", alloy_primitives::hex::encode(target.into_word()))
+}
+
+/// Decodes the raw parameter array exactly as the server does, runs the production batch and
+/// serializes the response the handler would return.
+fn decode_run_and_serialize(raw_params: &str, db: &mut InMemoryDB) -> Vec<serde_json::Value> {
+    let req = decode_params(raw_params).expect("the request decodes");
+    assert_eq!(req.protocol_version, MIN_PROTOCOL_VERSION, "an explicit v1 request stays v1");
+    let results = execute_audit_batch(&req, db, audit_env()).expect("the batch executes");
+    let value = serde_json::to_value(AuditTransactionsResponse { results })
+        .expect("the response serializes");
+    value["results"].as_array().expect("a results array").clone()
+}
+
+/// A result object's keys, sorted.
+fn sorted_keys(entry: &serde_json::Value) -> Vec<String> {
+    let mut keys: Vec<String> =
+        entry.as_object().expect("a result object").keys().cloned().collect();
+    keys.sort();
+    keys
+}
+
+/// A request that declares no call-frame selector keeps the four-field response shape: the
+/// diagnostic is simply not part of it, even though the entry was executed and denied.
+#[test]
+fn a_v1_response_without_callstack_selectors_omits_callstack_identification() {
+    let body = serde_json::json!([{
+        "protocol_version": 1,
+        "rules": [serde_json::json!({
+            "id": "evt",
+            "event_abis": { "transfer": {
+                "type": "event", "name": "Transfer",
+                "inputs": [
+                    { "name": "from", "type": "address", "indexed": true },
+                    { "name": "to", "type": "address", "indexed": true },
+                    { "name": "value", "type": "uint256", "indexed": false }
+                ],
+                "anonymous": false
+            } },
+            "condition": true,
+            "action": "deny"
+        })],
+        "txs": [deposit_body(&format!("0x{}", "57".repeat(32)), DEPOSITOR, PROXY, "0x")],
+        "known_allowed": [],
+    }]);
+
+    let entries = decode_run_and_serialize(&body.to_string(), &mut calldata_db());
+    assert_eq!(entries.len(), 1, "one entry per request transaction");
+    assert_eq!(entries[0]["verdict"], "deny", "the event-only rule fires");
+    assert_eq!(
+        sorted_keys(&entries[0]),
+        vec!["actions", "source_hash", "tx_hash", "verdict"],
+        "no callstack_identification on a selector-free response"
+    );
+}
+
+/// A request that declares a call-frame selector carries the diagnostic on every executed entry,
+/// and omits it on the entry whose deposit could not be built.
+#[test]
+fn a_v1_response_with_callstack_selectors_carries_callstack_identification() {
+    let body = serde_json::json!([{
+        "protocol_version": 1,
+        "rules": [proxy_impl_allowlist_rule_json()],
+        "txs": [
+            deposit_body(
+                &format!("0x{}", "58".repeat(32)),
+                DEPOSITOR,
+                PROXY,
+                &delegate_calldata(APPROVED_IMPL),
+            ),
+            deposit_body(
+                &format!("0x{}", "59".repeat(32)),
+                DEPOSITOR,
+                PROXY,
+                &delegate_calldata(UNAPPROVED_IMPL),
+            ),
+            serde_json::json!({
+                "source_hash": format!("0x{}", "5a".repeat(32)),
+                "from": "not-an-address",
+                "to": format!("{PROXY:#x}"),
+                "mint": "0",
+                "value": "0",
+                "gas_limit": 1_000_000,
+                "is_system_transaction": false,
+                "data": "0x",
+            }),
+        ],
+        "known_allowed": [],
+    }]);
+
+    let entries = decode_run_and_serialize(&body.to_string(), &mut calldata_db());
+    assert_eq!(entries.len(), 3, "three entries: two executed and one unbuildable");
+
+    assert_eq!(entries[0]["verdict"], "allow", "approved implementation");
+    assert_eq!(entries[0]["callstack_identification"], "clean");
+
+    assert_eq!(entries[1]["verdict"], "deny", "unapproved implementation");
+    assert_eq!(entries[1]["callstack_identification"], "objected");
+
+    assert_eq!(entries[2]["verdict"], "malformed", "the deposit cannot be built");
+    assert_eq!(
+        sorted_keys(&entries[2]),
+        vec!["actions", "source_hash", "tx_hash", "verdict"],
+        "an entry that never executed carries no diagnostic"
+    );
 }
