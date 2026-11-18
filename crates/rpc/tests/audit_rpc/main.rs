@@ -9,5 +9,4 @@ mod capture;
 mod harness;
 mod known_allowed;
 mod replay;
-mod reporting;
 mod wire;

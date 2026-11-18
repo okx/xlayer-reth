@@ -7,27 +7,24 @@
 //! removing it from `known_allowed`) and ending the round, a newly denied original turning into a
 //! synthetic ban built exactly as RCS builds it, and termination once a round neither saw an
 //! `unknown` nor grew the prefix. RCS's quota adjudication is replaced by a fixed per-deposit
-//! table. Like RCS, the driver sends **no** label map unless a scenario says otherwise.
+//! table. Like RCS, the driver sends the plain three-key request body.
 //!
-//! Each round is a fresh request through the production decode, `AuditBatchPlan::prepare`, the
-//! production deposit builder, inspector construction, the per-transaction loop and
-//! `assemble_results`, on a fresh copy of that round's base state, because each RPC call simulates
-//! on the current tip and discards its overlay. The chain is the devnet chain id, with a
+//! Each round is a fresh request through the production decode, the production deposit builder,
+//! inspector construction, the per-transaction loop and `assemble_results`, on a fresh copy of that
+//! round's base state, because each RPC call simulates on the current tip and discards its
+//! overlay. The chain is the devnet chain id, with a
 //! blacklist fixture at the devnet blacklist address, so the EVM's own native interceptor turns a
 //! blacklisted deposit into a failed deposit exactly as on chain.
 //!
 //! This is an in-process mirror of the caller. It does not run RCS's code and does not replace a
 //! joint run against a reachable node.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use alloy_evm::{Evm, EvmEnv, EvmFactory};
 use alloy_op_evm::{OpEvmFactory, OpTx};
 use alloy_primitives::{address, hex, keccak256, Address, Keccak256, B256, U256};
 use op_revm::OpSpecId;
-use rcs_filter::audit::synthetic_ban::{
-    BATCH_ADD_TO_BLACKLIST_SIGNATURE, MAX_SYNTHETIC_BAN_BATCH, SYNTHETIC_BAN_SOURCE_HASH_DOMAIN,
-};
 use revm::context::{BlockEnv, CfgEnv};
 use revm::context_interface::result::ExecutionResult;
 use revm::database::InMemoryDB;
@@ -35,10 +32,17 @@ use revm::state::{AccountInfo, Bytecode};
 use revm::DatabaseCommit;
 use xlayer_rpc::audit::deposit::{build_deposit_tx, DepositTxRequest};
 use xlayer_rpc::audit::rpc::test_seams::execute_audit_batch;
-use xlayer_rpc::audit::rpc::{AuditTransactionsRequest, KnownAllowedKind};
-use xlayer_rpc::audit::verdict::{AuditResult, CallstackIdentification, Verdict};
+use xlayer_rpc::audit::rpc::AuditTransactionsRequest;
+use xlayer_rpc::audit::verdict::{AuditResult, Verdict};
 
 use crate::harness::DEPOSITOR;
+
+/// RCS's v1 synthetic-ban derivation, as the caller's `signer.go` builds it.
+const SYNTHETIC_BAN_SOURCE_HASH_DOMAIN: &[u8] = b"xlayer-rcs:blacklist-simulation:v1";
+/// The canonical selector RCS uses to commit a ban batch.
+const BATCH_ADD_TO_BLACKLIST_SIGNATURE: &str = "batchAddToBlacklist(bytes32[])";
+/// RCS's maximum hashes per ban batch.
+const MAX_SYNTHETIC_BAN_BATCH: usize = 500;
 
 /// The devnet chain id: the only chain whose blacklist address the interceptor resolves and that
 /// a test can deploy a fixture at.
@@ -341,44 +345,19 @@ fn devnet_env() -> EvmEnv<OpSpecId> {
 
 // --------------------------------------------------------------------------- driver -------
 
-/// How the driver labels its request.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Labels {
-    /// No `known_allowed_kinds` at all — what RCS sends.
-    None,
-    /// A complete, correct map.
-    Correct,
-    /// A complete map that labels every synthetic ban `original`.
-    BansAsOriginal,
-}
-
 /// One production audit call: the real decode, plan, deposit build, inspector choice, batch body
 /// and result assembly, on `base`.
 fn audit_call(
     rules: &[serde_json::Value],
     txs: &[DepositTxRequest],
     known_allowed: &[String],
-    kinds: Option<BTreeMap<String, KnownAllowedKind>>,
     base: &InMemoryDB,
 ) -> Vec<AuditResult> {
-    let mut body = serde_json::json!({
+    let body = serde_json::json!({
         "rules": rules,
         "txs": txs.iter().map(request_json).collect::<Vec<_>>(),
         "known_allowed": known_allowed,
     });
-    if let Some(kinds) = kinds {
-        let map: serde_json::Map<String, serde_json::Value> = kinds
-            .into_iter()
-            .map(|(hash, kind)| {
-                let label = match kind {
-                    KnownAllowedKind::Original => "original",
-                    KnownAllowedKind::SyntheticBan => "synthetic_ban",
-                };
-                (hash, label.into())
-            })
-            .collect();
-        body["known_allowed_kinds"] = map.into();
-    }
     let req: AuditTransactionsRequest = serde_json::from_value(body).expect("the request decodes");
     let mut db = base.clone();
     execute_audit_batch(&req, &mut db, devnet_env()).expect("the batch executes")
@@ -488,7 +467,6 @@ fn replay(
     rules: &[serde_json::Value],
     originals: Vec<DepositTxRequest>,
     quota: &HashMap<String, Quota>,
-    labels: Labels,
     mut before_round: impl FnMut(usize, &mut InMemoryDB),
 ) -> ReplayOutcome {
     let mut state = ReplayState::new(originals);
@@ -498,24 +476,7 @@ fn replay(
         assert!(rounds.len() < 10, "the replay must converge: {rounds:?}");
         before_round(rounds.len(), &mut base);
         let (request, known_allowed) = state.begin_round();
-        let kinds = match labels {
-            Labels::None => None,
-            Labels::Correct | Labels::BansAsOriginal => Some(
-                known_allowed
-                    .iter()
-                    .map(|hash| {
-                        let is_ban = state.simulation_prefix.iter().any(|s| &s.source_hash == hash);
-                        let kind = if is_ban && labels == Labels::Correct {
-                            KnownAllowedKind::SyntheticBan
-                        } else {
-                            KnownAllowedKind::Original
-                        };
-                        (hash.clone(), kind)
-                    })
-                    .collect(),
-            ),
-        };
-        let results = audit_call(rules, &request, &known_allowed, kinds, &base);
+        let results = audit_call(rules, &request, &known_allowed, &base);
 
         // Correlated by position and checked by source hash, as RCS does.
         assert_eq!(results.len(), request.len(), "one result per request deposit");
@@ -613,31 +574,6 @@ use Verdict::{Allow, Audit, Deny, Unknown};
 // ---------------------------------------------------------------------------- tests -------
 
 #[test]
-fn the_driver_builds_synthetic_bans_exactly_like_the_golden_vectors() {
-    for ban in rcs_filter::test_support::synthetic_ban_golden::golden_bans() {
-        let elements: Vec<String> = ban.elements.iter().map(|e| format!("{e:#x}")).collect();
-        let built = build_blacklist_simulation(&elements);
-        assert_eq!(built.len(), 1);
-        assert_eq!(built[0].data, ban.data, "n = {}", ban.n);
-        assert_eq!(built[0].source_hash, ban.source_hash, "n = {}", ban.n);
-    }
-    let doc: serde_json::Value =
-        serde_json::from_str(rcs_filter::test_support::synthetic_ban_golden::GOLDEN).expect("JSON");
-    let l1 = &doc["l1_user_deposit"];
-    assert_eq!(
-        format!(
-            "{:#x}",
-            l1_user_deposit_source_hash(
-                l1["l1_block_hash"].as_str().unwrap().parse().unwrap(),
-                l1["log_index"].as_u64().unwrap()
-            )
-        ),
-        l1["source_hash"].as_str().unwrap(),
-        "the driver derives original source hashes exactly as RCS does"
-    );
-}
-
-#[test]
 fn the_blacklist_fixture_is_what_the_native_interceptor_reads() {
     // A deposit whose hash a committed ban listed is a failed deposit; the same deposit before
     // the ban executes normally. Without this, every replay assertion below could pass on a
@@ -661,69 +597,58 @@ fn the_blacklist_fixture_is_what_the_native_interceptor_reads() {
     );
 }
 
-/// An approved original is re-denied when its proxy is upgraded between rounds, and ends as
-/// a failed deposit on the blacklist.
+/// An original approved earlier stays allowed after its proxy is upgraded: a `known_allowed`
+/// entry is never re-checked for codeHash, so the upgrade does not re-open adjudication.
 #[test]
-fn an_original_approved_earlier_is_re_denied_after_an_upgrade_and_ends_as_a_failed_deposit() {
+fn an_original_approved_earlier_stays_allowed_after_an_upgrade() {
     let a = original(1, P1);
     let w = original(2, PLAIN);
     let quota = HashMap::from([(hash_of(&a), Quota::Approved)]);
-    let outcome =
-        replay(&default_rules(), vec![a.clone(), w.clone()], &quota, Labels::None, |k, base| {
-            if k == 1 {
-                point(base, P1, BAD_IMPL);
-            }
-        });
-    let ban_a = build_blacklist_simulation(&[hash_of(&a)]).remove(0);
+    let outcome = replay(&default_rules(), vec![a.clone(), w.clone()], &quota, |k, base| {
+        if k == 1 {
+            point(base, P1, BAD_IMPL);
+        }
+    });
 
-    assert_eq!(outcome.rounds.len(), 3, "{:?}", outcome.rounds);
+    assert_eq!(outcome.rounds.len(), 2, "{:?}", outcome.rounds);
     // Round 1: `a` needs quota adjudication and stops the batch.
     assert_eq!(outcome.rounds[0].known_allowed, Vec::<String>::new());
     assert_eq!(outcome.rounds[0].verdicts, vec![Audit, Unknown]);
-    // Round 2: `a` is known-allowed and unlabelled, and is now re-judged and denied.
+    // Round 2: `a` is known-allowed, so the upgraded proxy does not re-deny it.
     assert_eq!(outcome.rounds[1].known_allowed, vec![hash_of(&a)]);
-    assert_eq!(outcome.rounds[1].verdicts, vec![Deny, Allow]);
-    // Round 3: the ban prefix commits; `a` is a failed deposit and therefore clean.
-    assert_eq!(outcome.rounds[2].request, vec![hash_of(&ban_a), hash_of(&a), hash_of(&w)]);
-    assert_eq!(outcome.rounds[2].known_allowed, vec![hash_of(&ban_a)]);
-    assert_eq!(outcome.rounds[2].verdicts, vec![Allow, Allow, Allow]);
+    assert_eq!(outcome.rounds[1].verdicts, vec![Allow, Allow]);
 
-    assert_eq!(outcome.terminal_denied, HashSet::from([hash_of(&a)]));
-    assert_eq!(outcome.blacklist, vec![hash_of(&a)], "the would-be submitted blacklist");
+    assert!(outcome.terminal_denied.is_empty(), "nothing was denied");
+    assert!(outcome.blacklist.is_empty(), "no blacklist submission");
     assert_eq!(
         final_statuses(&outcome),
-        vec![Status::Success { logs: 0 }, Status::FailedDeposit, Status::Success { logs: 0 }]
+        vec![Status::Success { logs: 1 }, Status::Success { logs: 0 }]
     );
 }
 
-/// Of two approved originals only the one whose proxy moved is denied.
+/// An original running unapproved code from round 1 is denied on that round, becomes a ban
+/// prefix, and ends as a failed deposit; the approved original beside it keeps executing.
 #[test]
-fn only_the_original_whose_proxy_was_upgraded_is_denied() {
+fn only_the_original_running_unapproved_code_is_denied_and_blacklisted() {
     let a1 = original(1, P1);
     let a2 = original(2, P2);
     let w = original(3, PLAIN);
     let quota = HashMap::from([(hash_of(&a1), Quota::Approved), (hash_of(&a2), Quota::Approved)]);
-    let outcome = replay(
-        &default_rules(),
-        vec![a1.clone(), a2.clone(), w.clone()],
-        &quota,
-        Labels::None,
-        |k, base| {
-            if k == 2 {
+    let outcome =
+        replay(&default_rules(), vec![a1.clone(), a2.clone(), w.clone()], &quota, |k, base| {
+            if k == 0 {
+                // P2 starts on unapproved code; P1 stays approved.
                 point(base, P2, BAD_IMPL);
             }
-        },
-    );
+        });
     let ban_a2 = build_blacklist_simulation(&[hash_of(&a2)]).remove(0);
 
-    assert_eq!(outcome.rounds.len(), 4, "{:?}", outcome.rounds);
+    assert_eq!(outcome.rounds.len(), 3, "{:?}", outcome.rounds);
     assert_eq!(outcome.rounds[0].verdicts, vec![Audit, Unknown, Unknown]);
-    assert_eq!(outcome.rounds[1].verdicts, vec![Allow, Audit, Unknown]);
-    assert_eq!(outcome.rounds[2].known_allowed, vec![hash_of(&a1), hash_of(&a2)]);
-    assert_eq!(outcome.rounds[2].verdicts, vec![Allow, Deny, Allow]);
-    assert_eq!(outcome.rounds[3].request[0], hash_of(&ban_a2));
-    assert_eq!(outcome.rounds[3].known_allowed, vec![hash_of(&a1), hash_of(&ban_a2)]);
-    assert_eq!(outcome.rounds[3].verdicts, vec![Allow, Allow, Allow, Allow]);
+    assert_eq!(outcome.rounds[1].verdicts, vec![Allow, Deny, Allow]);
+    assert_eq!(outcome.rounds[2].request[0], hash_of(&ban_a2));
+    assert_eq!(outcome.rounds[2].known_allowed, vec![hash_of(&a1), hash_of(&ban_a2)]);
+    assert_eq!(outcome.rounds[2].verdicts, vec![Allow, Allow, Allow, Allow]);
 
     assert_eq!(outcome.blacklist, vec![hash_of(&a2)]);
     assert_eq!(
@@ -738,33 +663,39 @@ fn only_the_original_whose_proxy_was_upgraded_is_denied() {
     );
 }
 
-/// A ban prefix whose own execution a rule objects to still commits and stays `allow`.
+/// A ban prefix whose own execution a rule objects to still commits and stays `allow`. The
+/// evidence is the commit itself: the later original is a failed deposit only if the prefix's
+/// ban was written.
 #[test]
 fn a_ban_prefix_commits_even_when_its_execution_is_objected() {
-    let a = original(1, P1);
-    let w = original(2, PLAIN);
-    let quota = HashMap::from([(hash_of(&a), Quota::Approved)]);
+    let a1 = original(1, P1);
+    let a2 = original(2, P2);
+    let w = original(3, PLAIN);
+    let quota = HashMap::from([(hash_of(&a1), Quota::Approved)]);
     let mut rules = default_rules();
     rules.push(blacklist_guard());
-    let outcome = replay(&rules, vec![a.clone(), w.clone()], &quota, Labels::None, |k, base| {
-        if k == 1 {
-            point(base, P1, BAD_IMPL);
+    let outcome = replay(&rules, vec![a1.clone(), a2.clone(), w], &quota, |k, base| {
+        if k == 0 {
+            point(base, P2, BAD_IMPL);
         }
     });
 
     assert_eq!(outcome.rounds.len(), 3, "{:?}", outcome.rounds);
-    assert_eq!(outcome.rounds[0].verdicts, vec![Audit, Unknown]);
-    assert_eq!(outcome.rounds[1].verdicts, vec![Deny, Allow]);
-    assert_eq!(outcome.rounds[2].verdicts, vec![Allow, Allow, Allow]);
-    assert_eq!(outcome.blacklist, vec![hash_of(&a)]);
-    assert_eq!(final_statuses(&outcome)[1], Status::FailedDeposit);
+    assert_eq!(outcome.rounds[0].verdicts, vec![Audit, Unknown, Unknown]);
+    assert_eq!(outcome.rounds[1].verdicts, vec![Allow, Deny, Allow]);
+    assert_eq!(outcome.rounds[2].verdicts, vec![Allow, Allow, Allow, Allow]);
+    assert_eq!(outcome.blacklist, vec![hash_of(&a2)]);
+    assert_eq!(
+        final_statuses(&outcome)[2],
+        Status::FailedDeposit,
+        "the prefix's ban was committed even though a rule objected to its execution"
+    );
 
-    // The prefix really was objected to, and was still allowed and committed.
-    let ban_a = build_blacklist_simulation(&[hash_of(&a)]).remove(0);
+    // The prefix really was objected to, and was still allowed.
+    let ban_a2 = build_blacklist_simulation(&[hash_of(&a2)]).remove(0);
     let results =
-        audit_call(&rules, std::slice::from_ref(&ban_a), &[hash_of(&ban_a)], None, &base_state());
+        audit_call(&rules, std::slice::from_ref(&ban_a2), &[hash_of(&ban_a2)], &base_state());
     assert_eq!(results[0].verdict, Allow);
-    assert_eq!(results[0].callstack_identification, Some(CallstackIdentification::Objected));
 }
 
 /// With no call-frame rule in the request nothing changes: approved originals stay
@@ -774,7 +705,7 @@ fn a_request_without_call_frame_rules_behaves_as_before() {
     let a = original(1, P1);
     let w = original(2, PLAIN);
     let quota = HashMap::from([(hash_of(&a), Quota::Approved)]);
-    let outcome = replay(&[quota_rule()], vec![a.clone(), w], &quota, Labels::None, |k, base| {
+    let outcome = replay(&[quota_rule()], vec![a.clone(), w], &quota, |k, base| {
         if k == 1 {
             point(base, P1, BAD_IMPL);
         }
@@ -792,60 +723,17 @@ fn a_request_without_call_frame_rules_behaves_as_before() {
     );
 }
 
-/// A complete correct label map reaches the same result as inference does; a map that labels the ban
-/// `original` shows the explicit-label contract: labels win, and an objected ban then loses its
-/// commit.
-#[test]
-fn labels_win_over_inference() {
-    let a = original(1, P1);
-    let w = original(2, PLAIN);
-    let quota = HashMap::from([(hash_of(&a), Quota::Approved)]);
-    let upgrade = |k: usize, base: &mut InMemoryDB| {
-        if k == 1 {
-            point(base, P1, BAD_IMPL);
-        }
-    };
-
-    let labelled =
-        replay(&default_rules(), vec![a.clone(), w.clone()], &quota, Labels::Correct, upgrade);
-    let inferred =
-        replay(&default_rules(), vec![a.clone(), w.clone()], &quota, Labels::None, upgrade);
-    assert_eq!(
-        labelled.rounds.iter().map(|r| &r.verdicts).collect::<Vec<_>>(),
-        inferred.rounds.iter().map(|r| &r.verdicts).collect::<Vec<_>>()
-    );
-    assert_eq!(labelled.blacklist, inferred.blacklist);
-    assert_eq!(final_statuses(&labelled), final_statuses(&inferred));
-
-    let mut rules = default_rules();
-    rules.push(blacklist_guard());
-    let mislabelled =
-        replay(&rules, vec![a.clone(), w.clone()], &quota, Labels::BansAsOriginal, upgrade);
-    let last = mislabelled.rounds.last().expect("a round ran");
-    assert_eq!(last.verdicts[0], Deny, "a ban labelled original is adjudicated as one");
-    assert_eq!(
-        last.verdicts[1], Deny,
-        "its commit was withheld, so `a` was not blacklisted in the simulation and ran its payload"
-    );
-    assert_eq!(mislabelled.blacklist, vec![hash_of(&a)], "RCS-side state is unaffected");
-}
-
 /// A deposit the quota adjudicator denies in the first round becomes a ban prefix and a failed
 /// deposit, while an approved one in the same body keeps executing — the pre-existing quota path,
-/// unchanged by the call-frame inference.
+/// unchanged by the call-frame work.
 #[test]
 fn a_quota_denied_original_is_blacklisted_and_an_approved_one_keeps_executing() {
     let denied = original(1, P1);
     let approved = original(2, P2);
     let quota =
         HashMap::from([(hash_of(&denied), Quota::Denied), (hash_of(&approved), Quota::Approved)]);
-    let outcome = replay(
-        &default_rules(),
-        vec![denied.clone(), approved.clone()],
-        &quota,
-        Labels::None,
-        |_, _| {},
-    );
+    let outcome =
+        replay(&default_rules(), vec![denied.clone(), approved.clone()], &quota, |_, _| {});
     assert_eq!(outcome.rounds.len(), 2, "{:?}", outcome.rounds);
     assert_eq!(outcome.rounds[0].verdicts, vec![Audit, Unknown]);
     // Round 2: the ban commits, the denied deposit is a failed deposit, and the other deposit

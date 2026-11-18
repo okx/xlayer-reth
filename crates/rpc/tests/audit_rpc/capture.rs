@@ -1,22 +1,16 @@
 //! Real capture and a real verdict on `xlayer_auditTransactions`: capture / verdict / commit
-//! semantics, the per-transaction observation budget, the synthetic-prefix exception, ordered
-//! batches and the `CallstackOnly` mode's log surface.
-
-use std::collections::BTreeMap;
+//! semantics, the per-transaction observation budget, ordered batches and the `CallstackOnly`
+//! mode's log surface.
 
 use alloy_primitives::{keccak256, Address, B256, U256};
-use metrics_util::debugging::DebuggingRecorder;
 use rcs_filter::rules::{load_rules, RawRule};
-use rcs_filter::test_support::synthetic_ban_golden::golden_bans;
 use revm::database::InMemoryDB;
 use revm::state::{AccountInfo, Bytecode};
 use revm::Database as _;
 use xlayer_rpc::audit::rpc::observation_recorder;
 use xlayer_rpc::audit::rpc::test_seams::execute_audit_batch;
-use xlayer_rpc::audit::rpc::{
-    AuditTransactionsRequest, KnownAllowedKind, AUDIT_MAX_CALLSTACK_OBSERVATIONS_PER_TX,
-};
-use xlayer_rpc::audit::verdict::{CallstackIdentification, Verdict};
+use xlayer_rpc::audit::rpc::{AuditTransactionsRequest, AUDIT_MAX_CALLSTACK_OBSERVATIONS_PER_TX};
+use xlayer_rpc::audit::verdict::Verdict;
 
 use crate::harness::*;
 
@@ -35,14 +29,11 @@ fn a_callstack_rule_denies_unapproved_implementation() {
     let run = run_batch(
         &[deposit_request(&format!("0x{}", "33".repeat(32)), PROXY)],
         vec![proxy_impl_allowlist_rule()],
-        1,
         &[],
-        None,
         seeded_db(UNAPPROVED_IMPL, 1),
     );
     let result = only(&run);
     assert_eq!(result.verdict, Verdict::Deny);
-    assert_eq!(result.callstack_identification, Some(CallstackIdentification::Objected));
     assert_eq!(run.proxy_slot0, U256::ZERO, "a denied transaction's state is not committed");
 }
 
@@ -53,14 +44,11 @@ fn same_request_with_approved_implementation_allows() {
     let run = run_batch(
         &[deposit_request(&format!("0x{}", "33".repeat(32)), PROXY)],
         vec![proxy_impl_allowlist_rule()],
-        1,
         &[],
-        None,
         seeded_db(APPROVED_IMPL, 1),
     );
     let result = only(&run);
     assert_eq!(result.verdict, Verdict::Allow);
-    assert_eq!(result.callstack_identification, Some(CallstackIdentification::Clean));
     assert_eq!(run.proxy_slot0, U256::from(1u64), "an allowed transaction commits its state");
 }
 
@@ -74,9 +62,7 @@ fn ordinary_call_to_the_observed_proxy_is_allowed() {
     let run = run_batch(
         &[deposit_request(&format!("0x{}", "33".repeat(32)), PROXY)],
         vec![proxy_impl_allowlist_rule()],
-        1,
         &[],
-        None,
         // The proxy's own code performs NO delegatecall here: it is a bare `STOP`.
         seeded_db(UNAPPROVED_IMPL, 0),
     );
@@ -86,222 +72,42 @@ fn ordinary_call_to_the_observed_proxy_is_allowed() {
         Verdict::Allow,
         "a plain call to the proxy has no implementation to compare and must not be denied"
     );
-    assert_eq!(
-        result.callstack_identification,
-        Some(CallstackIdentification::Clean),
-        "the frame WAS identified; it simply carries no implementation"
-    );
 }
 
-/// A `deny` rule that reads only the event and transaction dimensions: `Transfer.from` binds to
-/// null because the deposit emits no `Transfer`, so the rule fires with no call-frame selector
-/// anywhere in it.
-fn null_bound_transfer_deny_rule() -> RawRule {
-    serde_json::from_value(serde_json::json!({
-        "id": "null-bound-transfer",
-        "event_abis": { "t": {
-            "type": "event", "name": "Transfer",
-            "inputs": [
-                { "name": "from", "type": "address", "indexed": true },
-                { "name": "to", "type": "address", "indexed": true },
-                { "name": "value", "type": "uint256", "indexed": false }
-            ],
-            "anonymous": false
-        } },
-        "condition": { "==": [ { "var": "t.from" }, null ] },
-        "action": "deny"
-    }))
-    .expect("valid event-only deny rule")
-}
-
-/// The deny is attributed to the rule that decided it: an event-only rule denies while the
-/// request's selector-bearing rule points at a proxy the deposit never calls, so the call-frame
-/// diagnostic stays `clean` instead of claiming an objection that never happened.
+/// Proof that the fail-closed gate is NARROWED and not widened: with an unadjudicable
+/// observation set, an ordinary deposit still gets the fail-closed non-verdict, with nothing
+/// committed.
 #[test]
-fn an_event_only_deny_beside_an_untouched_callstack_rule_is_not_reported_as_objected() {
-    let run = run_batch(
-        &[deposit_request(&format!("0x{}", "55".repeat(32)), LOG_TARGET)],
-        vec![null_bound_transfer_deny_rule(), proxy_impl_allowlist_rule()],
-        1,
-        &[],
-        None,
-        log0_db(0),
-    );
-    let result = only(&run);
-    assert_eq!(result.verdict, Verdict::Deny);
-    assert_eq!(
-        result.callstack_identification,
-        Some(CallstackIdentification::Clean),
-        "an event-only rule decided this deny; no call-frame rule was reached"
-    );
-    assert_eq!(run.depositor_nonce, 0, "a denied transaction's state is not committed");
-
-    // Control: the same event-only rule alone. The request declares no selector, so the field is
-    // not part of the response at all.
-    let control = run_batch(
-        &[deposit_request(&format!("0x{}", "56".repeat(32)), LOG_TARGET)],
-        vec![null_bound_transfer_deny_rule()],
-        1,
-        &[],
-        None,
-        log0_db(0),
-    );
-    assert_eq!(only(&control).verdict, Verdict::Deny);
-    assert_eq!(only(&control).callstack_identification, None);
-}
-
-/// a `known_allowed` Original denied on the callstack dimension does NOT stop the
-/// batch: a later transaction still executes and is classified.
-#[test]
-fn a_denied_original_does_not_stop_the_batch() {
-    let first = format!("0x{}", "33".repeat(32));
-    let second = format!("0x{}", "44".repeat(32));
-    let run = run_batch(
-        &[deposit_request(&first, PROXY), deposit_request(&second, APPROVED_IMPL)],
-        vec![proxy_impl_allowlist_rule()],
-        1,
-        &[&first],
-        Some([(first.clone(), KnownAllowedKind::Original)].into_iter().collect()),
-        seeded_db(UNAPPROVED_IMPL, 1),
-    );
-    assert_eq!(run.results[0].verdict, Verdict::Deny);
-    let later = &run.results[1];
-    assert_eq!(later.verdict, Verdict::Allow);
-}
-
-/// An UNLABELLED `known_allowed` entry that is not a synthetic ban, executing an unapproved
-/// implementation, is adjudicated as an approved original: `Deny`, with nothing committed.
-#[test]
-fn an_unlabelled_original_running_unapproved_code_is_denied_and_commits_nothing() {
-    let source = format!("0x{}", "66".repeat(32));
-    let run = run_batch(
-        &[deposit_request(&source, PROXY)],
-        vec![proxy_impl_allowlist_rule()],
-        1,
-        &[&source],
-        // No label map at all — the shape a caller that is not label-aware sends.
-        None,
-        seeded_db(UNAPPROVED_IMPL, 1),
-    );
-    let result = only(&run);
-    assert_eq!(result.verdict, Verdict::Deny, "an unlabelled original is re-adjudicated");
-    assert_eq!(result.callstack_identification, Some(CallstackIdentification::Objected));
-    assert_eq!(run.proxy_slot0, U256::ZERO, "a denied original commits nothing");
-
-    // The identical execution labelled `Original` gets the identical result.
-    let labelled = run_batch(
-        &[deposit_request(&source, PROXY)],
-        vec![proxy_impl_allowlist_rule()],
-        1,
-        &[&source],
-        Some([(source.clone(), KnownAllowedKind::Original)].into_iter().collect()),
-        seeded_db(UNAPPROVED_IMPL, 1),
-    );
-    let result = only(&labelled);
-    assert_eq!(result.verdict, Verdict::Deny);
-    assert_eq!(labelled.proxy_slot0, U256::ZERO, "a denied Original commits nothing");
-}
-
-/// A legacy batch carrying no label map at all: several `known_allowed` entries plus an
-/// ordinary deposit, with alias-bearing rules, all executing an unapproved implementation.
-#[test]
-fn an_unlabelled_batch_adjudicates_its_originals_and_the_ordinary_deposit_alike() {
-    let first = format!("0x{}", "66".repeat(32));
-    let second = format!("0x{}", "67".repeat(32));
-    let ordinary = format!("0x{}", "68".repeat(32));
-    let run = run_batch(
-        &[
-            deposit_request(&first, PROXY),
-            deposit_request(&second, PROXY),
-            deposit_request(&ordinary, PROXY),
-        ],
-        vec![proxy_impl_allowlist_rule()],
-        1,
-        &[&first, &second],
-        None,
-        seeded_db(UNAPPROVED_IMPL, 1),
-    );
-    assert_eq!(run.results[0].verdict, Verdict::Deny, "unlabelled original");
-    assert_eq!(run.results[1].verdict, Verdict::Deny, "unlabelled original");
-    assert_eq!(
-        run.results[2].verdict,
-        Verdict::Deny,
-        "the ordinary deposit is adjudicated, not exempted"
-    );
-    assert_eq!(run.proxy_slot0, U256::ZERO, "no denied transaction added state");
-}
-
-/// An unlabelled entry that is not a synthetic ban, whose observation set cannot be adjudicated
-/// — unavailable, and separately `Available` under a FOREIGN stamp — gets the non-verdict with
-/// nothing committed, exactly as a labelled `Original` does.
-#[test]
-fn an_unadjudicable_unlabelled_original_is_the_non_verdict_and_commits_nothing() {
+fn the_unadjudicable_gate_catches_an_ordinary_entry() {
     let source = format!("0x{}", "66".repeat(32));
 
     // Unavailable: the observation budget is exhausted.
     let run = run_batch(
         &[deposit_request(&source, PROXY)],
         vec![proxy_impl_allowlist_rule()],
-        1,
-        &[&source],
-        None,
+        &[],
         seeded_db(APPROVED_IMPL, 1_000),
     );
     let result = only(&run);
-    assert_eq!(result.verdict, Verdict::Malformed);
-    assert_eq!(result.callstack_identification, Some(CallstackIdentification::NotIdentified));
-    assert_eq!(run.proxy_slot0, U256::ZERO, "a non-verdict commits nothing");
+    assert_eq!(result.verdict, Verdict::Malformed, "never Allow");
+    assert_eq!(run.proxy_slot0, U256::ZERO, "state must not be committed");
 
     // Available, but produced under a different snapshot identity.
     let raw_rules = vec![proxy_impl_allowlist_rule()];
     let run = run_batch_stamped(
         &[deposit_request(&source, PROXY)],
         raw_rules.clone(),
-        1,
-        &[&source],
-        None,
+        &[],
         seeded_db(APPROVED_IMPL, 1),
-        Some(foreign_stamp(&raw_rules, 1)),
+        Some(foreign_stamp(&raw_rules)),
     );
     let result = only(&run);
-    assert_eq!(result.verdict, Verdict::Malformed);
-    assert_eq!(result.callstack_identification, Some(CallstackIdentification::NotIdentified));
-    assert_eq!(run.proxy_slot0, U256::ZERO, "a non-verdict commits nothing");
+    assert_eq!(result.verdict, Verdict::Malformed, "never Allow");
+    assert_eq!(run.proxy_slot0, U256::ZERO, "state must not be committed");
 }
 
-/// Proof that the synthetic-prefix exemption is NARROWED and not widened: with the same
-/// unadjudicable observation set, an ordinary deposit and a labelled `Original` both still get
-/// the fail-closed non-verdict, with nothing committed.
-#[test]
-fn the_unadjudicable_gate_still_catches_ordinary_and_labelled_original_entries() {
-    let source = format!("0x{}", "66".repeat(32));
-    for kinds in [
-        None,
-        Some(
-            [(source.clone(), KnownAllowedKind::Original)]
-                .into_iter()
-                .collect::<BTreeMap<String, KnownAllowedKind>>(),
-        ),
-    ] {
-        let known: &[&str] = if kinds.is_some() { &[&source] } else { &[] };
-        let run = run_batch(
-            &[deposit_request(&source, PROXY)],
-            vec![proxy_impl_allowlist_rule()],
-            1,
-            known,
-            kinds,
-            seeded_db(APPROVED_IMPL, 1_000),
-        );
-        let result = only(&run);
-        assert_eq!(result.verdict, Verdict::Malformed, "never Allow");
-        assert_eq!(result.callstack_identification, Some(CallstackIdentification::NotIdentified));
-        assert_eq!(run.proxy_slot0, U256::ZERO, "state must not be committed");
-    }
-}
-
-/// when the request declares no selector, no inspector is constructed, the
-/// identification diagnostic is `not_applicable`, and a v1 response keeps its exact previous
-/// shape (the field is absent from the JSON).
+/// when the request declares no selector, no inspector is constructed, the response keeps its
+/// exact four-field shape, and a `known_allowed` entry still commits as before.
 #[test]
 fn selector_free_request_is_unchanged() {
     let source = format!("0x{}", "33".repeat(32));
@@ -318,21 +124,17 @@ fn selector_free_request_is_unchanged() {
     let run = run_batch(
         &[deposit_request(&source, PROXY)],
         vec![event_only_rule()],
-        1,
         &[&source],
-        None,
         seeded_db(APPROVED_IMPL, 1),
     );
     let result = only(&run);
     assert_eq!(result.verdict, Verdict::Allow);
-    assert_eq!(
-        result.callstack_identification, None,
-        "a v1 response must not carry the diagnostic"
-    );
     let json = serde_json::to_value(result).expect("serializes");
-    assert!(
-        json.get("callstack_identification").is_none(),
-        "the v1 wire shape is unchanged: {json}"
+    let object = json.as_object().expect("a result is a JSON object");
+    assert_eq!(
+        object.len(),
+        4,
+        "the wire shape is exactly tx_hash / source_hash / verdict / actions: {json}"
     );
     assert_eq!(run.proxy_slot0, U256::from(1u64), "known_allowed still commits as before");
 }
@@ -352,18 +154,14 @@ fn no_virtual_native_log_enters_the_screened_stream() {
     let armed = run_batch(
         &[deposit_request(&source, PROXY)],
         vec![native_transfer_deny_rule(), inert_selector_rule()],
-        1,
         &[],
-        None,
         value_transferring_db(),
     );
     // Without capture at all — the pre-change path for this rule.
     let unarmed = run_batch(
         &[deposit_request(&source, PROXY)],
         vec![native_transfer_deny_rule()],
-        1,
         &[],
-        None,
         value_transferring_db(),
     );
 
@@ -441,22 +239,19 @@ fn value_transferring_db() -> InMemoryDB {
 
 // ----------------------------------------------------- repeated-adjudication fixtures ----
 
-/// the same for an ORDINARY entry (no `known_allowed` at all), running UNAPPROVED code: the
-/// request declares a selector, the execution could not be identified, so it is the
-/// non-verdict and its state stays out of the overlay.
+/// an ORDINARY entry (no `known_allowed` at all), running UNAPPROVED code, whose rules are all
+/// skipped by origin: the request declares a selector, the execution could not be identified, so
+/// it is the non-verdict and its state stays out of the overlay.
 #[test]
 fn capture_failure_on_an_ordinary_entry_with_skipped_rules_is_the_non_verdict() {
     let run = run_batch(
         &[deposit_request(&format!("0x{}", "33".repeat(32)), PROXY)],
         vec![proxy_impl_allowlist_rule_from_origin(OTHER_ORIGIN)],
-        1,
         &[],
-        None,
         seeded_db(UNAPPROVED_IMPL, 1_000),
     );
     let result = only(&run);
     assert_eq!(result.verdict, Verdict::Malformed);
-    assert_eq!(result.callstack_identification, Some(CallstackIdentification::NotIdentified));
     assert_eq!(
         run.proxy_slot0,
         U256::ZERO,
@@ -476,10 +271,8 @@ fn repeated_adjudication_of_an_approved_entry_converges_and_never_re_enters_adju
     let approved = keccak256(logging_impl_code());
     let rules =
         vec![proxy_impl_allowlist_rule_approving(&[approved]), audit_on_proxy_transfer_rule()];
-    let kinds = BTreeMap::from([(source.clone(), KnownAllowedKind::Original)]);
 
-    let fresh =
-        run_batch(&[deposit_request(&source, PROXY)], rules.clone(), 1, &[], None, logging_db());
+    let fresh = run_batch(&[deposit_request(&source, PROXY)], rules.clone(), &[], logging_db());
     assert_eq!(
         only(&fresh).verdict,
         Verdict::Audit,
@@ -488,14 +281,8 @@ fn repeated_adjudication_of_an_approved_entry_converges_and_never_re_enters_adju
 
     let mut rounds: Vec<String> = Vec::new();
     for round in 0..3 {
-        let run = run_batch(
-            &[deposit_request(&source, PROXY)],
-            rules.clone(),
-            1,
-            &[&source],
-            Some(kinds.clone()),
-            logging_db(),
-        );
+        let run =
+            run_batch(&[deposit_request(&source, PROXY)], rules.clone(), &[&source], logging_db());
         let result = only(&run);
         assert_eq!(
             result.verdict,
@@ -518,12 +305,12 @@ fn repeated_adjudication_of_an_approved_entry_converges_and_never_re_enters_adju
 // ---------------------------------------------------------------- default and boundary --------
 
 #[test]
-fn the_audit_default_budget_is_1000_and_independent_of_the_filter_config() {
+fn the_audit_budget_is_1000_and_independent_of_the_builder_budget() {
     assert_eq!(AUDIT_MAX_CALLSTACK_OBSERVATIONS_PER_TX, 1_000);
     assert_eq!(
-        rcs_filter::config::FilterConfig::default().max_callstack_observations_per_tx,
+        rcs_filter::capture::CANDIDATE_MAX_CALLSTACK_OBSERVATIONS_PER_TX,
         10_000,
-        "the payload builder's own default is unchanged and unrelated"
+        "the payload builder's own budget is a separate module constant"
     );
 }
 
@@ -534,9 +321,7 @@ fn exactly_1000_observations_are_adjudicated_and_committed_under_the_default_bud
     let run = run_batch(
         &[deposit_request(&source, PROXY)],
         vec![proxy_impl_allowlist_rule()],
-        1,
         &[],
-        None,
         // 999 first-level delegatecalls: the proxy's own frame plus one per delegatecall is 1 000.
         seeded_db(APPROVED_IMPL, 999),
     );
@@ -550,7 +335,6 @@ fn exactly_1000_observations_are_adjudicated_and_committed_under_the_default_bud
     );
     let result = only(&run);
     assert_eq!(result.verdict, Verdict::Allow);
-    assert_eq!(result.callstack_identification, Some(CallstackIdentification::Clean));
     assert_eq!(run.proxy_slot0, U256::from(1u64), "an allowed transaction commits its state");
     assert_eq!(run.depositor_nonce, 1);
 }
@@ -559,16 +343,12 @@ fn exactly_1000_observations_are_adjudicated_and_committed_under_the_default_bud
 fn the_1001st_observation_fails_closed_without_committing_under_the_default_budget() {
     let source = format!("0x{}", "33".repeat(32));
     let _ = observation_recorder::take();
-    let (run, out) = capture_tracing(|| {
-        run_batch(
-            &[deposit_request(&source, PROXY)],
-            vec![proxy_impl_allowlist_rule()],
-            1,
-            &[],
-            None,
-            seeded_db(APPROVED_IMPL, 1_000),
-        )
-    });
+    let run = run_batch(
+        &[deposit_request(&source, PROXY)],
+        vec![proxy_impl_allowlist_rule()],
+        &[],
+        seeded_db(APPROVED_IMPL, 1_000),
+    );
 
     let recorded = observation_recorder::take();
     assert_eq!(recorded.len(), 1);
@@ -578,13 +358,8 @@ fn the_1001st_observation_fails_closed_without_committing_under_the_default_budg
     );
     let result = only(&run);
     assert_eq!(result.verdict, Verdict::Malformed, "never Allow on a capture failure");
-    assert_eq!(result.callstack_identification, Some(CallstackIdentification::NotIdentified));
     assert_eq!(run.proxy_slot0, U256::ZERO, "a non-verdict does not commit state");
     assert_eq!(run.depositor_nonce, 0);
-    assert!(
-        !out.contains("xlayer_audit_rpc::synthetic_ban_budget"),
-        "only a synthetic prefix emits the over-budget event: {out}"
-    );
 }
 
 #[test]
@@ -596,9 +371,7 @@ fn the_default_budget_is_per_transaction_not_pooled_across_the_batch() {
     let run = run_batch(
         &[deposit_request(&first, PROXY), deposit_request(&second, PROXY)],
         vec![proxy_impl_allowlist_rule()],
-        1,
         &[],
-        None,
         seeded_db(APPROVED_IMPL, 999),
     );
     assert_eq!(run.results[0].verdict, Verdict::Allow);
@@ -620,9 +393,7 @@ fn the_default_budget_is_per_transaction_not_pooled_across_the_batch() {
     let run = run_batch(
         &[deposit_request(&over, PROXY), deposit_request(&under, PROXY_B)],
         vec![proxy_impl_allowlist_rule()],
-        1,
         &[],
-        None,
         db,
     );
     assert_eq!(run.results[0].verdict, Verdict::Malformed);
@@ -631,169 +402,21 @@ fn the_default_budget_is_per_transaction_not_pooled_across_the_batch() {
     assert_eq!(run.depositor_nonce, 1, "only the second transaction committed");
 }
 
+/// A `known_allowed` entry is never checked for codeHash: even an over-budget capture leaves it
+/// `Allow` and committed. The commit is what rebuilds the base state the later entries run on.
 #[test]
-fn an_over_budget_known_allowed_original_fails_closed_without_committing() {
+fn an_over_budget_known_allowed_entry_is_allowed_and_committed() {
     let source = format!("0x{}", "66".repeat(32));
     let run = run_batch(
         &[deposit_request(&source, PROXY)],
         vec![proxy_impl_allowlist_rule()],
-        1,
         &[&source],
-        Some([(source.clone(), KnownAllowedKind::Original)].into_iter().collect()),
         seeded_db(APPROVED_IMPL, 1_000),
     );
     let result = only(&run);
-    assert_eq!(result.verdict, Verdict::Malformed, "an approved original is not exempt");
-    assert_eq!(result.callstack_identification, Some(CallstackIdentification::NotIdentified));
-    assert_eq!(run.proxy_slot0, U256::ZERO, "a non-verdict commits nothing");
-    assert_eq!(run.depositor_nonce, 0);
-}
-
-// ------------------------------------------------------------- synthetic-prefix exception ----
-
-/// A synthetic ban prefix keeps its `Allow` and its commit even when over the budget, reports
-/// `not_identified`, and additionally emits the separately filterable over-budget event.
-///
-/// The exception is the Player's decision for this change: the prefix rebuilds the base state the
-/// later entries are adjudicated on, so withholding its commit would corrupt that base state. The
-/// event exists because the response diagnostic reaches nobody for such an entry.
-#[test]
-fn an_over_budget_labelled_synthetic_ban_prefix_is_committed_and_reports_budget_exceeded() {
-    in_isolated_process(
-        module_path!(),
-        "an_over_budget_labelled_synthetic_ban_prefix_is_committed_and_reports_budget_exceeded",
-        labelled_synthetic_ban_prefix_over_budget,
-    );
-}
-
-fn labelled_synthetic_ban_prefix_over_budget() {
-    let prefix = format!("0x{}", "55".repeat(32));
-    let kinds: BTreeMap<String, KnownAllowedKind> =
-        [(prefix.clone(), KnownAllowedKind::SyntheticBan)].into_iter().collect();
-
-    let recorder = DebuggingRecorder::new();
-    let snapshotter = recorder.snapshotter();
-    let _guard = metrics::set_default_local_recorder(&recorder);
-
-    let (run, out) = capture_tracing(|| {
-        run_batch(
-            &[deposit_request(&prefix, PROXY)],
-            vec![proxy_impl_allowlist_rule()],
-            1,
-            &[&prefix],
-            Some(kinds.clone()),
-            seeded_db(APPROVED_IMPL, 1_000),
-        )
-    });
-
-    let s = only(&run);
-    assert_eq!(s.verdict, Verdict::Allow, "the prefix contract stays unconditional");
-    assert_eq!(s.callstack_identification, Some(CallstackIdentification::NotIdentified));
-    assert_eq!(run.proxy_slot0, U256::from(1u64), "the prefix's commit is never withheld");
+    assert_eq!(result.verdict, Verdict::Allow, "known_allowed ignores its capture outcome");
+    assert_eq!(run.proxy_slot0, U256::from(1u64), "the known_allowed commit is never withheld");
     assert_eq!(run.depositor_nonce, 1);
-
-    assert_eq!(
-        observed(&snapshotter),
-        labelled_prefix_counters(),
-        "the prefix is counted once as not_identified and nothing else"
-    );
-    assert_one_budget_event(&out, &prefix, &approved_hash());
-
-    // In-budget control: the same shape at exactly 1 000 observations is identified clean and
-    // emits no budget event. Its counters are not re-read: the handles stay bound to this
-    // process's first recorder.
-    let (control, control_out) = capture_tracing(|| {
-        run_batch(
-            &[deposit_request(&prefix, PROXY)],
-            vec![proxy_impl_allowlist_rule()],
-            1,
-            &[&prefix],
-            Some(kinds),
-            seeded_db(APPROVED_IMPL, 999),
-        )
-    });
-    let c = only(&control);
-    assert_eq!(c.verdict, Verdict::Allow);
-    assert_eq!(c.callstack_identification, Some(CallstackIdentification::Clean));
-    assert_eq!(control.proxy_slot0, U256::from(1u64));
-    assert!(
-        !control_out.contains("xlayer_audit_rpc::synthetic_ban_budget"),
-        "an in-budget prefix emits no budget event: {control_out}"
-    );
-}
-
-/// The same exception for a request that sends NO label map: the golden ban is recognised by the
-/// content-binding check over the built deposit's own bytes.
-#[test]
-fn an_over_budget_inferred_synthetic_ban_prefix_is_committed_and_reports_budget_exceeded() {
-    in_isolated_process(
-        module_path!(),
-        "an_over_budget_inferred_synthetic_ban_prefix_is_committed_and_reports_budget_exceeded",
-        inferred_synthetic_ban_prefix_over_budget,
-    );
-}
-
-/// The golden one-element ban, sent to `PROXY`. The proxy ignores its calldata and performs the
-/// delegatecalls, so the classification rests on the deposit's own `source_hash` and `input`.
-fn golden_ban_to_proxy() -> xlayer_rpc::audit::deposit::DepositTxRequest {
-    let ban = golden_bans().into_iter().find(|ban| ban.n == 1).expect("an n = 1 vector");
-    xlayer_rpc::audit::deposit::DepositTxRequest {
-        data: ban.data,
-        ..deposit_request(&ban.source_hash, PROXY)
-    }
-}
-
-fn inferred_synthetic_ban_prefix_over_budget() {
-    let req = golden_ban_to_proxy();
-    let source = req.source_hash.clone();
-
-    let recorder = DebuggingRecorder::new();
-    let snapshotter = recorder.snapshotter();
-    let _guard = metrics::set_default_local_recorder(&recorder);
-
-    let (run, out) = capture_tracing(|| {
-        run_batch(
-            std::slice::from_ref(&req),
-            vec![proxy_impl_allowlist_rule()],
-            1,
-            &[&source],
-            // No label map at all: the class is decided by the content-binding check.
-            None,
-            seeded_db(APPROVED_IMPL, 1_000),
-        )
-    });
-
-    let s = only(&run);
-    assert_eq!(s.verdict, Verdict::Allow, "the prefix contract stays unconditional");
-    assert_eq!(s.callstack_identification, Some(CallstackIdentification::NotIdentified));
-    assert_eq!(run.proxy_slot0, U256::from(1u64), "the prefix's commit is never withheld");
-    assert_eq!(run.depositor_nonce, 1);
-
-    assert_eq!(
-        observed(&snapshotter),
-        inferred_prefix_counters(),
-        "the entry is recognised as a synthetic ban by the content-binding check"
-    );
-    assert_one_budget_event(&out, &source, &approved_hash());
-
-    let (control, control_out) = capture_tracing(|| {
-        run_batch(
-            std::slice::from_ref(&req),
-            vec![proxy_impl_allowlist_rule()],
-            1,
-            &[&source],
-            None,
-            seeded_db(APPROVED_IMPL, 999),
-        )
-    });
-    let c = only(&control);
-    assert_eq!(c.verdict, Verdict::Allow);
-    assert_eq!(c.callstack_identification, Some(CallstackIdentification::Clean));
-    assert_eq!(control.proxy_slot0, U256::from(1u64));
-    assert!(
-        !control_out.contains("xlayer_audit_rpc::synthetic_ban_budget"),
-        "an in-budget prefix emits no budget event: {control_out}"
-    );
 }
 
 // ------------------------------------------------------------------- event-binding budget ----
@@ -845,9 +468,7 @@ fn the_event_binding_budget_fails_closed_before_enumeration_and_commits_nothing(
     let admissible = run_batch(
         &[deposit_request(&format!("0x{}", "33".repeat(32)), LOG_TARGET)],
         vec![two_anonymous_events_rule()],
-        1,
         &[],
-        None,
         log0_db(100),
     );
     assert_eq!(
@@ -860,9 +481,7 @@ fn the_event_binding_budget_fails_closed_before_enumeration_and_commits_nothing(
     let over = run_batch(
         &[deposit_request(&format!("0x{}", "44".repeat(32)), LOG_TARGET)],
         vec![two_anonymous_events_rule()],
-        1,
         &[],
-        None,
         log0_db(101),
     );
     assert_eq!(

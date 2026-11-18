@@ -1,20 +1,15 @@
-//! The audit RPC's request boundary: the raw JSON-RPC decode, the protocol version, the label
-//! map, the rule-rejection detail and the producer-rendered rule document.
-
-use std::collections::BTreeMap;
+//! The audit RPC's request boundary: the raw JSON-RPC decode, the three-key request body, the
+//! rule-rejection detail, the producer-rendered rule document and the four-field response shape.
 
 use alloy_primitives::{Address, B256, U256};
 use jsonrpsee::types::Params;
-use rcs_filter::config::MIN_PROTOCOL_VERSION;
 use rcs_filter::rules::{load_rules, RawRule};
 use revm::database::InMemoryDB;
 use revm::state::{AccountInfo, Bytecode};
 use revm::Database as _;
 use xlayer_rpc::audit::rpc::observation_recorder;
 use xlayer_rpc::audit::rpc::test_seams::execute_audit_batch;
-use xlayer_rpc::audit::rpc::{
-    AuditTransactionsRequest, AuditTransactionsResponse, KnownAllowedKind,
-};
+use xlayer_rpc::audit::rpc::{AuditTransactionsRequest, AuditTransactionsResponse};
 use xlayer_rpc::audit::verdict::Verdict;
 
 use crate::harness::*;
@@ -114,7 +109,6 @@ fn duplicate_alias_keys_are_refused_by_the_real_request_decode() {
 fn the_legal_v1_request_decodes_and_prepares_through_the_same_decoder() {
     let req =
         decode_params(&params_with_rule(&legal_rule())).expect("the legal control must decode");
-    assert_eq!(req.protocol_version, MIN_PROTOCOL_VERSION, "an omitted version means 1");
     assert_eq!(req.rules.len(), 1);
     let mut db = InMemoryDB::default();
     let results = execute_audit_batch(&req, &mut db, audit_env())
@@ -193,56 +187,6 @@ fn no_value_hop_exists_on_the_production_audit_request_path() {
 
 // ---------------------------------------------------------------- request boundary --------
 
-/// a request omitting the protocol version behaves as version 1.
-#[test]
-fn omitted_protocol_version_means_one() {
-    let req: AuditTransactionsRequest = serde_json::from_value(serde_json::json!({
-        "rules": [],
-        "txs": [],
-    }))
-    .expect("an omitted version must still decode");
-    assert_eq!(req.protocol_version, MIN_PROTOCOL_VERSION);
-    assert!(req.known_allowed.is_empty());
-    assert!(req.known_allowed_kinds.is_none());
-    let mut db = InMemoryDB::default();
-    assert!(execute_audit_batch(&req, &mut db, audit_env()).is_ok());
-}
-
-/// an unsupported protocol version returns `-32602` naming both the received value and the
-/// supported set, and the set is exactly `[1]`.
-///
-/// `2` is included on purpose. A request declaring it was authored against a different
-/// `callstack` contract, so adjudicating it under this one would be a silent
-/// misinterpretation — strictly worse than a named rejection.
-#[test]
-fn unsupported_protocol_version_is_rejected_by_name() {
-    for unsupported in [0, 2, 3, 99] {
-        let req = AuditTransactionsRequest {
-            protocol_version: unsupported,
-            rules: Vec::new(),
-            txs: Vec::new(),
-            known_allowed: Vec::new(),
-            known_allowed_kinds: None,
-        };
-        let mut db = InMemoryDB::default();
-        let error = execute_audit_batch(&req, &mut db, audit_env())
-            .expect_err("only version 1 is supported");
-        assert_eq!(error.code(), -32602);
-        let message = error.message();
-        assert!(message.contains(&unsupported.to_string()), "{message}");
-        assert!(message.contains("[1]"), "the supported set must be named: {message}");
-    }
-    let req = AuditTransactionsRequest {
-        protocol_version: 1,
-        rules: Vec::new(),
-        txs: Vec::new(),
-        known_allowed: Vec::new(),
-        known_allowed_kinds: None,
-    };
-    let mut db = InMemoryDB::default();
-    assert!(execute_audit_batch(&req, &mut db, audit_env()).is_ok());
-}
-
 /// The **verbatim upstream rule-source document** — the same bytes the rule-layer tests use —
 /// is accepted at this entry point too, with no rejections.
 ///
@@ -263,7 +207,6 @@ fn the_upstream_rule_source_document_is_accepted_at_this_entry_point() {
         "known_allowed": []
     }))
     .expect("the upstream rules deserialize at this entry point");
-    assert_eq!(req.protocol_version, MIN_PROTOCOL_VERSION, "an omitted version means 1");
     assert_eq!(req.rules.len(), 7);
 
     let mut db = InMemoryDB::default();
@@ -271,34 +214,23 @@ fn the_upstream_rule_source_document_is_accepted_at_this_entry_point() {
         .expect("every upstream rule must be accepted");
     assert!(results.is_empty());
 
-    let rules = load_rules(req.protocol_version, 0, req.rules.clone());
+    let rules = load_rules(1, 0, req.rules.clone());
     assert!(rules.rejected.is_empty(), "{:?}", rules.rejected);
     assert_eq!(rules.rules.len(), 7);
-    assert_eq!(rules.selector_bearing_rule_count(), 4);
+    assert_eq!(rules.rules.iter().filter(|r| !r.callstack.is_empty()).count(), 4);
     assert_eq!(
         rules.callstack_selectors().len(),
         3,
         "three distinct proxy addresses, because two rules observe the same one"
     );
-    assert!(rules.has_callstack_rules(), "an alias-bearing request reports identification");
-    let projection = rcs_filter::audit::callstack_only_projection(&rules, &req.rules)
-        .expect("an alias-bearing request has a projection");
-    assert_eq!(projection.rules.len(), 4, "only the alias-bearing rules survive");
-    assert_eq!(
-        projection.stamp(),
-        rules.stamp(),
-        "the projection must carry the same snapshot stamp"
-    );
+    assert!(rules.has_callstack_rules(), "an alias-bearing request arms capture");
 }
 
 /// The caller's exact body — `{rules, txs, known_allowed}`, with NO `protocol_version` and NO
-/// `known_allowed_kinds` — is accepted with alias-bearing rules and a NON-EMPTY
-/// `known_allowed`.
+/// label map — is accepted with alias-bearing rules and a NON-EMPTY `known_allowed`.
 ///
-/// This is the regression test for the failure mode where labels are required: a caller that
-/// resolves entries to Allow across rounds sends a growing `known_allowed` and no labels, so
-/// requiring them would make every round after the first fail permanently. A first round with
-/// an empty `known_allowed` proves nothing, which is why this one is non-empty.
+/// A first round with an empty `known_allowed` proves nothing, which is why this one is
+/// non-empty.
 #[test]
 fn the_callers_exact_three_key_body_is_accepted_with_a_non_empty_known_allowed() {
     let source = format!("0x{}", "66".repeat(32));
@@ -314,23 +246,21 @@ fn the_callers_exact_three_key_body_is_accepted_with_a_non_empty_known_allowed()
     );
     let req: AuditTransactionsRequest =
         serde_json::from_value(body).expect("the three-key body deserializes");
-    assert_eq!(req.protocol_version, MIN_PROTOCOL_VERSION);
-    assert!(req.known_allowed_kinds.is_none());
     assert!(!req.known_allowed.is_empty());
 
     let mut db = InMemoryDB::default();
     execute_audit_batch(&req, &mut db, audit_env())
-        .expect("an unlabelled request must never be rejected for a missing label");
+        .expect("a request with no label map is the ordinary case");
 }
 
 /// A multi-round sequence in the caller's own shape: round 1 with an empty `known_allowed`,
 /// then each later round carrying the entries the previous round resolved to Allow. Every
-/// round is accepted and adjudicated, and no round is rejected for a missing label.
+/// round is accepted and adjudicated.
 ///
 /// Convergence is also pinned: an entry already in `known_allowed` stays `Allow` and never
 /// re-enters `Audit`, so the sequence terminates instead of looping.
 #[test]
-fn a_multi_round_unlabelled_sequence_is_accepted_and_converges() {
+fn a_multi_round_known_allowed_sequence_is_accepted_and_converges() {
     let first = format!("0x{}", "66".repeat(32));
     let second = format!("0x{}", "67".repeat(32));
     let mut resolved: Vec<String> = Vec::new();
@@ -353,9 +283,7 @@ fn a_multi_round_unlabelled_sequence_is_accepted_and_converges() {
         let run = run_batch(
             &[deposit_request(&first, PROXY), deposit_request(&second, PROXY)],
             vec![proxy_impl_allowlist_rule()],
-            1,
             &known,
-            None,
             seeded_db(APPROVED_IMPL, 1),
         );
         for (index, result) in run.results.iter().enumerate() {
@@ -425,7 +353,7 @@ fn a_condition_reading_an_unprovided_alias_variable_is_rejected_at_this_entry_po
 
 /// An undeclared key inside `callstack` fails at this entry point too, during the request
 /// decode, naming the offending key — so a near-miss spelling can never degrade a rule into a
-/// weakened event-only one.
+/// weakened event-only one. A misspelled rule-ROOT sibling fails the same decode.
 #[test]
 fn an_undeclared_callstack_key_is_rejected_at_this_entry_point() {
     for section in [
@@ -449,9 +377,9 @@ fn an_undeclared_callstack_key_is_rejected_at_this_entry_point() {
         assert!(error.to_string().contains("unknown field"), "{error}");
     }
 
-    // A misspelled rule-root sibling is caught by the rule root's own gate instead, and the
-    // rule is rejected rather than quietly losing its call-frame constraint.
-    let req: AuditTransactionsRequest = serde_json::from_value(serde_json::json!({
+    // A misspelled rule-root sibling is refused by the rule root's own decode gate, naming the
+    // key, rather than quietly losing the call-frame constraint.
+    let error = serde_json::from_value::<AuditTransactionsRequest>(serde_json::json!({
         "rules": [{
             "id": "misspelled-sibling",
             "event_abis": {},
@@ -462,144 +390,31 @@ fn an_undeclared_callstack_key_is_rejected_at_this_entry_point() {
         "txs": [],
         "known_allowed": []
     }))
-    .expect("the root gate runs in the compiler, so the request still decodes");
-    let mut db = InMemoryDB::default();
-    let error = match execute_audit_batch(&req, &mut db, audit_env()) {
-        Err(error) => error,
-        Ok(_) => panic!("the rule must be rejected"),
-    };
-    assert_eq!(error.code(), -32602);
-    let detail = error.data().expect("the rejected rule is named").to_string();
-    assert!(detail.contains("callStack"), "{detail}");
-    assert!(detail.contains("misspelled-sibling"), "{detail}");
+    .expect_err("a misspelled rule-root sibling must fail the request decode");
+    assert!(error.to_string().contains("callStack"), "{error}");
 }
 
-/// The request root is as strict as the rule schema: a speculative or misspelled field is
-/// rejected by name rather than silently discarded.
-#[test]
-fn unknown_request_field_is_rejected_by_name() {
-    let error = serde_json::from_value::<AuditTransactionsRequest>(serde_json::json!({
-        "rules": [],
-        "txs": [],
-        "knownAllowed": []
-    }))
-    .expect_err("an unknown request key must be rejected");
-    assert!(
-        error.to_string().contains("unknown field(s) in audit request: knownAllowed"),
-        "{error}"
-    );
-}
-
-/// A request that supplies a PARTIAL `known_allowed_kinds` map returns `-32602` naming the
-/// unlabelled hashes, and nothing is executed or committed. A caller that labels some entries
-/// and not others is label-aware, so the omission is ambiguous rather than conventional.
-#[test]
-fn a_partial_label_map_is_rejected_naming_the_unlabelled_hashes() {
-    let a = format!("0x{}", "33".repeat(32));
-    let b = format!("0x{}", "44".repeat(32));
-
-    let partial: BTreeMap<String, KnownAllowedKind> =
-        [(a.clone(), KnownAllowedKind::Original)].into_iter().collect();
-    let req = AuditTransactionsRequest {
-        protocol_version: 1,
-        rules: Vec::new(),
-        txs: Vec::new(),
-        known_allowed: vec![a.clone(), b.clone()],
-        known_allowed_kinds: Some(partial),
-    };
-    let mut db = InMemoryDB::default();
-    let error = execute_audit_batch(&req, &mut db, audit_env())
-        .expect_err("a partial map must be rejected");
-    assert_eq!(error.code(), -32602);
-    let data = error.data().expect("named").to_string();
-    assert!(data.contains(&b), "only the unlabelled hash is named: {data}");
-    assert!(!data.contains(&a), "a labelled hash must not be named: {data}");
-
-    // A complete map is accepted.
-    let complete: BTreeMap<String, KnownAllowedKind> =
-        [(a.clone(), KnownAllowedKind::Original), (b.clone(), KnownAllowedKind::SyntheticBan)]
-            .into_iter()
-            .collect();
-    let req = AuditTransactionsRequest {
-        protocol_version: 1,
-        rules: Vec::new(),
-        txs: Vec::new(),
-        known_allowed: vec![a, b],
-        known_allowed_kinds: Some(complete),
-    };
-    let mut db = InMemoryDB::default();
-    assert!(execute_audit_batch(&req, &mut db, audit_env()).is_ok());
-}
-
-/// A request that supplies NO label map is accepted whatever its `known_allowed` contains.
-///
-/// This is load-bearing rather than lenient: a caller that resolves entries to Allow across
-/// rounds sends a growing `known_allowed` and no labels at all, so requiring them would make
-/// every later round fail permanently.
-#[test]
-fn a_request_with_no_label_map_needs_no_labels() {
-    for known in [vec![format!("0x{}", "33".repeat(32))], Vec::new()] {
-        let req = AuditTransactionsRequest {
-            protocol_version: 1,
-            rules: Vec::new(),
-            txs: Vec::new(),
-            known_allowed: known,
-            known_allowed_kinds: None,
-        };
-        let mut db = InMemoryDB::default();
-        assert!(
-            execute_audit_batch(&req, &mut db, audit_env()).is_ok(),
-            "an unlabelled request is the ordinary case, not an error"
-        );
-    }
-}
-
-/// The two wire labels. `synthetic_ban` is the wire spelling a producer must send for a replay
-/// prefix; an unlabelled entry's class is decided locally and is not a wire value.
-#[test]
-fn known_allowed_kind_wire_spelling_is_snake_case() {
-    let kinds: BTreeMap<String, KnownAllowedKind> =
-        serde_json::from_value(serde_json::json!({ "0xaa": "original", "0xbb": "synthetic_ban" }))
-            .expect("both spellings decode");
-    assert_eq!(kinds["0xaa"], KnownAllowedKind::Original);
-    assert_eq!(kinds["0xbb"], KnownAllowedKind::SyntheticBan);
-    assert!(
-        serde_json::from_value::<KnownAllowedKind>(serde_json::json!("syntheticBan")).is_err(),
-        "a wrong spelling must not be accepted as a class"
-    );
-    // No third class exists on the wire: the labels a request may send stay exactly two.
-    for spelling in ["unlabelled", "unlabeled", "Unlabelled"] {
-        assert!(
-            serde_json::from_value::<KnownAllowedKind>(serde_json::json!(spelling)).is_err(),
-            "{spelling} must not be a wire-selectable class"
-        );
-    }
-}
-
-/// a rule refused for an unknown field is listed in the `-32602` detail array with its rule
-/// id and the unknown-field reason, so the caller learns WHICH rule was refused and WHY
-/// rather than only how many were.
+/// a rule refused by the compiler is listed in the `-32602` detail array with its rule id and
+/// the rejection reason, so the caller learns WHICH rule was refused and WHY rather than only
+/// how many were.
 #[test]
 fn a_rejected_rule_is_listed_in_the_error_detail_with_its_id_and_reason() {
-    let typo: RawRule = serde_json::from_value(serde_json::json!({
+    let bad_alias: RawRule = serde_json::from_value(serde_json::json!({
         "id": "typo-rule",
         "event_abis": {},
-        // The section name is misspelled, so no selector is declared and the key is unknown.
-        "callStack": { "entry": { "address": format!("{PROXY:#x}") } },
+        "callstack": { "direct_delegatecalls": { "entry": "0xAABB" } },
         "condition": true,
         "action": "deny"
     }))
-    .expect("the wire type captures an unknown key instead of failing to decode");
+    .expect("the alias is a plain string on the wire, so the rule still decodes");
 
-    let rules = load_rules(1, 0, vec![typo.clone()]);
+    let rules = load_rules(1, 0, vec![bad_alias.clone()]);
     assert_eq!(rules.rejected.len(), 1, "the rule must be refused, not installed");
 
     let req = AuditTransactionsRequest {
-        protocol_version: 1,
-        rules: vec![typo],
+        rules: vec![bad_alias],
         txs: Vec::new(),
         known_allowed: Vec::new(),
-        known_allowed_kinds: None,
     };
     let mut db = InMemoryDB::default();
     let error = execute_audit_batch(&req, &mut db, audit_env())
@@ -611,7 +426,10 @@ fn a_rejected_rule_is_listed_in_the_error_detail_with_its_id_and_reason() {
     assert_eq!(detail.len(), 1, "one refusal, one entry: {detail:?}");
     assert_eq!(detail[0]["id"], "typo-rule", "the entry names the rule: {detail:?}");
     let reason = detail[0]["reason"].as_str().expect("the entry carries a reason");
-    assert!(reason.contains("callStack"), "the reason must name the unrecognised key: {reason}");
+    assert!(
+        reason.contains("not a lowercase 0x 20-byte address"),
+        "the reason must state why the rule was refused: {reason}"
+    );
 }
 
 // ------------------------------------------- producer-rendered joint acceptance --------
@@ -688,7 +506,7 @@ fn adjudicate_rendered(
         .expect("the producer's rendered rules must decode at this entry point");
     assert_eq!(request.txs.len(), 1, "the batch really carries a transaction");
 
-    let rules = load_rules(request.protocol_version, 0, request.rules.clone());
+    let rules = load_rules(1, 0, request.rules.clone());
     assert!(rules.rejected.is_empty(), "no rendered rule may be rejected: {:?}", rules.rejected);
     let accepted = rules.rules.len();
 
@@ -838,7 +656,6 @@ fn delegate_calldata(target: Address) -> String {
 /// serializes the response the handler would return.
 fn decode_run_and_serialize(raw_params: &str, db: &mut InMemoryDB) -> Vec<serde_json::Value> {
     let req = decode_params(raw_params).expect("the request decodes");
-    assert_eq!(req.protocol_version, MIN_PROTOCOL_VERSION, "an explicit v1 request stays v1");
     let results = execute_audit_batch(&req, db, audit_env()).expect("the batch executes");
     let value = serde_json::to_value(AuditTransactionsResponse { results })
         .expect("the response serializes");
@@ -853,12 +670,11 @@ fn sorted_keys(entry: &serde_json::Value) -> Vec<String> {
     keys
 }
 
-/// A request that declares no call-frame selector keeps the four-field response shape: the
-/// diagnostic is simply not part of it, even though the entry was executed and denied.
+/// A request that declares no call-frame selector keeps the four-field response shape, even
+/// though the entry was executed and denied.
 #[test]
-fn a_v1_response_without_callstack_selectors_omits_callstack_identification() {
+fn a_selector_free_response_entry_has_exactly_the_four_base_fields() {
     let body = serde_json::json!([{
-        "protocol_version": 1,
         "rules": [serde_json::json!({
             "id": "evt",
             "event_abis": { "transfer": {
@@ -883,16 +699,16 @@ fn a_v1_response_without_callstack_selectors_omits_callstack_identification() {
     assert_eq!(
         sorted_keys(&entries[0]),
         vec!["actions", "source_hash", "tx_hash", "verdict"],
-        "no callstack_identification on a selector-free response"
+        "exactly the four base fields on a selector-free response"
     );
 }
 
-/// A request that declares a call-frame selector carries the diagnostic on every executed entry,
-/// and omits it on the entry whose deposit could not be built.
+/// A request that declares a call-frame selector keeps the SAME four-field response shape on
+/// every entry: the response carries no diagnostic field, and an entry whose deposit could not
+/// be built carries the same four keys.
 #[test]
-fn a_v1_response_with_callstack_selectors_carries_callstack_identification() {
+fn a_selector_bearing_response_entry_has_exactly_the_four_base_fields() {
     let body = serde_json::json!([{
-        "protocol_version": 1,
         "rules": [proxy_impl_allowlist_rule_json()],
         "txs": [
             deposit_body(
@@ -925,15 +741,13 @@ fn a_v1_response_with_callstack_selectors_carries_callstack_identification() {
     assert_eq!(entries.len(), 3, "three entries: two executed and one unbuildable");
 
     assert_eq!(entries[0]["verdict"], "allow", "approved implementation");
-    assert_eq!(entries[0]["callstack_identification"], "clean");
-
     assert_eq!(entries[1]["verdict"], "deny", "unapproved implementation");
-    assert_eq!(entries[1]["callstack_identification"], "objected");
-
     assert_eq!(entries[2]["verdict"], "malformed", "the deposit cannot be built");
-    assert_eq!(
-        sorted_keys(&entries[2]),
-        vec!["actions", "source_hash", "tx_hash", "verdict"],
-        "an entry that never executed carries no diagnostic"
-    );
+    for (index, entry) in entries.iter().enumerate() {
+        assert_eq!(
+            sorted_keys(entry),
+            vec!["actions", "source_hash", "tx_hash", "verdict"],
+            "entry {index} must carry exactly the four base fields: {entry}"
+        );
+    }
 }

@@ -1,12 +1,8 @@
 //! Shared fixtures for the audit-RPC integration tests: the observed proxy and its two
-//! implementations, the normative rule shapes, the production batch driver and the trace and
-//! metric capture helpers.
-
-use std::collections::BTreeMap;
+//! implementations, the normative rule shapes and the production batch driver.
 
 use alloy_evm::EvmEnv;
 use alloy_primitives::{keccak256, Address, B256, U256};
-use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 use op_revm::OpSpecId;
 use rcs_filter::callstack::SnapshotStamp;
 use rcs_filter::rules::{load_rules, RawRule};
@@ -18,7 +14,7 @@ use xlayer_rpc::audit::deposit::DepositTxRequest;
 use xlayer_rpc::audit::rpc::test_seams::{
     execute_audit_batch, execute_audit_batch_with_capture_stamp,
 };
-use xlayer_rpc::audit::rpc::{AuditTransactionsRequest, KnownAllowedKind};
+use xlayer_rpc::audit::rpc::AuditTransactionsRequest;
 use xlayer_rpc::audit::verdict::AuditResult;
 
 /// The proxy a rule observes. Its own code performs a first-level `DELEGATECALL`.
@@ -73,31 +69,6 @@ pub(crate) fn proxy_impl_allowlist_rule_json_approving(approved: &[B256]) -> ser
         "condition": { "!": { "in": [ { "var": "entry.delegateCodeHash" }, approved ] } },
         "action": "deny"
     })
-}
-
-/// The same normative rule under a DIFFERENT id, selecting the SAME proxy address. Two of
-/// these are two selector-bearing rules over a one-address selector set, which is what
-/// separates "how many rules carry a selector" from "how many distinct addresses they name".
-pub(crate) fn proxy_impl_allowlist_rule_with_id(id: &str) -> RawRule {
-    let mut rule = proxy_impl_allowlist_rule();
-    rule.id = id.to_string();
-    rule
-}
-
-/// ONE rule naming SEVERAL addresses: the mirror image of the fixture above, where the
-/// deduplicated address set is larger than the number of rules carrying a selector.
-pub(crate) fn rule_selecting_two_addresses() -> RawRule {
-    serde_json::from_value(serde_json::json!({
-        "id": "two-address-observer",
-        "event_abis": {},
-        "callstack": { "direct_delegatecalls": {
-            "entry": format!("{PROXY:#x}"),
-            "second": format!("{APPROVED_IMPL:#x}")
-        } },
-        "condition": { "!=": [ { "var": "entry.delegateTo" }, format!("{APPROVED_IMPL:#x}") ] },
-        "action": "deny"
-    }))
-    .expect("valid rule")
 }
 
 /// The same pattern over an explicit approved set, for a fixture whose implementation is not
@@ -208,16 +179,12 @@ pub(crate) struct BatchRun {
 pub(crate) fn audit_request(
     reqs: &[DepositTxRequest],
     raw_rules: Vec<RawRule>,
-    protocol_version: u32,
     known_allowed: &[&str],
-    kinds: Option<BTreeMap<String, KnownAllowedKind>>,
 ) -> AuditTransactionsRequest {
     AuditTransactionsRequest {
-        protocol_version,
         rules: raw_rules,
         txs: reqs.to_vec(),
         known_allowed: known_allowed.iter().map(|hash| (*hash).to_string()).collect(),
-        known_allowed_kinds: kinds,
     }
 }
 
@@ -227,12 +194,10 @@ pub(crate) fn audit_request(
 pub(crate) fn run_batch(
     reqs: &[DepositTxRequest],
     raw_rules: Vec<RawRule>,
-    protocol_version: u32,
     known_allowed: &[&str],
-    kinds: Option<BTreeMap<String, KnownAllowedKind>>,
     db: InMemoryDB,
 ) -> BatchRun {
-    run_batch_stamped(reqs, raw_rules, protocol_version, known_allowed, kinds, db, None)
+    run_batch_stamped(reqs, raw_rules, known_allowed, db, None)
 }
 
 /// The same production path, with the capture stamp the inspector is configured with made
@@ -247,13 +212,11 @@ pub(crate) fn run_batch(
 pub(crate) fn run_batch_stamped(
     reqs: &[DepositTxRequest],
     raw_rules: Vec<RawRule>,
-    protocol_version: u32,
     known_allowed: &[&str],
-    kinds: Option<BTreeMap<String, KnownAllowedKind>>,
     db: InMemoryDB,
     capture_stamp: Option<SnapshotStamp>,
 ) -> BatchRun {
-    let req = audit_request(reqs, raw_rules, protocol_version, known_allowed, kinds);
+    let req = audit_request(reqs, raw_rules, known_allowed);
     let mut db = db;
     let results = match capture_stamp {
         None => execute_audit_batch(&req, &mut db, audit_env()),
@@ -273,9 +236,9 @@ pub(crate) fn only(run: &BatchRun) -> &AuditResult {
 /// different `content_version`, which is exactly the shape a stale or crossed capture
 /// configuration produces. Capture still COMPLETES, so the observation set is `Available` —
 /// the unavailable dimension never fires and only the stamp separates the two.
-pub(crate) fn foreign_stamp(raw_rules: &[RawRule], protocol_version: u32) -> SnapshotStamp {
-    let evaluating = load_rules(protocol_version, 0, raw_rules.to_vec());
-    let foreign = load_rules(protocol_version, 7, raw_rules.to_vec());
+pub(crate) fn foreign_stamp(raw_rules: &[RawRule]) -> SnapshotStamp {
+    let evaluating = load_rules(1, 0, raw_rules.to_vec());
+    let foreign = load_rules(1, 7, raw_rules.to_vec());
     assert_eq!(
         foreign.callstack_selectors(),
         evaluating.callstack_selectors(),
@@ -283,171 +246,6 @@ pub(crate) fn foreign_stamp(raw_rules: &[RawRule], protocol_version: u32) -> Sna
     );
     assert_ne!(foreign.stamp(), evaluating.stamp(), "the fixture must be a foreign stamp");
     foreign.stamp()
-}
-
-/// Runs `f` with every `tracing` event captured, so a diagnostic's fields can be asserted —
-/// including the fields it must NOT carry.
-pub(crate) fn capture_tracing<R>(f: impl FnOnce() -> R) -> (R, String) {
-    use std::io::Write;
-    use std::sync::{Arc, Mutex};
-
-    #[derive(Clone)]
-    struct BufWriter(Arc<Mutex<Vec<u8>>>);
-    impl Write for BufWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    impl tracing_subscriber::fmt::MakeWriter<'_> for BufWriter {
-        type Writer = BufWriter;
-        fn make_writer(&self) -> BufWriter {
-            self.clone()
-        }
-    }
-
-    let buf = BufWriter(Arc::new(Mutex::new(Vec::new())));
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .with_ansi(false)
-        .with_target(true)
-        .with_writer(buf.clone())
-        .finish();
-    let out = tracing::subscriber::with_default(subscriber, f);
-    let logged = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
-    (out, logged)
-}
-
-/// Reads back every `rcs_filter.*` counter the closure registered on a local recorder.
-pub(crate) fn counters_during<T>(run: impl FnOnce() -> T) -> (T, Vec<(String, u64)>) {
-    let recorder = DebuggingRecorder::new();
-    let snapshotter = recorder.snapshotter();
-    let value = {
-        let _guard = metrics::set_default_local_recorder(&recorder);
-        run()
-    };
-    let mut counters: Vec<(String, u64)> = snapshotter
-        .snapshot()
-        .into_vec()
-        .into_iter()
-        .filter_map(|(key, _, _, value)| match value {
-            DebugValue::Counter(count) => Some((key.key().name().to_string(), count)),
-            _ => None,
-        })
-        .collect();
-    counters.sort();
-    (value, counters)
-}
-
-pub(crate) fn counter(counters: &[(String, u64)], name: &str) -> u64 {
-    counters.iter().find(|(key, _)| key == name).map_or(0, |(_, count)| *count)
-}
-
-/// Runs `body` as the first metrics user of a fresh process.
-///
-/// In the parent (marker unset) this re-executes the current test binary with
-/// `--exact <test_name>` and the marker set to that name, and fails unless the child exits
-/// successfully having run exactly that one test; the child's output is part of the failure. In
-/// the child (marker == the name) it runs `body` directly, so there is no further re-execution.
-/// The same path is taken under `cargo test` (all tests in one process) and nextest. `test_name`
-/// is the caller's fully qualified name (`format!("{}::{}", module_path!(), "case")`), because
-/// `module_path!()` expands at the call site, not here.
-pub(crate) fn in_isolated_process(module_path: &str, test: &str, body: impl FnOnce()) {
-    const ISOLATED_TEST_ENV: &str = "XLAYER_RPC_AUDIT_BUDGET_ISOLATED_TEST";
-    let module = module_path.split_once("::").map_or(module_path, |(_, rest)| rest);
-    let test_name = format!("{module}::{test}");
-    match std::env::var_os(ISOLATED_TEST_ENV) {
-        Some(marker) if marker == test_name.as_str() => return body(),
-        Some(marker) => panic!("child for {marker:?} reached {test_name}"),
-        None => {}
-    }
-    let exe = std::env::current_exe().expect("the running test binary");
-    let output = std::process::Command::new(exe)
-        .args([test_name.as_str(), "--exact", "--test-threads=1"])
-        .env(ISOLATED_TEST_ENV, &test_name)
-        .output()
-        .expect("spawn the isolated child");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success() && stdout.contains("test result: ok. 1 passed;"),
-        "isolated child for {test_name} failed ({}):\n{stdout}\n{stderr}",
-        output.status
-    );
-}
-
-/// The `(name, count)` pairs the recorder registered for the two audit families.
-///
-/// Only valid inside [`in_isolated_process`]: the metrics derive caches each metrics struct from
-/// `Default` in a process-global `OnceLock`, so handles created before this process's recorder was
-/// installed stay bound to the previous recorder and would report nothing.
-pub(crate) fn observed(snapshotter: &Snapshotter) -> Vec<(String, u64)> {
-    let mut counters: Vec<(String, u64)> = snapshotter
-        .snapshot()
-        .into_vec()
-        .into_iter()
-        .filter_map(|(key, _, _, value)| match value {
-            DebugValue::Counter(count) if is_audit_family(key.key().name()) => {
-                Some((key.key().name().to_string(), count))
-            }
-            _ => None,
-        })
-        .collect();
-    counters.sort();
-    counters
-}
-
-pub(crate) fn is_audit_family(name: &str) -> bool {
-    name.starts_with("rcs_filter.synthetic_ban_identification")
-        || name.starts_with("rcs_filter.known_allowed_resolution")
-}
-
-/// The two audit families with the labelled synthetic prefix's one `not_identified` and one
-/// `labelled` increment, everything else at zero.
-pub(crate) fn labelled_prefix_counters() -> Vec<(String, u64)> {
-    vec![
-        ("rcs_filter.known_allowed_resolution.inferred_original_total".to_string(), 0),
-        ("rcs_filter.known_allowed_resolution.inferred_synthetic_ban_total".to_string(), 0),
-        ("rcs_filter.known_allowed_resolution.labelled_total".to_string(), 1),
-        ("rcs_filter.synthetic_ban_identification.clean_total".to_string(), 0),
-        ("rcs_filter.synthetic_ban_identification.not_applicable_total".to_string(), 0),
-        ("rcs_filter.synthetic_ban_identification.not_identified_total".to_string(), 1),
-        ("rcs_filter.synthetic_ban_identification.objected_total".to_string(), 0),
-    ]
-}
-
-/// The same with the class inferred by the content-binding check instead of labelled.
-pub(crate) fn inferred_prefix_counters() -> Vec<(String, u64)> {
-    vec![
-        ("rcs_filter.known_allowed_resolution.inferred_original_total".to_string(), 0),
-        ("rcs_filter.known_allowed_resolution.inferred_synthetic_ban_total".to_string(), 1),
-        ("rcs_filter.known_allowed_resolution.labelled_total".to_string(), 0),
-        ("rcs_filter.synthetic_ban_identification.clean_total".to_string(), 0),
-        ("rcs_filter.synthetic_ban_identification.not_applicable_total".to_string(), 0),
-        ("rcs_filter.synthetic_ban_identification.not_identified_total".to_string(), 1),
-        ("rcs_filter.synthetic_ban_identification.objected_total".to_string(), 0),
-    ]
-}
-
-/// The single bounded over-budget event, asserted on the line itself: fixed tokens only, no rule
-/// id, no code hash and no observation content.
-pub(crate) fn assert_one_budget_event(out: &str, source_hash: &str, code_hash: &B256) {
-    let lines: Vec<&str> = out
-        .lines()
-        .filter(|line| line.contains("xlayer_audit_rpc::synthetic_ban_budget"))
-        .collect();
-    assert_eq!(lines.len(), 1, "exactly one budget event: {out}");
-    let line = lines[0];
-    assert!(line.contains("WARN"), "expected warn level: {line}");
-    assert!(line.contains("reason=\"budget_exceeded\""), "{line}");
-    assert!(line.contains("outcome=\"not_identified\""), "{line}");
-    assert!(line.contains("committed=true"), "{line}");
-    assert!(line.contains(source_hash), "the request's source hash: {line}");
-    assert!(line.contains("selector_bearing_rules=1"), "{line}");
-    assert!(!line.contains(&format!("{code_hash:#x}")), "no code hash: {line}");
 }
 
 /// The implementation used by the repeated-adjudication fixture. Distinct from the two
