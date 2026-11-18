@@ -171,7 +171,7 @@ fn every_upstream_rule_is_accepted_with_no_rejections() {
 
     // Four rules carry a `callstack` section; three distinct proxy addresses, because two rules
     // observe the same one.
-    assert_eq!(rules.selector_bearing_rule_count(), 4);
+    assert_eq!(rules.rules.iter().filter(|r| !r.callstack.is_empty()).count(), 4);
     assert!(rules.has_callstack_rules());
     let mut expected = vec![vault_proxy(), router_proxy(), bridge_proxy()];
     expected.sort_unstable();

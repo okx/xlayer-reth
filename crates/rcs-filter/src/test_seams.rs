@@ -71,12 +71,3 @@ impl FilterMetrics {
         &self.0.audit_approved_total
     }
 }
-
-/// The rule-validation bounds the strict-schema tests pin.
-pub const MAX_UNKNOWN_KEYS_REPORTED: usize = crate::rules::MAX_UNKNOWN_KEYS_REPORTED;
-pub const MAX_UNKNOWN_KEY_BYTES: usize = crate::rules::MAX_UNKNOWN_KEY_BYTES;
-
-/// Delegates to the private `rules::validation::bound_key`.
-pub fn bound_key(key: &str) -> String {
-    crate::rules::bound_key(key)
-}

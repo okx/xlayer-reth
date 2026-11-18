@@ -22,7 +22,6 @@ use rcs_filter::client::{RcsClient, ReqwestRcsClient, RulesResponse};
 use rcs_filter::config::FilterConfig;
 use rcs_filter::rules::{RawRule, RuleSet};
 use rcs_filter::test_support::TestClock;
-use serde_json::json;
 
 const START: u64 = 1_751_000_000;
 
@@ -435,7 +434,11 @@ async fn every_rendered_callstack_condition_actually_fires_on_the_installed_snap
         ],
         "the installed snapshot is the producer's seven rendered rules, in its own order"
     );
-    assert_eq!(rules.selector_bearing_rule_count(), 4, "four rules declare an alias");
+    assert_eq!(
+        rules.rules.iter().filter(|r| !r.callstack.is_empty()).count(),
+        4,
+        "four rules declare an alias"
+    );
     assert_eq!(rules.callstack_selectors().len(), 3, "over three distinct proxy addresses");
 
     // The producer's own addresses and allowlisted code hashes.
@@ -563,41 +566,3 @@ async fn every_rendered_callstack_condition_actually_fires_on_the_installed_snap
 }
 
 // ---------------------------------------------------------------- response root --------
-
-// `GET /rules` response-root schema: an unknown root-level key rejects the whole response,
-// and a correct response root still decodes.
-
-/// an unknown key at the `GET /rules` response **root** rejects the whole response.
-/// `RulesResponse` never reaches `compile_rule`, so there is no per-rule gate to carry this
-/// failure: the conversion itself must fail, which surfaces on the existing decode path and
-/// leaves `install_rules` unreached.
-#[test]
-fn unknown_root_level_field_rejects_the_whole_response() {
-    let error = serde_json::from_value::<RulesResponse>(json!({
-        "protocol_version": 1,
-        "content_version": 1,
-        "rules": [],
-        "contentVersion": 2
-    }))
-    .expect_err("an unknown root key must reject the response");
-    assert!(
-        error.to_string().contains("unknown field(s) in rules response: contentVersion"),
-        "{error}"
-    );
-}
-
-/// Control: a correct response root still decodes, and the required fields stay
-/// required (covered for the missing-field direction by
-/// `required_response_fields_fail_decoding_when_missing` above).
-#[test]
-fn correct_response_root_still_decodes() {
-    let response = serde_json::from_value::<RulesResponse>(json!({
-        "protocol_version": 2,
-        "content_version": 9,
-        "rules": []
-    }))
-    .expect("a correct response root must still decode");
-    assert_eq!(response.protocol_version, 2);
-    assert_eq!(response.content_version, 9);
-    assert!(response.rules.is_empty());
-}

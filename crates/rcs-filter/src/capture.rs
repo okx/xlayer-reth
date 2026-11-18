@@ -558,6 +558,9 @@ fn record_selfdestruct_step_end(
     });
 }
 
+/// Per-transaction call-frame observation budget of the payload builder's candidate loop.
+pub const CANDIDATE_MAX_CALLSTACK_OBSERVATIONS_PER_TX: usize = 10_000;
+
 /// The RCS capture inspector: the **inner** inspector of `alloy_op_evm::OpEvm`'s composite
 /// wrapper. It maintains one ordered queue of real + virtual logs with per-frame checkpoints and a
 /// single, non-rolling-back native-transfer counter with a sticky budget overflow.

@@ -281,12 +281,6 @@ impl FilterHandle {
         }
     }
 
-    /// The configured maximum call-frame observations per transaction. Single source of truth for
-    /// the builder's capture budget, read here rather than duplicated so the two cannot drift.
-    pub fn max_callstack_observations_per_tx(&self) -> usize {
-        self.shared.config.max_callstack_observations_per_tx
-    }
-
     /// The current rule snapshot.
     ///
     /// A caller that observes call frames must acquire the snapshot **once**, configure capture

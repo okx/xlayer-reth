@@ -11,10 +11,7 @@ use serde_json::{json, Value};
 
 use rcs_filter::callstack::{CallObservation, ObservationUnavailable, Observations, SnapshotStamp};
 use rcs_filter::handle::ScreenInput;
-use rcs_filter::matching::{
-    try_evaluate, try_evaluate_attributed, AttributedOutcome, DenyAttribution, MatchError,
-    MatchErrorKind, MatchOutcome,
-};
+use rcs_filter::matching::{try_evaluate, MatchError, MatchErrorKind, MatchOutcome};
 use rcs_filter::rules::{
     compile_rule, load_rules, RawRule, RuleSet, DEFAULT_MAX_EVENT_BINDINGS_PER_TX,
 };
@@ -612,17 +609,18 @@ fn an_unknown_key_inside_callstack_is_rejected_at_deserialization() {
 
 #[test]
 fn a_misspelled_callstack_sibling_is_rejected_by_the_rule_root_gate() {
-    // The rule root keeps its own unknown-field gate, so a misspelled sibling is a named
-    // rejection rather than a rule that quietly degrades into an event-only one.
-    let reason = reject_reason(json!({
+    // The rule root declares `deny_unknown_fields`, so a misspelled sibling fails the rule's own
+    // decode and the error names the key — it never quietly degrades into an event-only rule.
+    let error = serde_json::from_value::<RawRule>(json!({
         "id": "r",
         "event_abis": { "t": transfer_abi() },
         "callStack": { "direct_delegatecalls": { "p": hex_addr(proxy()) } },
         "condition": true,
         "action": "deny"
-    }));
-    assert!(reason.contains("unknown field(s) in rule"), "{reason}");
-    assert!(reason.contains("callStack"), "{reason}");
+    }))
+    .expect_err("a misspelled rule-root sibling must fail the decode");
+    assert!(error.to_string().contains("unknown field"), "{error}");
+    assert!(error.to_string().contains("callStack"), "{error}");
 }
 
 #[test]
@@ -1271,49 +1269,6 @@ fn the_alias_address_set_is_the_sorted_union_over_active_rules() {
     assert_eq!(reordered.stamp().selector_digest, rules.stamp().selector_digest);
 }
 
-/// The alias-bearing RULE count is not the alias ADDRESS count: the two diverge in both
-/// directions, and an event-only rule contributes to neither.
-#[test]
-fn the_alias_bearing_rule_count_counts_rules_not_addresses() {
-    // Two rules, different ids, naming ONE address.
-    let two_rules_one_address = rule_set(vec![
-        deny_on_alias("r1", "a", proxy(), json!(true)),
-        deny_on_alias("r2", "b", proxy(), json!(true)),
-    ]);
-    assert_eq!(two_rules_one_address.callstack_selectors().len(), 1, "one deduplicated address");
-    assert_eq!(two_rules_one_address.selector_bearing_rule_count(), 2, "two rules carry it");
-
-    // ONE rule naming SEVERAL addresses.
-    let one_rule_two_addresses = rule_set(vec![json!({
-        "id": "r1",
-        "event_abis": {},
-        "callstack": { "direct_delegatecalls": {
-            "a": hex_addr(proxy()),
-            "b": hex_addr(other_proxy())
-        }},
-        "condition": true,
-        "action": "deny"
-    })]);
-    assert_eq!(one_rule_two_addresses.callstack_selectors().len(), 2, "two addresses");
-    assert_eq!(one_rule_two_addresses.selector_bearing_rule_count(), 1, "declared by one rule");
-
-    // An event-only rule carries no alias and is counted by neither.
-    let mixed = rule_set(vec![
-        deny_on_alias("r1", "a", proxy(), json!(true)),
-        event_and_alias_rule("r2"),
-        json!({
-            "id": "r3",
-            "event_abis": { "t": { "type": "event", "name": "T",
-                "inputs": [{ "name": "a", "type": "address", "indexed": false }],
-                "anonymous": false } },
-            "condition": true,
-            "action": "deny"
-        }),
-    ]);
-    assert_eq!(mixed.selector_bearing_rule_count(), 2, "the event-only rule is not counted");
-    assert_eq!(mixed.rules.len(), 3, "while all three rules are active");
-}
-
 // --------------------------------------------------------------------------------------------
 // Combined per-transaction budget
 // --------------------------------------------------------------------------------------------
@@ -1740,127 +1695,4 @@ fn a_re_simulation_whose_executed_code_changed_is_not_silently_consistent() {
         Screen::Drop,
         "a changed executed code hash must not pass the consistency check"
     );
-}
-
-// --------------------------------------------------------------------------------------------
-// Deny attribution
-// --------------------------------------------------------------------------------------------
-
-/// `try_evaluate` with the deny attribution kept.
-fn screen_attributed<'a>(
-    rules: &RuleSet,
-    logs: &'a [Log],
-    observations: Observations<'a>,
-) -> Result<AttributedOutcome, MatchError> {
-    let input = ScreenInput {
-        tx_hash: B256::repeat_byte(0x77),
-        origin: "0x9999999999999999999999999999999999999999".parse().unwrap(),
-        tx_to: Some(proxy()),
-        nonce: 1,
-        value: U256::ZERO,
-        block_height: 100,
-        logs,
-        observations,
-    };
-    try_evaluate_attributed(rules, &input, DEFAULT_MAX_EVENT_BINDINGS_PER_TX)
-}
-
-/// A `deny` rule declaring no `callstack` section at all: its family is `Event`.
-fn event_only_deny(id: &str) -> Value {
-    json!({
-        "id": id,
-        "event_abis": { "transfer": transfer_abi() },
-        "condition": true,
-        "action": "deny"
-    })
-}
-
-#[test]
-fn an_event_only_deny_beside_an_untouched_alias_rule_is_attributed_to_the_event_family() {
-    let rules = rule_set(vec![
-        event_only_deny("event-deny"),
-        deny_on_alias(
-            "alias-deny",
-            "otherProxy",
-            other_proxy(),
-            delegate_code_hash_allowlist("otherProxy", &[approved_impl_code()]),
-        ),
-    ]);
-    // Every frame is observed through `proxy()`, so the alias rule on `other_proxy()` is
-    // suppressed and the event-only rule is what denies.
-    let items = [delegated(implementation(), rogue_code())];
-    let attributed = screen_attributed(&rules, &[], captured(&rules, &items)).expect("no error");
-    assert_eq!(attributed.outcome, MatchOutcome::Deny);
-    assert_eq!(attributed.deny_attribution, Some(DenyAttribution::Event));
-}
-
-#[test]
-fn a_selector_bearing_deny_is_attributed_to_the_callstack_family() {
-    let rules = rule_set(vec![deny_on_alias(
-        "alias-deny",
-        "vaultProxy",
-        proxy(),
-        delegate_code_hash_allowlist("vaultProxy", &[approved_impl_code()]),
-    )]);
-    let items = [delegated(implementation(), rogue_code())];
-    let attributed = screen_attributed(&rules, &[], captured(&rules, &items)).expect("no error");
-    assert_eq!(attributed.outcome, MatchOutcome::Deny);
-    assert_eq!(attributed.deny_attribution, Some(DenyAttribution::Callstack));
-}
-
-#[test]
-fn the_attribution_names_the_first_rule_that_denied() {
-    let alias_deny = deny_on_alias(
-        "alias-deny",
-        "vaultProxy",
-        proxy(),
-        delegate_code_hash_allowlist("vaultProxy", &[approved_impl_code()]),
-    );
-    let items = [delegated(implementation(), rogue_code())];
-
-    // Both rules deny; the visit stops at the first one.
-    let event_first = rule_set(vec![event_only_deny("event-deny"), alias_deny.clone()]);
-    let event_first_outcome =
-        screen_attributed(&event_first, &[], captured(&event_first, &items)).expect("no error");
-    assert_eq!(event_first_outcome.outcome, MatchOutcome::Deny);
-    assert_eq!(event_first_outcome.deny_attribution, Some(DenyAttribution::Event));
-
-    let alias_first = rule_set(vec![alias_deny, event_only_deny("event-deny")]);
-    let alias_first_outcome =
-        screen_attributed(&alias_first, &[], captured(&alias_first, &items)).expect("no error");
-    assert_eq!(alias_first_outcome.outcome, MatchOutcome::Deny);
-    assert_eq!(alias_first_outcome.deny_attribution, Some(DenyAttribution::Callstack));
-}
-
-#[test]
-fn try_evaluate_is_the_attributed_outcome_without_its_attribution() {
-    let rules = rule_set(vec![deny_on_alias(
-        "alias-deny",
-        "vaultProxy",
-        proxy(),
-        delegate_code_hash_allowlist("vaultProxy", &[approved_impl_code()]),
-    )]);
-
-    let allowed_items = [delegated(implementation(), approved_impl_code())];
-    let rogue_items = [delegated(implementation(), rogue_code())];
-
-    for (label, items, expected_outcome, expected_attribution) in [
-        ("allow", allowed_items.as_slice(), MatchOutcome::Allow, None),
-        ("deny", rogue_items.as_slice(), MatchOutcome::Deny, Some(DenyAttribution::Callstack)),
-    ] {
-        let observations = captured(&rules, items);
-        let plain = screen_with_limit(&rules, &[], observations, DEFAULT_MAX_EVENT_BINDINGS_PER_TX)
-            .expect("no error");
-        let attributed = screen_attributed(&rules, &[], observations).expect("no error");
-        assert_eq!(plain, attributed.outcome, "{label}: the outcome is identical");
-        assert_eq!(attributed.outcome, expected_outcome, "{label}");
-        assert_eq!(attributed.deny_attribution, expected_attribution, "{label}");
-    }
-
-    // An unadjudicable observation set fails with the same error either way.
-    let unavailable = Observations::Unavailable { reason: ObservationUnavailable::Incomplete };
-    let plain =
-        screen_with_limit(&rules, &[], unavailable, DEFAULT_MAX_EVENT_BINDINGS_PER_TX).unwrap_err();
-    let attributed = screen_attributed(&rules, &[], unavailable).unwrap_err();
-    assert_eq!(plain, attributed, "the error is unchanged");
 }

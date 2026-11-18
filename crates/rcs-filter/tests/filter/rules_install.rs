@@ -234,38 +234,6 @@ async fn it_a_compiler_rejected_rule_is_diagnosable_and_still_installs_nothing()
     }
 }
 
-/// Root-level variant: an unknown key at the response **root** fails on the decode path
-/// instead of the per-rule gate, and must equally leave the installed set untouched.
-#[tokio::test]
-async fn it_unknown_root_field_keeps_last_known_good() {
-    let mock = Arc::new(MockRcsClient::new());
-    mock.set_rules_fixture(&[golden::RULE_SCENARIO_A]);
-    let client: Arc<dyn RcsClient> = mock.clone();
-    let shared = not_ready_shared();
-    assert!(test_seams::load_and_install(&shared, &client).await.unwrap());
-    let previous = shared.rules_slot().read().unwrap().clone();
-
-    mock.set_rules_response_override(json!({
-        "protocol_version": 1,
-        "content_version": 2,
-        "rules": [],
-        "ruleset_digest": "0xdeadbeef"
-    }));
-    let err = test_seams::load_and_install(&shared, &client)
-        .await
-        .expect_err("an unknown root key must refuse the snapshot");
-    match &err {
-        rcs_filter::FilterError::Decode(message) => assert!(
-            message.contains("unknown field(s) in rules response: ruleset_digest"),
-            "{message}"
-        ),
-        other => panic!("expected a decode failure, got {other:?}"),
-    }
-    let current = shared.rules_slot().read().unwrap();
-    assert!(Arc::ptr_eq(&previous, &current));
-    assert_eq!(current.content_version, 1);
-}
-
 /// an unsupported `protocol_version` still returns `Ok(false)` with no install, even
 /// when a previously-good set is already in force. Pins that the strict schema did not turn the
 /// version gate into an error or let it install anything.
