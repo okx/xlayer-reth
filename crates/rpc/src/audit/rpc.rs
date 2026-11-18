@@ -11,14 +11,14 @@
 //! or the non-verdict but never `Audit`; and with no call-frame rule in the request an approved
 //! original is committed as `Allow`. See [`KnownAllowedKind`] for how the class is decided.
 //!
-//! Every transaction has its own call-frame observation budget ([`AuditCaptureConfig`], default
-//! 1 000), applied per transaction and never pooled across the batch. Over budget, an ordinary
-//! deposit or an approved original is the non-verdict and its state is not committed. A synthetic
-//! ban prefix — labelled `synthetic_ban` by the caller, or recognised by the content-binding check
-//! when the request sends no label map — keeps its unconditional `Allow` + commit, because that
-//! commit rebuilds the base state the later entries are adjudicated on; it is reported
-//! `not_identified`, and an over-budget prefix also emits the bounded
-//! `xlayer_audit_rpc::synthetic_ban_budget` event.
+//! Every transaction has its own call-frame observation budget
+//! ([`AUDIT_MAX_CALLSTACK_OBSERVATIONS_PER_TX`], 1 000), applied per transaction and never pooled
+//! across the batch. Over budget, an ordinary deposit or an approved original is the non-verdict
+//! and its state is not committed. A synthetic ban prefix — labelled `synthetic_ban` by the
+//! caller, or recognised by the content-binding check when the request sends no label map — keeps
+//! its unconditional `Allow` + commit, because that commit rebuilds the base state the later
+//! entries are adjudicated on; it is reported `not_identified`, and an over-budget prefix also
+//! emits the bounded `xlayer_audit_rpc::synthetic_ban_budget` event.
 //!
 //! This handler does no side-effecting screening (never touches `FilterHandle::screen_tx` or its
 //! `BufferPool`): it runs a throwaway EVM overlay seeded from the current chain-tip state and
@@ -34,9 +34,10 @@ use std::sync::Arc;
 use alloy_consensus::transaction::Recovered;
 use alloy_consensus::Transaction;
 use alloy_eips::BlockId;
-use alloy_evm::{Evm, IntoTxEnv};
+use alloy_evm::{Database, Evm, EvmFactory, IntoTxEnv};
 use alloy_op_evm::OpEvmFactory;
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
+use op_revm::OpSpecId;
 pub use rcs_filter::audit::KnownAllowedKind;
 use rcs_filter::audit::{
     callstack_only_inspector, callstack_only_projection, deposit_known_allowed_kind,
@@ -52,7 +53,7 @@ use rcs_filter::config::{
     is_supported_protocol, MIN_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
 };
 use rcs_filter::rules::{load_rules, RawRule, RuleSet, UnknownFields};
-use reth_evm::{block::BlockExecutorFactory, ConfigureEvm};
+use reth_evm::{block::BlockExecutorFactory, ConfigureEvm, EvmEnv};
 use reth_optimism_primitives::OpTransactionSigned;
 use reth_rpc_eth_api::{
     helpers::{Call, LoadState},
@@ -178,31 +179,13 @@ impl TryFrom<AuditTransactionsRequestWire> for AuditTransactionsRequest {
     }
 }
 
-/// The audit RPC's own capture configuration.
+/// Per-transaction call-frame observation budget of `xlayer_auditTransactions`.
 ///
-/// `max_callstack_observations_per_tx` is applied **per transaction** inside a batch — a deposit
-/// batch does not share one pooled allowance. The handler always uses [`Self::default`]; the
-/// value is deliberately not read from the node's `rcs-filter` args, whose
-/// `max-callstack-observations-per-tx` (default 10 000) bounds the payload builder's own paths
-/// only. Exceeding it fails closed for every adjudicated transaction — an ordinary deposit or an
-/// approved original is the non-verdict and its state is not committed. The one exception is a
-/// synthetic ban prefix, which keeps its `Allow` + commit and is reported `not_identified` (see
-/// the module documentation).
-#[derive(Debug, Clone, Copy)]
-pub struct AuditCaptureConfig {
-    pub max_callstack_observations_per_tx: usize,
-}
-
-impl AuditCaptureConfig {
-    /// Per-transaction call-frame observation budget of `xlayer_auditTransactions`.
-    pub const DEFAULT_MAX_CALLSTACK_OBSERVATIONS_PER_TX: usize = 1_000;
-}
-
-impl Default for AuditCaptureConfig {
-    fn default() -> Self {
-        Self { max_callstack_observations_per_tx: Self::DEFAULT_MAX_CALLSTACK_OBSERVATIONS_PER_TX }
-    }
-}
+/// Applied to each transaction separately, never pooled across a batch, and independent of the
+/// payload builder's `max-callstack-observations-per-tx`. Over budget, an ordinary deposit or an
+/// approved original is the non-verdict and is not committed; a synthetic ban prefix keeps its
+/// `Allow` + commit and is reported `not_identified` (see the module documentation).
+pub const AUDIT_MAX_CALLSTACK_OBSERVATIONS_PER_TX: usize = 1_000;
 
 /// The RPC crate's EVM adapter for the shared [`RcsCaptureScope`].
 ///
@@ -318,49 +301,6 @@ fn validate_compiled_rules(rules: &RuleSet) -> Result<(), jsonrpsee::types::Erro
     ))
 }
 
-/// The capture inspector this request needs, or `None` when it declares no call-frame selector —
-/// in which case NO inspector is constructed at all and the path keeps its pre-existing EVM.
-///
-/// `CallstackOnly`: this path produces and consumes no virtual native-transfer log, screens
-/// against the raw execution logs it already used, and the only live budget is the callstack
-/// observation budget of `capture`, applied PER TRANSACTION inside the batch.
-fn audit_capture_inspector(rules: &RuleSet, capture: AuditCaptureConfig) -> Option<RcsInspector> {
-    callstack_only_inspector(rules, capture.max_callstack_observations_per_tx)
-}
-
-// Test-only construction-site observable for the audit RPC's inspector, the
-// counterpart of the builder's. Incremented at the exact construction site, so `0` means no
-// inspector was built. Kept as `//` because `thread_local!` carries no documentation.
-#[cfg(test)]
-thread_local! {
-    pub(crate) static AUDIT_INSPECTOR_CONSTRUCTIONS: std::cell::Cell<usize> =
-        const { std::cell::Cell::new(0) };
-}
-
-/// Everything one batch needs that does not depend on the EVM type.
-struct AuditBatch<'a> {
-    txs: &'a [Recovered<OpTransactionSigned>],
-    reqs: &'a [DepositTxRequest],
-    /// The request's OWN compiled rule set. No local snapshot is ever mixed in: a node with an
-    /// empty or absent local snapshot must never make an uncaptured request look captured.
-    rules: &'a RuleSet,
-    /// A callstack-only projection of `rules`, used ONLY to adjudicate a `known_allowed`
-    /// `Original`. Filtering out rules with no `callstack` section leaves
-    /// `callstack_selector_addresses` untouched, so this projection carries the **same**
-    /// `SnapshotStamp` as `rules` and the existing stamp check keeps its meaning.
-    ///
-    /// This is what keeps the `known_allowed` short-circuit doing exactly what it was built for:
-    /// QUOTA / EVENT re-classification is still skipped, so an already-approved quota
-    /// transaction can never re-enter `Audit`.
-    known_allowed_rules: Option<&'a RuleSet>,
-    known_allowed: &'a HashSet<String>,
-    kinds: Option<&'a BTreeMap<String, KnownAllowedKind>>,
-    /// Whether the response may carry the identification diagnostic. Keyed on the request
-    /// actually declaring a call-frame alias, which is the condition it always meant: a request
-    /// with nothing to identify reports nothing.
-    report_identification: bool,
-}
-
 /// The class of an unlabelled `known_allowed` entry, decided from the deposit the batch executes.
 ///
 /// Only the built transaction's own `source_hash` and `input` are read — the bytes
@@ -375,41 +315,17 @@ fn inferred_known_allowed_kind(tx: &Recovered<OpTransactionSigned>) -> KnownAllo
     }
 }
 
-impl AuditBatch<'_> {
-    /// `Some(kind)` when this `source_hash` is a `known_allowed` entry.
-    ///
-    /// A request with a label map is read from it: a partial map was already refused at the
-    /// boundary, so every entry has a label and nothing is inferred (an entry missing from a
-    /// validated map cannot occur; it would be adjudicated as an ordinary deposit). Without a map
-    /// the class is inferred from the built deposit `tx` (see [`KnownAllowedKind`]).
-    fn known_allowed_kind(
-        &self,
-        source_hash: &str,
-        tx: &Recovered<OpTransactionSigned>,
-    ) -> Option<(KnownAllowedKind, KnownAllowedResolution)> {
-        resolve_known_allowed_kind(self.known_allowed, self.kinds, source_hash, || {
-            inferred_known_allowed_kind(tx)
-        })
-    }
-
-    fn identification(&self, value: CallstackIdentification) -> Option<CallstackIdentification> {
-        self.report_identification.then_some(value)
-    }
-}
-
 /// One request's validated, owned batch inputs.
 ///
 /// The handler validates and compiles a request ONCE, then moves the whole plan into the blocking
-/// task that executes it, which is why these are owned values rather than the borrows
-/// [`AuditBatch`] carries. Keeping the assembly in one place is what lets a test drive the real
-/// request pipeline — validation, compilation, the callstack-only projection and the batch body —
-/// instead of a re-implementation of it that could agree with production by luck.
-pub struct AuditBatchPlan {
+/// task that executes it, which is why these are owned values. One layer only: the executor and
+/// the per-class helpers are methods on the plan, and the built transactions are passed alongside
+/// it rather than copied into a second borrowed view.
+struct AuditBatchPlan {
     rules: RuleSet,
     known_allowed_rules: Option<RuleSet>,
     known_allowed: HashSet<String>,
     kinds: Option<BTreeMap<String, KnownAllowedKind>>,
-    report_identification: bool,
 }
 
 impl AuditBatchPlan {
@@ -433,36 +349,255 @@ impl AuditBatchPlan {
             known_allowed_rules.as_ref().is_none_or(|set| set.stamp() == rules.stamp()),
             "the callstack-only projection must carry the same snapshot stamp"
         );
-        let report_identification = rules.has_callstack_rules();
         Ok(Self {
             rules,
             known_allowed_rules,
             known_allowed: req.known_allowed.iter().cloned().collect(),
             kinds: req.known_allowed_kinds.clone(),
-            report_identification,
         })
     }
 
-    /// The request's own compiled rule set — what decides whether capture is armed at all.
-    pub fn rules(&self) -> &RuleSet {
-        &self.rules
+    /// `Some(kind)` when this `source_hash` is a `known_allowed` entry.
+    ///
+    /// A request with a label map is read from it: a partial map was already refused at the
+    /// boundary, so every entry has a label and nothing is inferred (an entry missing from a
+    /// validated map cannot occur; it would be adjudicated as an ordinary deposit). Without a map
+    /// the class is inferred from the built deposit `tx` (see [`KnownAllowedKind`]).
+    fn known_allowed_kind(
+        &self,
+        source_hash: &str,
+        tx: &Recovered<OpTransactionSigned>,
+    ) -> Option<(KnownAllowedKind, KnownAllowedResolution)> {
+        resolve_known_allowed_kind(&self.known_allowed, self.kinds.as_ref(), source_hash, || {
+            inferred_known_allowed_kind(tx)
+        })
     }
 
-    /// Borrows the plan for one ordered set of built transactions.
-    fn batch<'a>(
-        &'a self,
-        txs: &'a [Recovered<OpTransactionSigned>],
-        reqs: &'a [DepositTxRequest],
-    ) -> AuditBatch<'a> {
-        AuditBatch {
-            txs,
-            reqs,
-            rules: &self.rules,
-            known_allowed_rules: self.known_allowed_rules.as_ref(),
-            known_allowed: &self.known_allowed,
-            kinds: self.kinds.as_ref(),
-            report_identification: self.report_identification,
+    /// The response diagnostic, reported only when the request declares a call-frame alias.
+    fn identification(&self, value: CallstackIdentification) -> Option<CallstackIdentification> {
+        self.rules.has_callstack_rules().then_some(value)
+    }
+
+    /// Executes one ordered batch against `evm` and returns each built transaction's result in
+    /// order (`None` for an entry after an `Audit` stop).
+    ///
+    /// This is the base skeleton: transact, resolve the `known_allowed` class, let the class
+    /// decide its verdict, commit the state when it says so, and stop when it says so. Capture
+    /// and diagnostics live in the class helpers instead of in this loop.
+    fn run<E>(
+        &self,
+        evm: &mut E,
+        txs: &[Recovered<OpTransactionSigned>],
+        reqs: &[DepositTxRequest],
+    ) -> Result<Vec<Option<AuditResult>>, E::Error>
+    where
+        E: Evm,
+        E::DB: DatabaseCommit,
+        E::Inspector: RcsCaptureControl,
+        for<'tx> &'tx Recovered<OpTransactionSigned>: IntoTxEnv<E::Tx>,
+    {
+        // Built on first use rather than per batch: a request with no `known_allowed` entry
+        // registers nothing.
+        let mut resolution_metrics: Option<KnownAllowedResolutionMetrics> = None;
+
+        let mut executed: Vec<Option<AuditResult>> = (0..txs.len()).map(|_| None).collect();
+        for (exec_idx, tx) in txs.iter().enumerate() {
+            let tx_req = &reqs[exec_idx];
+
+            // One capture window per transaction, opened by the shared RAII guard.
+            let (ResultAndState { result, state }, capture) = audit_capture_window(&mut *evm, tx)?;
+            let observations = observations_from(&capture);
+            #[cfg(any(test, feature = "test-utils"))]
+            observation_recorder::record(observations);
+
+            let resolved = self.known_allowed_kind(&tx_req.source_hash, tx);
+            if let Some((kind, resolution)) = resolved {
+                let metrics =
+                    resolution_metrics.get_or_insert_with(KnownAllowedResolutionMetrics::default);
+                match (resolution, kind) {
+                    (KnownAllowedResolution::Labelled, _) => metrics.labelled_total.increment(1),
+                    (KnownAllowedResolution::Inferred, KnownAllowedKind::SyntheticBan) => {
+                        metrics.inferred_synthetic_ban_total.increment(1)
+                    }
+                    (KnownAllowedResolution::Inferred, KnownAllowedKind::Original) => {
+                        metrics.inferred_original_total.increment(1)
+                    }
+                }
+            }
+
+            let (audit_result, commit, keep_going) = match resolved.map(|(kind, _)| kind) {
+                Some(KnownAllowedKind::SyntheticBan) => {
+                    self.synthetic_ban_entry(tx, tx_req, result.logs(), observations)
+                }
+                Some(KnownAllowedKind::Original) => {
+                    self.original_entry(tx, tx_req, result.logs(), observations)
+                }
+                None => self.ordinary_entry(tx, tx_req, result.logs(), observations),
+            };
+            if commit {
+                evm.db_mut().commit(state);
+            }
+            executed[exec_idx] = Some(audit_result);
+            if !keep_going {
+                break;
+            }
         }
+        Ok(executed)
+    }
+
+    /// The synthetic replay prefix's entry: `Allow` + commit unconditionally, with its
+    /// identification reported.
+    ///
+    /// The caller skips such a prefix's verdict entirely and *depends* on it committing so the
+    /// blacklist / failed-deposit base state is rebuilt; withholding that commit to "protect" it
+    /// would corrupt the very base state the protection depends on. Its identification result is
+    /// therefore reported, never acted on.
+    fn synthetic_ban_entry(
+        &self,
+        tx: &Recovered<OpTransactionSigned>,
+        tx_req: &DepositTxRequest,
+        logs: &[alloy_primitives::Log],
+        observations: Observations<'_>,
+    ) -> (AuditResult, bool, bool) {
+        // The SAME unadjudicable judgement the ordinary gate applies, deliberately reused rather
+        // than restated: an observation set is adjudicable only if it is available AND was
+        // produced under this request's own snapshot. Testing only the available dimension here
+        // let an `Available` set carrying a FOREIGN stamp reach the classifier, where an
+        // `origin` / `contract_address`-narrowed rule is skipped with zero decoding and the
+        // prefix was reported `Clean` — "identified, nothing matched" about frames this snapshot
+        // cannot adjudicate at all. A request declaring no selector still falls through to the
+        // classifier and keeps its `NotApplicable` report, because the judgement returns `None`
+        // there.
+        let identification = diagnostic_identification(self, tx, tx_req, logs, observations);
+        // Observation only, and the one place an operator can see it: the consumer skips this
+        // prefix's verdict, so the response diagnostic reaches nobody.
+        report_synthetic_ban_identification(
+            &SyntheticBanIdentificationMetrics::default(),
+            tx.tx_hash(),
+            &tx_req.source_hash,
+            identification,
+            self.rules.selector_bearing_rule_count(),
+        );
+        if unadjudicable_observations(&self.rules, observations)
+            == Some(ObservationUnavailable::BudgetExceeded)
+        {
+            report_synthetic_ban_budget_exceeded(
+                tx.tx_hash(),
+                &tx_req.source_hash,
+                self.rules.selector_bearing_rule_count(),
+            );
+        }
+        (
+            known_allowed_result(tx.tx_hash(), &tx_req.source_hash)
+                .with_identification(self.identification(identification)),
+            true,
+            true,
+        )
+    }
+
+    /// An `Original`, labelled or inferred, earns no exemption from the non-verdict rule.
+    ///
+    /// Priority, highest first: unavailable observations with an alias-bearing request → the
+    /// existing non-verdict; an alias-bearing objection → `Deny`; otherwise `Allow` + commit,
+    /// byte-identical to the previous behaviour.
+    fn original_entry(
+        &self,
+        tx: &Recovered<OpTransactionSigned>,
+        tx_req: &DepositTxRequest,
+        logs: &[alloy_primitives::Log],
+        observations: Observations<'_>,
+    ) -> (AuditResult, bool, bool) {
+        if let Some(reason) = unadjudicable_observations(&self.rules, observations) {
+            return (unadjudicable_result(self, &tx_req.source_hash, reason), false, true);
+        }
+        let Some(callstack_rules) = self.known_allowed_rules.as_ref() else {
+            // The request declares no selector, so there is nothing to adjudicate and this is
+            // exactly today's unconditional `Allow` + commit.
+            return (
+                known_allowed_result(tx.tx_hash(), &tx_req.source_hash).with_identification(
+                    self.identification(CallstackIdentification::NotApplicable),
+                ),
+                true,
+                true,
+            );
+        };
+        let adjudicated = super::verdict::verdict_for(
+            tx_req,
+            ExecutedTx { from: tx.signer(), to: tx.to(), tx_hash: tx.tx_hash(), value: tx.value() },
+            logs,
+            callstack_rules,
+            observations,
+        );
+        match adjudicated.verdict {
+            // Not adjudicable: the existing non-verdict, state NOT committed.
+            Verdict::Malformed => (
+                AuditResult::malformed(tx_req.source_hash.clone()).with_identification(
+                    self.identification(CallstackIdentification::NotIdentified),
+                ),
+                false,
+                true,
+            ),
+            // A selector-bearing rule objects. Reuses `commit_and_continue(Deny)`'s existing
+            // semantics unchanged: state discarded, batch continues.
+            Verdict::Deny => (
+                AuditResult {
+                    tx_hash: format!("{:#x}", tx.tx_hash()),
+                    source_hash: tx_req.source_hash.clone(),
+                    verdict: Verdict::Deny,
+                    actions: None,
+                    callstack_identification: None,
+                }
+                .with_identification(self.identification(CallstackIdentification::Objected)),
+                false,
+                true,
+            ),
+            // `Audit` is deliberately NOT propagated here: the callstack dimension may only ever
+            // move a `known_allowed` verdict to `Deny` or a non-verdict, never to `Audit`, so
+            // quota convergence cannot regress into a re-adjudication loop.
+            Verdict::Allow | Verdict::Audit | Verdict::Unknown => (
+                known_allowed_result(tx.tx_hash(), &tx_req.source_hash)
+                    .with_identification(self.identification(CallstackIdentification::Clean)),
+                true,
+                true,
+            ),
+        }
+    }
+
+    /// An ordinary deposit (not in `known_allowed`): the unadjudicable gate, then the full
+    /// classifier, then the commit table.
+    fn ordinary_entry(
+        &self,
+        tx: &Recovered<OpTransactionSigned>,
+        tx_req: &DepositTxRequest,
+        logs: &[alloy_primitives::Log],
+        observations: Observations<'_>,
+    ) -> (AuditResult, bool, bool) {
+        if let Some(reason) = unadjudicable_observations(&self.rules, observations) {
+            return (unadjudicable_result(self, &tx_req.source_hash, reason), false, true);
+        }
+        let verdict_result = super::verdict::verdict_for(
+            tx_req,
+            ExecutedTx { from: tx.signer(), to: tx.to(), tx_hash: tx.tx_hash(), value: tx.value() },
+            logs,
+            &self.rules,
+            observations,
+        );
+        // `MatchOutcome::Deny` carries no rule id, so the diagnostic cannot name the objecting
+        // dimension; for a selector-bearing request a deny is reported as an objection.
+        let identification = match (verdict_result.verdict, self.rules.has_callstack_rules()) {
+            (Verdict::Deny, true) => Some(CallstackIdentification::Objected),
+            _ => verdict_result.callstack_identification,
+        };
+        let (commit, keep_going) = commit_and_continue(verdict_result.verdict);
+        (
+            verdict_result.with_identification(
+                self.identification(
+                    identification.unwrap_or(CallstackIdentification::NotApplicable),
+                ),
+            ),
+            commit,
+            keep_going,
+        )
     }
 }
 
@@ -473,7 +608,7 @@ impl AuditBatchPlan {
 /// the COUNT of rules carrying a call-frame selector — the rule surface, not the deduplicated
 /// selector address set. No rule id, no observed address, no code hash.
 fn unadjudicable_result(
-    batch: &AuditBatch<'_>,
+    plan: &AuditBatchPlan,
     source_hash: &str,
     reason: ObservationUnavailable,
 ) -> AuditResult {
@@ -481,11 +616,37 @@ fn unadjudicable_result(
         target: "xlayer_audit_rpc",
         %source_hash,
         reason = reason.as_str(),
-        selector_bearing_rules = batch.rules.selector_bearing_rule_count(),
+        selector_bearing_rules = plan.rules.selector_bearing_rule_count(),
         "observations unavailable for a selector-bearing request; returning the non-verdict"
     );
     AuditResult::malformed(source_hash.to_string())
-        .with_identification(batch.identification(CallstackIdentification::NotIdentified))
+        .with_identification(plan.identification(CallstackIdentification::NotIdentified))
+}
+
+/// Builds the caller's ordered, built batch: every request item whose deposit transaction could
+/// be decoded, its request, and the original-index → exec-index map (`None` for a failed build).
+///
+/// Both the handler and the test seam build through here, so a per-item construction failure
+/// produces a `Malformed` result identically on both paths without aborting the rest of the batch.
+fn build_deposits(
+    reqs: &[DepositTxRequest],
+) -> (Vec<Recovered<OpTransactionSigned>>, Vec<DepositTxRequest>, Vec<Option<usize>>) {
+    let mut ordered_txs = Vec::with_capacity(reqs.len());
+    let mut ordered_tx_reqs: Vec<DepositTxRequest> = Vec::with_capacity(reqs.len());
+    let mut built: Vec<Option<usize>> = Vec::with_capacity(reqs.len());
+    for tx_req in reqs {
+        match build_deposit_tx(tx_req) {
+            Ok(tx) => {
+                built.push(Some(ordered_txs.len()));
+                ordered_tx_reqs.push(tx_req.clone());
+                ordered_txs.push(tx);
+            }
+            Err(_err) => {
+                built.push(None);
+            }
+        }
+    }
+    (ordered_txs, ordered_tx_reqs, built)
 }
 
 /// Opens one capture window around the real `transact` of a single audit transaction and returns
@@ -510,14 +671,42 @@ where
     Ok((outcome, capture))
 }
 
+/// The one EVM-construction site for the two EVM shapes this path executes.
+///
+/// The handler and the test seam both go through here, so the inspector branch and the plain
+/// branch exist once. With no inspector the plain EVM is built and no capture runs.
+fn execute_audit_batch<DB>(
+    factory: &OpEvmFactory,
+    db: DB,
+    evm_env: EvmEnv<OpSpecId>,
+    plan: &AuditBatchPlan,
+    inspector: Option<RcsInspector>,
+    txs: &[Recovered<OpTransactionSigned>],
+    reqs: &[DepositTxRequest],
+) -> Result<Vec<Option<AuditResult>>, <OpEvmFactory as EvmFactory>::Error<DB::Error>>
+where
+    DB: Database + DatabaseCommit,
+{
+    match inspector {
+        Some(inspector) => {
+            let mut evm = factory.create_evm_with_inspector(db, evm_env, inspector);
+            plan.run(&mut evm, txs, reqs)
+        }
+        None => {
+            let mut evm = factory.create_evm(db, evm_env);
+            plan.run(&mut evm, txs, reqs)
+        }
+    }
+}
+
 /// Records, in batch order, the observation set the production batch body actually fed to
 /// screening for each transaction.
 ///
 /// Compiled only for this crate's own tests and for the non-default `test-utils` feature, so no
-/// production build contains it. It exists because "the three paths observe the same frames" is
-/// only meaningful if the compared frames are the ones production really used: three decisions
-/// can agree while resting on different observations, and a path that silently dropped its
-/// capture would still produce a decision.
+/// production build contains it. It exists because "the two paths observe the same frames" is
+/// only meaningful if the compared frames are the ones production really used: two decisions can
+/// agree while resting on different observations, and a path that silently dropped its capture
+/// would still produce a decision.
 #[cfg(any(test, feature = "test-utils"))]
 pub mod observation_recorder {
     use rcs_filter::callstack::{CallObservation, Observations};
@@ -543,227 +732,6 @@ pub mod observation_recorder {
     }
 }
 
-/// Executes one ordered batch against `evm`, filling `executed`.
-///
-/// Generic over the EVM so the capturing and the inert construction share ONE loop body: with no
-/// selector declared the caller builds a plain EVM and no [`RcsInspector`] is constructed at all.
-///
-/// Capture is armed per transaction through the shared RAII guard, so the `known_allowed`
-/// `continue`, the `?` on `transact`, the `Audit` `break` and the batch-end path all leave the
-/// inspector inactive by construction rather than by caller discipline.
-fn run_audit_batch<E>(
-    evm: &mut E,
-    batch: &AuditBatch<'_>,
-    executed: &mut [Option<AuditResult>],
-) -> Result<(), E::Error>
-where
-    E: Evm,
-    E::DB: DatabaseCommit,
-    E::Inspector: RcsCaptureControl,
-    for<'tx> &'tx Recovered<OpTransactionSigned>: IntoTxEnv<E::Tx>,
-{
-    // Built on first use rather than per batch: a request without a replay prefix registers
-    // nothing, and the derive caches the registration so a later batch only clones handles.
-    let mut synthetic_ban_metrics: Option<SyntheticBanIdentificationMetrics> = None;
-    // Built on first use for the same reason: a request with no `known_allowed` entry
-    // registers nothing.
-    let mut resolution_metrics: Option<KnownAllowedResolutionMetrics> = None;
-
-    for (exec_idx, tx) in batch.txs.iter().enumerate() {
-        let tx_req = &batch.reqs[exec_idx];
-
-        // One capture window per transaction, opened by the shared RAII guard.
-        let (outcome, capture) = audit_capture_window(&mut *evm, tx)?;
-        let ResultAndState { result, state } = outcome;
-        let logs = result.logs().to_vec();
-        let observations = observations_from(&capture);
-        #[cfg(any(test, feature = "test-utils"))]
-        observation_recorder::record(observations);
-        let resolved = batch.known_allowed_kind(&tx_req.source_hash, tx);
-        if let Some((kind, resolution)) = resolved {
-            let metrics =
-                resolution_metrics.get_or_insert_with(KnownAllowedResolutionMetrics::default);
-            match (resolution, kind) {
-                (KnownAllowedResolution::Labelled, _) => metrics.labelled_total.increment(1),
-                (KnownAllowedResolution::Inferred, KnownAllowedKind::SyntheticBan) => {
-                    metrics.inferred_synthetic_ban_total.increment(1)
-                }
-                (KnownAllowedResolution::Inferred, KnownAllowedKind::Original) => {
-                    metrics.inferred_original_total.increment(1)
-                }
-            }
-        }
-        let kind = resolved.map(|(kind, _)| kind);
-
-        // Highest priority, and deliberately BEFORE any rule is filtered or matched: a request
-        // that declares an alias and whose observation set cannot be adjudicated gets the
-        // non-verdict, with no state committed. Rule-level filtering (`contract_address` /
-        // `origin`) short-circuits with zero decoding, so leaving this to the matcher would let
-        // an unidentifiable execution be reported as an authoritative `Allow` whenever the
-        // narrowed rules happened to be skipped.
-        //
-        // The exemption covers exactly the one class whose verdict its own contract fixes rather
-        // than adjudication: a `SyntheticBan`, labelled or inferred (unconditional `Allow` +
-        // commit, because that commit is what rebuilds the base state). It is handled by its own
-        // arm below, so passing it through this gate would return the non-verdict for an entry
-        // that was never going to be adjudicated and withhold the commit the caller depends on.
-        // Ordinary deposits and `Original` entries, labelled or inferred, are NOT exempt.
-        // That includes a prefix over the observation budget: its unavailable set is reported
-        // (`not_identified`, plus the bounded budget event), never acted on. The class is the
-        // caller's label or, without a label map, the content-binding check of
-        // [`KnownAllowedKind`] — a binding to the entry's own bytes, not source authentication.
-        let self_adjudicating = matches!(kind, Some(KnownAllowedKind::SyntheticBan));
-        if !self_adjudicating
-            && let Some(reason) = unadjudicable_observations(batch.rules, observations)
-        {
-            executed[exec_idx] = Some(unadjudicable_result(batch, &tx_req.source_hash, reason));
-            continue;
-        }
-
-        match kind {
-            // A synthetic replay prefix keeps the pre-existing contract UNCONDITIONALLY: it
-            // executes, its state IS committed, and its verdict stays `Allow`. The caller skips
-            // such a prefix's verdict entirely and *depends* on it committing so the blacklist /
-            // failed-deposit base state is rebuilt; withholding that commit to "protect" it would
-            // corrupt the very base state the protection depends on. Its identification result is
-            // therefore reported, never acted on.
-            Some(KnownAllowedKind::SyntheticBan) => {
-                evm.db_mut().commit(state);
-                // The SAME unadjudicable judgement the gate above applies, deliberately reused
-                // rather than restated: an observation set is adjudicable only if it is
-                // available AND was produced under this request's own snapshot. Testing only
-                // the available dimension here let an `Available` set carrying a FOREIGN stamp
-                // reach the classifier, where an `origin` / `contract_address`-narrowed rule is
-                // skipped with zero decoding and the prefix was reported `Clean` — "identified,
-                // nothing matched" about frames this snapshot cannot adjudicate at all.
-                // A request declaring no selector still falls through to the classifier and
-                // keeps its `NotApplicable` report, because the judgement returns `None` there.
-                let identification =
-                    diagnostic_identification(batch, tx, tx_req, &logs, observations);
-                // Observation only, and the one place an operator can see it: the consumer
-                // skips this prefix's verdict, so the response diagnostic reaches nobody.
-                report_synthetic_ban_identification(
-                    synthetic_ban_metrics
-                        .get_or_insert_with(SyntheticBanIdentificationMetrics::default),
-                    tx.tx_hash(),
-                    &tx_req.source_hash,
-                    identification,
-                    batch.rules.selector_bearing_rule_count(),
-                );
-                if unadjudicable_observations(batch.rules, observations)
-                    == Some(ObservationUnavailable::BudgetExceeded)
-                {
-                    report_synthetic_ban_budget_exceeded(
-                        tx.tx_hash(),
-                        &tx_req.source_hash,
-                        batch.rules.selector_bearing_rule_count(),
-                    );
-                }
-                executed[exec_idx] = Some(
-                    known_allowed_result(tx.tx_hash(), &tx_req.source_hash)
-                        .with_identification(batch.identification(identification)),
-                );
-                continue;
-            }
-            // An `Original`, labelled or inferred, earns no exemption from the non-verdict rule.
-            // Priority, highest first: unavailable observations with an alias-bearing request →
-            // the existing non-verdict; an alias-bearing objection → `Deny`; otherwise `Allow` +
-            // commit, byte-identical to the previous behaviour.
-            Some(KnownAllowedKind::Original) => {
-                let Some(callstack_rules) = batch.known_allowed_rules else {
-                    // The request declares no selector, so there is nothing to adjudicate and
-                    // this is exactly today's unconditional `Allow` + commit.
-                    evm.db_mut().commit(state);
-                    executed[exec_idx] = Some(
-                        known_allowed_result(tx.tx_hash(), &tx_req.source_hash)
-                            .with_identification(
-                                batch.identification(CallstackIdentification::NotApplicable),
-                            ),
-                    );
-                    continue;
-                };
-                let adjudicated = super::verdict::verdict_for(
-                    tx_req,
-                    ExecutedTx {
-                        from: tx.signer(),
-                        to: tx.to(),
-                        tx_hash: tx.tx_hash(),
-                        value: tx.value(),
-                    },
-                    &logs,
-                    callstack_rules,
-                    observations,
-                );
-                match adjudicated.verdict {
-                    // Not adjudicable: the existing non-verdict, state NOT committed.
-                    Verdict::Malformed => {
-                        executed[exec_idx] = Some(
-                            AuditResult::malformed(tx_req.source_hash.clone()).with_identification(
-                                batch.identification(CallstackIdentification::NotIdentified),
-                            ),
-                        );
-                    }
-                    // A selector-bearing rule objects. Reuses `commit_and_continue(Deny)`'s
-                    // existing semantics unchanged: state discarded, batch continues.
-                    Verdict::Deny => {
-                        executed[exec_idx] = Some(
-                            AuditResult {
-                                tx_hash: format!("{:#x}", tx.tx_hash()),
-                                source_hash: tx_req.source_hash.clone(),
-                                verdict: Verdict::Deny,
-                                actions: None,
-                                callstack_identification: None,
-                            }
-                            .with_identification(
-                                batch.identification(CallstackIdentification::Objected),
-                            ),
-                        );
-                    }
-                    // `Audit` is deliberately NOT propagated here: the callstack dimension may
-                    // only ever move a `known_allowed` verdict to `Deny` or a non-verdict, never
-                    // to `Audit`, so quota convergence cannot regress into a re-adjudication loop.
-                    Verdict::Allow | Verdict::Audit | Verdict::Unknown => {
-                        evm.db_mut().commit(state);
-                        executed[exec_idx] = Some(
-                            known_allowed_result(tx.tx_hash(), &tx_req.source_hash)
-                                .with_identification(
-                                    batch.identification(CallstackIdentification::Clean),
-                                ),
-                        );
-                    }
-                }
-                continue;
-            }
-            None => {}
-        }
-
-        let verdict_result = super::verdict::verdict_for(
-            tx_req,
-            ExecutedTx { from: tx.signer(), to: tx.to(), tx_hash: tx.tx_hash(), value: tx.value() },
-            &logs,
-            batch.rules,
-            observations,
-        );
-        // `MatchOutcome::Deny` carries no rule id, so the diagnostic cannot name the objecting
-        // dimension; for a selector-bearing request a deny is reported as an objection.
-        let identification = match (verdict_result.verdict, batch.rules.has_callstack_rules()) {
-            (Verdict::Deny, true) => Some(CallstackIdentification::Objected),
-            _ => verdict_result.callstack_identification,
-        };
-        let (commit, keep_going) = commit_and_continue(verdict_result.verdict);
-        if commit {
-            evm.db_mut().commit(state);
-        }
-        executed[exec_idx] = Some(verdict_result.with_identification(
-            batch.identification(identification.unwrap_or(CallstackIdentification::NotApplicable)),
-        ));
-        if !keep_going {
-            break;
-        }
-    }
-    Ok(())
-}
-
 /// Emits the per-class counter and the bounded anomaly log for one synthetic replay prefix's
 /// identification.
 ///
@@ -772,9 +740,9 @@ where
 /// unidentifiable replay prefix visible, because the consumer skips such a prefix's verdict
 /// entirely and so an optional response field alone would reach no operator.
 ///
-/// Bounded exactly like the deposit path's diagnostic: the request's `source_hash`, the executed
-/// transaction hash, the fixed outcome token and the COUNT of rules carrying a call-frame
-/// selector (never the deduplicated selector address count). No rule id
+/// Bounded exactly like the request-level non-verdict diagnostic: the request's `source_hash`,
+/// the executed transaction hash, the fixed outcome token and the COUNT of rules carrying a
+/// call-frame selector (never the deduplicated selector address count). No rule id
 /// (`MatchOutcome::Deny` carries none and `MatchError`'s `Display` does, which is why neither is
 /// formatted here), no observed address, no code hash, no log content.
 fn report_synthetic_ban_identification(
@@ -848,19 +816,19 @@ fn report_synthetic_ban_budget_exceeded(
 /// still falls through to the classifier and keeps its `NotApplicable` report, because the
 /// judgement returns `None` there.
 fn diagnostic_identification(
-    batch: &AuditBatch<'_>,
+    plan: &AuditBatchPlan,
     tx: &Recovered<OpTransactionSigned>,
     tx_req: &DepositTxRequest,
     logs: &[alloy_primitives::Log],
     observations: Observations<'_>,
 ) -> CallstackIdentification {
-    if unadjudicable_observations(batch.rules, observations).is_some() {
+    if unadjudicable_observations(&plan.rules, observations).is_some() {
         return CallstackIdentification::NotIdentified;
     }
-    let Some(callstack_rules) = batch.known_allowed_rules else {
+    let Some(callstack_rules) = plan.known_allowed_rules.as_ref() else {
         return CallstackIdentification::NotApplicable;
     };
-    // The same shared classifier the other two paths use — the prefix's verdict is computed
+    // The same shared classifier the other path uses — the prefix's verdict is computed
     // identically, it is simply not acted on.
     let adjudicated = super::verdict::verdict_for(
         tx_req,
@@ -938,25 +906,10 @@ where
         // Every request-level check, the rule compilation and the callstack-only projection, in
         // the one place a test can drive them too.
         let plan = AuditBatchPlan::prepare(&req)?;
-        let capture_config = AuditCaptureConfig::default();
 
         // Build every tx up front so a per-item construction failure produces a `Malformed`
         // result without aborting the rest of the batch.
-        let mut ordered_txs = Vec::with_capacity(req.txs.len());
-        let mut ordered_tx_reqs: Vec<DepositTxRequest> = Vec::with_capacity(req.txs.len());
-        let mut built: Vec<Option<usize>> = Vec::with_capacity(req.txs.len());
-        for tx_req in &req.txs {
-            match build_deposit_tx(tx_req) {
-                Ok(tx) => {
-                    built.push(Some(ordered_txs.len()));
-                    ordered_tx_reqs.push(tx_req.clone());
-                    ordered_txs.push(tx);
-                }
-                Err(_err) => {
-                    built.push(None);
-                }
-            }
-        }
+        let (ordered_txs, ordered_tx_reqs, built) = build_deposits(&req.txs);
 
         // Fetch the header FIRST and pin state to that exact block hash (rather than
         // independently resolving "latest" twice). If a new block landed between two
@@ -985,31 +938,23 @@ where
         let txs = req.txs;
         let results: Vec<AuditResult> = backend
             .spawn_with_state_at_block(block_id, move |this, mut state_db| {
-                let mut executed: Vec<Option<AuditResult>> =
-                    (0..ordered_txs.len()).map(|_| None).collect();
-                let batch = plan.batch(&ordered_txs, &ordered_tx_reqs);
-
-                // Two typed EVM-construction branches feed one generic batch body. When the
-                // request declares at least one call-frame selector the shared capture inspector
-                // is attached in `CallstackOnly` mode — the SAME inspector the payload builder
-                // uses, which is what makes equal identification structural rather than
-                // coincidental. With no selector declared, NO inspector is constructed at all and
-                // this path takes its pre-existing plain `evm_with_env` branch.
-                if let Some(inspector) = audit_capture_inspector(plan.rules(), capture_config) {
-                    #[cfg(test)]
-                    AUDIT_INSPECTOR_CONSTRUCTIONS.with(|c| c.set(c.get() + 1));
-                    let mut evm = this.evm_config().evm_with_env_and_inspector(
-                        &mut state_db,
-                        evm_env,
-                        inspector,
-                    );
-                    run_audit_batch(&mut evm, &batch, &mut executed)
-                        .map_err(T::Error::from_evm_err)?;
-                } else {
-                    let mut evm = this.evm_config().evm_with_env(&mut state_db, evm_env);
-                    run_audit_batch(&mut evm, &batch, &mut executed)
-                        .map_err(T::Error::from_evm_err)?;
-                }
+                // When the request declares at least one call-frame selector the shared capture
+                // inspector is attached in `CallstackOnly` mode — the SAME inspector the payload
+                // builder uses, which is what makes equal identification structural rather than
+                // coincidental. With no selector declared, NO inspector is constructed at all
+                // and this path takes its pre-existing plain EVM.
+                let inspector =
+                    callstack_only_inspector(&plan.rules, AUDIT_MAX_CALLSTACK_OBSERVATIONS_PER_TX);
+                let mut executed = execute_audit_batch(
+                    this.evm_config().evm_factory(),
+                    &mut state_db,
+                    evm_env,
+                    &plan,
+                    inspector,
+                    &ordered_txs,
+                    &ordered_tx_reqs,
+                )
+                .map_err(T::Error::from_evm_err)?;
 
                 Ok(assemble_results(&txs, &built, &mut executed))
             })
@@ -1020,187 +965,82 @@ where
     }
 }
 
-/// Cross-crate test access to this path's own capture and observation handling.
+/// Cross-crate test access to this path's own complete production batch.
 ///
 /// Compiled only with the non-default `test-utils` feature, which no `[dependencies]` entry
 /// enables — a production build contains none of it. It exists so a test that has to live in
-/// another crate (the equal-identification comparison across the three execution paths) can
-/// drive **this** path's real code instead of re-implementing it, which would make the
-/// comparison prove nothing.
+/// another crate (the equal-identification comparison across the two execution paths) can drive
+/// **this** path's real code instead of re-implementing it, which would make the comparison prove
+/// nothing.
 #[cfg(feature = "test-utils")]
 pub mod test_seams {
     use super::*;
+    use rcs_filter::callstack::SnapshotStamp;
 
-    /// Delegates to this path's own [`super::audit_capture_inspector`].
-    pub fn audit_capture_inspector(
-        rules: &RuleSet,
-        capture: AuditCaptureConfig,
-    ) -> Option<RcsInspector> {
-        super::audit_capture_inspector(rules, capture)
-    }
-
-    /// Delegates to this path's own [`super::observations_from`].
-    pub fn observations_from(outcome: &CaptureOutcome) -> Observations<'_> {
-        super::observations_from(outcome)
-    }
-
-    /// Validates and compiles one request exactly as the handler does, including the strict wire
-    /// schema's own checks, and returns the plan the production batch body executes.
-    pub fn prepare_audit_batch_plan(
+    /// Runs `req` through the complete production batch against `db`: request validation and
+    /// rule compilation, deposit construction, the production inspector choice with
+    /// [`AUDIT_MAX_CALLSTACK_OBSERVATIONS_PER_TX`], the per-transaction loop and result assembly.
+    /// Only the handler's state anchoring (latest header, blocking task) is not part of it.
+    /// Validation errors are the exact JSON-RPC errors the handler returns.
+    pub fn execute_audit_batch<DB: Database + DatabaseCommit>(
         req: &AuditTransactionsRequest,
-    ) -> Result<AuditBatchPlan, jsonrpsee::types::ErrorObjectOwned> {
-        AuditBatchPlan::prepare(req)
+        db: DB,
+        evm_env: EvmEnv<OpSpecId>,
+    ) -> Result<Vec<AuditResult>, jsonrpsee::types::ErrorObjectOwned> {
+        run_complete_batch(req, db, evm_env, None)
     }
 
-    /// Runs the production [`super::run_audit_batch`] over `plan`, so a cross-crate test reaches
-    /// the real capture window, the real `known_allowed` policy, the real commit decision and the
-    /// real verdict mapping rather than any subset of them.
-    pub fn run_audit_batch<E>(
-        evm: &mut E,
-        plan: &AuditBatchPlan,
-        txs: &[Recovered<OpTransactionSigned>],
-        reqs: &[DepositTxRequest],
-        executed: &mut [Option<AuditResult>],
-    ) -> Result<(), E::Error>
-    where
-        E: Evm,
-        E::DB: DatabaseCommit,
-        E::Inspector: RcsCaptureControl,
-        for<'tx> &'tx Recovered<OpTransactionSigned>: IntoTxEnv<E::Tx>,
-    {
-        super::run_audit_batch(evm, &plan.batch(txs, reqs), executed)
+    /// The same batch with capture configured under `capture_stamp` instead of the request's own
+    /// snapshot identity — the only way to reach the stamp-mismatch branch, since a request
+    /// always compiles its own rules. The selector set and budget are the production ones.
+    pub fn execute_audit_batch_with_capture_stamp<DB: Database + DatabaseCommit>(
+        req: &AuditTransactionsRequest,
+        db: DB,
+        evm_env: EvmEnv<OpSpecId>,
+        capture_stamp: SnapshotStamp,
+    ) -> Result<Vec<AuditResult>, jsonrpsee::types::ErrorObjectOwned> {
+        run_complete_batch(req, db, evm_env, Some(capture_stamp))
     }
 
-    /// Public mirror of the private `AuditBatch`, field for field, so an integration test can build
-    /// the exact borrowed batch the production loop consumes.
-    pub struct AuditBatch<'a> {
-        pub txs: &'a [Recovered<OpTransactionSigned>],
-        pub reqs: &'a [DepositTxRequest],
-        pub rules: &'a RuleSet,
-        pub known_allowed_rules: Option<&'a RuleSet>,
-        pub known_allowed: &'a HashSet<String>,
-        pub kinds: Option<&'a BTreeMap<String, KnownAllowedKind>>,
-        pub report_identification: bool,
-    }
-
-    /// Runs the production [`super::run_audit_batch`] over a mirrored batch.
-    pub fn run_mirrored_batch<E>(
-        evm: &mut E,
-        batch: &AuditBatch<'_>,
-        executed: &mut [Option<AuditResult>],
-    ) -> Result<(), E::Error>
-    where
-        E: Evm,
-        E::DB: DatabaseCommit,
-        E::Inspector: RcsCaptureControl,
-        for<'tx> &'tx Recovered<OpTransactionSigned>: IntoTxEnv<E::Tx>,
-    {
-        let batch = super::AuditBatch {
-            txs: batch.txs,
-            reqs: batch.reqs,
-            rules: batch.rules,
-            known_allowed_rules: batch.known_allowed_rules,
-            known_allowed: batch.known_allowed,
-            kinds: batch.kinds,
-            report_identification: batch.report_identification,
-        };
-        super::run_audit_batch(evm, &batch, executed)
-    }
-
-    impl AuditBatchPlan {
-        /// The plan borrowed for one ordered set of built transactions, as a mirrored batch.
-        pub fn batch_for_test<'a>(
-            &'a self,
-            txs: &'a [Recovered<OpTransactionSigned>],
-            reqs: &'a [DepositTxRequest],
-        ) -> AuditBatch<'a> {
-            let b = self.batch(txs, reqs);
-            AuditBatch {
-                txs: b.txs,
-                reqs: b.reqs,
-                rules: b.rules,
-                known_allowed_rules: b.known_allowed_rules,
-                known_allowed: b.known_allowed,
-                kinds: b.kinds,
-                report_identification: b.report_identification,
-            }
-        }
-
-        /// Whether the plan reports the identification diagnostic.
-        pub fn report_identification_for_test(&self) -> bool {
-            self.report_identification
-        }
-
-        /// The callstack-only projection the plan adjudicates `known_allowed` originals with.
-        pub fn known_allowed_rules_for_test(&self) -> Option<&RuleSet> {
-            self.known_allowed_rules.as_ref()
-        }
-    }
-
-    /// Delegates to this path's own [`super::validate_protocol_version`].
-    pub fn validate_protocol_version(
-        protocol_version: u32,
-    ) -> Result<(), jsonrpsee::types::ErrorObjectOwned> {
-        super::validate_protocol_version(protocol_version)
-    }
-
-    /// Delegates to this path's own [`super::validate_known_allowed_labels`].
-    pub fn validate_known_allowed_labels(
-        known_allowed: &[String],
-        kinds: Option<&BTreeMap<String, KnownAllowedKind>>,
-    ) -> Result<(), jsonrpsee::types::ErrorObjectOwned> {
-        super::validate_known_allowed_labels(known_allowed, kinds)
-    }
-
-    /// Delegates to this path's own [`super::validate_compiled_rules`].
-    pub fn validate_compiled_rules(
-        rules: &RuleSet,
-    ) -> Result<(), jsonrpsee::types::ErrorObjectOwned> {
-        super::validate_compiled_rules(rules)
-    }
-
-    /// Delegates to this path's own [`super::assemble_results`].
-    pub fn assemble_results(
-        txs: &[DepositTxRequest],
-        built: &[Option<usize>],
-        executed: &mut [Option<AuditResult>],
-    ) -> Vec<AuditResult> {
-        super::assemble_results(txs, built, executed)
-    }
-
-    /// Delegates to this path's own [`super::inferred_known_allowed_kind`].
+    /// The class of an unlabelled `known_allowed` entry, decided from the built deposit the
+    /// batch executes. A request can never carry a non-deposit, so this is the only boundary that
+    /// can exercise the non-deposit arm of the private classifier.
     pub fn inferred_known_allowed_kind(tx: &Recovered<OpTransactionSigned>) -> KnownAllowedKind {
         super::inferred_known_allowed_kind(tx)
     }
 
-    /// Delegates to this path's own [`super::report_synthetic_ban_identification`].
-    pub fn report_synthetic_ban_identification(
-        metrics: &SyntheticBanIdentificationMetrics,
-        tx_hash: alloy_primitives::B256,
-        source_hash: &str,
-        identification: CallstackIdentification,
-        selector_bearing_rules: usize,
-    ) {
-        super::report_synthetic_ban_identification(
-            metrics,
-            tx_hash,
-            source_hash,
-            identification,
-            selector_bearing_rules,
+    fn run_complete_batch<DB: Database + DatabaseCommit>(
+        req: &AuditTransactionsRequest,
+        db: DB,
+        evm_env: EvmEnv<OpSpecId>,
+        capture_stamp: Option<SnapshotStamp>,
+    ) -> Result<Vec<AuditResult>, jsonrpsee::types::ErrorObjectOwned> {
+        let plan = super::AuditBatchPlan::prepare(req)?;
+        let (txs, reqs, built) = super::build_deposits(&req.txs);
+        let inspector = match capture_stamp {
+            None => callstack_only_inspector(&plan.rules, AUDIT_MAX_CALLSTACK_OBSERVATIONS_PER_TX),
+            Some(stamp) => plan.rules.has_callstack_rules().then(|| {
+                RcsInspector::callstack_only(
+                    AUDIT_MAX_CALLSTACK_OBSERVATIONS_PER_TX,
+                    CallstackCaptureConfig::new(stamp, plan.rules.callstack_selectors().to_vec()),
+                )
+            }),
+        };
+        // Explicitly `super::`: the public seam of the same name would otherwise shadow the
+        // private production function.
+        let mut executed = super::execute_audit_batch(
+            &OpEvmFactory::default(),
+            db,
+            evm_env,
+            &plan,
+            inspector,
+            &txs,
+            &reqs,
         )
-    }
-
-    /// Delegates to this path's own [`super::audit_capture_window`].
-    pub fn audit_capture_window<E, Tx>(
-        evm: &mut E,
-        tx: Tx,
-    ) -> Result<(ResultAndState<E::HaltReason>, CaptureOutcome), E::Error>
-    where
-        E: Evm,
-        E::Inspector: RcsCaptureControl,
-        Tx: IntoTxEnv<E::Tx>,
-    {
-        super::audit_capture_window(evm, tx)
+        .map_err(|error| {
+            jsonrpsee::types::ErrorObjectOwned::owned(-32000, error.to_string(), None::<()>)
+        })?;
+        Ok(super::assemble_results(&req.txs, &built, &mut executed))
     }
 }
 

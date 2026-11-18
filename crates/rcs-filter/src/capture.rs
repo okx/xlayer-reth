@@ -3,10 +3,9 @@
 //! the panic-safe RAII guard that drive it.
 //!
 //! This module exists so every execution path that must identify executed code — the payload
-//! builder's candidate loop, the deposit/sequencer path, and the audit RPC's simulation — runs
-//! the **same** inspector from **one** implementation. Two inspectors that merely behave alike
-//! would drift the moment one of them changes, which would make "equal identification" a
-//! coincidence rather than a property.
+//! builder's candidate loop and the audit RPC's simulation — runs the **same** inspector from
+//! **one** implementation. Two inspectors that merely behave alike would drift the moment one of
+//! them changes, which would make "equal identification" a coincidence rather than a property.
 //!
 //! The module is deliberately EVM-**agnostic**: it owns [`RcsCaptureScope`] and [`CaptureGuard`]
 //! but names no concrete EVM type, so `rcs-filter` needs no `alloy-op-evm` normal dependency. Each

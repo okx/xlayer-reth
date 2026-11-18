@@ -4,11 +4,10 @@ use reth_metrics::{metrics::Counter, Metrics};
 
 /// Identification signals for synthetic blacklist replay prefixes.
 ///
-/// A dedicated `synthetic_ban` family, deliberately separate from both the pool path's
-/// `rcs_filter` counters and the deposit path's `rcs_filter.deposit_identification` ones: a
-/// replay prefix is the single class whose verdict and commit are unconditional, so its
-/// identification is pure observation and must never be read as, or aggregated with, a series an
-/// operator can act on.
+/// A dedicated `synthetic_ban` family, deliberately separate from the pool path's `rcs_filter`
+/// counters: a replay prefix is the single class whose verdict and commit are unconditional, so
+/// its identification is pure observation and must never be read as, or aggregated with, a series
+/// an operator can act on.
 #[derive(Metrics, Clone)]
 #[metrics(scope = "rcs_filter.synthetic_ban_identification")]
 pub struct SyntheticBanIdentificationMetrics {

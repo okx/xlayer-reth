@@ -1,8 +1,119 @@
-//! Rule-snapshot binding across hot reloads, driven through `execute_best_transactions`: an
-//! approved candidate re-simulated in a later block keeps its saved snapshot, and every
-//! flashblock of one block keeps the snapshot pinned for that block.
+//! The candidate loop: block-pinned rule snapshots, per-candidate snapshot binding across hot
+//! reloads, and the builder's own (independent) observation budget.
 
-use super::*;
+use std::sync::Arc;
+
+use alloy_consensus::TxEip1559;
+use alloy_eips::Encodable2718;
+use alloy_primitives::{Address, TxKind, U256};
+use op_alloy_consensus::OpTypedTransaction;
+use rcs_filter::capture::CallstackCaptureConfig;
+use rcs_filter::rules::{load_rules, RawRule};
+use rcs_filter::test_support::golden;
+use rcs_filter::{BufferStatus, FilterConfig, FilterHandle, Screen, SystemClock};
+use reth_optimism_txpool::OpPooledTransaction;
+use reth_revm::State;
+use reth_transaction_pool::test_utils::{testing_pool, MockTransaction};
+use reth_transaction_pool::{TransactionOrigin, TransactionPool};
+use revm::database::{CacheDB, EmptyDB};
+use revm::state::{AccountInfo, Bytecode};
+use serde_json::json;
+use xlayer_builder::flashblocks::test_seams::{
+    clear_last_candidate_observations, clear_last_screen_decision, last_candidate_observations,
+    last_screen_decision, ExecutionInfo, LoopSeams, Signer, TransactionLimits,
+};
+
+use crate::fixtures::*;
+
+// ------------------------------------------------------------ snapshot pinning --------
+
+fn selector_rule(id: &str, address: Address) -> RawRule {
+    serde_json::from_value(json!({
+        "id": id,
+        "event_abis": {},
+        "callstack": { "direct_delegatecalls": { "entry": format!("{address:#x}") } },
+        "condition": { "!=": [ { "var": "entry.delegateTo" }, null ] },
+        "action": "deny"
+    }))
+    .expect("valid rule")
+}
+
+fn handle_with(address: Address, content_version: u64) -> Arc<FilterHandle> {
+    let rules = load_rules(
+        rcs_filter::config::MIN_PROTOCOL_VERSION,
+        content_version,
+        vec![selector_rule("guard", address)],
+    );
+    assert!(rules.rejected.is_empty(), "{:?}", rules.rejected);
+    Arc::new(FilterHandle::for_test(FilterConfig::default(), rules, Arc::new(SystemClock)))
+}
+
+/// A context carrying the snapshot pinned for its block, exactly as the payload job builds it.
+fn pin(filter: &Arc<FilterHandle>) -> Option<Arc<rcs_filter::rules::RuleSet>> {
+    Some(filter.rule_snapshot())
+}
+
+#[test]
+fn the_capture_config_comes_from_the_pinned_snapshot_not_the_live_one() {
+    let first = Address::repeat_byte(0x11);
+    let second = Address::repeat_byte(0x22);
+    let filter = handle_with(first, 1);
+
+    // The block's payload job pins the snapshot once, up front.
+    let pinned = pin(&filter).expect("screening is enabled");
+    let pinned_stamp = pinned.stamp();
+    assert_eq!(pinned.callstack_selectors(), [first]);
+
+    // A hot reload lands mid-block. Rule installation is an immediate swap, so this is the
+    // moment that would leak new rules into the block already being built.
+    filter.install_rules(load_rules(
+        rcs_filter::config::MIN_PROTOCOL_VERSION,
+        2,
+        vec![selector_rule("guard", second)],
+    ));
+
+    // Every flashblock of this block builds a fresh inspector from the SAME pinned snapshot,
+    // so neither the selector set nor the stamp moves part-way through the block.
+    assert_eq!(pinned.callstack_selectors(), [first]);
+    assert_eq!(pinned.stamp(), pinned_stamp);
+
+    // The next block's payload job pins the reloaded snapshot, which is where it takes effect.
+    let next_block = pin(&filter).expect("screening is enabled");
+    assert_eq!(next_block.callstack_selectors(), [second]);
+    assert_ne!(next_block.stamp(), pinned_stamp);
+}
+
+#[test]
+fn a_context_without_screening_pins_no_snapshot_and_captures_nothing() {
+    // With the master switch off there is no snapshot to pin, and the capture configuration
+    // is inert, so the observation hooks cost nothing.
+    let config = CallstackCaptureConfig::default();
+    assert!(config.is_inert());
+}
+
+#[test]
+fn a_snapshot_with_no_selectors_yields_an_inert_capture_config() {
+    // Screening enabled but no active rule asking about call frames: the whole observation
+    // path stays inert rather than observing every frame "just in case".
+    let rules = load_rules(rcs_filter::config::MIN_PROTOCOL_VERSION, 1, vec![]);
+    assert!(!rules.has_callstack_rules());
+    let config = CallstackCaptureConfig::new(rules.stamp(), rules.callstack_selectors().to_vec());
+    assert!(config.is_inert());
+}
+
+#[test]
+fn a_snapshot_with_selectors_yields_an_active_capture_config_carrying_its_stamp() {
+    let address = Address::repeat_byte(0x33);
+    let filter = handle_with(address, 7);
+    let pinned = filter.rule_snapshot();
+    let config = CallstackCaptureConfig::new(pinned.stamp(), pinned.callstack_selectors().to_vec());
+    assert!(!config.is_inert());
+    // The stamp travels with the selector set, so an inspector cannot be configured from one
+    // snapshot and stamped with another.
+    assert_eq!(config.stamp_for_test(), Some(pinned.stamp()));
+}
+
+// ------------------------------------------------------- snapshot binding --------
 
 /// A callstack-gated audit rule: the decoded event supplies the action payload while the
 /// observed call frame acts as a condition, which is the only shape §6.8 permits for `audit`.
@@ -71,14 +182,14 @@ fn callstack_state(sender: Address) -> State<CacheDB<EmptyDB>> {
     cache.insert_account_info(
         golden::token_x(),
         AccountInfo {
-            code: Some(Bytecode::new_raw(Bytes::from(delegating_code(callstack_implementation())))),
+            code: Some(Bytecode::new_raw(delegating_code(callstack_implementation()).into())),
             ..Default::default()
         },
     );
     cache.insert_account_info(
         callstack_implementation(),
         AccountInfo {
-            code: Some(Bytecode::new_raw(Bytes::from(erc20_transfer_emitter_code()))),
+            code: Some(Bytecode::new_raw(erc20_transfer_emitter_code().into())),
             ..Default::default()
         },
     );
@@ -88,8 +199,8 @@ fn callstack_state(sender: Address) -> State<CacheDB<EmptyDB>> {
 /// Signs one candidate that calls `TOKEN_X`, whose code delegatecalls its implementation — so
 /// the real capture observes a DIRECT DELEGATECALL of the declared address AND the log the
 /// implementation emits (under the delegatecall, at `TOKEN_X`) matches the rule's event.
-fn callstack_candidate() -> (Signer, OpPooledTransaction, B256) {
-    let signer = crate::tests::funded_signer();
+fn callstack_candidate() -> (Signer, OpPooledTransaction, alloy_primitives::B256) {
+    let signer = funded_signer();
     let candidate = OpTypedTransaction::Eip1559(TxEip1559 {
         chain_id: 1,
         nonce: 0,
@@ -101,7 +212,7 @@ fn callstack_candidate() -> (Signer, OpPooledTransaction, B256) {
         ..Default::default()
     });
     let recovered = signer.sign_tx(candidate).expect("sign candidate");
-    let hash: B256 = recovered.tx_hash();
+    let hash: alloy_primitives::B256 = recovered.tx_hash();
     let encoded_len = recovered.encode_2718_len();
     (signer, OpPooledTransaction::new(recovered, encoded_len), hash)
 }
@@ -287,5 +398,92 @@ async fn every_flashblock_of_one_block_keeps_the_pinned_snapshot() {
         last_screen_decision(),
         Some(Screen::Allow),
         "the next block pins the reloaded snapshot, whose selector the candidate never touches"
+    );
+}
+
+// ---------------------------------------------------------- observation budget --------
+
+fn candidate_state(sender: Address, proxy_code: Vec<u8>) -> State<CacheDB<EmptyDB>> {
+    let mut cache = CacheDB::new(EmptyDB::default());
+    cache.insert_account_info(
+        sender,
+        AccountInfo { balance: U256::from(10u128.pow(18)), nonce: 0, ..Default::default() },
+    );
+    cache.insert_account_info(
+        PROXY,
+        AccountInfo { code: Some(Bytecode::new_raw(proxy_code.into())), ..Default::default() },
+    );
+    cache.insert_account_info(
+        APPROVED_IMPL,
+        AccountInfo { code: Some(Bytecode::new_raw(impl_code(0x01).into())), ..Default::default() },
+    );
+    State::builder().with_database(cache).with_bundle_update().build()
+}
+
+/// The builder's observation budget is its own configured value (10 000 by default) and is
+/// unrelated to the audit RPC's 1 000: through the real candidate loop a candidate producing
+/// 1 001 observations is captured in full and allowed, never truncated.
+#[tokio::test]
+async fn the_builder_budget_is_not_bounded_by_the_audit_default() {
+    let approved = code_hash(&impl_code(0x01));
+    let filter = filter_with(vec![proxy_impl_allowlist_rule(&[approved])], test_config());
+    let ctx = build_ctx(filter.clone());
+
+    let signer = funded_signer();
+    let candidate = OpTypedTransaction::Eip1559(TxEip1559 {
+        chain_id: 1,
+        nonce: 0,
+        gas_limit: 2_000_000,
+        max_fee_per_gas: 1_000_000_000,
+        max_priority_fee_per_gas: 0,
+        to: TxKind::Call(PROXY),
+        value: U256::ZERO,
+        ..Default::default()
+    });
+    let recovered = signer.sign_tx(candidate).expect("sign the candidate");
+    let candidate_hash = recovered.tx_hash();
+    let encoded_len = recovered.encode_2718_len();
+    let pooled = OpPooledTransaction::new(recovered, encoded_len);
+
+    // The proxy's own frame plus one per first-level delegatecall: 1 001 observations.
+    let mut state = candidate_state(signer.address, delegating_proxy_code(APPROVED_IMPL, 1_000));
+    let pool = testing_pool();
+    let mock = MockTransaction::legacy()
+        .with_sender(signer.address)
+        .with_nonce(0)
+        .with_gas_price(100)
+        .with_hash(candidate_hash);
+    pool.add_transaction(TransactionOrigin::External, mock).await.unwrap();
+
+    let limits =
+        TransactionLimits { block_gas: 30_000_000, block_da: None, block_da_footprint: None };
+    clear_last_candidate_observations();
+    clear_last_screen_decision();
+    let mut best_txs = RecordingTxs { tx: Some(pooled), marked: Vec::new() };
+    let mut info = ExecutionInfo::with_capacity(1);
+    ctx.execute_best_transactions(&mut info, &mut state, &mut best_txs, &pool, limits)
+        .expect("the candidate loop runs");
+
+    let observed = last_candidate_observations()
+        .expect("the candidate's capture completed, so its observations are recorded");
+    assert_eq!(
+        observed.len(),
+        1_001,
+        "the builder's default budget captures every frame of the fixture"
+    );
+    assert_eq!(
+        last_screen_decision(),
+        Some(Screen::Allow),
+        "an in-budget candidate under the builder's own default is allowed, not truncated"
+    );
+    assert_eq!(
+        FilterConfig::default().max_callstack_observations_per_tx,
+        10_000,
+        "the builder's default budget"
+    );
+    assert_eq!(
+        xlayer_rpc::audit::rpc::AUDIT_MAX_CALLSTACK_OBSERVATIONS_PER_TX,
+        1_000,
+        "the audit RPC's budget is unrelated and unchanged"
     );
 }

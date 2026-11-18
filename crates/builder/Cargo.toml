@@ -154,11 +154,11 @@ rcs-filter = { workspace = true, features = ["test-utils"] }
 # compiled as a dependency, and `pub(crate)` does not cross a crate boundary, so the seams this
 # crate's loop-level tests arm are reached through its non-default `test-utils` feature — enabled
 # from `[dev-dependencies]` only, never from `[dependencies]` above.
-# The equal-identification comparison across the three execution paths has to run two of those
-# paths (the candidate loop and the sequencer loop), which live in THIS crate behind `pub(super)`
-# and `#[cfg(test)]`, and the third (the audit path) which lives in `xlayer-rpc`. So the test
-# belongs here and reaches the audit path's own capture window, observation mapping and verdict
-# function through that crate's non-default `test-utils` feature. Enabled from
+# The equal-identification comparison across the two execution paths has to run one of those
+# paths (the candidate loop), which lives in THIS crate behind `pub(super)` and `#[cfg(test)]`,
+# and the other (the audit path) which lives in `xlayer-rpc`. So the test belongs here and
+# reaches the audit path's own capture window, observation mapping and verdict function through
+# that crate's non-default `test-utils` feature. Enabled from
 # `[dev-dependencies]` only — `xlayer-rpc` is deliberately absent from `[dependencies]` above, so
 # no production build of this crate links it or compiles the seams.
 xlayer-rpc = { workspace = true, features = ["test-utils"] }

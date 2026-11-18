@@ -97,17 +97,6 @@ impl AuditResult {
     }
 }
 
-/// The observation state of an audit-RPC execution that ran **no** capture.
-///
-/// No longer the normal path: the audit RPC now attaches the shared capture inspector whenever
-/// the request's own rules declare call-frame selectors, so `verdict_for` is fed a real
-/// observation set. This value remains reachable for a genuine capture failure and for a request
-/// that declares no selectors at all (where nothing can depend on it), and it continues to yield
-/// the existing non-verdict rather than an authoritative `Allow`.
-pub fn observations_not_captured() -> Observations<'static> {
-    Observations::NOT_CAPTURED
-}
-
 /// Classifies one already-executed deposit transaction against `rules`. `tx_hash` and `logs`
 /// come from the caller's EVM execution; this function does no execution itself —
 /// zero network IO, zero side effects (unlike `FilterHandle::screen_tx`, this never touches a
@@ -244,7 +233,7 @@ mod tests {
             },
             &[],
             &no_rules(),
-            observations_not_captured(),
+            Observations::NOT_CAPTURED,
         );
         assert_eq!(result.verdict, Verdict::Allow);
         assert!(result.actions.is_none());
@@ -300,7 +289,7 @@ mod tests {
             },
             &[log],
             &deny_above_threshold_rule(),
-            observations_not_captured(),
+            Observations::NOT_CAPTURED,
         );
 
         assert_eq!(result.verdict, Verdict::Deny);
@@ -325,7 +314,7 @@ mod tests {
             },
             &[log],
             &deny_above_threshold_rule(),
-            observations_not_captured(),
+            Observations::NOT_CAPTURED,
         );
 
         assert_eq!(result.verdict, Verdict::Allow);
@@ -370,7 +359,7 @@ mod tests {
             ExecutedTx { from: origin(), to: Some(recipient()), tx_hash: B256::ZERO, value },
             &[log],
             &audit_quota_rule(),
-            observations_not_captured(),
+            Observations::NOT_CAPTURED,
         );
 
         assert_eq!(result.verdict, Verdict::Audit);
@@ -403,7 +392,7 @@ mod tests {
             },
             &logs,
             &audit_quota_rule(),
-            observations_not_captured(),
+            Observations::NOT_CAPTURED,
         );
 
         assert_eq!(result.verdict, Verdict::Audit);
@@ -440,7 +429,7 @@ mod tests {
             },
             &logs,
             &rules,
-            observations_not_captured(),
+            Observations::NOT_CAPTURED,
         );
 
         assert_eq!(result.verdict, Verdict::Malformed);
@@ -471,7 +460,7 @@ mod tests {
             },
             &logs,
             &rules,
-            observations_not_captured(),
+            Observations::NOT_CAPTURED,
         );
 
         assert_eq!(result.verdict, Verdict::Audit);
@@ -517,7 +506,7 @@ mod tests {
             },
             &logs_of(70),
             &two_rules(),
-            observations_not_captured(),
+            Observations::NOT_CAPTURED,
         );
         assert_eq!(allowed.verdict, Verdict::Audit);
         assert!(
@@ -535,7 +524,7 @@ mod tests {
             },
             &logs_of(71),
             &two_rules(),
-            observations_not_captured(),
+            Observations::NOT_CAPTURED,
         );
         assert_eq!(malformed.verdict, Verdict::Malformed);
         assert!(
@@ -594,7 +583,7 @@ mod tests {
             },
             &[], // no logs
             &emergency_deny_all_rule(),
-            observations_not_captured(),
+            Observations::NOT_CAPTURED,
         );
         assert_eq!(result.verdict, Verdict::Deny);
         assert!(result.actions.is_none());

@@ -10,23 +10,35 @@
 //! table. Like RCS, the driver sends **no** label map unless a scenario says otherwise.
 //!
 //! Each round is a fresh request through the production decode, `AuditBatchPlan::prepare`, the
-//! production deposit builder, inspector construction, `run_audit_batch` and `assemble_results`,
-//! on a fresh copy of that round's base state, because each RPC call simulates on the current tip
-//! and discards its overlay. The chain is the devnet chain id, with a blacklist fixture at the
-//! devnet blacklist address, so the EVM's own native interceptor turns a blacklisted deposit into
-//! a failed deposit exactly as on chain.
+//! production deposit builder, inspector construction, the per-transaction loop and
+//! `assemble_results`, on a fresh copy of that round's base state, because each RPC call simulates
+//! on the current tip and discards its overlay. The chain is the devnet chain id, with a
+//! blacklist fixture at the devnet blacklist address, so the EVM's own native interceptor turns a
+//! blacklisted deposit into a failed deposit exactly as on chain.
 //!
 //! This is an in-process mirror of the caller. It does not run RCS's code and does not replace a
 //! joint run against a reachable node.
 
-use super::*;
-use alloy_primitives::{address, hex, Keccak256};
-use op_revm::OpHaltReason;
-use revm::context_interface::result::ExecutionResult;
-use std::collections::HashMap;
-use xlayer_rpc::audit::synthetic_ban::{
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use alloy_evm::{Evm, EvmEnv, EvmFactory};
+use alloy_op_evm::{OpEvmFactory, OpTx};
+use alloy_primitives::{address, hex, keccak256, Address, Keccak256, B256, U256};
+use op_revm::OpSpecId;
+use rcs_filter::audit::synthetic_ban::{
     BATCH_ADD_TO_BLACKLIST_SIGNATURE, MAX_SYNTHETIC_BAN_BATCH, SYNTHETIC_BAN_SOURCE_HASH_DOMAIN,
 };
+use revm::context::{BlockEnv, CfgEnv};
+use revm::context_interface::result::ExecutionResult;
+use revm::database::InMemoryDB;
+use revm::state::{AccountInfo, Bytecode};
+use revm::DatabaseCommit;
+use xlayer_rpc::audit::deposit::{build_deposit_tx, DepositTxRequest};
+use xlayer_rpc::audit::rpc::test_seams::execute_audit_batch;
+use xlayer_rpc::audit::rpc::{AuditTransactionsRequest, KnownAllowedKind};
+use xlayer_rpc::audit::verdict::{AuditResult, CallstackIdentification, Verdict};
+
+use crate::harness::DEPOSITOR;
 
 /// The devnet chain id: the only chain whose blacklist address the interceptor resolves and that
 /// a test can deploy a fixture at.
@@ -368,36 +380,8 @@ fn audit_call(
         body["known_allowed_kinds"] = map.into();
     }
     let req: AuditTransactionsRequest = serde_json::from_value(body).expect("the request decodes");
-    let plan = prepare_audit_batch_plan(&req).expect("the request passes every check");
-
-    let mut ordered_txs = Vec::new();
-    let mut ordered_reqs = Vec::new();
-    let mut built = Vec::new();
-    for tx_req in &req.txs {
-        match build_deposit_tx(tx_req) {
-            Ok(tx) => {
-                built.push(Some(ordered_txs.len()));
-                ordered_reqs.push(tx_req.clone());
-                ordered_txs.push(tx);
-            }
-            Err(_) => built.push(None),
-        }
-    }
-    let mut executed: Vec<Option<AuditResult>> = (0..ordered_txs.len()).map(|_| None).collect();
-    let batch = plan.batch_for_test(&ordered_txs, &ordered_reqs);
-    let capture = AuditCaptureConfig { max_callstack_observations_per_tx: 10_000 };
-    if let Some(inspector) = audit_capture_inspector(plan.rules(), capture) {
-        let mut evm = OpEvmFactory::<OpTx>::default().create_evm_with_inspector(
-            base.clone(),
-            devnet_env(),
-            inspector,
-        );
-        run_mirrored_batch(&mut evm, &batch, &mut executed).expect("the batch executes");
-    } else {
-        let mut evm = OpEvmFactory::<OpTx>::default().create_evm(base.clone(), devnet_env());
-        run_mirrored_batch(&mut evm, &batch, &mut executed).expect("the batch executes");
-    }
-    assemble_results(&req.txs, &built, &mut executed)
+    let mut db = base.clone();
+    execute_audit_batch(&req, &mut db, devnet_env()).expect("the batch executes")
 }
 
 /// `replay_state.go`, line for line.
@@ -610,7 +594,7 @@ fn final_statuses(outcome: &ReplayOutcome) -> Vec<Status> {
             evm.db_mut().commit(state);
             match result {
                 ExecutionResult::Success { logs, .. } => Status::Success { logs: logs.len() },
-                ExecutionResult::Halt { reason: OpHaltReason::FailedDeposit, .. } => {
+                ExecutionResult::Halt { reason: op_revm::OpHaltReason::FailedDeposit, .. } => {
                     Status::FailedDeposit
                 }
                 _ => Status::Other,
@@ -623,6 +607,7 @@ fn hash_of(req: &DepositTxRequest) -> String {
     req.source_hash.clone()
 }
 
+use revm::context_interface::result::ResultAndState;
 use Verdict::{Allow, Audit, Deny, Unknown};
 
 // ---------------------------------------------------------------------------- tests -------

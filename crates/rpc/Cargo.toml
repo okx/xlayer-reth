@@ -9,10 +9,10 @@ repository.workspace = true
 
 [features]
 default = []
-# Opens this crate's own capture/observation handling to a test in another crate, so the
-# equal-identification comparison across the three execution paths drives the real code rather
-# than a copy of it. Non-default and never enabled from `[dependencies]`, so it is absent from
-# every production build.
+# Opens this crate's own complete audit batch to a test in another crate, so the
+# equal-identification comparison across the two execution paths drives the real code rather than
+# a copy of it. Non-default and never enabled from `[dependencies]`, so it is absent from every
+# production build.
 test-utils = []
 
 [dependencies]
