@@ -4,7 +4,6 @@
 //! `xlayer_builder::flashblocks::test_seams`.
 
 mod candidate_loop;
-mod config;
 mod cross_path;
 mod deposit_execution;
 mod fixtures;

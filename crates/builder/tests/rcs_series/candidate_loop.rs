@@ -420,9 +420,9 @@ fn candidate_state(sender: Address, proxy_code: Vec<u8>) -> State<CacheDB<EmptyD
     State::builder().with_database(cache).with_bundle_update().build()
 }
 
-/// The builder's observation budget is its own configured value (10 000 by default) and is
-/// unrelated to the audit RPC's 1 000: through the real candidate loop a candidate producing
-/// 1 001 observations is captured in full and allowed, never truncated.
+/// The builder's observation budget is its own module constant (10 000) and is unrelated to the
+/// audit RPC's 1 000: through the real candidate loop a candidate producing 1 001 observations is
+/// captured in full and allowed, never truncated.
 #[tokio::test]
 async fn the_builder_budget_is_not_bounded_by_the_audit_default() {
     let approved = code_hash(&impl_code(0x01));
@@ -477,9 +477,9 @@ async fn the_builder_budget_is_not_bounded_by_the_audit_default() {
         "an in-budget candidate under the builder's own default is allowed, not truncated"
     );
     assert_eq!(
-        FilterConfig::default().max_callstack_observations_per_tx,
+        rcs_filter::capture::CANDIDATE_MAX_CALLSTACK_OBSERVATIONS_PER_TX,
         10_000,
-        "the builder's default budget"
+        "the builder's fixed per-transaction budget"
     );
     assert_eq!(
         xlayer_rpc::audit::rpc::AUDIT_MAX_CALLSTACK_OBSERVATIONS_PER_TX,

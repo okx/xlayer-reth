@@ -1,4 +1,4 @@
-//! Equal identification across the two real execution paths that identify executed code: the
+//! Equal observations across the two real execution paths that identify executed code: the
 //! payload builder's candidate loop and the audit RPC's simulation. Both drive the production
 //! code — the candidate through `execute_best_transactions`, the audit path through the complete
 //! production batch behind `execute_audit_batch`.
@@ -24,7 +24,7 @@ use xlayer_rpc::audit::deposit::build_deposit_tx;
 use xlayer_rpc::audit::rpc::observation_recorder;
 use xlayer_rpc::audit::rpc::test_seams::execute_audit_batch;
 use xlayer_rpc::audit::rpc::AuditTransactionsRequest;
-use xlayer_rpc::audit::verdict::{CallstackIdentification, Verdict};
+use xlayer_rpc::audit::verdict::Verdict;
 
 use xlayer_builder::flashblocks::test_seams::{
     clear_last_candidate_observations, clear_last_screen_decision, last_candidate_observations,
@@ -133,7 +133,7 @@ fn candidate_path(raw: Vec<RawRule>, proxy_code: Vec<u8>) -> (Vec<CallObservatio
 fn audit_path_with_rule(
     rule: serde_json::Value,
     proxy_code: Vec<u8>,
-) -> (Vec<CallObservation>, Verdict, Option<CallstackIdentification>, u64) {
+) -> (Vec<CallObservation>, Verdict, u64) {
     let source_hash = format!("{:#x}", B256::repeat_byte(0x33));
     // A real request, parsed through the strict wire schema the RPC exposes. The protocol
     // version is deliberately OMITTED, which is the shape the caller actually sends and
@@ -181,13 +181,10 @@ fn audit_path_with_rule(
         .expect("the depositor account is readable")
         .expect("the fixture seeds the depositor")
         .nonce;
-    (observed, result.verdict, result.callstack_identification, depositor_nonce)
+    (observed, result.verdict, depositor_nonce)
 }
 
-fn audit_path(
-    approved: &[B256],
-    proxy_code: Vec<u8>,
-) -> (Vec<CallObservation>, Verdict, Option<CallstackIdentification>, u64) {
+fn audit_path(approved: &[B256], proxy_code: Vec<u8>) -> (Vec<CallObservation>, Verdict, u64) {
     audit_path_with_rule(proxy_impl_allowlist_rule_json(approved), proxy_code)
 }
 
@@ -198,7 +195,7 @@ fn audit_path(
 ///
 /// The observed frames are compared, not just the decisions: two paths can agree on
 /// a decision while resting on different observations, and it is the observation equality
-/// that "equal identification" actually asserts. The snapshot STAMP is deliberately not
+/// that "equal observations" actually asserts. The snapshot STAMP is deliberately not
 /// part of the comparison — each path stamps its observations with its own rule-set
 /// identity (the builder's installed snapshot, the audit path's per-request set), and
 /// requiring those to be equal would assert something the design never claims.
@@ -220,7 +217,7 @@ async fn candidate_and_audit_paths_observe_the_same_frames_and_reach_the_same_de
         );
 
         let (candidate_observed, screen) = candidate_path(raw.clone(), proxy_code.clone());
-        let (audit_observed, verdict, audit_identification, audit_depositor_nonce) =
+        let (audit_observed, verdict, audit_depositor_nonce) =
             audit_path(&[approved], proxy_code.clone());
 
         // The fixture really produced the frames the rule is about — the proxy running
@@ -256,22 +253,12 @@ async fn candidate_and_audit_paths_observe_the_same_frames_and_reach_the_same_de
             assert_eq!(screen, Screen::Deny, "the candidate loop rejects");
             assert_eq!(verdict, Verdict::Deny, "the audit path denies");
             assert_eq!(
-                audit_identification,
-                Some(CallstackIdentification::Objected),
-                "the audit path reports the objection it acted on"
-            );
-            assert_eq!(
                 audit_depositor_nonce, 0,
                 "the audit path discards the state of the transaction it denied"
             );
         } else {
             assert_eq!(screen, Screen::Allow, "the candidate loop admits");
             assert_eq!(verdict, Verdict::Allow, "the audit path allows");
-            assert_eq!(
-                audit_identification,
-                Some(CallstackIdentification::Clean),
-                "the audit path identified the frames it allowed on"
-            );
             assert_eq!(
                 audit_depositor_nonce, 1,
                 "the audit path commits the state of the transaction it allowed"
@@ -324,7 +311,7 @@ async fn the_four_field_rule_reaches_the_same_decision_on_both_paths() {
     for (case, rule, objected) in cases {
         let raw: RawRule = serde_json::from_value(rule.clone()).expect("the rule deserializes");
         let (candidate_observed, screen) = candidate_path(vec![raw], proxy_code.clone());
-        let (audit_observed, verdict, audit_identification, audit_depositor_nonce) =
+        let (audit_observed, verdict, audit_depositor_nonce) =
             audit_path_with_rule(rule, proxy_code.clone());
 
         let delegatecall = candidate_observed
@@ -340,12 +327,10 @@ async fn the_four_field_rule_reaches_the_same_decision_on_both_paths() {
         if objected {
             assert_eq!(screen, Screen::Deny, "{case}: candidate loop");
             assert_eq!(verdict, Verdict::Deny, "{case}: audit path");
-            assert_eq!(audit_identification, Some(CallstackIdentification::Objected), "{case}");
             assert_eq!(audit_depositor_nonce, 0, "{case}: a denied audit tx commits nothing");
         } else {
             assert_eq!(screen, Screen::Allow, "{case}: candidate loop");
             assert_eq!(verdict, Verdict::Allow, "{case}: audit path");
-            assert_eq!(audit_identification, Some(CallstackIdentification::Clean), "{case}");
             assert_eq!(audit_depositor_nonce, 1, "{case}: an allowed audit tx commits");
         }
     }

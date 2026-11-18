@@ -816,7 +816,7 @@ impl FlashblocksBuilderCtx {
         if let Some(filter) = self.filter.clone() {
             let inspector = RcsInspector::with_callstack(
                 filter.max_native_transfers_per_tx(),
-                filter.max_callstack_observations_per_tx(),
+                rcs_filter::capture::CANDIDATE_MAX_CALLSTACK_OBSERVATIONS_PER_TX,
                 self.callstack_capture_config(),
             );
             let mut evm = self.evm_config.evm_with_env_and_inspector(
