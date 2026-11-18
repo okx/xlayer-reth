@@ -4,7 +4,7 @@
 use alloy_primitives::B256;
 
 /// Vectors produced by RCS's own derivation code; see the file's `provenance` object.
-pub const GOLDEN: &str = include_str!("../../testdata/synthetic-ban-golden-vectors.json");
+pub const GOLDEN: &str = include_str!("../../tests/data/synthetic-ban-golden-vectors.json");
 
 pub struct GoldenBan {
     pub n: usize,

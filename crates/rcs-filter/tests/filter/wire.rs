@@ -340,11 +340,11 @@ fn no_value_hop_exists_on_the_production_rule_path() {
 /// provenance only; pinning the rendered response is what makes the acceptance below joint.
 const RENDERED_RESPONSE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/testdata/producer-rendered-rules-response.json"
+    "/tests/data/producer-rendered-rules-response.json"
 ));
 
 /// `sha256` of [`RENDERED_RESPONSE`] — re-checkable with
-/// `sha256sum crates/rcs-filter/testdata/producer-rendered-rules-response.json`.
+/// `sha256sum crates/rcs-filter/tests/data/producer-rendered-rules-response.json`.
 const RENDERED_RESPONSE_SHA256: &str =
     "dbd8d60bc1c04d153670c859d08dfb02a7b4d5f2c0e899b7442264062a03244e";
 

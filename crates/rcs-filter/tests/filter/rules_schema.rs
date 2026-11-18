@@ -202,7 +202,7 @@ fn golden_fixtures_still_load_clean() {
 
     let snapshot: Value = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/testdata/rules-snapshot.json"
+        "/tests/data/rules-snapshot.json"
     )))
     .expect("official snapshot must deserialize");
     let raw: Vec<RawRule> = snapshot["rules"]

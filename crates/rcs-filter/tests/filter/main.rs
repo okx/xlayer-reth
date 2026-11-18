@@ -3,6 +3,7 @@
 mod callstack_screening;
 mod callstack_types;
 mod four_field;
+mod rules_install;
 mod rules_schema;
 mod timed_out_allow_recheck;
 mod upstream_rules;

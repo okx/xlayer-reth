@@ -250,7 +250,7 @@ fn unsupported_protocol_version_is_rejected_by_name() {
 fn the_upstream_rule_source_document_is_accepted_at_this_entry_point() {
     const UPSTREAM_RULES: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../rcs-filter/testdata/upstream-rule-source-examples.json"
+        "/../rcs-filter/tests/data/upstream-rule-source-examples.json"
     ));
     let document: serde_json::Value = serde_json::from_str(UPSTREAM_RULES).expect("valid JSON");
 
@@ -624,7 +624,7 @@ const UNDECLARED_TARGET: Address =
 /// The producer's rendered `GET /rules` body, verbatim.
 const RENDERED_RESPONSE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../rcs-filter/testdata/producer-rendered-rules-response.json"
+    "/../rcs-filter/tests/data/producer-rendered-rules-response.json"
 ));
 
 /// The rendered `rules` array as raw text, sliced out without parsing so the rule
