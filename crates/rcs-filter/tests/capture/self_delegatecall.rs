@@ -12,7 +12,7 @@ use rcs_filter::rules::{load_rules, RawRule, RuleSet, DEFAULT_MAX_EVENT_BINDINGS
 use rcs_filter::test_support::TestClock;
 use rcs_filter::FilterConfig;
 
-use super::*;
+use crate::fixtures::*;
 
 const P: Address = Address::repeat_byte(0x61);
 const I: Address = Address::repeat_byte(0x62);

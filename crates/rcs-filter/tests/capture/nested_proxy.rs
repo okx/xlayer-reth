@@ -1,7 +1,7 @@
 //! Nested proxies on a real EVM: which direct delegatecalls are observed, and which alias each
 //! observation binds through the four condition variables.
 
-use super::*;
+use crate::fixtures::*;
 use rcs_filter::handle::ScreenInput;
 use rcs_filter::matching::{try_evaluate, MatchOutcome};
 use rcs_filter::rules::{load_rules, RawRule, RuleSet, DEFAULT_MAX_EVENT_BINDINGS_PER_TX};

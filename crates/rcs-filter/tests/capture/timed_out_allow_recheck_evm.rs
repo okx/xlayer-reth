@@ -12,7 +12,7 @@ use rcs_filter::rules::{load_rules, RawRule, RuleSet};
 use rcs_filter::test_support::TestClock;
 use rcs_filter::FilterConfig;
 
-use super::*;
+use crate::fixtures::*;
 
 const START: u64 = 1_751_000_000;
 const TX: B256 = B256::repeat_byte(0x99);

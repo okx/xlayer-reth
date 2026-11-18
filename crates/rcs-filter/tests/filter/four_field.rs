@@ -1,7 +1,13 @@
 //! The four condition variables a direct-delegatecall alias binds: the selected proxy's own
 //! address and executed code hash, and the delegate target's address and executed code hash.
 
-use super::*;
+use alloy_primitives::{Address, B256, U256};
+use rcs_filter::callstack::{CallObservation, Observations};
+use rcs_filter::matching::{MatchError, MatchOutcome};
+use rcs_filter::rules::{compile_rule, RuleSet};
+use serde_json::{json, Value};
+
+use crate::callstack_screening::*;
 
 fn approved_proxy_code() -> B256 {
     proxy_code()

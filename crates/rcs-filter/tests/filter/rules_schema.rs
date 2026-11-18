@@ -5,8 +5,9 @@
 //! `Option<String>` deserialized to `None`, and the rule installed with the protection silently
 //! removed.
 
-use super::*;
 use alloy_primitives::Address;
+use rcs_filter::config::*;
+use rcs_filter::rules::*;
 use rcs_filter::test_seams::{bound_key, MAX_UNKNOWN_KEYS_REPORTED, MAX_UNKNOWN_KEY_BYTES};
 use rcs_filter::test_support::golden;
 use serde_json::{json, Value};
@@ -337,4 +338,52 @@ fn key_echo_truncation_respects_char_boundaries() {
     assert!(bounded.len() <= MAX_UNKNOWN_KEY_BYTES);
     assert!(bounded.ends_with("..."));
     assert!(bounded.trim_end_matches("...").chars().all(|c| c == 'ä'));
+}
+
+// ---------------------------------------------------------------- selector families ---
+
+/// Fixture copied verbatim from `validation.rs`'s pre-existing `tests` module.
+fn parse(json: &str) -> RawRule {
+    serde_json::from_str(json).expect("valid rule json")
+}
+
+// Selector families: a rule must declare at least one event or call-frame selector.
+
+#[test]
+fn a_rule_with_no_selector_of_either_kind_is_rejected() {
+    // An empty `event_abis` is no longer rejected on its own — a rule may select purely on
+    // call frames. What must stay rejected is a rule with NEITHER selector family, which
+    // could never match anything.
+    let json = r#"{"id":"r","event_abis":{},"condition":true,"action":"deny"}"#;
+    let reason = compile_rule(parse(json)).expect_err("a rule that can never match");
+    assert!(reason.contains("neither event_abis nor callstack"), "{reason}");
+
+    // The same rule with a `callstack` section is valid, and needs no version argument.
+    let with_callstack = r#"{"id":"r","event_abis":{},"callstack":{"direct_delegatecalls":{"entry":"0x1111111111111111111111111111111111111111"}},"condition":true,"action":"deny"}"#;
+    assert!(compile_rule(parse(with_callstack)).is_ok());
+}
+
+// ---------------------------------------------------------------- config gate ---------
+
+// Call-frame selector configuration: no protocol-version gate, and a call-frame observation
+// budget of at least one.
+
+#[test]
+fn callstack_needs_no_version_gate() {
+    // `callstack` belongs to the one supported schema, so acceptance is decided by the rule
+    // compiler alone and the only supported version is the minimum one.
+    assert_eq!(MIN_PROTOCOL_VERSION, 1);
+    assert!(is_supported_protocol(MIN_PROTOCOL_VERSION));
+}
+
+#[test]
+fn callstack_observation_budget_must_be_at_least_one() {
+    let zero = FilterConfig { max_callstack_observations_per_tx: 0, ..Default::default() };
+    // Validated even while disabled: a zero budget is a startup misconfiguration either way.
+    assert!(!zero.enabled);
+    assert!(zero.validate().is_err());
+    assert!(FilterConfig { max_callstack_observations_per_tx: 1, ..Default::default() }
+        .validate()
+        .is_ok());
+    assert_eq!(FilterConfig::default().max_callstack_observations_per_tx, 10_000);
 }

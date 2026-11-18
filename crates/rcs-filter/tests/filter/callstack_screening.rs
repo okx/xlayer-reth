@@ -20,48 +20,48 @@ use rcs_filter::rules::{
 /// gate left to exercise — only the fact that this is the single accepted value.
 const PV: u32 = rcs_filter::config::MIN_PROTOCOL_VERSION;
 
-fn proxy() -> Address {
+pub(crate) fn proxy() -> Address {
     "0x1111111111111111111111111111111111111111".parse().unwrap()
 }
 
-fn other_proxy() -> Address {
+pub(crate) fn other_proxy() -> Address {
     "0x2222222222222222222222222222222222222222".parse().unwrap()
 }
 
-fn implementation() -> Address {
+pub(crate) fn implementation() -> Address {
     "0x3333333333333333333333333333333333333333".parse().unwrap()
 }
 
-fn library() -> Address {
+pub(crate) fn library() -> Address {
     "0x4444444444444444444444444444444444444444".parse().unwrap()
 }
 
-fn proxy_code() -> B256 {
+pub(crate) fn proxy_code() -> B256 {
     B256::repeat_byte(0xa1)
 }
 
-fn approved_impl_code() -> B256 {
+pub(crate) fn approved_impl_code() -> B256 {
     B256::repeat_byte(0xb1)
 }
 
-fn rogue_code() -> B256 {
+pub(crate) fn rogue_code() -> B256 {
     B256::repeat_byte(0xee)
 }
 
-fn hex_addr(a: Address) -> String {
+pub(crate) fn hex_addr(a: Address) -> String {
     format!("{a:#x}")
 }
 
-fn hex_hash(h: B256) -> String {
+pub(crate) fn hex_hash(h: B256) -> String {
     format!("{h:#x}")
 }
 
-fn raw(value: Value) -> RawRule {
+pub(crate) fn raw(value: Value) -> RawRule {
     serde_json::from_value(value).expect("rule json deserializes")
 }
 
 /// A `deny` rule declaring one alias on `address`, with the given condition.
-fn deny_on_alias(id: &str, alias: &str, address: Address, condition: Value) -> Value {
+pub(crate) fn deny_on_alias(id: &str, alias: &str, address: Address, condition: Value) -> Value {
     json!({
         "id": id,
         "event_abis": {},
@@ -75,14 +75,14 @@ fn deny_on_alias(id: &str, alias: &str, address: Address, condition: Value) -> V
 ///
 /// There is no `matched` guard, and there is deliberately none to add: an alias that produced no
 /// observation suppresses the rule, so this condition is never evaluated with an absent value.
-fn delegate_code_hash_allowlist(alias: &str, approved: &[B256]) -> Value {
+pub(crate) fn delegate_code_hash_allowlist(alias: &str, approved: &[B256]) -> Value {
     let list: Vec<Value> = approved.iter().map(|h| Value::String(hex_hash(*h))).collect();
     json!({ "!": { "in": [ { "var": format!("{alias}.delegateCodeHash") }, list ] } })
 }
 
 /// The producer's paired shape: an approved implementation is an (address, code hash) pair, so
 /// crossing address A with hash B is not approved.
-fn paired_allowlist(alias: &str, approved: &[(Address, B256)]) -> Value {
+pub(crate) fn paired_allowlist(alias: &str, approved: &[(Address, B256)]) -> Value {
     let pairs: Vec<Value> = approved
         .iter()
         .map(|(address, code_hash)| {
@@ -96,7 +96,7 @@ fn paired_allowlist(alias: &str, approved: &[(Address, B256)]) -> Value {
 }
 
 /// A `Transfer` event declaration, reused by the mixed-rule tests.
-fn transfer_abi() -> Value {
+pub(crate) fn transfer_abi() -> Value {
     json!({
         "type": "event",
         "name": "Transfer",
@@ -109,13 +109,13 @@ fn transfer_abi() -> Value {
     })
 }
 
-fn rule_set(rules: Vec<Value>) -> RuleSet {
+pub(crate) fn rule_set(rules: Vec<Value>) -> RuleSet {
     let set = load_rules(PV, 1, rules.into_iter().map(raw).collect());
     assert!(set.rejected.is_empty(), "test rule set must load cleanly: {:?}", set.rejected);
     set
 }
 
-fn screen<'a>(
+pub(crate) fn screen<'a>(
     rules: &RuleSet,
     logs: &'a [Log],
     observations: Observations<'a>,
@@ -123,7 +123,7 @@ fn screen<'a>(
     screen_with_limit(rules, logs, observations, DEFAULT_MAX_EVENT_BINDINGS_PER_TX)
 }
 
-fn screen_with_limit<'a>(
+pub(crate) fn screen_with_limit<'a>(
     rules: &RuleSet,
     logs: &'a [Log],
     observations: Observations<'a>,
@@ -143,12 +143,12 @@ fn screen_with_limit<'a>(
 }
 
 /// Observations stamped with `rules`'s own identity, i.e. captured under that snapshot.
-fn captured<'a>(rules: &RuleSet, items: &'a [CallObservation]) -> Observations<'a> {
+pub(crate) fn captured<'a>(rules: &RuleSet, items: &'a [CallObservation]) -> Observations<'a> {
     Observations::available(rules.stamp(), items)
 }
 
 /// One direct delegatecall of `proxy()` into `impl_address`, which executed `impl_code`.
-fn delegated(impl_address: Address, impl_code: B256) -> CallObservation {
+pub(crate) fn delegated(impl_address: Address, impl_code: B256) -> CallObservation {
     CallObservation::direct_delegatecall(proxy(), proxy_code(), impl_address, impl_code)
 }
 
@@ -580,7 +580,7 @@ fn an_upgraded_and_rolled_back_implementation_is_still_caught() {
 // Load-time validation
 // --------------------------------------------------------------------------------------------
 
-fn reject_reason(value: Value) -> String {
+pub(crate) fn reject_reason(value: Value) -> String {
     compile_rule(raw(value)).expect_err("rule must be rejected").to_string()
 }
 
@@ -1738,5 +1738,3 @@ fn a_re_simulation_whose_executed_code_changed_is_not_silently_consistent() {
         "a changed executed code hash must not pass the consistency check"
     );
 }
-
-mod four_field_tests;

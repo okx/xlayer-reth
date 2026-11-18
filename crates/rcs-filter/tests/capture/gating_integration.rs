@@ -9,10 +9,9 @@
 //! prove — plus CREATE2 endowment, parent-frame revert rollback, a runtime-forced real-log mismatch,
 //! and that the composite's own SDM/post-exec warming is preserved. A green CI pipeline does NOT
 //! replace this gate.
-use super::ObservationBudget;
 use rcs_filter::callstack::Observations;
 
-use super::*;
+use crate::fixtures::*;
 use alloy_consensus::{SignableTransaction, TxEip7702, TxLegacy};
 use alloy_eips::eip7702::Authorization;
 use alloy_evm::{Evm, EvmEnv, EvmFactory, FromRecoveredTx};
@@ -1257,7 +1256,7 @@ fn runtime_forced_real_log_mismatch_fails_closed_through_composite() {
     // proven together on the real screening path by test 35 (context.rs), which consumes this same
     // fixture. Stopping at `InvariantViolation` does NOT close the fail-closed loop — that is test
     // 35's job.
-    let outcome = super::test_fixtures::real_runtime_reallogmismatch_outcome();
+    let outcome = crate::fixtures::real_runtime_reallogmismatch_outcome();
     assert!(
         matches!(
             outcome,
