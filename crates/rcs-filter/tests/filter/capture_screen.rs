@@ -436,33 +436,69 @@ fn screen_captured_failure_skips_rule_evaluation_and_buffering() {
     assert_eq!(control, Screen::AuditPending);
     assert_eq!(handle.buffer_status(&control_hash), Some(BufferStatus::NotSubmitted));
 
+    // Every failure outcome the capture can produce, each labelled so a regression names the
+    // variant it broke. The three invariant failures that are not a frame-stack imbalance carry
+    // production-shaped fields: a depth past the frame bound, a real-log count divergence of the
+    // shape the runtime cross-check reports (one captured log against two claimed logs), and the
+    // first CREATE index at which a mismatch is detected.
     let failures = [
-        CaptureOutcome::LimitExceeded {
-            attempted: 2,
-            limit: 1,
-            budget: ObservationBudget::NativeTransfer,
-        },
-        CaptureOutcome::LimitExceeded {
-            attempted: 2,
-            limit: 1,
-            budget: ObservationBudget::Callstack,
-        },
-        CaptureOutcome::InvariantViolation {
-            reason: CaptureInvariantError::FrameStackUnbalanced { remaining: 1 },
-        },
-        CaptureOutcome::Passthrough,
+        (
+            "native-transfer budget",
+            CaptureOutcome::LimitExceeded {
+                attempted: 2,
+                limit: 1,
+                budget: ObservationBudget::NativeTransfer,
+            },
+        ),
+        (
+            "callstack budget",
+            CaptureOutcome::LimitExceeded {
+                attempted: 2,
+                limit: 1,
+                budget: ObservationBudget::Callstack,
+            },
+        ),
+        (
+            "frame-stack overflow",
+            CaptureOutcome::InvariantViolation {
+                reason: CaptureInvariantError::FrameStackOverflow { depth: 1_025 },
+            },
+        ),
+        (
+            "frame-stack unbalanced",
+            CaptureOutcome::InvariantViolation {
+                reason: CaptureInvariantError::FrameStackUnbalanced { remaining: 1 },
+            },
+        ),
+        (
+            "real-log mismatch",
+            CaptureOutcome::InvariantViolation {
+                reason: CaptureInvariantError::RealLogMismatch {
+                    first_bad_index: 0,
+                    observed: 1,
+                    expected: 2,
+                },
+            },
+        ),
+        (
+            "create address mismatch",
+            CaptureOutcome::InvariantViolation {
+                reason: CaptureInvariantError::CreateAddressMismatch { create_index: 0 },
+            },
+        ),
+        ("passthrough", CaptureOutcome::Passthrough),
     ];
-    for (index, failure) in failures.iter().enumerate() {
+    for (index, (case, failure)) in failures.iter().enumerate() {
         let tx_hash = B256::repeat_byte(0x70 + u8::try_from(index).unwrap());
         assert_eq!(
             handle.screen_captured(&pinned, capture_tx(tx_hash), failure),
             Screen::Deny,
-            "a failed capture never reaches rule evaluation"
+            "{case}: a failed capture never reaches rule evaluation"
         );
         assert_eq!(
             handle.buffer_status(&tx_hash),
             None,
-            "a failed capture never creates a buffer entry"
+            "{case}: a failed capture never creates a buffer entry"
         );
     }
 }

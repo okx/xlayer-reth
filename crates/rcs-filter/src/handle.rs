@@ -1451,7 +1451,7 @@ mod tests {
         use crate::callstack::SnapshotStamp;
         use crate::capture::ObservationBudget;
         use crate::capture::{CaptureInvariantError, CaptureOutcome, CapturedObservations};
-        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
@@ -1472,8 +1472,36 @@ mod tests {
         handle.shared.metrics.local_deny_observation_invariant_total =
             metrics::counter!("rcs_filter_test.capture_invariant_total");
 
+        const DENY_TOTAL: &str = "rcs_filter_test.capture_deny_total";
+        const NATIVE_LIMIT: &str = "rcs_filter_test.capture_native_limit_total";
+        const CALLSTACK_LIMIT: &str = "rcs_filter_test.capture_callstack_limit_total";
+        const OBSERVATION_INVARIANT: &str = "rcs_filter_test.capture_invariant_total";
+
         let counter = |values: &[(String, u64)], name: &str| -> u64 {
             values.iter().find(|(key, _)| key == name).map_or(0, |(_, value)| *value)
+        };
+
+        // A snapshot drains the recorder, so each reading below is exactly the delta recorded for
+        // the case that preceded it. Taking one snapshot per case — instead of one running total at
+        // the end — keeps a missed or double-counted increment from cancelling out.
+        //
+        // Columns: deny_total, native-transfer limit, callstack limit, observation invariant.
+        let read_counters = |snapshotter: &Snapshotter| -> [u64; 4] {
+            let values: Vec<(String, u64)> = snapshotter
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .filter_map(|(key, _, _, value)| match value {
+                    DebugValue::Counter(count) => Some((key.key().name().to_string(), count)),
+                    _ => None,
+                })
+                .collect();
+            [
+                counter(&values, DENY_TOTAL),
+                counter(&values, NATIVE_LIMIT),
+                counter(&values, CALLSTACK_LIMIT),
+                counter(&values, OBSERVATION_INVARIANT),
+            ]
         };
 
         // A complete capture is not a failure and records nothing.
@@ -1489,54 +1517,84 @@ mod tests {
             ),
         };
         assert_eq!(handle.capture_failure_decision(B256::ZERO, &complete), None);
+        assert_eq!(
+            read_counters(&snapshotter),
+            [0, 0, 0, 0],
+            "a complete capture records no local deny"
+        );
 
+        // Every failure variant records exactly one total deny and exactly one matching reason,
+        // leaving the other two reason counters untouched. The three invariant failures that are
+        // not a frame-stack imbalance carry production-shaped fields (a depth past the frame bound,
+        // a real-log count divergence, and the detected CREATE index).
         let outcomes = [
-            CaptureOutcome::LimitExceeded {
-                attempted: 2,
-                limit: 1,
-                budget: ObservationBudget::NativeTransfer,
-            },
-            CaptureOutcome::LimitExceeded {
-                attempted: 2,
-                limit: 1,
-                budget: ObservationBudget::Callstack,
-            },
-            CaptureOutcome::InvariantViolation {
-                reason: CaptureInvariantError::FrameStackUnbalanced { remaining: 1 },
-            },
-            CaptureOutcome::Passthrough,
+            (
+                "native-transfer budget",
+                CaptureOutcome::LimitExceeded {
+                    attempted: 2,
+                    limit: 1,
+                    budget: ObservationBudget::NativeTransfer,
+                },
+                [1, 1, 0, 0],
+            ),
+            (
+                "callstack budget",
+                CaptureOutcome::LimitExceeded {
+                    attempted: 2,
+                    limit: 1,
+                    budget: ObservationBudget::Callstack,
+                },
+                [1, 0, 1, 0],
+            ),
+            (
+                "frame-stack overflow",
+                CaptureOutcome::InvariantViolation {
+                    reason: CaptureInvariantError::FrameStackOverflow { depth: 1_025 },
+                },
+                [1, 0, 0, 1],
+            ),
+            (
+                "frame-stack unbalanced",
+                CaptureOutcome::InvariantViolation {
+                    reason: CaptureInvariantError::FrameStackUnbalanced { remaining: 1 },
+                },
+                [1, 0, 0, 1],
+            ),
+            (
+                "real-log mismatch",
+                CaptureOutcome::InvariantViolation {
+                    reason: CaptureInvariantError::RealLogMismatch {
+                        first_bad_index: 0,
+                        observed: 1,
+                        expected: 2,
+                    },
+                },
+                [1, 0, 0, 1],
+            ),
+            (
+                "create address mismatch",
+                CaptureOutcome::InvariantViolation {
+                    reason: CaptureInvariantError::CreateAddressMismatch { create_index: 0 },
+                },
+                [1, 0, 0, 1],
+            ),
+            ("passthrough", CaptureOutcome::Passthrough, [1, 0, 0, 1]),
         ];
-        for (index, outcome) in outcomes.iter().enumerate() {
+        for (index, (case, outcome, expected)) in outcomes.iter().enumerate() {
             assert_eq!(
                 handle.capture_failure_decision(
                     B256::repeat_byte(0x10 + u8::try_from(index).unwrap()),
                     outcome
                 ),
-                Some(Screen::Deny)
+                Some(Screen::Deny),
+                "{case}: every failure outcome fails closed"
+            );
+            // The snapshot drains the recorder, so this is this case's own delta.
+            assert_eq!(
+                read_counters(&snapshotter),
+                *expected,
+                "{case}: exactly one total deny, exactly one matching reason, no other reason moves"
             );
         }
-
-        // One snapshot at the end: a snapshot drains the counters, so it must be taken once.
-        let values: Vec<(String, u64)> = snapshotter
-            .snapshot()
-            .into_vec()
-            .into_iter()
-            .filter_map(|(key, _, _, value)| match value {
-                DebugValue::Counter(count) => Some((key.key().name().to_string(), count)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            counter(&values, "rcs_filter_test.capture_deny_total"),
-            4,
-            "each of the four failure decisions adds exactly one total deny; complete adds none"
-        );
-        assert_eq!(counter(&values, "rcs_filter_test.capture_native_limit_total"), 1);
-        assert_eq!(counter(&values, "rcs_filter_test.capture_callstack_limit_total"), 1);
-        assert_eq!(
-            counter(&values, "rcs_filter_test.capture_invariant_total"),
-            2,
-            "the invariant violation and the passthrough each record one invariant deny"
-        );
     }
 }
