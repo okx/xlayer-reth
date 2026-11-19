@@ -35,8 +35,7 @@ use op_revm::OpSpecId;
 use rcs_filter::audit::{callstack_only_inspector, observations_from, unadjudicable_observations};
 use rcs_filter::callstack::ObservationUnavailable;
 use rcs_filter::capture::{
-    CallstackCaptureConfig, CaptureGuard, CaptureOutcome, RcsCaptureControl, RcsCaptureScope,
-    RcsInspector,
+    CaptureGuard, CaptureOutcome, RcsCaptureControl, RcsCaptureScope, RcsInspector,
 };
 use rcs_filter::rules::{load_rules, RawRule, RuleSet};
 use reth_evm::{block::BlockExecutorFactory, ConfigureEvm, EvmEnv};
@@ -141,10 +140,6 @@ where
     E: Evm,
     E::Inspector: RcsCaptureControl,
 {
-    fn scope_configure_callstack_capture(&mut self, config: CallstackCaptureConfig) {
-        self.0.components_mut().1.configure_callstack_capture(config);
-    }
-
     fn scope_start_capture(&mut self) {
         self.0.components_mut().1.start_capture();
     }
@@ -494,6 +489,7 @@ pub mod observation_recorder {
 pub mod test_seams {
     use super::*;
     use rcs_filter::callstack::SnapshotStamp;
+    use rcs_filter::capture::{CallstackCaptureConfig, RcsInspectorConfig};
 
     /// Runs `req` through the complete production batch against `db`: request validation and
     /// rule compilation, deposit construction, the production inspector choice with
@@ -533,10 +529,10 @@ pub mod test_seams {
         let inspector = match capture_stamp {
             None => callstack_only_inspector(&rules, AUDIT_MAX_CALLSTACK_OBSERVATIONS_PER_TX),
             Some(stamp) => rules.has_callstack_rules().then(|| {
-                RcsInspector::callstack_only(
+                RcsInspector::new(RcsInspectorConfig::callstack_only_for_test(
                     AUDIT_MAX_CALLSTACK_OBSERVATIONS_PER_TX,
                     CallstackCaptureConfig::new(stamp, rules.callstack_selectors().to_vec()),
-                )
+                ))
             }),
         };
         // Explicitly `super::`: the public seam of the same name would otherwise shadow the

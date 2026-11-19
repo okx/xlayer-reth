@@ -7,7 +7,6 @@ use alloy_consensus::TxEip1559;
 use alloy_eips::Encodable2718;
 use alloy_primitives::{Address, TxKind, U256};
 use op_alloy_consensus::OpTypedTransaction;
-use rcs_filter::capture::CallstackCaptureConfig;
 use rcs_filter::rules::{load_rules, RawRule};
 use rcs_filter::test_support::golden;
 use rcs_filter::{BufferStatus, FilterConfig, FilterHandle, Screen, SystemClock};
@@ -81,23 +80,31 @@ fn the_capture_config_comes_from_the_pinned_snapshot_not_the_live_one() {
     let next_block = pin(&filter).expect("screening is enabled");
     assert_eq!(next_block.callstack_selectors(), [second]);
     assert_ne!(next_block.stamp(), pinned_stamp);
+
+    // The candidate configuration is derived from the snapshot it is given and never reads the
+    // live rules: the pinned snapshot still carries its own stamp after the reload.
+    assert_eq!(
+        filter.candidate_callstack_capture_config(Some(&pinned)).stamp_for_test(),
+        Some(pinned_stamp)
+    );
 }
 
 #[test]
 fn a_context_without_screening_pins_no_snapshot_and_captures_nothing() {
-    // With the master switch off there is no snapshot to pin, and the capture configuration
-    // is inert, so the observation hooks cost nothing.
-    let config = CallstackCaptureConfig::default();
-    assert!(config.is_inert());
+    // With no snapshot pinned, the derived capture configuration is inert, so the observation
+    // hooks cost nothing.
+    let filter = handle_with(Address::repeat_byte(0x44), 1);
+    assert!(filter.candidate_callstack_capture_config(None).is_inert());
 }
 
 #[test]
 fn a_snapshot_with_no_selectors_yields_an_inert_capture_config() {
     // Screening enabled but no active rule asking about call frames: the whole observation
     // path stays inert rather than observing every frame "just in case".
+    let filter = handle_with(Address::repeat_byte(0x55), 1);
     let rules = load_rules(rcs_filter::config::MIN_PROTOCOL_VERSION, 1, vec![]);
     assert!(!rules.has_callstack_rules());
-    let config = CallstackCaptureConfig::new(rules.stamp(), rules.callstack_selectors().to_vec());
+    let config = filter.candidate_callstack_capture_config(Some(&rules));
     assert!(config.is_inert());
 }
 
@@ -106,7 +113,7 @@ fn a_snapshot_with_selectors_yields_an_active_capture_config_carrying_its_stamp(
     let address = Address::repeat_byte(0x33);
     let filter = handle_with(address, 7);
     let pinned = filter.rule_snapshot();
-    let config = CallstackCaptureConfig::new(pinned.stamp(), pinned.callstack_selectors().to_vec());
+    let config = filter.candidate_callstack_capture_config(Some(&pinned));
     assert!(!config.is_inert());
     // The stamp travels with the selector set, so an inspector cannot be configured from one
     // snapshot and stamped with another.

@@ -78,7 +78,7 @@ fn run_capturing_tx(db: InMemoryDB, target: Address, budget: usize) -> (CaptureO
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::new(budget),
+        RcsInspector::native_only_for_test(budget),
     );
     evm.components_mut().1.start_capture();
     let result = evm.transact(call_tx(target)).expect("tx executes");
@@ -633,7 +633,7 @@ fn inactive_inspector_selfdestruct_leaves_new_state_untouched() {
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::new(16),
+        RcsInspector::native_only_for_test(16),
     );
     // Deliberately never call start_capture.
     let result = evm.transact(call_tx(entry)).expect("tx executes");
@@ -673,7 +673,7 @@ fn inactive_inspector_selfdestruct_normal_transfer_leaves_new_state_untouched() 
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::new(16),
+        RcsInspector::native_only_for_test(16),
     );
     // Deliberately never call start_capture.
     let result = evm.transact(call_tx(victim)).expect("tx executes");
@@ -709,7 +709,7 @@ fn inactive_then_armed_inspector_still_captures() {
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::new(16),
+        RcsInspector::native_only_for_test(16),
     );
     // First: run inactive (never start_capture).
     let result = evm.transact(call_tx_from(caller(), entry)).expect("tx executes");
@@ -797,7 +797,7 @@ fn selfdestruct_oog_after_journal_write_leaks_flag_but_not_across_windows() {
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::new(16),
+        RcsInspector::native_only_for_test(16),
     );
     evm.components_mut().1.start_capture();
     let result = evm.transact(call_tx_from(caller(), entry)).expect("tx executes");
@@ -1120,7 +1120,7 @@ fn inspector_state_does_not_cross_transactions_through_real_evm() {
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::new(1),
+        RcsInspector::native_only_for_test(1),
     );
 
     // tx1 -> c1: two transfers over a budget of 1 ⇒ overflow (LimitExceeded).
@@ -1290,7 +1290,7 @@ fn composite_post_exec_warming_preserved_with_rcs_inspector_inner() {
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::new(16),
+        RcsInspector::native_only_for_test(16),
     );
 
     // `transact` does not commit here, so nonce 0 is reused across both txs (as in the upstream
@@ -1346,7 +1346,7 @@ fn run_capturing_create_tx(
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::new(budget),
+        RcsInspector::native_only_for_test(budget),
     );
     evm.components_mut().1.start_capture();
     let result = evm.transact(create_tx_with_value(from, value)).expect("tx executes");
@@ -1388,7 +1388,7 @@ fn inactive_inspector_diso_create_tx_no_mutation() {
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::new(16),
+        RcsInspector::native_only_for_test(16),
     );
     // Deliberately do NOT call start_capture() — inspector stays inactive.
     evm.transact(create_tx_with_value(deployer, U256::from(5u64))).expect("tx executes");
@@ -1424,7 +1424,7 @@ fn create_recipients_push_pop_balanced() {
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::new(16),
+        RcsInspector::native_only_for_test(16),
     );
     evm.components_mut().1.start_capture();
     let result = evm.transact(call_tx(factory)).expect("tx executes");
@@ -1552,7 +1552,7 @@ fn eip7702_type4_delegated_transfers_attributed_to_authority() {
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::new(16),
+        RcsInspector::native_only_for_test(16),
     );
     evm.components_mut().1.start_capture();
     let result = evm.transact(op_tx).expect("tx executes");
@@ -1656,7 +1656,7 @@ fn revoked_create_still_consumes_native_budget() {
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::new(1),
+        RcsInspector::native_only_for_test(1),
     );
     evm.components_mut().1.start_capture();
     let result = evm.transact(call_tx(factory)).expect("tx executes");
@@ -1785,7 +1785,7 @@ fn address_mismatch_flag_cleared_by_both_finish_and_abort() {
     // set would make the NEXT capture window fail closed on a stale mismatch.
     //
     // (a) armed flag → finish_capture surfaces it AND clears it.
-    let mut inspector = RcsInspector::new(10);
+    let mut inspector = RcsInspector::native_only_for_test(10);
     inspector.start_capture();
     inspector.set_address_mismatch_create_index_for_test(Some(3));
     let outcome = inspector.finish_capture(&[]);
@@ -2020,7 +2020,7 @@ fn run_capturing_call_tx_with_value(
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::new(budget),
+        RcsInspector::native_only_for_test(budget),
     );
     evm.components_mut().1.start_capture();
     let tx = TxLegacy {
@@ -2598,7 +2598,7 @@ fn top_level_call_with_value_emits_transfer() {
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::new(16),
+        RcsInspector::native_only_for_test(16),
     );
     evm.components_mut().1.start_capture();
     let result = evm.transact(op_tx).expect("tx executes");
@@ -2653,7 +2653,7 @@ fn create_is_ok_early_return_no_endowment_leak() {
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::new(16),
+        RcsInspector::native_only_for_test(16),
     );
     evm.components_mut().1.start_capture();
     let result = evm.transact(op_tx).expect("tx executes");
@@ -2703,7 +2703,7 @@ fn root_success_child_revert_keeps_root_drops_child() {
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::new(16),
+        RcsInspector::native_only_for_test(16),
     );
     evm.components_mut().1.start_capture();
     let result = evm.transact(op_tx).expect("tx executes");
@@ -2747,7 +2747,7 @@ fn whole_tx_root_failure_drops_all() {
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::new(16),
+        RcsInspector::native_only_for_test(16),
     );
     evm.components_mut().1.start_capture();
     let result = evm.transact(op_tx).expect("tx executes");
@@ -2809,7 +2809,7 @@ fn next_capture_starts_clean() {
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::new(16),
+        RcsInspector::native_only_for_test(16),
     );
 
     // First tx (sender_a): root value=5, internal CALL (value=3) reverts.
@@ -2954,7 +2954,7 @@ fn inactive_create_no_mutation_and_no_derivation_at_create_return() {
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::new(16),
+        RcsInspector::native_only_for_test(16),
     );
     // Deliberately do NOT call start_capture().
     evm.transact(create_tx_with_value(deployer, U256::from(5u64))).expect("tx executes");
@@ -2987,7 +2987,7 @@ fn derivation_ran_true_when_journal_read_for_address_derivation() {
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::new(16),
+        RcsInspector::native_only_for_test(16),
     );
     evm.components_mut().1.start_capture();
     let _ = evm.transact(create_tx_with_value(deployer, U256::from(5u64))).expect("tx executes");
@@ -3046,7 +3046,7 @@ fn inactive_create_hook_hit_is_nonzero_with_derivation_false() {
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::new(16),
+        RcsInspector::native_only_for_test(16),
     );
     // Deliberately do NOT call start_capture().
     evm.transact(create_tx_with_value(deployer, U256::from(5u64))).expect("tx executes");
@@ -3111,7 +3111,7 @@ fn create_recipients_balanced_before_finish_capture() {
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::new(16),
+        RcsInspector::native_only_for_test(16),
     );
     evm.components_mut().1.start_capture();
     let result =
@@ -3130,7 +3130,7 @@ fn create_recipients_balanced_before_finish_capture() {
 fn abort_capture_mid_window_leaves_state_clean() {
     // abort_capture must reset all inspector state even when called with entries mid-flight:
     // a partially-filled queue, an open checkpoint, and an in-progress create_recipients entry.
-    let mut inspector = RcsInspector::new(10);
+    let mut inspector = RcsInspector::native_only_for_test(10);
     inspector.start_capture();
     inspector.push_checkpoint();
     inspector.observe_native_transfer(
@@ -3174,7 +3174,7 @@ fn two_consecutive_txs_capture_independently() {
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::new(16),
+        RcsInspector::native_only_for_test(16),
     );
     evm.components_mut().1.start_capture();
     let result1 = evm.transact(call_tx_from(sender1, target)).expect("tx1 executes");
@@ -3244,7 +3244,7 @@ fn eip7702_origin_itself_delegated_runs_inner_call_and_create() {
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::new(16),
+        RcsInspector::native_only_for_test(16),
     );
     evm.components_mut().1.start_capture();
     let result = evm.transact(op_tx).expect("tx executes");

@@ -2,7 +2,7 @@
 //! capture-outcome mapping, and the request-level unadjudicable gate.
 
 use crate::callstack::{ObservationUnavailable, Observations};
-use crate::capture::{CallstackCaptureConfig, CaptureOutcome, ObservationBudget, RcsInspector};
+use crate::capture::{CaptureOutcome, ObservationBudget, RcsInspector, RcsInspectorConfig};
 use crate::rules::RuleSet;
 
 /// The capture inspector a request needs, or `None` when it declares no call-frame selector — in
@@ -16,10 +16,7 @@ pub fn callstack_only_inspector(
     max_callstack_observations_per_tx: usize,
 ) -> Option<RcsInspector> {
     rules.has_callstack_rules().then(|| {
-        RcsInspector::callstack_only(
-            max_callstack_observations_per_tx,
-            CallstackCaptureConfig::from_rules(rules),
-        )
+        RcsInspector::new(RcsInspectorConfig::audit(rules, max_callstack_observations_per_tx))
     })
 }
 

@@ -6,7 +6,7 @@ use crate::{
 };
 use std::{sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use alloy_consensus::{
     conditional::BlockConditionalAttributes, transaction::Recovered, Eip658Value, Transaction,
@@ -23,9 +23,8 @@ use op_revm::{L1BlockInfo, OpSpecId};
 
 #[cfg(any(test, feature = "test-utils"))]
 use rcs_filter::callstack::CallObservation;
-use rcs_filter::callstack::Observations;
 use rcs_filter::rules::RuleSet;
-use rcs_filter::{FilterHandle, LocalDenyReason, PreScreen, Screen, ScreenInput};
+use rcs_filter::{FilterHandle, PreScreen, Screen, ScreenTx};
 use reth_basic_payload_builder::PayloadConfig;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_evm::{
@@ -56,8 +55,7 @@ use revm::{
 };
 
 use super::rcs_capture::{
-    CallstackCaptureConfig, CaptureGuard, CaptureInvariantError, CaptureOutcome, ObservationBudget,
-    RcsCaptureControl, RcsCaptureScope, RcsInspector,
+    CaptureGuard, CaptureOutcome, RcsCaptureControl, RcsCaptureScope, RcsInspector,
 };
 
 /// Container type that holds all necessities to build a new payload.
@@ -129,112 +127,13 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// Maps a non-`Complete` [`CaptureOutcome`] to a fail-closed screening decision, emitting a
-/// structured `error!` at every real budget-overflow / invariant decision point and recording the
-/// matching local-deny reason metric exactly once. Returns `None` only for `Complete` (the caller
-/// screens the captured stream instead). An enabled filter receiving `Passthrough` is a
-/// state-machine bug and fails closed exactly like an observation-invariant violation — it is never
-/// allowed to fall back to raw logs.
-///
-/// Diagnostic fields are bounded to `tx_hash`, `observed_count`/`attempted`, and `limit`; the
-/// transfer list, individual from/to/value tuples, and the observation queue are NEVER logged.
-fn fail_closed_screen(
-    filter: &FilterHandle,
-    tx_hash: B256,
-    outcome: &CaptureOutcome,
-) -> Option<Screen> {
-    match outcome {
-        CaptureOutcome::Complete { .. } => None,
-        // The two capture budgets are reported separately: one bounds internal native-transfer
-        // volume, the other bounds call-frame observation volume, and conflating them would hide
-        // which limit an operator needs to raise.
-        CaptureOutcome::LimitExceeded { attempted, limit, budget } => {
-            error!(
-                target: "rcs_filter::capture",
-                %tx_hash,
-                budget = budget.as_str(),
-                observed_count = *attempted,
-                limit = *limit,
-                "observation budget exceeded; failing closed (Screen::Deny)"
-            );
-            filter.record_local_deny(match budget {
-                ObservationBudget::NativeTransfer => LocalDenyReason::NativeTransferLimit,
-                ObservationBudget::Callstack => LocalDenyReason::CallstackObservationLimit,
-            });
-            Some(Screen::Deny)
-        }
-        // A frame-stack invariant failure means parentage is untrustworthy, so the observation set
-        // cannot be adjudicated. Bounded to the depth/remaining count — never any frame address.
-        CaptureOutcome::InvariantViolation {
-            reason: CaptureInvariantError::FrameStackOverflow { depth },
-        } => {
-            error!(
-                target: "rcs_filter::capture",
-                %tx_hash,
-                depth = *depth,
-                "observed frame stack exceeded its bound; failing closed (Screen::Deny)"
-            );
-            filter.record_local_deny(LocalDenyReason::ObservationInvariant);
-            Some(Screen::Deny)
-        }
-        CaptureOutcome::InvariantViolation {
-            reason: CaptureInvariantError::FrameStackUnbalanced { remaining },
-        } => {
-            error!(
-                target: "rcs_filter::capture",
-                %tx_hash,
-                remaining = *remaining,
-                "observed frame stack was unbalanced at capture end; failing closed (Screen::Deny)"
-            );
-            filter.record_local_deny(LocalDenyReason::ObservationInvariant);
-            Some(Screen::Deny)
-        }
-        // R9 item 1: `RealLogMismatch` is its OWN arm, emitting EXACTLY the four bounded fields —
-        // `tx_hash`, `first_bad_index`, `observed`, `expected` — and NEVER the real-log list, the
-        // observation queue, or any from/to/value content. It must not be merged with `Passthrough`
-        // (the earlier merged arm dropped these fields and logged only `tx_hash`).
-        CaptureOutcome::InvariantViolation {
-            reason: CaptureInvariantError::RealLogMismatch { first_bad_index, observed, expected },
-        } => {
-            error!(
-                target: "rcs_filter::capture",
-                %tx_hash,
-                first_bad_index = *first_bad_index,
-                observed = *observed,
-                expected = *expected,
-                "real-log subsequence mismatch; failing closed (Screen::Deny)"
-            );
-            filter.record_local_deny(LocalDenyReason::ObservationInvariant);
-            Some(Screen::Deny)
-        }
-        // D7b: a successful CREATE returned an address that differed from the pre-derived expected
-        // address. Fails closed with only the bounded `create_index` field (no addresses logged).
-        CaptureOutcome::InvariantViolation {
-            reason: CaptureInvariantError::CreateAddressMismatch { create_index },
-        } => {
-            error!(
-                target: "rcs_filter::capture",
-                %tx_hash,
-                create_index = *create_index,
-                "CREATE address mismatch: pre-derived address differs from actual; \
-                 failing closed (Screen::Deny)"
-            );
-            filter.record_local_deny(LocalDenyReason::ObservationInvariant);
-            Some(Screen::Deny)
-        }
-        // An enabled filter receiving `Passthrough` is a state-machine bug: it stays a
-        // `tx_hash`-only fail-closed log (no extra fields) and never falls back to raw logs. Any
-        // future content-free `CaptureInvariantError` kind will force an explicit decision here at
-        // compile time, so a new invariant can never silently inherit the mismatch fields.
-        CaptureOutcome::Passthrough => {
-            error!(
-                target: "rcs_filter::capture",
-                %tx_hash,
-                "capture invariant violated; failing closed (Screen::Deny)"
-            );
-            filter.record_local_deny(LocalDenyReason::ObservationInvariant);
-            Some(Screen::Deny)
-        }
+/// Records the observations of a completed capture for the last screened candidate, so a test can
+/// compare what two paths actually observed rather than only their verdicts. Test-only; it never
+/// influences the decision.
+#[cfg(any(test, feature = "test-utils"))]
+fn record_candidate_observations(outcome: &CaptureOutcome) {
+    if let CaptureOutcome::Complete { observations, .. } = outcome {
+        LAST_CANDIDATE_OBSERVATIONS.with(|o| *o.borrow_mut() = Some(observations.items.clone()));
     }
 }
 
@@ -276,10 +175,6 @@ where
     DB: Database,
     I: Inspector<OpEvmContext<DB>> + RcsCaptureControl,
 {
-    fn scope_configure_callstack_capture(&mut self, config: CallstackCaptureConfig) {
-        self.0.components_mut().1.configure_callstack_capture(config);
-    }
-
     fn scope_start_capture(&mut self) {
         self.0.components_mut().1.start_capture();
     }
@@ -757,23 +652,6 @@ impl FlashblocksBuilderCtx {
         Ok(())
     }
 
-    /// Derives the capture configuration from the snapshot pinned for this L2 block.
-    ///
-    /// Every flashblock of the block builds a fresh inspector but derives it from this same
-    /// snapshot, so the selector set cannot change part-way through a block. A snapshot with no
-    /// selectors yields an inert configuration, which keeps the observation hooks free for every
-    /// deployment that has not enabled callstack rules.
-    ///
-    /// This is the configuration a FRESH candidate uses. A candidate that already has a buffer
-    /// entry is captured under the snapshot saved on that entry instead — see
-    /// [`Self::candidate_rule_snapshot`].
-    fn callstack_capture_config(&self) -> CallstackCaptureConfig {
-        match self.rcs_rule_snapshot.as_ref() {
-            Some(rules) => CallstackCaptureConfig::from_rules(rules),
-            None => CallstackCaptureConfig::default(),
-        }
-    }
-
     /// The rule snapshot one specific candidate is both captured and screened under.
     ///
     /// Design §6.5.1 gives two different sources, and which one applies is a property of the
@@ -814,10 +692,8 @@ impl FlashblocksBuilderCtx {
         // transfers can be observed during the real-user candidate simulation; when it is disabled
         // the zero-overhead no-op inspector is kept and behavior is unchanged.
         if let Some(filter) = self.filter.clone() {
-            let inspector = RcsInspector::with_callstack(
-                filter.max_native_transfers_per_tx(),
-                rcs_filter::capture::CANDIDATE_MAX_CALLSTACK_OBSERVATIONS_PER_TX,
-                self.callstack_capture_config(),
+            let inspector = RcsInspector::new(
+                filter.candidate_inspector_config(self.rcs_rule_snapshot.as_deref()),
             );
             let mut evm = self.evm_config.evm_with_env_and_inspector(
                 &mut *db,
@@ -979,11 +855,9 @@ impl FlashblocksBuilderCtx {
             let mut candidate_snapshot: Option<Arc<RuleSet>> = None;
             if let Some(filter) = self.filter.as_ref() {
                 candidate_snapshot = self.candidate_rule_snapshot(filter, &tx_hash);
-                let config = candidate_snapshot.as_deref().map_or_else(
-                    CallstackCaptureConfig::default,
-                    CallstackCaptureConfig::from_rules,
-                );
-                BuilderCaptureScope(&mut *evm).scope_configure_callstack_capture(config);
+                let config =
+                    filter.candidate_callstack_capture_config(candidate_snapshot.as_deref());
+                evm.components_mut().1.configure_callstack_capture(config);
             }
 
             let tx_simulation_start_time = Instant::now();
@@ -1100,50 +974,28 @@ impl FlashblocksBuilderCtx {
             // the raw logs; a budget overflow or observation-invariant failure fails closed to
             // `Screen::Deny` via the same downstream handling, never entering the pending buffer.
             if let Some(filter) = self.filter.as_ref() {
-                let decision = if let CaptureOutcome::Complete { logs, observations } =
-                    &capture_outcome
-                {
-                    #[cfg(any(test, feature = "test-utils"))]
-                    LAST_CANDIDATE_OBSERVATIONS
-                        .with(|o| *o.borrow_mut() = Some(observations.items.clone()));
-                    let input = ScreenInput {
-                        tx_hash,
-                        origin: tx.signer(),
-                        tx_to: tx.to(),
-                        nonce: tx.nonce(),
-                        value: tx.value(),
-                        block_height: self.block_number(),
-                        logs,
-                        // Capture completed, so the set is authoritative — an empty list genuinely
-                        // means no observed frame, not an absence of capture. It carries the stamp
-                        // of the snapshot whose selector set configured it.
-                        observations: Observations::available(
-                            observations.stamp,
-                            &observations.items,
-                        ),
-                    };
-                    match candidate_snapshot.as_ref() {
-                        // Screen against the very snapshot that configured this candidate's
-                        // capture — the saved one for a buffered candidate, the block-pinned one
-                        // for a fresh candidate.
-                        Some(snapshot) => filter.screen_tx_with_snapshot(&input, snapshot),
-                        // No snapshot could be selected for this candidate although screening is
-                        // enabled: the two could not be proven to agree, so fail closed rather
-                        // than evaluate against a possibly newer rule set.
-                        None => {
-                            error!(
-                                target: "rcs_filter::capture",
-                                %tx_hash,
-                                "no rule snapshot was pinned for this block; failing closed (Screen::Deny)"
-                            );
-                            filter.record_local_deny(LocalDenyReason::ObservationInvariant);
-                            Screen::Deny
-                        }
-                    }
-                } else {
-                    // Every non-`Complete` outcome fails closed (budget overflow, observation
-                    // invariant, or — a state-machine bug — an enabled filter seeing `Passthrough`).
-                    fail_closed_screen(filter, tx_hash, &capture_outcome).unwrap_or(Screen::Deny)
+                #[cfg(any(test, feature = "test-utils"))]
+                record_candidate_observations(&capture_outcome);
+                let decision = match candidate_snapshot.as_ref() {
+                    // Screen against the very snapshot that configured this candidate's capture —
+                    // the saved one for a buffered candidate, the block-pinned one for a fresh
+                    // candidate.
+                    Some(snapshot) => filter.screen_captured(
+                        snapshot,
+                        ScreenTx {
+                            tx_hash,
+                            origin: tx.signer(),
+                            tx_to: tx.to(),
+                            nonce: tx.nonce(),
+                            value: tx.value(),
+                            block_height: self.block_number(),
+                        },
+                        &capture_outcome,
+                    ),
+                    // No snapshot could be selected for this candidate although screening is
+                    // enabled: the two could not be proven to agree, so fail closed rather than
+                    // evaluate against a possibly newer rule set.
+                    None => filter.screen_captured_without_snapshot(tx_hash, &capture_outcome),
                 };
                 // Test-only decision seam (spec §5.10.3 P1.2): record the ACTUAL screen decision so a
                 // loop-level test asserts `Screen::Deny` DIRECTLY — a Deny-only signal, never inferred
@@ -1231,292 +1083,9 @@ impl FlashblocksBuilderCtx {
     }
 }
 
-/// An empty, available observation set for tests: capture ran and genuinely saw no frame.
-/// Deliberately not `Unavailable`, which would make every callstack rule fail closed.
-#[cfg(test)]
-fn test_observations() -> super::rcs_capture::CapturedObservations {
-    super::rcs_capture::CapturedObservations::new(
-        rcs_filter::callstack::SnapshotStamp {
-            protocol_version: 1,
-            content_version: 0,
-            selector_digest: B256::ZERO,
-        },
-        Vec::new(),
-    )
-}
-
-#[cfg(test)]
-mod capture_decision_tests {
-    use super::*;
-    use crate::flashblocks::rcs_capture::CaptureInvariantError;
-
-    fn test_filter() -> FilterHandle {
-        rcs_filter::FilterHandle::for_test(
-            rcs_filter::FilterConfig::default(),
-            rcs_filter::rules::RuleSet::default(),
-            Arc::new(rcs_filter::SystemClock),
-        )
-    }
-
-    #[test]
-    fn complete_is_not_fail_closed() {
-        let filter = test_filter();
-        assert_eq!(
-            fail_closed_screen(
-                &filter,
-                B256::ZERO,
-                &CaptureOutcome::Complete { logs: vec![], observations: test_observations() }
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn limit_exceeded_fails_closed() {
-        let filter = test_filter();
-        assert_eq!(
-            fail_closed_screen(
-                &filter,
-                B256::ZERO,
-                &CaptureOutcome::LimitExceeded {
-                    attempted: 3,
-                    limit: 2,
-                    budget: ObservationBudget::NativeTransfer,
-                }
-            ),
-            Some(Screen::Deny)
-        );
-    }
-
-    #[test]
-    fn invariant_violation_fails_closed() {
-        let filter = test_filter();
-        let outcome = CaptureOutcome::InvariantViolation {
-            reason: CaptureInvariantError::RealLogMismatch {
-                first_bad_index: 0,
-                observed: 1,
-                expected: 2,
-            },
-        };
-        assert_eq!(fail_closed_screen(&filter, B256::ZERO, &outcome), Some(Screen::Deny));
-    }
-
-    // The R10 direct-dispatch test 35 has been REWRITTEN (spec §8 test 35, R11; it supersedes the
-    // R10 version) into the LOOP-LEVEL builder-path gating test in the `loop_level_fail_closed_tests`
-    // module below: that test drives the REAL `execute_best_transactions` / `run_tx_loop` candidate
-    // loop with a non-empty `RuleSet` and a real runtime `RealLogMismatch`, instead of calling
-    // `fail_closed_screen` directly. The direct `fail_closed_screen` dispatch stays covered here by
-    // `invariant_violation_fails_closed` / `enabled_filter_passthrough_fails_closed`, and the real
-    // runtime outcome by `test_fixtures::real_runtime_reallogmismatch_outcome` (test 33).
-
-    #[test]
-    fn enabled_filter_passthrough_fails_closed() {
-        // Review-focus: an enabled filter must never reuse raw logs on a `Passthrough`.
-        let filter = test_filter();
-        assert_eq!(
-            fail_closed_screen(&filter, B256::ZERO, &CaptureOutcome::Passthrough),
-            Some(Screen::Deny)
-        );
-    }
-
-    /// Runs `f` under a capturing `tracing` subscriber and returns its result plus everything it
-    /// logged, so a test can assert the level, target, and exact bounded fields of a diagnostic and
-    /// prove no content leaks. One helper shared by the capture-diagnostic tests (R9 non-blocking
-    /// cleanup: previously each test hand-rolled its own writer).
-    pub(super) fn capture_tracing<R>(f: impl FnOnce() -> R) -> (R, String) {
-        use std::io::Write;
-        use std::sync::Mutex;
-
-        #[derive(Clone)]
-        struct BufWriter(Arc<Mutex<Vec<u8>>>);
-        impl Write for BufWriter {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        impl tracing_subscriber::fmt::MakeWriter<'_> for BufWriter {
-            type Writer = BufWriter;
-            fn make_writer(&self) -> BufWriter {
-                self.clone()
-            }
-        }
-
-        let buf = BufWriter(Arc::new(Mutex::new(Vec::new())));
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::TRACE)
-            .with_ansi(false)
-            .with_target(true)
-            .with_writer(buf.clone())
-            .finish();
-        let out = tracing::subscriber::with_default(subscriber, f);
-        let logged = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
-        (out, logged)
-    }
-
-    #[test]
-    fn native_overflow_emits_error_with_bounded_fields_only() {
-        let filter = test_filter();
-        let (decision, out) = capture_tracing(|| {
-            fail_closed_screen(
-                &filter,
-                B256::repeat_byte(0xCD),
-                &CaptureOutcome::LimitExceeded {
-                    attempted: 10_001,
-                    limit: 10_000,
-                    budget: ObservationBudget::NativeTransfer,
-                },
-            )
-        });
-        assert_eq!(decision, Some(Screen::Deny));
-        assert!(out.contains("ERROR"), "expected error-level diagnostic, got: {out}");
-        assert!(out.contains("rcs_filter::capture"), "expected target, got: {out}");
-        assert!(out.contains("observed_count"), "expected observed_count field, got: {out}");
-        assert!(out.contains("10001"), "expected attempted count value, got: {out}");
-        assert!(out.contains("limit"), "expected limit field, got: {out}");
-    }
-
-    #[test]
-    fn realogmismatch_emits_own_arm_four_fields_no_content() {
-        // R9 item 1 / spec §8 test 31. The `RealLogMismatch` arm must be DISTINCT from `Passthrough`:
-        // it emits EXACTLY tx_hash + first_bad_index + observed + expected at error level, while
-        // `Passthrough` (an enabled filter seeing a no-op outcome) stays a tx_hash-only fail-closed
-        // log. Neither may leak real-log or transfer content (there is none to leak — the decision
-        // fn takes only the tx hash and bounded counts).
-        let filter = test_filter();
-
-        let (mismatch_decision, mismatch_out) = capture_tracing(|| {
-            fail_closed_screen(
-                &filter,
-                B256::repeat_byte(0xAB),
-                &CaptureOutcome::InvariantViolation {
-                    reason: CaptureInvariantError::RealLogMismatch {
-                        first_bad_index: 7,
-                        observed: 9,
-                        expected: 11,
-                    },
-                },
-            )
-        });
-        assert_eq!(mismatch_decision, Some(Screen::Deny));
-        assert!(mismatch_out.contains("ERROR"), "expected error level, got: {mismatch_out}");
-        assert!(
-            mismatch_out.contains("rcs_filter::capture"),
-            "expected target, got: {mismatch_out}"
-        );
-        assert!(mismatch_out.contains("tx_hash"), "expected tx_hash field, got: {mismatch_out}");
-        // The four bounded fields, by exact `field=value`, so a timestamp digit cannot spoof them.
-        assert!(
-            mismatch_out.contains("first_bad_index=7"),
-            "expected first_bad_index=7, got: {mismatch_out}"
-        );
-        assert!(mismatch_out.contains("observed=9"), "expected observed=9, got: {mismatch_out}");
-        assert!(mismatch_out.contains("expected=11"), "expected expected=11, got: {mismatch_out}");
-        // It is NOT the LimitExceeded arm (which emits `observed_count`, not `first_bad_index`).
-        assert!(
-            !mismatch_out.contains("observed_count"),
-            "RealLogMismatch must not emit the LimitExceeded `observed_count` field: {mismatch_out}"
-        );
-
-        let (passthrough_decision, passthrough_out) = capture_tracing(|| {
-            fail_closed_screen(&filter, B256::repeat_byte(0xCD), &CaptureOutcome::Passthrough)
-        });
-        assert_eq!(passthrough_decision, Some(Screen::Deny));
-        assert!(passthrough_out.contains("ERROR"), "expected error level, got: {passthrough_out}");
-        assert!(
-            passthrough_out.contains("tx_hash"),
-            "Passthrough log must carry tx_hash, got: {passthrough_out}"
-        );
-        // Passthrough is tx_hash-only: it must NOT be merged with the RealLogMismatch arm and must
-        // never carry the mismatch fields.
-        assert!(
-            !passthrough_out.contains("first_bad_index"),
-            "Passthrough must not carry RealLogMismatch fields (distinct arms): {passthrough_out}"
-        );
-        assert!(
-            !passthrough_out.contains("expected="),
-            "Passthrough must stay tx_hash-only: {passthrough_out}"
-        );
-    }
-
-    #[test]
-    fn capture_guard_disarms_on_success_single_abort_on_err_no_double_abort() {
-        // R9 item 3 / spec §8 test 34. Drive the guard against a lifecycle-counting scope (no EVM
-        // needed) and assert: (a) a successful `finish` disarms so `Drop` does NOT abort; (b) the
-        // `Err` path aborts exactly once via `Drop` (no double-abort); (c) a caught panic still
-        // aborts exactly once and leaves the scope inactive.
-        #[derive(Default)]
-        struct CountingScope {
-            starts: u32,
-            finishes: u32,
-            aborts: u32,
-            configures: u32,
-            active: bool,
-        }
-        impl RcsCaptureScope for CountingScope {
-            fn scope_configure_callstack_capture(&mut self, _config: CallstackCaptureConfig) {
-                self.configures += 1;
-            }
-            fn scope_start_capture(&mut self) {
-                self.starts += 1;
-                self.active = true;
-            }
-            fn scope_finish_capture(&mut self, _result_logs: &[Log]) -> CaptureOutcome {
-                self.finishes += 1;
-                self.active = false;
-                CaptureOutcome::Complete { logs: Vec::new(), observations: test_observations() }
-            }
-            fn scope_abort_capture(&mut self) {
-                self.aborts += 1;
-                self.active = false;
-            }
-        }
-
-        // (a) success → finish disarms → Drop is a no-op.
-        let mut scope = CountingScope::default();
-        {
-            let guard = CaptureGuard::new(&mut scope);
-            let outcome = guard.finish(&[]);
-            assert!(matches!(outcome, CaptureOutcome::Complete { .. }));
-        }
-        assert_eq!(scope.starts, 1, "start_capture runs once on construction");
-        assert_eq!(scope.finishes, 1);
-        assert_eq!(scope.aborts, 0, "a disarmed guard must not abort on Drop");
-        assert!(!scope.active);
-
-        // (b) Err path → guard dropped armed → exactly one abort, no double-abort.
-        let mut scope = CountingScope::default();
-        {
-            let _guard = CaptureGuard::new(&mut scope);
-            // Mirror the `evm.transact` Err path: return without `finish`; guard drops armed.
-        }
-        assert_eq!(scope.starts, 1);
-        assert_eq!(scope.finishes, 0);
-        assert_eq!(scope.aborts, 1, "the Err path aborts exactly once via Drop");
-        assert!(!scope.active);
-
-        // (c) caught panic → the guard's Drop still aborts once, leaving the scope inactive.
-        let mut scope = CountingScope::default();
-        let prev_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {})); // silence the expected panic in test output
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = CaptureGuard::new(&mut scope);
-            panic!("simulated transact panic");
-        }));
-        std::panic::set_hook(prev_hook);
-        assert!(result.is_err(), "the panic must propagate out of catch_unwind");
-        assert_eq!(scope.starts, 1);
-        assert_eq!(scope.aborts, 1, "a caught panic still aborts exactly once via Drop");
-        assert!(!scope.active, "the inspector must be left inactive after an unwind");
-    }
-}
-
 /// Spec §8 **test 35** (R12, GATING) — a LOOP-LEVEL builder-path fail-closed test driven through the
 /// ACTUAL `execute_best_transactions` / `run_tx_loop` candidate loop (§5.1), not a direct
-/// `fail_closed_screen` call and not a re-implementation. R12 rewrites each proof obligation as a
+/// `FilterHandle::capture_failure_decision` call and not a re-implementation. R12 rewrites each proof obligation as a
 /// FALSIFIABLE, mutation-resistant assertion (§5.10.3): each MUST fail under a specific incorrect
 /// implementation.
 /// - **P1.1** — the candidate can reach `AuditPending` (option (a): it emits a REAL ERC20 `Transfer`
@@ -1883,10 +1452,12 @@ mod loop_level_fail_closed_tests {
     /// rather than a hand-built `CaptureOutcome`: the loop's own `RcsInspector::create_end` sees a
     /// genuinely successful CREATE whose deployed address differs from the pre-derived recipient,
     /// `finish_capture` surfaces `InvariantViolation { CreateAddressMismatch }`, and
-    /// `fail_closed_screen` must turn that into a Deny WITHOUT reaching `screen_tx`.
+    /// `FilterHandle::capture_failure_decision` must turn that into a Deny WITHOUT reaching
+    /// `screen_tx`.
     ///
     /// Falsifiable in both directions: removing the `CreateAddressMismatch` arm from
-    /// `fail_closed_screen` fails to compile (the match is exhaustive), and routing the outcome to
+    /// `FilterHandle::capture_failure_decision` fails to compile (the match is exhaustive), and
+    /// routing the outcome to
     /// any non-Deny decision makes the `LAST_SCREEN_DECISION` assertion below fail.
     #[tokio::test]
     async fn loop_level_create_address_mismatch_denies_no_buffer_no_commit_no_receipt() {
@@ -2118,10 +1689,11 @@ mod loop_level_fail_closed_tests {
     /// rather than a helper's `CaptureOutcome`: the loop's own `RcsInspector` (constructed by
     /// `execute_best_transactions` straight from `FilterConfig::max_native_transfers_per_tx`, so no
     /// new production seam is needed) overflows at `limit + 1`, `finish_capture` returns
-    /// `LimitExceeded`, and `fail_closed_screen` must turn that into a Deny WITHOUT reaching
-    /// `screen_tx`.
+    /// `LimitExceeded`, and `FilterHandle::capture_failure_decision` must turn that into a Deny
+    /// WITHOUT reaching `screen_tx`.
     ///
-    /// Falsifiable: temporarily widening the `LimitExceeded` arm of `fail_closed_screen` to return
+    /// Falsifiable: temporarily widening the `LimitExceeded` arm of
+    /// `FilterHandle::capture_failure_decision` to return
     /// a non-`Deny` decision makes the `LAST_SCREEN_DECISION` assertion below fail.
     #[tokio::test]
     async fn loop_level_native_limit_exceeded_denies_no_buffer_no_commit_no_receipt() {

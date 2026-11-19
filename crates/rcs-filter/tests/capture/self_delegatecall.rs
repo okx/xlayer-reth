@@ -121,11 +121,11 @@ fn capture_with(db: InMemoryDB, target: Address, rules: &RuleSet) -> (Vec<CallOb
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::with_callstack(
+        RcsInspector::new(RcsInspectorConfig::native_and_callstack_for_test(
             1_000,
             16,
             CallstackCaptureConfig::new(rules.stamp(), rules.callstack_selectors().to_vec()),
-        ),
+        )),
     );
     evm.components_mut().1.start_capture();
     let result = evm.transact(call_tx(target)).expect("tx executes");

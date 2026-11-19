@@ -59,7 +59,7 @@ pub(crate) fn real_runtime_reallogmismatch_outcome() -> CaptureOutcome {
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::new(16),
+        RcsInspector::native_only_for_test(16),
     );
     evm.components_mut().1.start_capture();
     let result = evm.transact(op_tx).expect("tx executes");
@@ -126,11 +126,11 @@ pub(crate) fn run_observing_tx(
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::with_callstack(
+        RcsInspector::new(RcsInspectorConfig::native_and_callstack_for_test(
             1_000,
             observation_budget,
             CallstackCaptureConfig::new(stamp(), selectors.to_vec()),
-        ),
+        )),
     );
     evm.components_mut().1.start_capture();
     let result = evm.transact(call_tx(target)).expect("tx executes");
@@ -275,11 +275,11 @@ pub(crate) fn run_unarmed_tx(db: InMemoryDB, target: Address, selectors: &[Addre
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::with_callstack(
+        RcsInspector::new(RcsInspectorConfig::native_and_callstack_for_test(
             1_000,
             16,
             CallstackCaptureConfig::new(stamp(), selectors.to_vec()),
-        ),
+        )),
     );
     let result = evm.transact(call_tx(target)).expect("tx executes");
     assert!(result.result.is_success(), "the unarmed control transaction still executes");

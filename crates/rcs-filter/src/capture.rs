@@ -282,7 +282,6 @@ impl RcsCaptureControl for NoOpInspector {
 /// EVM value in a newtype it owns — `impl ForeignTrait for LocalType` is permitted, so that is
 /// what keeps both call sites legal under the orphan rule.
 pub trait RcsCaptureScope {
-    fn scope_configure_callstack_capture(&mut self, config: CallstackCaptureConfig);
     fn scope_start_capture(&mut self);
     fn scope_finish_capture(&mut self, result_logs: &[Log]) -> CaptureOutcome;
     fn scope_abort_capture(&mut self);
@@ -561,6 +560,75 @@ fn record_selfdestruct_step_end(
 /// Per-transaction call-frame observation budget of the payload builder's candidate loop.
 pub const CANDIDATE_MAX_CALLSTACK_OBSERVATIONS_PER_TX: usize = 10_000;
 
+/// Everything one [`RcsInspector`] is built from.
+///
+/// Fields are private: a configuration can only be obtained from a named profile, so a caller
+/// cannot combine a budget with the wrong mode or with a selector set from a different snapshot.
+#[derive(Debug, Clone)]
+pub struct RcsInspectorConfig {
+    mode: CaptureMode,
+    max_native_transfers: usize,
+    max_callstack_observations: usize,
+    callstack: CallstackCaptureConfig,
+}
+
+impl RcsInspectorConfig {
+    /// The payload builder's candidate profile: native transfers AND call frames, the filter's
+    /// native budget, the fixed candidate callstack budget, and the selector set of `rules` (or an
+    /// inert set when no snapshot is pinned).
+    pub fn candidate(max_native_transfers: usize, rules: Option<&RuleSet>) -> Self {
+        Self {
+            mode: CaptureMode::NativeAndCallstack,
+            max_native_transfers,
+            max_callstack_observations: CANDIDATE_MAX_CALLSTACK_OBSERVATIONS_PER_TX,
+            callstack: rules.map(CallstackCaptureConfig::from_rules).unwrap_or_default(),
+        }
+    }
+
+    /// The audit RPC's profile: call frames only, the caller's per-transaction callstack budget,
+    /// and the selector set of the request's own `rules`. The native budget is not applicable in
+    /// this mode; `usize::MAX` only gives the field a value, exactly as the old callstack-only
+    /// profile did.
+    pub fn audit(rules: &RuleSet, max_callstack_observations: usize) -> Self {
+        Self {
+            mode: CaptureMode::CallstackOnly,
+            max_native_transfers: usize::MAX,
+            max_callstack_observations,
+            callstack: CallstackCaptureConfig::from_rules(rules),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl RcsInspectorConfig {
+    /// Test-only: `NativeAndCallstack` with explicit budgets and selector set.
+    pub fn native_and_callstack_for_test(
+        max_native_transfers: usize,
+        max_callstack_observations: usize,
+        callstack: CallstackCaptureConfig,
+    ) -> Self {
+        Self {
+            mode: CaptureMode::NativeAndCallstack,
+            max_native_transfers,
+            max_callstack_observations,
+            callstack,
+        }
+    }
+
+    /// Test-only: `CallstackOnly` with an explicit budget and selector set (e.g. a foreign stamp).
+    pub fn callstack_only_for_test(
+        max_callstack_observations: usize,
+        callstack: CallstackCaptureConfig,
+    ) -> Self {
+        Self {
+            mode: CaptureMode::CallstackOnly,
+            max_native_transfers: usize::MAX,
+            max_callstack_observations,
+            callstack,
+        }
+    }
+}
+
 /// The RCS capture inspector: the **inner** inspector of `alloy_op_evm::OpEvm`'s composite
 /// wrapper. It maintains one ordered queue of real + virtual logs with per-frame checkpoints and a
 /// single, non-rolling-back native-transfer counter with a sticky budget overflow.
@@ -661,54 +729,38 @@ enum PendingObservation {
 }
 
 impl RcsInspector {
+    /// Builds an inspector from a named profile.
+    ///
+    /// This is the only public production constructor: the configuration decides the mode, both
+    /// observation budgets, and the selector set together with the snapshot stamp it belongs to,
+    /// so those can never be combined incorrectly.
+    pub fn new(config: RcsInspectorConfig) -> Self {
+        Self::with_mode(
+            config.max_native_transfers,
+            config.max_callstack_observations,
+            config.callstack,
+            config.mode,
+        )
+    }
+
     /// Creates an inactive inspector with the given native-transfer budget and no call-frame
     /// selectors, leaving the callstack path inert.
     ///
-    /// Test-only: production always builds the inspector from a pinned rule snapshot through
-    /// [`Self::with_callstack`], so that the selector set and the stamp it will be screened
-    /// against can never come from two different snapshots.
+    /// Test-only: production always builds the inspector through [`Self::new`] from a named
+    /// profile, so that the selector set and the stamp it will be screened against can never come
+    /// from two different snapshots.
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn new(max_native_transfers: usize) -> Self {
-        Self::with_callstack(max_native_transfers, usize::MAX, CallstackCaptureConfig::default())
-    }
-
-    /// Creates an inactive inspector with both observation budgets and a capture selector set.
-    ///
-    /// The selector set and the snapshot stamp travel together in `callstack`, so the inspector
-    /// cannot stamp its output with a snapshot other than the one that configured it.
-    pub fn with_callstack(
-        max_native_transfers: usize,
-        max_callstack_observations: usize,
-        callstack: CallstackCaptureConfig,
-    ) -> Self {
-        Self::with_mode(
+    pub fn native_only_for_test(max_native_transfers: usize) -> Self {
+        Self::new(RcsInspectorConfig::native_and_callstack_for_test(
             max_native_transfers,
-            max_callstack_observations,
-            callstack,
-            CaptureMode::NativeAndCallstack,
-        )
-    }
-
-    /// Creates an inactive inspector that observes **only** call frames.
-    ///
-    /// The native-transfer budget is deliberately not a parameter: in this mode it is neither
-    /// applicable nor consulted, so accepting one would invite a caller to believe it does
-    /// something. `usize::MAX` is stored purely so the field has a value.
-    pub fn callstack_only(
-        max_callstack_observations: usize,
-        callstack: CallstackCaptureConfig,
-    ) -> Self {
-        Self::with_mode(
             usize::MAX,
-            max_callstack_observations,
-            callstack,
-            CaptureMode::CallstackOnly,
-        )
+            CallstackCaptureConfig::default(),
+        ))
     }
 
-    /// The one real constructor. Both budgets plus the selector set, the snapshot stamp it
+    /// The one field initialiser. Both budgets plus the selector set, the snapshot stamp it
     /// travels with, and the capture mode.
-    pub fn with_mode(
+    fn with_mode(
         max_native_transfers: usize,
         max_callstack_observations: usize,
         callstack: CallstackCaptureConfig,

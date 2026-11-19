@@ -113,7 +113,11 @@ fn an_empty_selector_set_computes_no_hash_and_tracks_no_frame() {
 #[test]
 fn an_empty_selector_set_pushes_no_frame_record() {
     let any = Address::from([0xD7; 20]);
-    let mut inspector = RcsInspector::with_callstack(1_000, 16, CallstackCaptureConfig::default());
+    let mut inspector = RcsInspector::new(RcsInspectorConfig::native_and_callstack_for_test(
+        1_000,
+        16,
+        CallstackCaptureConfig::default(),
+    ));
     inspector.start_capture();
     inspector.enter_frame_for_test(any, any, Some(CallScheme::Call));
     assert_eq!(inspector.open_frame_count(), 0, "no frame is tracked for an inert selector set");
@@ -417,11 +421,11 @@ fn eip7702_delegation_is_a_call_observation_with_the_executed_delegate_code() {
             CfgEnv::new_with_spec(OpSpecId::JOVIAN),
             BlockEnv { gas_limit: 30_000_000, ..Default::default() },
         ),
-        RcsInspector::with_callstack(
+        RcsInspector::new(RcsInspectorConfig::native_and_callstack_for_test(
             1_000,
             16,
             CallstackCaptureConfig::new(stamp(), vec![authority]),
-        ),
+        )),
     );
     evm.components_mut().1.start_capture();
     let result = evm.transact(op_tx).expect("tx executes");
@@ -495,11 +499,11 @@ fn create_frames_keep_the_frame_stack_balanced_and_emit_no_observation() {
 fn an_unbalanced_frame_stack_fails_closed() {
     // Driven directly, because a real EVM always balances its frames. A leftover entry means
     // parentage cannot be trusted, so the capture must not be reported as complete.
-    let mut inspector = RcsInspector::with_callstack(
+    let mut inspector = RcsInspector::new(RcsInspectorConfig::native_and_callstack_for_test(
         1_000,
         16,
         CallstackCaptureConfig::new(stamp(), vec![Address::repeat_byte(0x11)]),
-    );
+    ));
     inspector.start_capture();
     inspector.enter_frame_for_test(
         Address::repeat_byte(0x11),
@@ -517,11 +521,11 @@ fn an_unbalanced_frame_stack_fails_closed() {
 #[test]
 fn exhausting_the_frame_stack_bound_fails_closed() {
     let selected = Address::repeat_byte(0x11);
-    let mut inspector = RcsInspector::with_callstack(
+    let mut inspector = RcsInspector::new(RcsInspectorConfig::native_and_callstack_for_test(
         1_000,
         usize::MAX,
         CallstackCaptureConfig::new(stamp(), vec![selected]),
-    );
+    ));
     inspector.start_capture();
     for _ in 0..=MAX_OPEN_FRAMES {
         inspector.enter_frame_for_test(selected, selected, Some(CallScheme::Call));
@@ -539,11 +543,11 @@ fn a_staged_candidate_is_discarded_when_its_frame_never_executes() {
     // The stage/commit/discard discipline, exercised directly: entering a frame allocates no
     // observation, and leaving it without a confirmed execution leaves none behind.
     let selected = Address::repeat_byte(0x11);
-    let mut inspector = RcsInspector::with_callstack(
+    let mut inspector = RcsInspector::new(RcsInspectorConfig::native_and_callstack_for_test(
         1_000,
         16,
         CallstackCaptureConfig::new(stamp(), vec![selected]),
-    );
+    ));
     inspector.start_capture();
     inspector.enter_frame_for_test(selected, selected, Some(CallScheme::Call));
     assert!(inspector.observations_for_test().is_empty(), "staging allocates no observation");
@@ -565,11 +569,11 @@ fn a_staged_candidate_is_discarded_when_its_frame_never_executes() {
 #[test]
 fn capture_state_does_not_leak_between_transactions() {
     let selected = Address::repeat_byte(0x11);
-    let mut inspector = RcsInspector::with_callstack(
+    let mut inspector = RcsInspector::new(RcsInspectorConfig::native_and_callstack_for_test(
         1_000,
         1,
         CallstackCaptureConfig::new(stamp(), vec![selected]),
-    );
+    ));
     // First window overflows its observation budget.
     inspector.start_capture();
     for _ in 0..2 {
@@ -595,11 +599,11 @@ fn capture_state_does_not_leak_between_transactions() {
 #[test]
 fn hooks_are_inert_until_capture_is_armed() {
     let selected = Address::repeat_byte(0x11);
-    let mut inspector = RcsInspector::with_callstack(
+    let mut inspector = RcsInspector::new(RcsInspectorConfig::native_and_callstack_for_test(
         1_000,
         16,
         CallstackCaptureConfig::new(stamp(), vec![selected]),
-    );
+    ));
     // Not armed: a gasless pre-check or any non-candidate simulation must capture nothing.
     inspector.enter_frame_for_test(selected, selected, Some(CallScheme::Call));
     inspector.confirm_frame_execution_for_test(B256::repeat_byte(0xaa));
@@ -612,11 +616,11 @@ fn hooks_are_inert_until_capture_is_armed() {
 #[test]
 fn aborting_a_capture_clears_the_observation_state() {
     let selected = Address::repeat_byte(0x11);
-    let mut inspector = RcsInspector::with_callstack(
+    let mut inspector = RcsInspector::new(RcsInspectorConfig::native_and_callstack_for_test(
         1_000,
         16,
         CallstackCaptureConfig::new(stamp(), vec![selected]),
-    );
+    ));
     inspector.start_capture();
     inspector.enter_frame_for_test(selected, selected, Some(CallScheme::Call));
     inspector.confirm_frame_execution_for_test(B256::repeat_byte(0xaa));

@@ -45,7 +45,7 @@ fn noop_inspector_finish_is_passthrough() {
 
 #[test]
 fn inactive_inspector_ignores_all_observations() {
-    let mut inspector = RcsInspector::new(10);
+    let mut inspector = RcsInspector::native_only_for_test(10);
     // Observations before start_capture are dropped by the inactive gate.
     inspector.observe_native_transfer(addr(1), addr(2), U256::from(1u64), NativeTransferKind::Call);
     inspector.record_real_log(real_log(3));
@@ -60,7 +60,7 @@ fn inactive_inspector_ignores_all_observations() {
 fn inactive_inspector_push_pop_checkpoint_and_create_recipients_stay_clean() {
     // push_checkpoint / pop_checkpoint / create_recipients.push are all gated on self.active.
     // An inspector that was never started must leave all internal state untouched.
-    let mut inspector = RcsInspector::new(10);
+    let mut inspector = RcsInspector::native_only_for_test(10);
     inspector.push_checkpoint();
     inspector.push_checkpoint();
     inspector.push_checkpoint();
@@ -88,7 +88,7 @@ fn inactive_inspector_push_pop_checkpoint_and_create_recipients_stay_clean() {
 
 #[test]
 fn observed_count_increments_and_does_not_roll_back() {
-    let mut inspector = RcsInspector::new(10);
+    let mut inspector = RcsInspector::native_only_for_test(10);
     inspector.start_capture();
     inspector.push_checkpoint(); // root frame checkpoint at 0
     inspector.observe_native_transfer(addr(1), addr(2), U256::from(1u64), NativeTransferKind::Call);
@@ -103,7 +103,7 @@ fn observed_count_increments_and_does_not_roll_back() {
 
 #[test]
 fn limit_th_allowed_limit_plus_one_overflows_sticky() {
-    let mut inspector = RcsInspector::new(2);
+    let mut inspector = RcsInspector::native_only_for_test(2);
     inspector.start_capture();
     inspector.observe_native_transfer(addr(1), addr(2), U256::from(1u64), NativeTransferKind::Call);
     inspector.observe_native_transfer(addr(1), addr(2), U256::from(1u64), NativeTransferKind::Call);
@@ -120,7 +120,7 @@ fn limit_th_allowed_limit_plus_one_overflows_sticky() {
 
 #[test]
 fn identical_from_to_value_not_deduplicated() {
-    let mut inspector = RcsInspector::new(10);
+    let mut inspector = RcsInspector::native_only_for_test(10);
     inspector.start_capture();
     inspector.observe_native_transfer(addr(1), addr(2), U256::from(5u64), NativeTransferKind::Call);
     inspector.observe_native_transfer(addr(1), addr(2), U256::from(5u64), NativeTransferKind::Call);
@@ -132,7 +132,7 @@ fn identical_from_to_value_not_deduplicated() {
 
 #[test]
 fn zero_and_self_transfers_are_ignored() {
-    let mut inspector = RcsInspector::new(10);
+    let mut inspector = RcsInspector::native_only_for_test(10);
     inspector.start_capture();
     inspector.observe_native_transfer(addr(1), addr(2), U256::ZERO, NativeTransferKind::Call);
     inspector.observe_native_transfer(addr(1), addr(1), U256::from(9u64), NativeTransferKind::Call);
@@ -144,7 +144,7 @@ fn zero_and_self_transfers_are_ignored() {
 
 #[test]
 fn start_capture_resets_state_between_txs() {
-    let mut inspector = RcsInspector::new(10);
+    let mut inspector = RcsInspector::native_only_for_test(10);
     inspector.start_capture();
     inspector.observe_native_transfer(addr(1), addr(2), U256::from(1u64), NativeTransferKind::Call);
     inspector.record_real_log(real_log(3));
@@ -159,7 +159,7 @@ fn start_capture_resets_state_between_txs() {
 
 #[test]
 fn matching_real_logs_yield_complete() {
-    let mut inspector = RcsInspector::new(10);
+    let mut inspector = RcsInspector::native_only_for_test(10);
     inspector.start_capture();
     inspector.record_real_log(real_log(1));
     inspector.observe_native_transfer(addr(4), addr(5), U256::from(7u64), NativeTransferKind::Call);
@@ -173,7 +173,7 @@ fn matching_real_logs_yield_complete() {
 
 #[test]
 fn real_log_count_mismatch_fails_closed() {
-    let mut inspector = RcsInspector::new(10);
+    let mut inspector = RcsInspector::native_only_for_test(10);
     inspector.start_capture();
     inspector.record_real_log(real_log(1));
     assert!(matches!(
@@ -186,7 +186,7 @@ fn real_log_count_mismatch_fails_closed() {
 
 #[test]
 fn real_log_order_mismatch_fails_closed() {
-    let mut inspector = RcsInspector::new(10);
+    let mut inspector = RcsInspector::native_only_for_test(10);
     inspector.start_capture();
     inspector.record_real_log(real_log(1));
     inspector.record_real_log(real_log(2));
@@ -233,7 +233,7 @@ fn assert_capture_state_is_clean(inspector: &RcsInspector) {
 fn finish_capture_clears_state_on_limit_exceeded_exit() {
     // A `LimitExceeded` finish must leave the inspector fully reset IMMEDIATELY (spec §5.2, R9
     // item 4): the earlier implementation returned on this path before draining the queue.
-    let mut inspector = RcsInspector::new(1);
+    let mut inspector = RcsInspector::native_only_for_test(1);
     inspector.start_capture();
     inspector.push_checkpoint();
     observe_n(&mut inspector, NativeTransferKind::Call, 2);
@@ -256,7 +256,7 @@ fn finish_capture_clears_state_on_limit_exceeded_exit() {
 fn finish_capture_clears_state_on_invariant_exit() {
     // An `InvariantViolation` (RealLog mismatch) finish must ALSO leave the inspector fully reset
     // immediately, never leaking the captured queue into the next transaction (R9 item 4).
-    let mut inspector = RcsInspector::new(10);
+    let mut inspector = RcsInspector::native_only_for_test(10);
     inspector.start_capture();
     inspector.push_checkpoint();
     inspector.record_real_log(real_log(1));
@@ -281,7 +281,7 @@ fn new_selfdestruct_state_cleared_on_every_finish_exit_and_abort() {
     // InvariantViolation, and abort_capture.
 
     // Complete.
-    let mut inspector = RcsInspector::new(10);
+    let mut inspector = RcsInspector::native_only_for_test(10);
     inspector.start_capture();
     inspector.set_selfdestruct_journal_mark_for_test(Some(7));
     inspector.set_selfdestruct_wrote_journal_for_test(true);
@@ -291,7 +291,7 @@ fn new_selfdestruct_state_cleared_on_every_finish_exit_and_abort() {
     assert_capture_state_is_clean(&inspector);
 
     // LimitExceeded.
-    let mut inspector = RcsInspector::new(1);
+    let mut inspector = RcsInspector::native_only_for_test(1);
     inspector.start_capture();
     inspector.push_checkpoint();
     observe_n(&mut inspector, NativeTransferKind::Call, 2);
@@ -310,7 +310,7 @@ fn new_selfdestruct_state_cleared_on_every_finish_exit_and_abort() {
     assert_capture_state_is_clean(&inspector);
 
     // InvariantViolation.
-    let mut inspector = RcsInspector::new(10);
+    let mut inspector = RcsInspector::native_only_for_test(10);
     inspector.start_capture();
     inspector.push_checkpoint();
     inspector.record_real_log(real_log(1));
@@ -322,7 +322,7 @@ fn new_selfdestruct_state_cleared_on_every_finish_exit_and_abort() {
     assert_capture_state_is_clean(&inspector);
 
     // abort_capture.
-    let mut inspector = RcsInspector::new(10);
+    let mut inspector = RcsInspector::native_only_for_test(10);
     inspector.start_capture();
     inspector.set_selfdestruct_journal_mark_for_test(Some(7));
     inspector.set_selfdestruct_wrote_journal_for_test(true);
@@ -338,7 +338,7 @@ fn unconsumed_selfdestruct_flag_does_not_cross_windows() {
     // leaves `selfdestruct_wrote_journal` set; the NEXT window must not inherit it, and a
     // following ordinary (non-SELFDESTRUCT) transfer in that window must not be mis-attributed
     // or doubled.
-    let mut inspector = RcsInspector::new(10);
+    let mut inspector = RcsInspector::native_only_for_test(10);
     inspector.start_capture();
     inspector.set_selfdestruct_wrote_journal_for_test(true); // simulates the abnormal-exit leak
     let _ = inspector.finish_capture(&[]);
@@ -365,7 +365,7 @@ fn observe_n(inspector: &mut RcsInspector, kind: NativeTransferKind, n: usize) {
 
 #[test]
 fn native_budget_boundary_10000_allowed_10001_overflows() {
-    let mut ok = RcsInspector::new(10_000);
+    let mut ok = RcsInspector::native_only_for_test(10_000);
     ok.start_capture();
     observe_n(&mut ok, NativeTransferKind::Call, 10_000);
     match ok.finish_capture(&[]) {
@@ -373,7 +373,7 @@ fn native_budget_boundary_10000_allowed_10001_overflows() {
         other => panic!("expected Complete at limit, got {other:?}"),
     }
 
-    let mut over = RcsInspector::new(10_000);
+    let mut over = RcsInspector::native_only_for_test(10_000);
     over.start_capture();
     observe_n(&mut over, NativeTransferKind::Call, 10_001);
     assert!(matches!(
@@ -389,7 +389,7 @@ fn native_budget_boundary_10000_allowed_10001_overflows() {
 #[test]
 fn selfdestruct_shares_unified_budget_with_call() {
     // limit 1: one qualifying CALL then one qualifying SELFDESTRUCT ⇒ the second overflows.
-    let mut inspector = RcsInspector::new(1);
+    let mut inspector = RcsInspector::native_only_for_test(1);
     inspector.start_capture();
     inspector.observe_native_transfer(addr(1), addr(2), U256::from(1u64), NativeTransferKind::Call);
     inspector.observe_native_transfer(
@@ -410,7 +410,7 @@ fn selfdestruct_shares_unified_budget_with_call() {
 
 #[test]
 fn selfdestruct_then_parent_revert_removes_event_but_count_stays() {
-    let mut inspector = RcsInspector::new(10);
+    let mut inspector = RcsInspector::native_only_for_test(10);
     inspector.start_capture();
     inspector.push_checkpoint(); // parent frame
     inspector.observe_native_transfer(
@@ -427,7 +427,7 @@ fn selfdestruct_then_parent_revert_removes_event_but_count_stays() {
 
 #[test]
 fn selfdestruct_zero_or_self_target_consumes_no_budget() {
-    let mut inspector = RcsInspector::new(10);
+    let mut inspector = RcsInspector::native_only_for_test(10);
     inspector.start_capture();
     inspector.observe_native_transfer(
         addr(3),
@@ -452,7 +452,7 @@ fn selfdestruct_zero_or_self_target_consumes_no_budget() {
 // extract depth/inputs from the EVM context). Runtime execution through OpEvm is the follow-up.
 
 fn armed(limit: usize) -> RcsInspector {
-    let mut inspector = RcsInspector::new(limit);
+    let mut inspector = RcsInspector::native_only_for_test(limit);
     inspector.start_capture();
     inspector
 }
@@ -556,7 +556,10 @@ fn reverse_transfers_parent_revert_removes_both_count_stays() {
 /// for a reason that has nothing to do with call-frame selectors.
 #[test]
 fn callstack_only_never_reports_a_native_budget_outcome() {
-    let mut inspector = RcsInspector::callstack_only(usize::MAX, selector_config());
+    let mut inspector = RcsInspector::new(RcsInspectorConfig::callstack_only_for_test(
+        usize::MAX,
+        selector_config(),
+    ));
     assert_eq!(inspector.mode(), CaptureMode::CallstackOnly);
     inspector.start_capture();
     // 5 native transfers under a native budget that `NativeAndCallstack` would overflow at 1
@@ -582,7 +585,11 @@ fn callstack_only_never_reports_a_native_budget_outcome() {
 /// transfers never reaching the inspector at all).
 #[test]
 fn native_and_callstack_still_overflows_on_the_same_sequence() {
-    let mut inspector = RcsInspector::with_callstack(1, usize::MAX, selector_config());
+    let mut inspector = RcsInspector::new(RcsInspectorConfig::native_and_callstack_for_test(
+        1,
+        usize::MAX,
+        selector_config(),
+    ));
     assert_eq!(inspector.mode(), CaptureMode::NativeAndCallstack);
     inspector.start_capture();
     observe_n(&mut inspector, NativeTransferKind::Call, 5);
@@ -603,9 +610,14 @@ fn native_and_callstack_still_overflows_on_the_same_sequence() {
 #[test]
 fn default_mode_is_native_and_callstack() {
     assert_eq!(CaptureMode::default(), CaptureMode::NativeAndCallstack);
-    assert_eq!(RcsInspector::new(10).mode(), CaptureMode::NativeAndCallstack);
+    assert_eq!(RcsInspector::native_only_for_test(10).mode(), CaptureMode::NativeAndCallstack);
     assert_eq!(
-        RcsInspector::with_callstack(10, 10, CallstackCaptureConfig::default()).mode(),
+        RcsInspector::new(RcsInspectorConfig::native_and_callstack_for_test(
+            10,
+            10,
+            CallstackCaptureConfig::default()
+        ))
+        .mode(),
         CaptureMode::NativeAndCallstack
     );
 }
@@ -614,7 +626,8 @@ fn default_mode_is_native_and_callstack() {
 /// a truncated observation set is not adjudicable.
 #[test]
 fn callstack_only_still_enforces_the_callstack_budget() {
-    let mut inspector = RcsInspector::callstack_only(0, selector_config());
+    let mut inspector =
+        RcsInspector::new(RcsInspectorConfig::callstack_only_for_test(0, selector_config()));
     inspector.start_capture();
     inspector
         .commit_observation_for_test(CallObservation::call(addr(0xAA), B256::repeat_byte(0xCC)));
@@ -630,7 +643,8 @@ fn callstack_only_still_enforces_the_callstack_budget() {
 fn callstack_only_still_produces_stamped_observations() {
     let config = selector_config();
     let stamp = config.stamp_for_test().expect("a configured selector set carries a stamp");
-    let mut inspector = RcsInspector::callstack_only(usize::MAX, config);
+    let mut inspector =
+        RcsInspector::new(RcsInspectorConfig::callstack_only_for_test(usize::MAX, config));
     inspector.start_capture();
     let observation = CallObservation::call(addr(0xAA), B256::repeat_byte(0xCC));
     inspector.commit_observation_for_test(observation);
@@ -642,6 +656,58 @@ fn callstack_only_still_produces_stamped_observations() {
         }
         other => panic!("expected Complete, got {other:?}"),
     }
+}
+
+/// The candidate profile is the payload builder's: native transfers plus call frames, the fixed
+/// 10 000 call-frame observation budget, and an inert selector set when no snapshot is given.
+#[test]
+fn the_candidate_profile_captures_natively_with_the_10000_callstack_budget() {
+    let mut inspector = RcsInspector::new(RcsInspectorConfig::candidate(3, None));
+    assert_eq!(inspector.mode(), CaptureMode::NativeAndCallstack);
+    inspector.start_capture();
+    let observation = CallObservation::call(addr(0xAA), B256::repeat_byte(0xCC));
+    for _ in 0..10_000 {
+        inspector.commit_observation_for_test(observation);
+    }
+    assert!(matches!(inspector.finish_capture(&[]), CaptureOutcome::Complete { .. }));
+
+    let mut over = RcsInspector::new(RcsInspectorConfig::candidate(3, None));
+    over.start_capture();
+    for _ in 0..10_001 {
+        over.commit_observation_for_test(observation);
+    }
+    assert!(matches!(
+        over.finish_capture(&[]),
+        CaptureOutcome::LimitExceeded {
+            attempted: 10_001,
+            limit: 10_000,
+            budget: ObservationBudget::Callstack,
+        }
+    ));
+}
+
+/// The audit profile is call-frames only with the caller's budget: native observations are
+/// no-ops, and the given call-frame budget is the one enforced.
+#[test]
+fn the_audit_profile_is_callstack_only_with_the_given_budget() {
+    let rules = rcs_filter::rules::RuleSet::default();
+    let mut inspector = RcsInspector::new(RcsInspectorConfig::audit(&rules, 1_000));
+    assert_eq!(inspector.mode(), CaptureMode::CallstackOnly);
+    inspector.start_capture();
+    observe_n(&mut inspector, NativeTransferKind::Call, 5);
+    assert_eq!(inspector.observed_count_for_test(), 0, "native capture is a no-op in this mode");
+    let observation = CallObservation::call(addr(0xAA), B256::repeat_byte(0xCC));
+    for _ in 0..1_001 {
+        inspector.commit_observation_for_test(observation);
+    }
+    assert!(matches!(
+        inspector.finish_capture(&[]),
+        CaptureOutcome::LimitExceeded {
+            attempted: 1_001,
+            limit: 1_000,
+            budget: ObservationBudget::Callstack,
+        }
+    ));
 }
 
 /// A selector-bearing configuration with a real stamp, for the mode tests above.

@@ -3,6 +3,7 @@
 mod callstack_observation;
 mod fixtures;
 mod gating_integration;
+mod guard;
 mod inspector;
 mod nested_proxy;
 mod self_delegatecall;

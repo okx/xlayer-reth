@@ -2,6 +2,7 @@
 
 mod callstack_screening;
 mod callstack_types;
+mod capture_screen;
 mod four_field;
 mod rules_install;
 mod rules_schema;
