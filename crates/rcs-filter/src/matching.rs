@@ -219,7 +219,25 @@ fn evaluate_checked(
 
                 // Stage three: action merge with deny short-circuit.
                 match rule.action {
-                    Action::Deny => ControlFlow::Break(MatchOutcome::Deny),
+                    Action::Deny => {
+                        tracing::warn!(
+                            target: "rcs_filter",
+                            alert = "XL_RCS_ALERT",
+                            stage = "rule_match",
+                            reason = "deny_rule",
+                            outcome = "excluded_from_block",
+                            tx_hash = %input.tx_hash,
+                            rule_id = %rule.id,
+                            origin = %input.origin,
+                            tx_to = input.tx_to.map(tracing::field::display),
+                            nonce = input.nonce,
+                            value = %input.value,
+                            block_height = input.block_height,
+                            log_count = input.logs.len(),
+                            "XL_RCS_ALERT RCS denied transaction"
+                        );
+                        ControlFlow::Break(MatchOutcome::Deny)
+                    }
                     Action::Allow => ControlFlow::Continue(()),
                     Action::Audit => {
                         // Never emit an empty-action Audit: an all-null binding that satisfies an
@@ -614,6 +632,42 @@ mod tests {
     use crate::test_support::{golden, log_builder};
     use alloy_primitives::{keccak256, Bytes, LogData, U256};
     use serde_json::json;
+
+    /// Runs `f` under a capturing `tracing` subscriber and returns its result plus everything it
+    /// logged, so a test can assert the level, target, message and exact fields of an alert.
+    fn capture_tracing<R>(f: impl FnOnce() -> R) -> (R, String) {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct BufWriter(Arc<Mutex<Vec<u8>>>);
+        impl Write for BufWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl tracing_subscriber::fmt::MakeWriter<'_> for BufWriter {
+            type Writer = BufWriter;
+            fn make_writer(&self) -> BufWriter {
+                self.clone()
+            }
+        }
+
+        let buf = BufWriter(Arc::new(Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_target(true)
+            .with_writer(buf.clone())
+            .finish();
+        let out = tracing::subscriber::with_default(subscriber, f);
+        let logged = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        (out, logged)
+    }
 
     fn ruleset_a() -> RuleSet {
         load_rules(1, 1, vec![serde_json::from_str(golden::RULE_SCENARIO_A).unwrap()])
@@ -1219,8 +1273,15 @@ mod tests {
             golden::one_token(),
         )];
         reset_decode_attempts();
-        assert_eq!(evaluate(&rules, &transfer_input(&logs)), MatchOutcome::Deny);
+        let (outcome, out) = capture_tracing(|| evaluate(&rules, &transfer_input(&logs)));
+        assert_eq!(outcome, MatchOutcome::Deny);
         assert_eq!(decode_attempts(), 1);
+        assert_eq!(
+            out.matches("XL_RCS_ALERT RCS denied transaction").count(),
+            1,
+            "exactly one alert: {out}"
+        );
+        assert!(out.contains("rule_id=deny-first"), "expected the denying rule id: {out}");
     }
 
     #[test]
@@ -1242,7 +1303,9 @@ mod tests {
             logs: &logs,
             observations: Observations::NOT_CAPTURED,
         };
-        match evaluate(&rules, &input) {
+        let (outcome, out) = capture_tracing(|| evaluate(&rules, &input));
+        assert!(!out.contains("XL_RCS_ALERT"), "an audit decision emits no deny alert: {out}");
+        match outcome {
             MatchOutcome::Audit { actions, .. } => {
                 let quota = actions.get("quota").expect("quota key");
                 assert_eq!(quota.len(), 1);
@@ -1630,7 +1693,28 @@ mod tests {
             logs: &logs,
             observations: Observations::NOT_CAPTURED,
         };
-        assert_eq!(evaluate(&rules, &input), MatchOutcome::Deny);
+        let (outcome, out) = capture_tracing(|| evaluate(&rules, &input));
+        assert_eq!(outcome, MatchOutcome::Deny);
+        assert_eq!(
+            out.matches("XL_RCS_ALERT RCS denied transaction").count(),
+            1,
+            "exactly one alert: {out}"
+        );
+        assert!(out.contains("WARN"), "expected warn level: {out}");
+        assert!(out.contains("stage=\"rule_match\""), "expected stage: {out}");
+        assert!(out.contains("reason=\"deny_rule\""), "expected reason: {out}");
+        assert!(out.contains("outcome=\"excluded_from_block\""), "expected outcome: {out}");
+        assert!(
+            out.contains("rule_id=blk-compromised-contract"),
+            "expected the denying rule id: {out}"
+        );
+        assert!(out.contains(&format!("tx_hash={:#x}", golden::tx_b())), "expected tx_hash: {out}");
+        assert!(out.contains("origin="), "expected origin: {out}");
+        assert!(out.contains("tx_to="), "expected tx_to: {out}");
+        assert!(out.contains("nonce=0"), "expected nonce: {out}");
+        assert!(out.contains("value="), "expected value: {out}");
+        assert!(out.contains("block_height=1000000"), "expected block_height: {out}");
+        assert!(out.contains("log_count=1"), "expected log_count: {out}");
     }
 
     #[test]
@@ -1646,6 +1730,8 @@ mod tests {
             logs: &[],
             observations: Observations::NOT_CAPTURED,
         };
-        assert_eq!(evaluate(&rules, &input), MatchOutcome::Allow);
+        let (outcome, out) = capture_tracing(|| evaluate(&rules, &input));
+        assert_eq!(outcome, MatchOutcome::Allow);
+        assert!(!out.contains("XL_RCS_ALERT"), "an allow decision emits no alert: {out}");
     }
 }
