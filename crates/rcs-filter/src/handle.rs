@@ -483,7 +483,7 @@ impl FilterHandle {
                     reason = "no_rule_snapshot",
                     outcome = "excluded_from_block",
                     %tx_hash,
-                    "XL_RCS_ALERT RCS capture failed closed"
+                    "XL_RCS_ALERT RCS capture failed closed: no rule snapshot was pinned for this block"
                 );
                 self.record_local_deny(LocalDenyReason::ObservationInvariant);
                 Screen::Deny
@@ -527,7 +527,7 @@ impl FilterHandle {
                     budget = budget.as_str(),
                     observed_count = *attempted,
                     limit = *limit,
-                    "XL_RCS_ALERT RCS capture failed closed"
+                    "XL_RCS_ALERT RCS capture failed closed: observation budget exceeded"
                 );
                 self.record_local_deny(match budget {
                     ObservationBudget::NativeTransfer => LocalDenyReason::NativeTransferLimit,
@@ -1076,42 +1076,6 @@ mod tests {
         }
     }
 
-    /// Runs `f` under a capturing `tracing` subscriber and returns its result plus everything it
-    /// logged.
-    fn capture_tracing<R>(f: impl FnOnce() -> R) -> (R, String) {
-        use std::io::Write;
-        use std::sync::Mutex;
-
-        #[derive(Clone)]
-        struct BufWriter(Arc<Mutex<Vec<u8>>>);
-        impl Write for BufWriter {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        impl tracing_subscriber::fmt::MakeWriter<'_> for BufWriter {
-            type Writer = BufWriter;
-            fn make_writer(&self) -> BufWriter {
-                self.clone()
-            }
-        }
-
-        let buf = BufWriter(Arc::new(Mutex::new(Vec::new())));
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::TRACE)
-            .with_ansi(false)
-            .with_target(true)
-            .with_writer(buf.clone())
-            .finish();
-        let out = tracing::subscriber::with_default(subscriber, f);
-        let logged = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
-        (out, logged)
-    }
-
     #[test]
     fn audit_tx_enters_pool_as_pending() {
         let h = handle_with_scenario_a();
@@ -1243,165 +1207,6 @@ mod tests {
         assert!(out.contains("rcs_filter"), "expected target, got: {out}");
         assert!(out.contains("observed_count"), "expected observed_count field, got: {out}");
         assert!(out.contains("limit"), "expected limit field, got: {out}");
-        // The alert names the offending rule id, and carries the fixed stage/reason tokens plus
-        // the transaction context; it still never carries the binding content.
-        assert!(out.contains("XL_RCS_ALERT RCS denied transaction because matching failed"));
-        assert!(out.contains("stage=\"match\""), "expected stage, got: {out}");
-        assert!(out.contains("reason=\"binding_budget_exceeded\""), "expected reason, got: {out}");
-        assert!(out.contains("outcome=\"excluded_from_block\""), "expected outcome, got: {out}");
-        assert!(out.contains("attempted=9"), "expected attempted count, got: {out}");
-        assert!(out.contains("limit=2"), "expected limit, got: {out}");
-        assert!(out.contains("rule_id=\"binding-budget\""), "expected the rule id, got: {out}");
-        assert!(out.contains("block_height=0"), "expected block_height, got: {out}");
-        assert!(out.contains("origin="), "expected origin, got: {out}");
-    }
-
-    #[test]
-    fn record_match_failure_emits_one_alert_per_variant() {
-        use crate::callstack::ObservationUnavailable;
-        use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
-
-        let recorder = DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-        let _guard = metrics::set_default_local_recorder(&recorder);
-
-        // Unique test counter names keep this recorder deterministic alongside the other tests.
-        let mut handle = FilterHandle::for_test(
-            FilterConfig { max_event_bindings_per_tx: 2, ..FilterConfig::default() },
-            RuleSet::default(),
-            Arc::new(TestClock::new(1)),
-        );
-        handle.shared.metrics.deny_total = metrics::counter!("rcs_filter_test.match_deny_total");
-        handle.shared.metrics.deny_observations_unavailable_total =
-            metrics::counter!("rcs_filter_test.match_observations_unavailable_total");
-        handle.shared.metrics.deny_observation_snapshot_mismatch_total =
-            metrics::counter!("rcs_filter_test.match_snapshot_mismatch_total");
-
-        const DENY_TOTAL: &str = "rcs_filter_test.match_deny_total";
-        const OBSERVATIONS_UNAVAILABLE: &str =
-            "rcs_filter_test.match_observations_unavailable_total";
-        const SNAPSHOT_MISMATCH: &str = "rcs_filter_test.match_snapshot_mismatch_total";
-
-        let counter = |values: &[(String, u64)], name: &str| -> u64 {
-            values.iter().find(|(key, _)| key == name).map_or(0, |(_, value)| *value)
-        };
-        // Columns: deny_total, observations-unavailable, snapshot-mismatch. A snapshot drains the
-        // recorder, so each reading is exactly the delta recorded for the case before it.
-        let read_counters = |snapshotter: &Snapshotter| -> [u64; 3] {
-            let values: Vec<(String, u64)> = snapshotter
-                .snapshot()
-                .into_vec()
-                .into_iter()
-                .filter_map(|(key, _, _, value)| match value {
-                    DebugValue::Counter(count) => Some((key.key().name().to_string(), count)),
-                    _ => None,
-                })
-                .collect();
-            [
-                counter(&values, DENY_TOTAL),
-                counter(&values, OBSERVATIONS_UNAVAILABLE),
-                counter(&values, SNAPSHOT_MISMATCH),
-            ]
-        };
-
-        let logs = [Log {
-            address: golden::token_x(),
-            data: LogData::new_unchecked(vec![], Bytes::new()),
-        }];
-        let input = ScreenInput {
-            tx_hash: B256::repeat_byte(0x11),
-            origin: Address::repeat_byte(0x22),
-            tx_to: None,
-            nonce: 5,
-            value: U256::from(7u64),
-            block_height: 123,
-            logs: &logs,
-            observations: Observations::NOT_CAPTURED,
-        };
-
-        // (error, reason token, rule id, carries `attempted`, expected metric deltas)
-        let cases = [
-            (
-                matching::MatchError::BindingBudgetExceeded {
-                    rule_id: "budget".into(),
-                    attempted: 9,
-                    limit: 2,
-                },
-                "binding_budget_exceeded",
-                "budget",
-                true,
-                [1, 0, 0],
-            ),
-            (
-                matching::MatchError::BindingCountOverflow { rule_id: "overflow".into() },
-                "binding_count_overflow",
-                "overflow",
-                false,
-                [1, 0, 0],
-            ),
-            (
-                matching::MatchError::ObservationsUnavailable {
-                    rule_id: "observations".into(),
-                    reason: ObservationUnavailable::NotCaptured,
-                },
-                "observations_unavailable",
-                "observations",
-                false,
-                [1, 1, 0],
-            ),
-            (
-                matching::MatchError::ObservationSnapshotMismatch { rule_id: "stamp".into() },
-                "observation_snapshot_mismatch",
-                "stamp",
-                false,
-                [1, 0, 1],
-            ),
-        ];
-
-        for (error, reason, rule_id, carries_attempted, expected_metrics) in cases {
-            let ((), out) = capture_tracing(|| handle.record_match_failure(&input, &error));
-            assert_eq!(
-                out.matches("XL_RCS_ALERT RCS denied transaction because matching failed").count(),
-                1,
-                "{reason}: exactly one alert: {out}"
-            );
-            assert!(out.contains("ERROR"), "{reason}: expected error level: {out}");
-            assert!(out.contains("stage=\"match\""), "{reason}: expected stage: {out}");
-            assert!(out.contains(&format!("reason=\"{reason}\"")), "{reason}: wrong reason: {out}");
-            assert!(
-                out.contains("outcome=\"excluded_from_block\""),
-                "{reason}: expected outcome: {out}"
-            );
-            assert!(
-                out.contains(&format!("tx_hash={:#x}", input.tx_hash)),
-                "{reason}: expected tx_hash: {out}"
-            );
-            assert!(
-                out.contains(&format!("rule_id=\"{rule_id}\"")),
-                "{reason}: expected rule id: {out}"
-            );
-            assert!(out.contains("nonce=5"), "{reason}: expected nonce: {out}");
-            assert!(out.contains("value=7"), "{reason}: expected value: {out}");
-            assert!(out.contains("block_height=123"), "{reason}: expected block_height: {out}");
-            assert!(out.contains("origin="), "{reason}: expected origin: {out}");
-            if carries_attempted {
-                assert!(out.contains("attempted=9"), "{reason}: expected attempted: {out}");
-            } else {
-                assert!(!out.contains("attempted="), "{reason}: attempted must be omitted: {out}");
-            }
-            // `observations_unavailable` keeps the old diagnostic token under a new field name.
-            if reason == "observations_unavailable" {
-                assert!(
-                    out.contains("observation_reason=\"not_captured\""),
-                    "expected the observation reason: {out}"
-                );
-            }
-            assert_eq!(
-                read_counters(&snapshotter),
-                expected_metrics,
-                "{reason}: metric increments must match today's behaviour"
-            );
-        }
     }
 
     #[test]

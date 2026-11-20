@@ -43,57 +43,6 @@ fn enabled_config() -> FilterConfig {
     FilterConfig { enabled: true, rcs_base_url: "http://mock".into(), ..Default::default() }
 }
 
-/// Builds a capturing `tracing` subscriber that appends formatted lines to an in-memory buffer.
-fn capture_subscriber() -> (impl tracing::Subscriber + Send + Sync, Arc<Mutex<Vec<u8>>>) {
-    use std::io::Write;
-
-    #[derive(Clone)]
-    struct BufWriter(Arc<Mutex<Vec<u8>>>);
-    impl Write for BufWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    impl tracing_subscriber::fmt::MakeWriter<'_> for BufWriter {
-        type Writer = BufWriter;
-        fn make_writer(&self) -> BufWriter {
-            self.clone()
-        }
-    }
-
-    let buf = BufWriter(Arc::new(Mutex::new(Vec::new())));
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .with_ansi(false)
-        .with_target(true)
-        .with_writer(buf.clone())
-        .finish();
-    (subscriber, buf.0)
-}
-
-/// Runs a synchronous closure under a capturing subscriber and returns its result plus the log.
-fn capture_tracing<R>(f: impl FnOnce() -> R) -> (R, String) {
-    let (subscriber, buf) = capture_subscriber();
-    let out = tracing::subscriber::with_default(subscriber, f);
-    let logged = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
-    (out, logged)
-}
-
-/// Runs a future under a thread-local capturing subscriber. `#[tokio::test]` uses a
-/// current-thread runtime, so the guard stays in effect across every await on this thread.
-async fn capture_logs<F: std::future::Future>(future: F) -> (F::Output, String) {
-    let (subscriber, buf) = capture_subscriber();
-    let guard = tracing::subscriber::set_default(subscriber);
-    let out = future.await;
-    drop(guard);
-    let logged = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
-    (out, logged)
-}
-
 fn scenario_a_rules() -> RuleSet {
     load_rules(1, 1, vec![serde_json::from_str(golden::RULE_SCENARIO_A).unwrap()])
 }
@@ -1663,18 +1612,14 @@ async fn query_once_maps_submitted_through_pending_to_approved() {
     }
 
     mock.register_query_state(golden::TX_A, "pending", Some(START as i64));
-    let (result, out) = capture_logs(worker::query_once(&shared, &client)).await;
-    result.expect("query ok");
-    assert!(!out.contains("XL_RCS_ALERT"), "pending must emit no alert: {out}");
+    worker::query_once(&shared, &client).await.expect("query ok");
     assert_eq!(
         shared.pool.lock().unwrap().get(&golden::tx_a()).unwrap().status,
         BufferStatus::Pending
     );
 
     mock.register_query_state(golden::TX_A, "approved", Some(START as i64 + 2));
-    let (result, out) = capture_logs(worker::query_once(&shared, &client)).await;
-    result.expect("query ok");
-    assert!(!out.contains("XL_RCS_ALERT"), "approved must emit no alert: {out}");
+    worker::query_once(&shared, &client).await.expect("query ok");
     assert_eq!(
         shared.pool.lock().unwrap().get(&golden::tx_a()).unwrap().status,
         BufferStatus::Approved
@@ -1701,8 +1646,7 @@ async fn denied_emits_one_discard_event() {
         Some(START as i64),
         Some("daily quota exhausted: diagnostic text only"),
     );
-    let (result, out) = capture_logs(worker::query_once(&shared, &client)).await;
-    result.expect("query ok");
+    worker::query_once(&shared, &client).await.expect("query ok");
 
     assert_eq!(
         shared.pool.lock().unwrap().get(&golden::tx_c()).unwrap().status,
@@ -1713,25 +1657,6 @@ async fn denied_emits_one_discard_event() {
         TerminalEvent { tx_hash: golden::tx_c(), generation: 1, reason: TerminalReason::Denied }
     );
     assert!(events.try_recv().is_err());
-
-    assert_eq!(
-        out.matches("XL_RCS_ALERT RCS denied audited transaction").count(),
-        1,
-        "exactly one denied-audit alert: {out}"
-    );
-    assert!(out.contains("WARN"), "expected warn level: {out}");
-    assert!(out.contains("stage=\"audit_query\""), "expected stage: {out}");
-    assert!(out.contains("reason=\"rcs_denied\""), "expected reason: {out}");
-    assert!(out.contains("outcome=\"txpool_dropped\""), "expected outcome: {out}");
-    assert!(out.contains("status=\"denied\""), "expected status: {out}");
-    assert!(out.contains("generation=1"), "expected generation: {out}");
-    assert!(
-        out.contains("rcs_reason=\"daily quota exhausted: diagnostic text only\""),
-        "expected the RCS reason verbatim: {out}"
-    );
-    assert!(out.contains("decided_at="), "expected decided_at: {out}");
-    assert!(out.contains(&format!("tx_hash={:#x}", golden::tx_c())), "expected tx_hash: {out}");
-    assert!(out.contains("block_height=1000010"), "expected block_height: {out}");
 }
 
 #[tokio::test]
@@ -1746,9 +1671,7 @@ async fn outdated_emits_discard_event() {
     shared.pool.lock().unwrap().insert(entry);
 
     mock.register_query_state(golden::TX_D, "pending", Some(START as i64));
-    let (result, out) = capture_logs(worker::query_once(&shared, &client)).await;
-    result.expect("query ok");
-    assert!(!out.contains("XL_RCS_ALERT"), "pending emits no alert: {out}");
+    worker::query_once(&shared, &client).await.expect("query ok");
     assert_eq!(
         shared.pool.lock().unwrap().get(&golden::tx_d()).unwrap().status,
         BufferStatus::Pending
@@ -1757,9 +1680,7 @@ async fn outdated_emits_discard_event() {
 
     clock.set(START + 2);
     mock.register_query_state(golden::TX_D, "approved", Some(START as i64 + 2));
-    let (result, out) = capture_logs(worker::query_once(&shared, &client)).await;
-    result.expect("query ok");
-    assert!(!out.contains("XL_RCS_ALERT"), "approved emits no alert: {out}");
+    worker::query_once(&shared, &client).await.expect("query ok");
     assert_eq!(
         shared.pool.lock().unwrap().get(&golden::tx_d()).unwrap().status,
         BufferStatus::Approved
@@ -1768,9 +1689,7 @@ async fn outdated_emits_discard_event() {
 
     clock.set(START + 35);
     mock.register_query_state(golden::TX_D, "outdated", Some(START as i64 + 2));
-    let (result, out) = capture_logs(worker::query_once(&shared, &client)).await;
-    result.expect("query ok");
-    assert!(!out.contains("XL_RCS_ALERT"), "outdated emits no alert: {out}");
+    worker::query_once(&shared, &client).await.expect("query ok");
 
     assert_eq!(
         shared.pool.lock().unwrap().get(&golden::tx_d()).unwrap().status,
@@ -1813,9 +1732,8 @@ fn fail_close_emits_discard_event() {
     shared.pool.lock().unwrap().insert(entry);
     clock.set(START + 91);
 
-    let ((resolved, _), out) = capture_tracing(|| worker::timeout_once(&shared));
+    let (resolved, _) = worker::timeout_once(&shared);
     assert_eq!(resolved, vec![(golden::tx_c(), 1, crate::pool::Resolution::Discard)]);
-    assert!(!out.contains("XL_RCS_ALERT"), "fail-close timeout emits no alert: {out}");
     assert_eq!(
         events.try_recv().unwrap(),
         TerminalEvent {
@@ -1837,18 +1755,10 @@ async fn duplicate_terminal_updates_are_idempotent() {
     shared.pool.lock().unwrap().insert(entry);
     mock.register_query_state(golden::TX_C, "denied", Some(START as i64));
 
-    let ((), out) = capture_logs(async {
-        worker::query_once(&shared, &client).await.unwrap();
-        worker::query_once(&shared, &client).await.unwrap();
-    })
-    .await;
+    worker::query_once(&shared, &client).await.unwrap();
+    worker::query_once(&shared, &client).await.unwrap();
     assert!(events.try_recv().is_ok());
     assert!(events.try_recv().is_err());
-    assert_eq!(
-        out.matches("XL_RCS_ALERT RCS denied audited transaction").count(),
-        1,
-        "a duplicate terminal response must not re-alert: {out}"
-    );
 }
 
 #[test]

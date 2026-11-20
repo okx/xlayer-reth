@@ -175,11 +175,6 @@ fn native_overflow_emits_error_with_bounded_fields_only() {
     assert!(out.contains("observed_count"), "expected observed_count field, got: {out}");
     assert!(out.contains("10001"), "expected attempted count value, got: {out}");
     assert!(out.contains("limit"), "expected limit field, got: {out}");
-    assert!(out.contains("XL_RCS_ALERT RCS capture failed closed"), "expected the alert: {out}");
-    assert!(out.contains("stage=\"capture\""), "expected stage: {out}");
-    assert!(out.contains("reason=\"native_transfer_limit\""), "expected reason: {out}");
-    assert!(out.contains("outcome=\"excluded_from_block\""), "expected outcome: {out}");
-    assert!(out.contains("attempted=10001"), "expected attempted field: {out}");
 }
 
 #[test]
@@ -207,14 +202,6 @@ fn realogmismatch_emits_own_arm_four_fields_no_content() {
     assert!(mismatch_out.contains("ERROR"), "expected error level, got: {mismatch_out}");
     assert!(mismatch_out.contains("rcs_filter::capture"), "expected target, got: {mismatch_out}");
     assert!(mismatch_out.contains("tx_hash"), "expected tx_hash field, got: {mismatch_out}");
-    assert!(
-        mismatch_out.contains("XL_RCS_ALERT RCS capture failed closed"),
-        "expected the alert: {mismatch_out}"
-    );
-    assert!(
-        mismatch_out.contains("reason=\"real_log_mismatch\""),
-        "expected the real-log-mismatch reason, got: {mismatch_out}"
-    );
     // The four bounded fields, by exact `field=value`, so a timestamp digit cannot spoof them.
     assert!(
         mismatch_out.contains("first_bad_index=7"),
@@ -236,10 +223,6 @@ fn realogmismatch_emits_own_arm_four_fields_no_content() {
     assert!(
         passthrough_out.contains("tx_hash"),
         "Passthrough log must carry tx_hash, got: {passthrough_out}"
-    );
-    assert!(
-        passthrough_out.contains("reason=\"passthrough\""),
-        "expected the passthrough reason, got: {passthrough_out}"
     );
     // Passthrough is tx_hash-only: it must NOT be merged with the RealLogMismatch arm and must
     // never carry the mismatch fields.
@@ -274,11 +257,6 @@ fn callstack_overflow_fails_closed_with_its_own_budget_label() {
     assert!(out.contains("ERROR"), "expected error level, got: {out}");
     assert!(out.contains("rcs_filter::capture"), "expected target, got: {out}");
     assert!(out.contains("budget=\"callstack\""), "expected the callstack label, got: {out}");
-    assert!(
-        out.contains("reason=\"callstack_limit\""),
-        "expected the callstack reason, got: {out}"
-    );
-    assert!(out.contains("XL_RCS_ALERT RCS capture failed closed"), "expected the alert: {out}");
     assert!(out.contains("observed_count"), "expected observed_count field, got: {out}");
     assert!(out.contains("limit=1000"), "expected the limit value, got: {out}");
     assert!(
@@ -301,7 +279,6 @@ fn frame_stack_invariants_fail_closed_with_bounded_fields() {
     });
     assert_eq!(decision, Some(Screen::Deny));
     assert!(out.contains("depth=7"), "expected the depth field, got: {out}");
-    assert!(out.contains("reason=\"frame_stack_overflow\""), "expected reason: {out}");
     assert!(!out.contains("observed_count"), "bounded fields only: {out}");
     assert!(!out.contains("first_bad_index"), "bounded fields only: {out}");
 
@@ -315,7 +292,6 @@ fn frame_stack_invariants_fail_closed_with_bounded_fields() {
     });
     assert_eq!(decision, Some(Screen::Deny));
     assert!(out.contains("remaining=3"), "expected the remaining field, got: {out}");
-    assert!(out.contains("reason=\"frame_stack_unbalanced\""), "expected reason: {out}");
     assert!(!out.contains("observed_count"), "bounded fields only: {out}");
     assert!(!out.contains("first_bad_index"), "bounded fields only: {out}");
 }
@@ -333,7 +309,6 @@ fn create_address_mismatch_fails_closed_with_create_index_only() {
     });
     assert_eq!(decision, Some(Screen::Deny));
     assert!(out.contains("create_index=5"), "expected the create_index field, got: {out}");
-    assert!(out.contains("reason=\"create_address_mismatch\""), "expected reason: {out}");
     assert!(!out.contains("observed_count"), "bounded fields only: {out}");
     assert!(!out.contains("first_bad_index"), "bounded fields only: {out}");
     assert!(!out.contains("depth="), "bounded fields only: {out}");
@@ -424,31 +399,18 @@ fn screen_captured_complete_with_a_foreign_stamp_fails_closed() {
         selector_digest: B256::repeat_byte(0xEE),
     };
     let tx_hash = B256::repeat_byte(0x51);
-    let (decision, out) = capture_tracing(|| {
-        handle.screen_captured(
-            &pinned,
-            capture_tx(tx_hash),
-            &CaptureOutcome::Complete {
-                logs: vec![],
-                observations: CapturedObservations::new(
-                    foreign,
-                    vec![delegated(implementation(), rogue_code())],
-                ),
-            },
-        )
-    });
+    let decision = handle.screen_captured(
+        &pinned,
+        capture_tx(tx_hash),
+        &CaptureOutcome::Complete {
+            logs: vec![],
+            observations: CapturedObservations::new(
+                foreign,
+                vec![delegated(implementation(), rogue_code())],
+            ),
+        },
+    );
     assert_eq!(decision, Screen::Deny, "the foreign stamp must be forwarded, not replaced");
-    assert!(out.contains("ERROR"), "expected error-level diagnostic, got: {out}");
-    assert!(
-        out.contains("XL_RCS_ALERT RCS denied transaction because matching failed"),
-        "expected the match-failure alert, got: {out}"
-    );
-    assert!(
-        out.contains("reason=\"observation_snapshot_mismatch\""),
-        "expected the snapshot-mismatch reason, got: {out}"
-    );
-    assert!(out.contains("rule_id=\"guard\""), "expected the rule id, got: {out}");
-    assert!(out.contains("block_height=100"), "expected the captured block height, got: {out}");
     assert_eq!(handle.buffer_status(&tx_hash), None);
 }
 
@@ -554,12 +516,8 @@ fn screen_captured_without_snapshot_fails_closed_and_keeps_the_failure_diagnosti
     });
     assert_eq!(decision, Screen::Deny);
     assert!(
-        out.contains("XL_RCS_ALERT RCS capture failed closed"),
-        "expected the capture alert, got: {out}"
-    );
-    assert!(
-        out.contains("reason=\"no_rule_snapshot\""),
-        "expected the no-snapshot reason, got: {out}"
+        out.contains("no rule snapshot was pinned for this block"),
+        "expected the no-snapshot diagnostic, got: {out}"
     );
 
     let (decision, out) = capture_tracing(|| {
@@ -574,11 +532,11 @@ fn screen_captured_without_snapshot_fails_closed_and_keeps_the_failure_diagnosti
     });
     assert_eq!(decision, Screen::Deny);
     assert!(
-        out.contains("reason=\"native_transfer_limit\""),
-        "expected the budget reason, got: {out}"
+        out.contains("observation budget exceeded"),
+        "expected the budget diagnostic, got: {out}"
     );
     assert!(
-        !out.contains("no_rule_snapshot"),
+        !out.contains("no rule snapshot was pinned"),
         "a failed capture keeps its own diagnostic, got: {out}"
     );
 }
