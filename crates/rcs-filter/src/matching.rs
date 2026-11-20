@@ -219,7 +219,25 @@ fn evaluate_checked(
 
                 // Stage three: action merge with deny short-circuit.
                 match rule.action {
-                    Action::Deny => ControlFlow::Break(MatchOutcome::Deny),
+                    Action::Deny => {
+                        tracing::warn!(
+                            target: "rcs_filter",
+                            alert = "XL_RCS_ALERT",
+                            stage = "rule_match",
+                            reason = "deny_rule",
+                            outcome = "excluded_from_block",
+                            tx_hash = %input.tx_hash,
+                            rule_id = %rule.id,
+                            origin = %input.origin,
+                            tx_to = input.tx_to.map(tracing::field::display),
+                            nonce = input.nonce,
+                            value = %input.value,
+                            block_height = input.block_height,
+                            log_count = input.logs.len(),
+                            "XL_RCS_ALERT RCS denied transaction"
+                        );
+                        ControlFlow::Break(MatchOutcome::Deny)
+                    }
                     Action::Allow => ControlFlow::Continue(()),
                     Action::Audit => {
                         // Never emit an empty-action Audit: an all-null binding that satisfies an

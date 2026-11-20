@@ -348,7 +348,27 @@ pub(crate) async fn query_once(shared: &Shared, client: &Arc<dyn RcsClient>) -> 
                             Some(TerminalReason::FailCloseTimeout)
                         }
                         QueryResolution::RetryTimeout(Resolution::ReleaseForPackaging) => None,
-                        QueryResolution::Denied => Some(TerminalReason::Denied),
+                        QueryResolution::Denied => {
+                            let entry = pool.get(&hash);
+                            warn!(
+                                target: "rcs_filter",
+                                alert = "XL_RCS_ALERT",
+                                stage = "audit_query",
+                                reason = "rcs_denied",
+                                outcome = "txpool_dropped",
+                                tx_hash = %hash,
+                                generation = expected_generation,
+                                status = "denied",
+                                rcs_reason = tx.reason.as_deref(),
+                                decided_at = tx.decided_at,
+                                origin = entry.map(|e| tracing::field::display(e.origin)),
+                                tx_to = entry.map(|e| tracing::field::display(e.contract_address)),
+                                nonce = entry.map(|e| e.nonce),
+                                block_height = entry.map(|e| e.block_height),
+                                "XL_RCS_ALERT RCS denied audited transaction"
+                            );
+                            Some(TerminalReason::Denied)
+                        }
                         QueryResolution::Outdated => Some(TerminalReason::Outdated),
                     };
                     if let Some(reason) = reason {
