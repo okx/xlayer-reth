@@ -1,6 +1,6 @@
 //! Real capture and a real verdict on `xlayer_auditTransactions`: capture / verdict / commit
-//! semantics, the per-transaction observation budget, ordered batches and the `CallstackOnly`
-//! mode's log surface.
+//! semantics, the per-transaction native-transfer and callstack budgets, ordered batches and the
+//! `NativeAndCallstack` mode's real + virtual log surface.
 
 use alloy_primitives::{keccak256, Address, B256, U256};
 use rcs_filter::rules::{load_rules, RawRule};
@@ -9,7 +9,10 @@ use revm::state::{AccountInfo, Bytecode};
 use revm::Database as _;
 use xlayer_rpc::audit::rpc::observation_recorder;
 use xlayer_rpc::audit::rpc::test_seams::execute_audit_batch;
-use xlayer_rpc::audit::rpc::{AuditTransactionsRequest, AUDIT_MAX_CALLSTACK_OBSERVATIONS_PER_TX};
+use xlayer_rpc::audit::rpc::{
+    AuditTransactionsRequest, AUDIT_MAX_CALLSTACK_OBSERVATIONS_PER_TX,
+    AUDIT_MAX_NATIVE_TRANSFERS_PER_TX,
+};
 use xlayer_rpc::audit::verdict::Verdict;
 
 use crate::harness::*;
@@ -74,9 +77,10 @@ fn ordinary_call_to_the_observed_proxy_is_allowed() {
     );
 }
 
-/// Proof that the fail-closed gate is NARROWED and not widened: with an unadjudicable
-/// observation set, an ordinary deposit still gets the fail-closed non-verdict, with nothing
-/// committed.
+/// An unadjudicable capture on an ordinary deposit still gets the fail-closed non-verdict with
+/// nothing committed — both a budget-exhausted capture and a foreign-stamped one — so the gate
+/// keeps failing closed now that it is driven by the capture outcome rather than by selector
+/// presence alone.
 #[test]
 fn the_unadjudicable_gate_catches_an_ordinary_entry() {
     let source = format!("0x{}", "66".repeat(32));
@@ -106,24 +110,26 @@ fn the_unadjudicable_gate_catches_an_ordinary_entry() {
     assert_eq!(run.proxy_slot0, U256::ZERO, "state must not be committed");
 }
 
-/// when the request declares no selector, no inspector is constructed, the response keeps its
-/// exact four-field shape, and a `known_allowed` entry still commits as before.
+/// An empty rule set constructs no inspector and screens the plain EVM's raw execution logs, so
+/// the response keeps its exact four-field shape and a `known_allowed` entry still commits as
+/// before.
 #[test]
 fn selector_free_request_is_unchanged() {
     let source = format!("0x{}", "33".repeat(32));
-    let rules = load_rules(1, 0, vec![event_only_rule()]);
+    let rules = load_rules(1, 0, vec![]);
     assert!(
-        rcs_filter::audit::callstack_only_inspector(
+        rcs_filter::audit::audit_inspector(
             &rules,
+            AUDIT_MAX_NATIVE_TRANSFERS_PER_TX,
             AUDIT_MAX_CALLSTACK_OBSERVATIONS_PER_TX
         )
         .is_none(),
-        "a selector-free request must construct NO inspector"
+        "an empty rule set must construct NO inspector"
     );
 
     let run = run_batch(
         &[deposit_request(&source, PROXY)],
-        vec![event_only_rule()],
+        vec![],
         &[&source],
         seeded_db(APPROVED_IMPL, 1),
     );
@@ -139,44 +145,181 @@ fn selector_free_request_is_unchanged() {
     assert_eq!(run.proxy_slot0, U256::from(1u64), "known_allowed still commits as before");
 }
 
-/// an **event-only** rule with a non-zero internal native transfer in the transaction
-/// returns exactly its pre-change verdict, which proves no virtual native-transfer log
-/// entered the screened stream. This is the direct consequence of this path running in
-/// `CallstackOnly` mode: under `NativeAndCallstack` the same transaction WOULD produce a
-/// virtual `Transfer` on the native-asset identifier, and the rule below is written to deny
-/// exactly that.
+/// A rules-bearing **event-only** request whose transaction performs a real internal native
+/// transfer is denied by a rule keyed on the native-asset `Transfer` address. This is the direct
+/// consequence of this path running in `NativeAndCallstack` mode and screening the capture's own
+/// ordered real + virtual logs: the internal `CALL` synthesizes a virtual `Transfer` on the
+/// native-asset identifier, and the rule below is written to deny exactly that.
 #[test]
-fn no_virtual_native_log_enters_the_screened_stream() {
+fn a_virtual_native_log_enters_the_screened_stream() {
     let source = format!("0x{}", "33".repeat(32));
 
-    // With capture armed (a selector-bearing rule is present) and a transaction that really
-    // performs an internal native transfer: the native-log rule must NOT match.
-    let armed = run_batch(
-        &[deposit_request(&source, PROXY)],
-        vec![native_transfer_deny_rule(), inert_selector_rule()],
-        &[],
-        value_transferring_db(),
-    );
-    // Without capture at all — the pre-change path for this rule.
-    let unarmed = run_batch(
+    // Event-only request (no callstack selector at all) over a transaction that really performs
+    // an internal native transfer: the virtual native log must reach the matcher and deny.
+    let denied = run_batch(
         &[deposit_request(&source, PROXY)],
         vec![native_transfer_deny_rule()],
         &[],
         value_transferring_db(),
     );
-
-    assert_eq!(only(&unarmed).verdict, Verdict::Allow, "baseline: no native log is screened");
     assert_eq!(
-        only(&armed).verdict,
-        only(&unarmed).verdict,
-        "arming capture must not introduce a virtual native-transfer log"
+        only(&denied).verdict,
+        Verdict::Deny,
+        "the internal native transfer's virtual log must enter the screened stream"
+    );
+    assert_eq!(denied.depositor_nonce, 0, "a denied transaction commits nothing");
+
+    // Paired control: the same transaction against the same event declared on a DIFFERENT address
+    // still allows, proving the deny came from the native virtual log, not from a real log. The
+    // control address must differ from the native-asset identifier byte for byte.
+    let other_address = Address::repeat_byte(0x11);
+    assert_ne!(other_address, rcs_filter::capture::NATIVE_ASSET_ADDRESS);
+    let allowed = run_batch(
+        &[deposit_request(&format!("0x{}", "44".repeat(32)), PROXY)],
+        vec![native_transfer_deny_rule_on(other_address)],
+        &[],
+        value_transferring_db(),
+    );
+    assert_eq!(
+        only(&allowed).verdict,
+        Verdict::Allow,
+        "the deny is bound to the native-asset address, not to any real log"
+    );
+    assert_eq!(allowed.depositor_nonce, 1, "the control transaction commits its state");
+}
+
+/// An event-only request whose transaction performs NO internal native transfer still allows and
+/// commits — guarding against a gate that fails closed on every event-only request.
+#[test]
+fn an_event_only_request_without_a_native_transfer_still_allows() {
+    let source = format!("0x{}", "33".repeat(32));
+    let run = run_batch(
+        &[deposit_request(&source, PROXY)],
+        vec![native_transfer_deny_rule()],
+        &[],
+        // The proxy's own code is a bare STOP: no internal call, hence no virtual native log.
+        seeded_db(APPROVED_IMPL, 0),
+    );
+    assert_eq!(only(&run).verdict, Verdict::Allow);
+    assert_eq!(run.depositor_nonce, 1, "an admissible event-only request still commits");
+}
+
+/// A `known_allowed` entry keeps its unconditional bypass even with a native-transfer deny rule
+/// armed: it is allowed, committed, and carries no actions.
+#[test]
+fn known_allowed_entry_with_a_native_deny_rule_is_allowed_and_committed() {
+    let source = format!("0x{}", "66".repeat(32));
+    let run = run_batch(
+        &[deposit_request(&source, PROXY)],
+        vec![native_transfer_deny_rule()],
+        &[&source],
+        value_transferring_db(),
+    );
+    let result = only(&run);
+    assert_eq!(result.verdict, Verdict::Allow, "known_allowed ignores its capture outcome");
+    assert!(result.actions.is_none(), "known_allowed carries no actions");
+    assert_eq!(run.depositor_nonce, 1, "the known_allowed commit is never withheld");
+}
+
+/// A native-transfer budget overflow is unadjudicable even though the request declares no
+/// callstack rule: two real non-zero internal `CALL`s against a budget of one is genuinely over
+/// the boundary (`observed 2 > limit 1`), so the transaction is `malformed` and commits nothing.
+#[test]
+fn a_native_budget_overflow_fails_closed_even_for_an_event_only_request() {
+    let source = format!("0x{}", "77".repeat(32));
+    let run = run_batch_with_native_budget(
+        &[deposit_request(&source, PROXY)],
+        vec![native_transfer_deny_rule()],
+        &[],
+        value_transferring_twice_db(),
+        1,
+    );
+    let result = only(&run);
+    assert_eq!(result.verdict, Verdict::Malformed, "a truncated capture never allows");
+    assert_eq!(run.depositor_nonce, 0, "an over-budget transaction commits nothing");
+}
+
+/// The boundary is "over", not "at": the same two-`CALL` fixture completes at a budget of two and
+/// is adjudicated (the native rule denies it), while a single-`CALL` fixture overflows a budget
+/// of zero.
+#[test]
+fn a_native_capture_exactly_at_the_budget_is_adjudicated() {
+    let source = format!("0x{}", "78".repeat(32));
+    let at_limit = run_batch_with_native_budget(
+        &[deposit_request(&source, PROXY)],
+        vec![native_transfer_deny_rule()],
+        &[],
+        value_transferring_twice_db(),
+        2,
+    );
+    assert_eq!(
+        only(&at_limit).verdict,
+        Verdict::Deny,
+        "two observations at a budget of two complete and are adjudicated"
+    );
+    assert_eq!(at_limit.depositor_nonce, 0, "the denied transaction commits nothing");
+
+    let over = run_batch_with_native_budget(
+        &[deposit_request(&format!("0x{}", "79".repeat(32)), PROXY)],
+        vec![native_transfer_deny_rule()],
+        &[],
+        value_transferring_db(),
+        0,
+    );
+    assert_eq!(
+        only(&over).verdict,
+        Verdict::Malformed,
+        "one observation over a budget of zero is unadjudicable"
+    );
+}
+
+/// Event and callstack rules are both reachable on the same execution: the event rule audits the
+/// emitted proxy `Transfer`, and the callstack rule's denial still fires, with the recorded
+/// observation set naming the proxy delegatecall.
+#[test]
+fn event_and_callstack_rules_both_reach_the_matcher() {
+    let source = format!("0x{}", "33".repeat(32));
+
+    // Event dimension alone: the proxy→logging-impl Transfer drives Audit.
+    let event_only = run_batch(
+        &[deposit_request(&source, PROXY)],
+        vec![audit_on_proxy_transfer_rule()],
+        &[],
+        logging_db(),
+    );
+    assert_eq!(only(&event_only).verdict, Verdict::Audit, "the event rule reaches the matcher");
+
+    // Both dimensions: the callstack deny short-circuits the event audit.
+    let _ = observation_recorder::take();
+    let mixed = run_batch(
+        &[deposit_request(&source, PROXY)],
+        vec![audit_on_proxy_transfer_rule(), proxy_impl_allowlist_rule()],
+        &[],
+        logging_db(),
+    );
+    let recorded = observation_recorder::take();
+    assert_eq!(recorded.len(), 1, "one transaction, one recorded observation set");
+    assert!(
+        delegatecall_of_proxy(&recorded[0]).is_some(),
+        "the proxy delegatecall observation reaches screening: {:?}",
+        recorded[0]
+    );
+    assert_eq!(
+        only(&mixed).verdict,
+        Verdict::Deny,
+        "the callstack denial still fires alongside the event rule"
     );
 }
 
 /// Deny on a `Transfer` whose `log.address` is the native-asset identifier — i.e. exactly the
-/// virtual log `NativeAndCallstack` capture would synthesize, and nothing a real EVM emits
-/// here.
+/// virtual log `NativeAndCallstack` capture synthesizes, and nothing a real EVM emits here.
 fn native_transfer_deny_rule() -> RawRule {
+    native_transfer_deny_rule_on(rcs_filter::capture::NATIVE_ASSET_ADDRESS)
+}
+
+/// The same deny shape, keyed on an explicit address — used by the control case to show the deny
+/// is bound to the native-asset address rather than to any real log.
+fn native_transfer_deny_rule_on(address: Address) -> RawRule {
     serde_json::from_value(serde_json::json!({
         "id": "deny-native-transfer",
         "event_abis": { "transfer": {
@@ -190,24 +333,11 @@ fn native_transfer_deny_rule() -> RawRule {
         } },
         "condition": { "==": [
             { "var": "transfer.address" },
-            format!("{:#x}", rcs_filter::capture::NATIVE_ASSET_ADDRESS)
+            format!("{address:#x}")
         ] },
         "action": "deny"
     }))
     .expect("valid native-log rule")
-}
-
-/// An alias-bearing rule that exists only to arm capture: its condition can never hold,
-/// because the alias only ever binds the address it was declared on.
-fn inert_selector_rule() -> RawRule {
-    serde_json::from_value(serde_json::json!({
-        "id": "arm-capture-only",
-        "event_abis": {},
-        "callstack": { "direct_delegatecalls": { "entry": format!("{PROXY:#x}") } },
-        "condition": { "==": [ { "var": "entry.delegateTo" }, format!("{PROXY:#x}") ] },
-        "action": "deny"
-    }))
-    .expect("valid alias rule")
 }
 
 /// A proxy whose own code performs a non-zero internal `CALL` — a real native transfer.
@@ -307,6 +437,10 @@ fn repeated_adjudication_of_an_approved_entry_converges_and_never_re_enters_adju
 #[test]
 fn the_audit_budget_is_1000_and_independent_of_the_builder_budget() {
     assert_eq!(AUDIT_MAX_CALLSTACK_OBSERVATIONS_PER_TX, 1_000);
+    assert_eq!(
+        AUDIT_MAX_NATIVE_TRANSFERS_PER_TX, 10_000,
+        "the audit path truncates internal native transfers at the builder's own default"
+    );
     assert_eq!(
         rcs_filter::capture::CANDIDATE_MAX_CALLSTACK_OBSERVATIONS_PER_TX,
         10_000,

@@ -13,6 +13,7 @@ use revm::Database as _;
 use xlayer_rpc::audit::deposit::DepositTxRequest;
 use xlayer_rpc::audit::rpc::test_seams::{
     execute_audit_batch, execute_audit_batch_with_capture_stamp,
+    execute_audit_batch_with_native_budget,
 };
 use xlayer_rpc::audit::rpc::AuditTransactionsRequest;
 use xlayer_rpc::audit::verdict::AuditResult;
@@ -106,18 +107,6 @@ pub(crate) fn proxy_impl_allowlist_rule_from_origin(origin: Address) -> RawRule 
     .expect("the origin-narrowed sample must deserialize")
 }
 
-/// An event rule declaring no `callstack` section at all.
-pub(crate) fn event_only_rule() -> RawRule {
-    serde_json::from_str(
-        r#"{"id":"evt","event_abis":{"transfer":{"type":"event","name":"Transfer",
-               "inputs":[{"name":"from","type":"address","indexed":true},
-                         {"name":"to","type":"address","indexed":true},
-                         {"name":"value","type":"uint256","indexed":false}],
-               "anonymous":false}},"condition":true,"action":"deny"}"#,
-    )
-    .expect("valid event-only rule")
-}
-
 pub(crate) fn deposit_request(source_hash: &str, to: Address) -> DepositTxRequest {
     DepositTxRequest {
         source_hash: source_hash.to_string(),
@@ -155,6 +144,47 @@ pub(crate) fn seeded_db(proxy_target: Address, delegatecalls: usize) -> InMemory
             },
         );
     }
+    db
+}
+
+/// `CALL(gas, target, value = 1, 0,0,0,0); POP` repeated `times`, then `STOP`.
+///
+/// Each call is a real internal, non-zero, non-self native transfer, so capture observes exactly
+/// `times` native-transfer candidates.
+pub(crate) fn value_transferring_code(target: Address, times: usize) -> Vec<u8> {
+    let mut code = Vec::new();
+    for _ in 0..times {
+        // retSize, retOffset, argsSize, argsOffset (all zero), value = 1, target, GAS, CALL, POP.
+        code.extend_from_slice(&[0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x01, 0x73]);
+        code.extend_from_slice(target.as_slice());
+        code.extend_from_slice(&[0x5a, 0xf1, 0x50]);
+    }
+    code.push(0x00);
+    code
+}
+
+/// A proxy whose own code performs two real non-zero internal `CALL`s to [`APPROVED_IMPL`].
+///
+/// Used with a lowered native budget to prove the overflow / exactly-at-limit boundary on a real
+/// RPC execution rather than on a synthetic capture outcome.
+pub(crate) fn value_transferring_twice_db() -> InMemoryDB {
+    let mut db = InMemoryDB::default();
+    db.insert_account_info(
+        DEPOSITOR,
+        AccountInfo { balance: U256::from(10u128.pow(18)), ..Default::default() },
+    );
+    db.insert_account_info(
+        PROXY,
+        AccountInfo {
+            balance: U256::from(1_000u64),
+            code: Some(Bytecode::new_raw(value_transferring_code(APPROVED_IMPL, 2).into())),
+            ..Default::default()
+        },
+    );
+    db.insert_account_info(
+        APPROVED_IMPL,
+        AccountInfo { code: Some(Bytecode::new_raw(impl_code(0x01).into())), ..Default::default() },
+    );
     db
 }
 
@@ -230,6 +260,30 @@ pub(crate) fn run_batch_stamped(
 
 pub(crate) fn only(run: &BatchRun) -> &AuditResult {
     run.results.first().expect("the single transaction was classified")
+}
+
+/// The same complete production batch with the native-transfer budget lowered, so a real fixture
+/// can be pushed over — or held exactly at — the boundary without a 10 001-transfer transaction.
+/// Everything except the budget is production, including the gate and the per-transaction loop.
+pub(crate) fn run_batch_with_native_budget(
+    reqs: &[DepositTxRequest],
+    raw_rules: Vec<RawRule>,
+    known_allowed: &[&str],
+    db: InMemoryDB,
+    max_native_transfers_per_tx: usize,
+) -> BatchRun {
+    let req = audit_request(reqs, raw_rules, known_allowed);
+    let mut db = db;
+    let results = execute_audit_batch_with_native_budget(
+        &req,
+        &mut db,
+        audit_env(),
+        max_native_transfers_per_tx,
+    )
+    .expect("the batch executes");
+    let proxy_slot0 = db.storage(PROXY, U256::ZERO).expect("storage read");
+    let depositor_nonce = db.basic(DEPOSITOR).expect("account read").map_or(0, |a| a.nonce);
+    BatchRun { results, proxy_slot0, depositor_nonce }
 }
 
 /// A snapshot identity that is NOT the evaluating request's: the same selector set under a

@@ -8,10 +8,13 @@
 //! entirely — it's executed and its state committed unconditionally as `Allow` (see
 //! `AuditTransactionsRequest::known_allowed`'s doc comment for why this bypass is necessary).
 //!
-//! When the request declares at least one call-frame selector, the shared capture inspector is
-//! attached in `CallstackOnly` mode and each transaction has its own observation budget
-//! (`AUDIT_MAX_CALLSTACK_OBSERVATIONS_PER_TX`, 1 000). An ordinary entry whose observations cannot
-//! be adjudicated is `malformed` and not committed. A `known_allowed` entry ignores its capture
+//! When the request declares at least one valid compiled rule, the shared capture inspector is
+//! attached in `NativeAndCallstack` mode and each transaction has its own native-transfer
+//! (`AUDIT_MAX_NATIVE_TRANSFERS_PER_TX`, 10 000) and callstack
+//! (`AUDIT_MAX_CALLSTACK_OBSERVATIONS_PER_TX`, 1 000) budget. Screening consumes the capture's own
+//! ordered real + virtual logs, so an internal native transfer observed here classifies exactly as
+//! it would on the payload builder's candidate path. An ordinary entry whose capture is not
+//! `Complete` is `malformed` and not committed. A `known_allowed` entry ignores its capture
 //! outcome.
 //!
 //! This handler does no side-effecting screening (never touches `FilterHandle::screen_tx` or its
@@ -32,7 +35,9 @@ use alloy_evm::{Database, Evm, EvmFactory, IntoTxEnv};
 use alloy_op_evm::OpEvmFactory;
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use op_revm::OpSpecId;
-use rcs_filter::audit::{callstack_only_inspector, observations_from, unadjudicable_observations};
+#[cfg(any(test, feature = "test-utils"))]
+use rcs_filter::audit::observations_from;
+use rcs_filter::audit::{audit_inspector, screen_capture, ScreenCapture};
 use rcs_filter::callstack::ObservationUnavailable;
 use rcs_filter::capture::{
     CaptureGuard, CaptureOutcome, RcsCaptureControl, RcsCaptureScope, RcsInspector,
@@ -112,6 +117,13 @@ pub struct AuditTransactionsRequest {
     #[serde(default)]
     pub known_allowed: Vec<String>,
 }
+
+/// Per-transaction internal native-transfer budget of `xlayer_auditTransactions`.
+///
+/// Matches the payload builder's resolved default so both paths truncate at the same point.
+/// Applied to each transaction separately and never pooled across a batch. Over budget, an
+/// ordinary deposit is the non-verdict and is not committed.
+pub const AUDIT_MAX_NATIVE_TRANSFERS_PER_TX: usize = 10_000;
 
 /// Per-transaction call-frame observation budget of `xlayer_auditTransactions`.
 ///
@@ -267,11 +279,16 @@ where
         let txs = req.txs;
         let results: Vec<AuditResult> = backend
             .spawn_with_state_at_block(block_id, move |this, mut state_db| {
-                // When the request declares at least one call-frame selector the shared capture
-                // inspector is attached in `CallstackOnly` mode. With no selector declared, NO
-                // inspector is constructed at all and this path takes its plain EVM.
-                let inspector =
-                    callstack_only_inspector(&rules, AUDIT_MAX_CALLSTACK_OBSERVATIONS_PER_TX);
+                // The shared capture inspector is attached in `NativeAndCallstack` mode whenever
+                // the request declares at least one valid compiled rule, so internal native
+                // transfers are collected and screened exactly as on the builder candidate path.
+                // With an empty rule set, NO inspector is constructed and this path takes its
+                // plain EVM.
+                let inspector = audit_inspector(
+                    &rules,
+                    AUDIT_MAX_NATIVE_TRANSFERS_PER_TX,
+                    AUDIT_MAX_CALLSTACK_OBSERVATIONS_PER_TX,
+                );
                 let mut executed = execute_audit_batch(
                     this.evm_config().evm_factory(),
                     &mut state_db,
@@ -343,22 +360,24 @@ where
     for (exec_idx, tx) in txs.iter().enumerate() {
         let tx_req = &reqs[exec_idx];
         let (ResultAndState { result, state }, capture) = audit_capture_window(&mut *evm, tx)?;
-        let observations = observations_from(&capture);
         #[cfg(any(test, feature = "test-utils"))]
-        observation_recorder::record(observations);
+        observation_recorder::record(observations_from(&capture));
 
         // Base contract, unchanged: a known_allowed entry is committed and allowed without any
-        // rule (re-)classification. Its capture outcome — complete, over budget, incomplete or
-        // foreign-stamped — is deliberately not consulted.
+        // rule (re-)classification. Its capture outcome — complete, over either budget,
+        // incomplete or foreign-stamped — is deliberately not consulted.
         if known_allowed.contains(&tx_req.source_hash) {
             evm.db_mut().commit(state);
             executed[exec_idx] = Some(known_allowed_result(tx.tx_hash(), &tx_req.source_hash));
             continue;
         }
 
-        let verdict_result = match unadjudicable_observations(rules, observations) {
-            Some(reason) => unadjudicable_result(&tx_req.source_hash, reason),
-            None => super::verdict::verdict_for(
+        // The gate is decided from the capture outcome, and the SAME value supplies the screened
+        // logs and the observations: a completed capture yields its own ordered real + virtual
+        // stream, and nothing else may be screened in its place.
+        let verdict_result = match screen_capture(rules, &capture, result.logs()) {
+            Err(reason) => unadjudicable_result(&tx_req.source_hash, reason),
+            Ok(ScreenCapture { logs, observations }) => super::verdict::verdict_for(
                 tx_req,
                 ExecutedTx {
                     from: tx.signer(),
@@ -366,7 +385,7 @@ where
                     tx_hash: tx.tx_hash(),
                     value: tx.value(),
                 },
-                result.logs(),
+                logs,
                 rules,
                 observations,
             ),
@@ -383,7 +402,7 @@ where
     Ok(executed)
 }
 
-/// The non-verdict for a transaction whose executed code could not be identified.
+/// The non-verdict for a transaction whose capture could not be adjudicated.
 ///
 /// Bounded deliberately: the request's `source_hash` and the fixed low-cardinality reason token.
 /// No rule id, no observed address, no code hash.
@@ -392,7 +411,7 @@ fn unadjudicable_result(source_hash: &str, reason: ObservationUnavailable) -> Au
         target: "xlayer_audit_rpc",
         %source_hash,
         reason = reason.as_str(),
-        "observations unavailable for a selector-bearing request; returning the non-verdict"
+        "capture could not adjudicate this transaction; returning the non-verdict"
     );
     AuditResult::malformed(source_hash.to_string())
 }
@@ -493,7 +512,8 @@ pub mod test_seams {
 
     /// Runs `req` through the complete production batch against `db`: request validation and
     /// rule compilation, deposit construction, the production inspector choice with
-    /// [`AUDIT_MAX_CALLSTACK_OBSERVATIONS_PER_TX`], the per-transaction loop and result assembly.
+    /// [`AUDIT_MAX_NATIVE_TRANSFERS_PER_TX`] and [`AUDIT_MAX_CALLSTACK_OBSERVATIONS_PER_TX`], the
+    /// per-transaction loop and result assembly.
     /// Only the handler's state anchoring (latest header, blocking task) is not part of it.
     /// Validation errors are the exact JSON-RPC errors the handler returns.
     pub fn execute_audit_batch<DB: Database + DatabaseCommit>(
@@ -501,19 +521,33 @@ pub mod test_seams {
         db: DB,
         evm_env: EvmEnv<OpSpecId>,
     ) -> Result<Vec<AuditResult>, jsonrpsee::types::ErrorObjectOwned> {
-        run_complete_batch(req, db, evm_env, None)
+        run_complete_batch(req, db, evm_env, None, AUDIT_MAX_NATIVE_TRANSFERS_PER_TX)
     }
 
     /// The same batch with capture configured under `capture_stamp` instead of the request's own
     /// snapshot identity — the only way to reach the stamp-mismatch branch, since a request
-    /// always compiles its own rules. The selector set and budget are the production ones.
+    /// always compiles its own rules. The selector set is the request's own and both budgets are
+    /// the production ones; only the stamp is overridden.
     pub fn execute_audit_batch_with_capture_stamp<DB: Database + DatabaseCommit>(
         req: &AuditTransactionsRequest,
         db: DB,
         evm_env: EvmEnv<OpSpecId>,
         capture_stamp: SnapshotStamp,
     ) -> Result<Vec<AuditResult>, jsonrpsee::types::ErrorObjectOwned> {
-        run_complete_batch(req, db, evm_env, Some(capture_stamp))
+        run_complete_batch(req, db, evm_env, Some(capture_stamp), AUDIT_MAX_NATIVE_TRANSFERS_PER_TX)
+    }
+
+    /// The same complete production batch with the native-transfer budget made injectable, so the
+    /// real overflow / exactly-at-limit behaviour can be proven on a real fixture at a lowered
+    /// budget instead of needing a 10 001-transfer transaction. Everything else — the inspector
+    /// profile, the callstack budget, the gate, the loop and result assembly — is production.
+    pub fn execute_audit_batch_with_native_budget<DB: Database + DatabaseCommit>(
+        req: &AuditTransactionsRequest,
+        db: DB,
+        evm_env: EvmEnv<OpSpecId>,
+        max_native_transfers_per_tx: usize,
+    ) -> Result<Vec<AuditResult>, jsonrpsee::types::ErrorObjectOwned> {
+        run_complete_batch(req, db, evm_env, None, max_native_transfers_per_tx)
     }
 
     fn run_complete_batch<DB: Database + DatabaseCommit>(
@@ -521,15 +555,24 @@ pub mod test_seams {
         db: DB,
         evm_env: EvmEnv<OpSpecId>,
         capture_stamp: Option<SnapshotStamp>,
+        max_native_transfers_per_tx: usize,
     ) -> Result<Vec<AuditResult>, jsonrpsee::types::ErrorObjectOwned> {
         let rules = load_rules(1, 0, req.rules.clone());
         validate_compiled_rules(&rules)?;
         let known_allowed: HashSet<String> = req.known_allowed.iter().cloned().collect();
         let (txs, reqs, built) = build_deposits(&req.txs);
+        // The same "any valid rule" predicate and the same `NativeAndCallstack` profile as the
+        // handler. The stamping seam overrides only the snapshot stamp; it must not fall back to a
+        // callstack-only inspector, which would silently drop the native-transfer evidence.
         let inspector = match capture_stamp {
-            None => callstack_only_inspector(&rules, AUDIT_MAX_CALLSTACK_OBSERVATIONS_PER_TX),
-            Some(stamp) => rules.has_callstack_rules().then(|| {
-                RcsInspector::new(RcsInspectorConfig::callstack_only_for_test(
+            None => audit_inspector(
+                &rules,
+                max_native_transfers_per_tx,
+                AUDIT_MAX_CALLSTACK_OBSERVATIONS_PER_TX,
+            ),
+            Some(stamp) => (!rules.rules.is_empty()).then(|| {
+                RcsInspector::new(RcsInspectorConfig::native_and_callstack_for_test(
+                    max_native_transfers_per_tx,
                     AUDIT_MAX_CALLSTACK_OBSERVATIONS_PER_TX,
                     CallstackCaptureConfig::new(stamp, rules.callstack_selectors().to_vec()),
                 ))

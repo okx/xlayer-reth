@@ -84,6 +84,11 @@ pub enum CaptureMode {
     ///
     /// A consumer in this mode screens against the **raw** EVM logs of its own execution result,
     /// never against `CaptureOutcome::Complete`'s `logs` (which is empty here by construction).
+    ///
+    /// The audit RPC no longer selects this variant: it now needs the same virtual native-transfer
+    /// evidence the payload builder screens. The variant is retained with its documented
+    /// semantics because the inspector tests pin them and its mode gate is what keeps such a
+    /// consumer from paying a budget it does not use.
     CallstackOnly,
 }
 
@@ -585,14 +590,19 @@ impl RcsInspectorConfig {
         }
     }
 
-    /// The audit RPC's profile: call frames only, the caller's per-transaction callstack budget,
-    /// and the selector set of the request's own `rules`. The native budget is not applicable in
-    /// this mode; `usize::MAX` only gives the field a value, exactly as the old callstack-only
-    /// profile did.
-    pub fn audit(rules: &RuleSet, max_callstack_observations: usize) -> Self {
+    /// The audit RPC's profile: internal native transfers AND call frames, captured from the same
+    /// single inspection pass the payload builder's candidate path uses, so a deposit is screened
+    /// against the same evidence either path would produce. It differs from [`Self::candidate`]
+    /// only in that both budgets are supplied by the caller (the audit path pins its own
+    /// native-transfer and per-transaction callstack budgets).
+    pub fn audit(
+        rules: &RuleSet,
+        max_native_transfers: usize,
+        max_callstack_observations: usize,
+    ) -> Self {
         Self {
-            mode: CaptureMode::CallstackOnly,
-            max_native_transfers: usize::MAX,
+            mode: CaptureMode::NativeAndCallstack,
+            max_native_transfers,
             max_callstack_observations,
             callstack: CallstackCaptureConfig::from_rules(rules),
         }

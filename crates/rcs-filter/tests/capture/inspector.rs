@@ -686,26 +686,87 @@ fn the_candidate_profile_captures_natively_with_the_10000_callstack_budget() {
     ));
 }
 
-/// The audit profile is call-frames only with the caller's budget: native observations are
-/// no-ops, and the given call-frame budget is the one enforced.
+/// The audit profile captures internal native transfers AND call frames: the native family is
+/// armed with the caller's native budget, and the caller's callstack budget is enforced
+/// independently.
 #[test]
-fn the_audit_profile_is_callstack_only_with_the_given_budget() {
+fn the_audit_profile_captures_natively_with_the_given_budgets() {
     let rules = rcs_filter::rules::RuleSet::default();
-    let mut inspector = RcsInspector::new(RcsInspectorConfig::audit(&rules, 1_000));
-    assert_eq!(inspector.mode(), CaptureMode::CallstackOnly);
-    inspector.start_capture();
-    observe_n(&mut inspector, NativeTransferKind::Call, 5);
-    assert_eq!(inspector.observed_count_for_test(), 0, "native capture is a no-op in this mode");
+
+    // The native family is armed and truncates at the given native budget.
+    let mut native_over = RcsInspector::new(RcsInspectorConfig::audit(&rules, 3, 1_000));
+    assert_eq!(native_over.mode(), CaptureMode::NativeAndCallstack);
+    native_over.start_capture();
+    observe_n(&mut native_over, NativeTransferKind::Call, 4);
+    assert!(matches!(
+        native_over.finish_capture(&[]),
+        CaptureOutcome::LimitExceeded {
+            attempted: 4,
+            limit: 3,
+            budget: ObservationBudget::NativeTransfer,
+        }
+    ));
+
+    // The callstack budget is enforced independently at 1 001, even under the audit profile.
+    let mut callstack_over = RcsInspector::new(RcsInspectorConfig::audit(&rules, 3, 1_000));
+    assert_eq!(callstack_over.mode(), CaptureMode::NativeAndCallstack);
+    callstack_over.start_capture();
     let observation = CallObservation::call(addr(0xAA), B256::repeat_byte(0xCC));
     for _ in 0..1_001 {
-        inspector.commit_observation_for_test(observation);
+        callstack_over.commit_observation_for_test(observation);
     }
     assert!(matches!(
-        inspector.finish_capture(&[]),
+        callstack_over.finish_capture(&[]),
         CaptureOutcome::LimitExceeded {
             attempted: 1_001,
             limit: 1_000,
             budget: ObservationBudget::Callstack,
+        }
+    ));
+}
+
+/// The audit profile's native budget is "over", not "at": exactly at the budget completes, one
+/// more overflows.
+#[test]
+fn the_audit_profile_native_budget_is_over_not_at() {
+    let rules = rcs_filter::rules::RuleSet::default();
+
+    let mut at_limit = RcsInspector::new(RcsInspectorConfig::audit(&rules, 5, 1_000));
+    at_limit.start_capture();
+    observe_n(&mut at_limit, NativeTransferKind::Call, 5);
+    match at_limit.finish_capture(&[]) {
+        CaptureOutcome::Complete { logs, .. } => {
+            assert_eq!(logs.len(), 5, "five observations at a budget of five complete")
+        }
+        other => panic!("expected Complete, got {other:?}"),
+    }
+
+    let mut over = RcsInspector::new(RcsInspectorConfig::audit(&rules, 5, 1_000));
+    over.start_capture();
+    observe_n(&mut over, NativeTransferKind::Call, 6);
+    assert!(matches!(
+        over.finish_capture(&[]),
+        CaptureOutcome::LimitExceeded {
+            attempted: 6,
+            limit: 5,
+            budget: ObservationBudget::NativeTransfer,
+        }
+    ));
+}
+
+/// The audit profile now runs the real-log cross-check, so a queued real log that diverges from
+/// the execution result fails closed instead of being silently screened.
+#[test]
+fn the_audit_profile_cross_checks_real_logs() {
+    let rules = rcs_filter::rules::RuleSet::default();
+    let mut inspector = RcsInspector::new(RcsInspectorConfig::audit(&rules, 10, 1_000));
+    assert_eq!(inspector.mode(), CaptureMode::NativeAndCallstack);
+    inspector.start_capture();
+    inspector.record_real_log(real_log(0x11));
+    assert!(matches!(
+        inspector.finish_capture(&[real_log(0x12)]),
+        CaptureOutcome::InvariantViolation {
+            reason: CaptureInvariantError::RealLogMismatch { first_bad_index: 0, .. }
         }
     ));
 }
