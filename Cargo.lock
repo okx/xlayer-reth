@@ -421,6 +421,7 @@ dependencies = [
  "op-revm",
  "revm",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -7964,15 +7965,22 @@ dependencies = [
 name = "rcs-filter"
 version = "0.0.7"
 dependencies = [
+ "alloy-consensus",
  "alloy-dyn-abi",
+ "alloy-eips",
+ "alloy-evm",
+ "alloy-op-evm",
  "alloy-primitives",
  "alloy-sol-types",
  "async-trait",
  "futures-util",
  "metrics",
  "metrics-util",
+ "op-revm",
+ "rcs-filter",
  "reqwest 0.13.4",
  "reth-metrics",
+ "revm",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -14490,7 +14498,7 @@ dependencies = [
  "tracing-subscriber 0.3.23",
  "url",
  "xlayer-bridge-intercept",
- "xlayer-rcs-capture",
+ "xlayer-builder",
  "xlayer-rpc",
  "xlayer-trace-monitor",
 ]
@@ -14593,21 +14601,6 @@ dependencies = [
  "tokio",
  "tracing",
  "xlayer-trace-monitor",
-]
-
-[[package]]
-name = "xlayer-rcs-capture"
-version = "0.0.7"
-dependencies = [
- "alloy-consensus",
- "alloy-eips",
- "alloy-evm",
- "alloy-op-evm",
- "alloy-primitives",
- "op-revm",
- "rcs-filter",
- "revm",
- "serde_json",
 ]
 
 [[package]]
@@ -14714,15 +14707,12 @@ dependencies = [
  "alloy-op-evm",
  "alloy-primitives",
  "jsonrpsee",
- "metrics",
- "metrics-util",
  "op-alloy-consensus",
  "op-alloy-network",
  "op-revm",
  "rcs-filter",
  "reth-chain-state",
  "reth-evm",
- "reth-metrics",
  "reth-optimism-evm",
  "reth-optimism-primitives",
  "reth-optimism-rpc",
@@ -14736,8 +14726,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "tracing-subscriber 0.3.23",
- "xlayer-rcs-capture",
+ "xlayer-rpc",
 ]
 
 [[package]]

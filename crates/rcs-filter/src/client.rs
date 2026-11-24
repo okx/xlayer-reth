@@ -16,42 +16,11 @@ use crate::error::{FilterError, Result};
 const MAX_RESPONSE_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 /// `GET /rules` response. `rules` may be an empty array.
-///
-/// Deserialized through [`RulesResponseWire`] so an unknown key at the response **root** is
-/// rejected too. Adding `#[serde(flatten)]` here alone would not reject anything: this type
-/// never reaches `compile_rule`, so there is no per-rule gate to carry the failure. Instead the
-/// conversion fails, `get_rules()` surfaces it as a decode [`FilterError`], and
-/// `load_and_install` never reaches `install_rules` — last-known-good is retained.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(try_from = "RulesResponseWire")]
 pub struct RulesResponse {
     pub protocol_version: u32,
     pub content_version: u64,
     pub rules: Vec<crate::rules::RawRule>,
-}
-
-/// Wire shape of [`RulesResponse`]: the three real fields plus every key the root does not
-/// declare. `protocol_version` and `content_version` stay **required**, exactly as before.
-#[derive(Debug, Deserialize)]
-struct RulesResponseWire {
-    protocol_version: u32,
-    content_version: u64,
-    rules: Vec<crate::rules::RawRule>,
-    #[serde(flatten)]
-    unknown: crate::rules::UnknownFields,
-}
-
-impl TryFrom<RulesResponseWire> for RulesResponse {
-    type Error = String;
-
-    fn try_from(wire: RulesResponseWire) -> std::result::Result<Self, String> {
-        crate::rules::reject_unknown(crate::rules::RULES_RESPONSE_LOCATION, &wire.unknown)?;
-        Ok(Self {
-            protocol_version: wire.protocol_version,
-            content_version: wire.content_version,
-            rules: wire.rules,
-        })
-    }
 }
 
 /// `GET /rules/version` response — no `rules`.
@@ -340,9 +309,6 @@ mod wire_tests {
         .is_err());
         assert!(serde_json::from_value::<QueryResponse>(json!({})).is_err());
     }
-
-    #[cfg(test)]
-    mod response_root_tests;
 
     #[tokio::test]
     async fn endpoint_specific_statuses_are_enforced() {

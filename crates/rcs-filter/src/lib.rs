@@ -17,7 +17,9 @@
 //! 2. All RCS network IO happens on background tokio workers ([`worker`]).
 //! 3. Rules are hot-swapped atomically ([`Arc<RwLock<Arc<RuleSet>>>`]).
 
+pub mod audit;
 pub mod callstack;
+pub mod capture;
 pub mod client;
 pub mod clock;
 pub mod config;
@@ -29,21 +31,13 @@ pub mod pool;
 pub mod quota_hash;
 pub mod rules;
 mod submit;
+#[cfg(feature = "test-utils")]
+pub mod test_seams;
 pub mod test_support;
 pub mod worker;
 
 #[cfg(test)]
-mod callstack_tests;
-#[cfg(test)]
 mod integration_tests;
-#[cfg(test)]
-mod raw_wire_tests;
-#[cfg(test)]
-mod timed_out_allow_recheck_api_tests;
-#[cfg(test)]
-mod timed_out_allow_recheck_tests;
-#[cfg(test)]
-mod upstream_rules_tests;
 
 pub use callstack::{
     CallObservation, CallObservationKind, ObservationUnavailable, Observations, SnapshotStamp,
@@ -56,7 +50,8 @@ pub use clock::{Clock, SystemClock};
 pub use config::{FilterConfig, SUPPORTED_PROTOCOL_VERSIONS};
 pub use error::{FilterError, Result};
 pub use handle::{
-    FilterHandle, LocalDenyReason, PreScreen, Screen, ScreenInput, TerminalEvent, TerminalReason,
+    FilterHandle, LocalDenyReason, PreScreen, Screen, ScreenInput, ScreenTx, TerminalEvent,
+    TerminalReason,
 };
 pub use pool::{BufferPool, BufferStatus};
 pub use rules::{Action, CompiledRule, RejectedRule, RuleSet, TimeoutAction};

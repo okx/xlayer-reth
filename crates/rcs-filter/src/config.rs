@@ -8,9 +8,9 @@ use std::time::Duration;
 /// compatibility" middle state.
 ///
 /// The set is deliberately **exactly** `[1]`. The `callstack` section is part of the version-one
-/// rule schema, so there is no later version to tolerate: a snapshot or request declaring any
-/// other version was authored against a different `callstack` contract, and adjudicating it under
-/// this one would be a silent misinterpretation. A named rejection is strictly safer.
+/// rule schema, so there is no later version to tolerate: a snapshot declaring any other version
+/// was authored against a different `callstack` contract, and adjudicating it under this one would
+/// be a silent misinterpretation. A named rejection is strictly safer.
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[1];
 
 /// The oldest rule protocol version this build accepts.
@@ -71,11 +71,6 @@ pub struct FilterConfig {
     /// the historical fixed matcher ceiling; used identically in first screening and the
     /// post-approval consistency recompute. Must be `>= 1` (default 10_000).
     pub max_event_bindings_per_tx: usize,
-    /// Maximum call-frame observations captured for one transaction during simulation. The Nth
-    /// candidate is allowed; the (N+1)th overflows and fails the transaction closed. Bounds
-    /// capture-side volume; `max_event_bindings_per_tx` separately bounds match-side
-    /// combinatorics. Must be `>= 1` (default 10_000).
-    pub max_callstack_observations_per_tx: usize,
 }
 
 impl Default for FilterConfig {
@@ -96,7 +91,6 @@ impl Default for FilterConfig {
             terminal_entry_retention: Duration::from_secs(300),
             max_native_transfers_per_tx: 10_000,
             max_event_bindings_per_tx: 10_000,
-            max_callstack_observations_per_tx: 10_000,
         }
     }
 }
@@ -166,11 +160,6 @@ impl FilterConfig {
                 "rcs-filter max_event_bindings_per_tx must be >= 1".to_string(),
             ));
         }
-        if self.max_callstack_observations_per_tx == 0 {
-            return Err(crate::FilterError::Config(
-                "rcs-filter max_callstack_observations_per_tx must be >= 1".to_string(),
-            ));
-        }
         Ok(())
     }
 }
@@ -229,9 +218,6 @@ mod tests {
         assert!(!is_supported_protocol(2));
         assert!(!is_supported_protocol(3));
     }
-
-    #[cfg(test)]
-    mod callstack_config_tests;
 
     #[test]
     fn enabled_requires_base_url() {

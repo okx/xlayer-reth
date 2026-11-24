@@ -21,11 +21,18 @@ async-trait.workspace = true
 futures-util.workspace = true
 reth-metrics.workspace = true
 metrics.workspace = true
+revm.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 metrics-util.workspace = true
 tracing-subscriber = "0.3"
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+alloy-evm.workspace = true
+alloy-op-evm.workspace = true
+op-revm.workspace = true
+rcs-filter = { path = ".", features = ["test-utils"] }
 
 [features]
 default = []

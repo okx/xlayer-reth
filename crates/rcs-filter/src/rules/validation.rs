@@ -13,7 +13,7 @@ use tracing::warn;
 use super::jsonlogic::{compile, AddressSetInterner};
 use super::model::{
     Action, CompiledDirectDelegatecall, CompiledEvent, CompiledInput, CompiledRule, EventAbi,
-    RawCallstack, RawRule, RejectedRule, RuleSet, TimeoutAction, UnknownFields,
+    RawCallstack, RawRule, RejectedRule, RuleSet, TimeoutAction,
 };
 
 /// Fixed ERC20 `Transfer` quota shape (ordered input names).
@@ -34,71 +34,7 @@ const DELEGATE_TO: &str = "delegateTo";
 /// The direct-delegatecall target's executed-code-hash variable suffix bound per alias.
 const DELEGATE_CODE_HASH: &str = "delegateCodeHash";
 
-/// At most this many offending keys are echoed in a rejection reason. A hostile or broken
-/// snapshot must not be able to inflate an operator log line.
-const MAX_UNKNOWN_KEYS_REPORTED: usize = 8;
-/// At most this many bytes of each echoed key are reproduced, for the same reason.
-const MAX_UNKNOWN_KEY_BYTES: usize = 64;
-/// Location label used when the offending keys sit at the `GET /rules` response root.
-pub(crate) const RULES_RESPONSE_LOCATION: &str = "rules response";
-
-/// Rejects a level that carries any wire key it does not declare, naming the keys.
-///
-/// The reason is bounded on both axes ([`MAX_UNKNOWN_KEYS_REPORTED`],
-/// [`MAX_UNKNOWN_KEY_BYTES`]) and keys are reported in sorted order, which a `BTreeMap`
-/// already guarantees, so the reason is stable for a given input.
-pub fn reject_unknown(location: &str, unknown: &UnknownFields) -> std::result::Result<(), String> {
-    if unknown.is_empty() {
-        return Ok(());
-    }
-    let echoed: Vec<String> =
-        unknown.keys().take(MAX_UNKNOWN_KEYS_REPORTED).map(|key| bound_key(key)).collect();
-    let mut reason = format!("unknown field(s) in {location}: {}", echoed.join(", "));
-    if let Some(suppressed) = unknown.len().checked_sub(MAX_UNKNOWN_KEYS_REPORTED)
-        && suppressed > 0
-    {
-        reason.push_str(&format!(" (+{suppressed} more)"));
-    }
-    Err(reason)
-}
-
-/// Truncates one echoed key to [`MAX_UNKNOWN_KEY_BYTES`] bytes on a char boundary, marking
-/// that it was cut so a reader cannot mistake the prefix for the whole key.
-fn bound_key(key: &str) -> String {
-    if key.len() <= MAX_UNKNOWN_KEY_BYTES {
-        return key.to_string();
-    }
-    const MARKER: &str = "...";
-    let mut end = MAX_UNKNOWN_KEY_BYTES - MARKER.len();
-    while end > 0 && !key.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}{MARKER}", &key[..end])
-}
-
-/// One dedicated traversal rejecting any unknown wire key reachable from `raw`, in a fixed
-/// order: the rule root, then events by name, then each event's inputs by index. The event map is
-/// a `BTreeMap`, so "by name" is already sorted.
-///
-/// Running this as a single pass before every other per-rule check is what makes the reported
-/// reason independent of which unrelated validation would otherwise have failed first.
-///
-/// The `callstack` section is deliberately absent from this traversal: it declares no
-/// unknown-field map, because `RawCallstack` carries `deny_unknown_fields` and so an unknown key
-/// inside it is already a deserialization failure that names the key. The rule root's own check
-/// stays exactly as it was — it is what still catches a misspelled sibling such as `callStack`.
-fn reject_unknown_rule_fields(raw: &RawRule) -> std::result::Result<(), String> {
-    reject_unknown("rule", &raw.unknown)?;
-    for (var_name, abi) in &raw.event_abis {
-        reject_unknown(&format!("event '{var_name}'"), &abi.unknown)?;
-        for (index, input) in abi.inputs.iter().enumerate() {
-            reject_unknown(&format!("event '{var_name}' input #{index}"), &input.unknown)?;
-        }
-    }
-    Ok(())
-}
-
-/// Loads and validates a batch of raw rules into an immutable [`RuleSet`] snapshot with a
+/// The selected proxy's own address variable suffix bound per alias.
 /// topic0 index. Rejected rules are dropped with a `warn`; the returned set contains only
 /// rules that passed validation.
 pub fn load_rules(protocol_version: u32, content_version: u64, raw: Vec<RawRule>) -> RuleSet {
@@ -179,11 +115,6 @@ pub(crate) fn compile_rule_with_interner(
     raw: RawRule,
     interner: &mut AddressSetInterner,
 ) -> std::result::Result<CompiledRule, String> {
-    // First, and before every other per-rule check: an unknown wire key anywhere under this
-    // rule means an author-visible constraint may be silently absent, so the reason that names
-    // the offending key must win over any other rejection the same input would also trigger.
-    reject_unknown_rule_fields(&raw)?;
-
     // A rule needs at least one selector family: with neither declared events nor a `callstack`
     // section it could never match. `event_abis` alone being empty is legitimate for a rule that
     // selects purely on call frames. An explicitly null `callstack` is NOT an absent one and is
@@ -536,9 +467,6 @@ mod tests {
         assert!(compile_rule(parse(json)).is_err());
     }
 
-    #[cfg(test)]
-    mod selector_family_tests;
-
     #[test]
     fn event_alias_depth_above_eight_is_rejected() {
         let mut raw = parse(
@@ -699,6 +627,3 @@ mod tests {
         assert_eq!(set.rules[0].id, "valid");
     }
 }
-
-#[cfg(test)]
-mod strict_schema_tests;

@@ -44,13 +44,6 @@ impl TimeoutAction {
     }
 }
 
-/// Wire keys a level does not declare, captured verbatim by `#[serde(flatten)]`.
-///
-/// serde's default is to discard an unrecognized key, which turns a misspelled security
-/// constraint into a silently absent one. Capturing them makes the loader able to name the
-/// offending key; the map exists **only** to be rejected and is never consulted for matching.
-pub type UnknownFields = BTreeMap<String, serde_json::Value>;
-
 /// A single ABI input declaration inside an [`EventAbi`]. `name` is `Option` so the
 /// loader can detect and reject a missing name.
 #[derive(Debug, Clone, Deserialize)]
@@ -60,10 +53,6 @@ pub struct AbiInput {
     #[serde(rename = "type")]
     pub param_type: String,
     pub indexed: bool,
-    /// Every wire key that is not one of this level's declared fields. Collected solely so the
-    /// loader can reject it by name; nothing ever reads a value out of this map.
-    #[serde(flatten)]
-    pub unknown: UnknownFields,
 }
 
 /// A named event declaration. The map key in [`RawRule::event_abis`] is
@@ -75,9 +64,6 @@ pub struct EventAbi {
     pub name: String,
     pub inputs: Vec<AbiInput>,
     pub anonymous: bool,
-    /// See [`AbiInput::unknown`].
-    #[serde(flatten)]
-    pub unknown: UnknownFields,
 }
 
 fn default_audit_types() -> Vec<String> {
@@ -86,7 +72,14 @@ fn default_audit_types() -> Vec<String> {
 
 /// Raw rule as delivered by RCS `GET /rules`. `condition` is kept as a raw
 /// JSON value (may be the literal `true` or a JSONLogic object).
+///
+/// `deny_unknown_fields` is what keeps a misspelled sibling of a declared section — most
+/// importantly the `callStack` near-miss of `callstack` — from loading as an event-only rule with
+/// the call-frame constraint silently absent. The whole document's decode fails instead, and both
+/// consumers are all-or-nothing: hot reload keeps its last known good snapshot, and the audit RPC
+/// rejects the request.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawRule {
     pub id: String,
     #[serde(default)]
@@ -113,9 +106,6 @@ pub struct RawRule {
     pub action: Action,
     #[serde(default)]
     pub audit_timeout_action: Option<TimeoutAction>,
-    /// See [`AbiInput::unknown`].
-    #[serde(flatten)]
-    pub unknown: UnknownFields,
 }
 
 /// The `callstack` rule section as delivered on the wire.
@@ -333,18 +323,6 @@ impl RuleSet {
     /// can be skipped entirely and every rule follows the pre-existing matching path.
     pub fn has_callstack_rules(&self) -> bool {
         !self.callstack_selector_addresses.is_empty()
-    }
-
-    /// How many active rules actually carry at least one call-frame selector.
-    ///
-    /// Deliberately NOT the length of [`Self::callstack_selectors`]: that is the sorted,
-    /// deduplicated ADDRESS set, which answers "how much does capture observe" and is what the
-    /// capture configuration and the snapshot digest are built from. This answers the different
-    /// question an operator diagnostic asks — "how large is the rule surface that could have
-    /// adjudicated this" — and the two diverge in both directions: several rules may name one
-    /// address, and one rule may name several.
-    pub fn selector_bearing_rule_count(&self) -> usize {
-        self.rules.iter().filter(|rule| !rule.callstack.is_empty()).count()
     }
 
     /// Returns the candidate rule indices for a log whose first topic is `topic0`.
