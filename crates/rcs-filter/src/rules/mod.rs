@@ -9,8 +9,9 @@ mod model;
 mod validation;
 
 /// Maximum named event aliases in one rule. Production snapshots currently use at most three;
-/// eight leaves room for richer joins while placing a hard bound on recursive binding depth.
-pub const MAX_EVENTS_PER_RULE: usize = 8;
+/// the bound is 256 so larger multi-event rules (for example a bridge exposing 61 event
+/// aliases) compile, while still placing a hard bound on rule size.
+pub const MAX_EVENTS_PER_RULE: usize = 256;
 
 /// Maximum `direct_delegatecalls` aliases in one rule, following [`MAX_EVENTS_PER_RULE`] so a
 /// rule's recursive candidate-binding depth stays bounded by rule configuration rather than by

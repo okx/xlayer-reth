@@ -473,16 +473,21 @@ mod tests {
             r#"{"id":"deep","event_abis":{"e":{"type":"event","name":"E","inputs":[],"anonymous":false}},"condition":true,"action":"deny"}"#,
         );
         let event = raw.event_abis.remove("e").unwrap();
-        for index in 0..8 {
+        for index in 0..crate::rules::MAX_EVENTS_PER_RULE {
             raw.event_abis.insert(format!("e{index}"), event.clone());
         }
-        assert!(compile_rule(raw.clone()).is_ok(), "eight aliases must remain valid");
-        raw.event_abis.insert("e8".to_string(), event);
+        assert!(
+            compile_rule(raw.clone()).is_ok(),
+            "aliases up to MAX_EVENTS_PER_RULE must remain valid"
+        );
+        raw.event_abis.insert(format!("e{}", crate::rules::MAX_EVENTS_PER_RULE), event);
 
         let set = load_rules(1, 1, vec![raw]);
         assert!(set.rules.is_empty());
         assert_eq!(set.rejected.len(), 1);
-        assert!(set.rejected[0].reason.contains("at most 8"));
+        assert!(set.rejected[0]
+            .reason
+            .contains(&format!("at most {}", crate::rules::MAX_EVENTS_PER_RULE)));
     }
 
     #[test]
